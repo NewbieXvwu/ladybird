@@ -43,12 +43,15 @@ jobs:
         with:
           submodules: 'recursive'
 
-      - name: Setup macOS build environment
-        uses: ./.github/actions/setup
+
+      - name: Select latest available Xcode
+        uses: maxim-lobanov/setup-xcode@v1
         with:
-          os: 'macOS'
-          arch: 'x86_64'
-          toolchain: 'Clang'
+          xcode-version: '15.2'
+
+      - name: Install Homebrew dependencies
+        run: brew install autoconf autoconf-archive automake bash ccache coreutils llvm@20 nasm ninja pkg-config qt unzip wabt
+
 
       - name: Build Ladybird
         run: ./Meta/ladybird.py build ladybird
