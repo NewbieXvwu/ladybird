@@ -1,0 +1,65 @@
+name: Build and Upload Ladybird
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    name: Build for Linux (x86_64)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Setup Linux build environment
+        uses: ./.github/actions/setup
+        with:
+          os: 'Linux'
+          arch: 'x86_64'
+          toolchain: 'Clang'
+      
+      - name: Build Ladybird
+        run: ./Meta/ladybird.py build ladybird
+
+      - name: Package artifacts
+        run: tar -czvf ladybird-linux-x86_64.tar.gz -C Build/release .
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-linux-x86_64
+          path: ladybird-linux-x86_64.tar.gz
+
+  build-macos:
+    name: Build for macOS (Intel)
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Setup macOS build environment
+        uses: ./.github/actions/setup
+        with:
+          os: 'macOS'
+          arch: 'x86_64'
+          toolchain: 'Clang'
+
+      - name: Build Ladybird
+        run: ./Meta/ladybird.py build ladybird
+
+      - name: Package artifacts
+        run: |
+          cd Build/release/bin
+          zip -r ../../../ladybird-macos-intel.zip Ladybird.app
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-macos-intel
+          path: ladybird-macos-intel.zip
