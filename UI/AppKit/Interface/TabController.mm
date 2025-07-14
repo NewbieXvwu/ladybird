@@ -103,9 +103,11 @@ static NSString* const TOOLBAR_TAB_OVERVIEW_IDENTIFIER = @"ToolbarTabOverviewIde
         self.toolbar = [[NSToolbar alloc] initWithIdentifier:TOOLBAR_IDENTIFIER];
         [self.toolbar setDelegate:self];
         [self.toolbar setDisplayMode:NSToolbarDisplayModeIconOnly];
+	#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
         if (@available(macOS 15, *)) {
             [self.toolbar setAllowsDisplayModeCustomization:NO];
         }
+	#endif
         [self.toolbar setAllowsUserCustomization:NO];
         [self.toolbar setSizeMode:NSToolbarSizeModeRegular];
 
