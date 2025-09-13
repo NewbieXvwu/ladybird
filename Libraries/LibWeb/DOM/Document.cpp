@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Bitmap.h>
 #include <AK/CharacterTypes.h>
 #include <AK/Debug.h>
 #include <AK/GenericLexer.h>
@@ -46,6 +47,7 @@
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
 #include <LibWeb/CSS/StyleValues/ColorSchemeStyleValue.h>
+#include <LibWeb/CSS/StyleValues/GuaranteedInvalidStyleValue.h>
 #include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/CSS/TransitionEvent.h>
 #include <LibWeb/CSS/VisualViewport.h>
@@ -62,6 +64,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/DocumentObserver.h>
+#include <LibWeb/DOM/DocumentOrShadowRoot.h>
 #include <LibWeb/DOM/DocumentType.h>
 #include <LibWeb/DOM/EditingHostManager.h>
 #include <LibWeb/DOM/Element.h>
@@ -76,6 +79,7 @@
 #include <LibWeb/DOM/ProcessingInstruction.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/ShadowRoot.h>
+#include <LibWeb/DOM/StyleInvalidator.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/DOM/TreeWalker.h>
 #include <LibWeb/DOM/Utils.h>
@@ -132,10 +136,12 @@
 #include <LibWeb/HTML/Scripting/Agent.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
+#include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Scripting/WindowEnvironmentSettingsObject.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
 #include <LibWeb/HTML/Storage.h>
 #include <LibWeb/HTML/StorageEvent.h>
+#include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowProxy.h>
@@ -429,7 +435,9 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
 
     // FIXME: 17. Process link headers given document, navigationParams's response, and "pre-media".
 
-    // 18. Return document.
+    // FIXME: 18. Potentially free deferred fetch quota for document.
+
+    // 19. Return document.
     return document;
 }
 
@@ -452,13 +460,15 @@ GC::Ref<Document> Document::create_for_fragment_parsing(JS::Realm& realm)
     return realm.create<Document>(realm, URL::about_blank(), TemporaryDocumentForFragmentParsing::Yes);
 }
 
-Document::Document(JS::Realm& realm, const URL::URL& url, TemporaryDocumentForFragmentParsing temporary_document_for_fragment_parsing)
+Document::Document(JS::Realm& realm, URL::URL const& url, TemporaryDocumentForFragmentParsing temporary_document_for_fragment_parsing)
     : ParentNode(realm, *this, NodeType::DOCUMENT_NODE)
     , m_page(Bindings::principal_host_defined_page(realm))
-    , m_style_computer(make<CSS::StyleComputer>(*this))
+    , m_style_computer(realm.heap().allocate<CSS::StyleComputer>(*this))
     , m_url(url)
     , m_temporary_document_for_fragment_parsing(temporary_document_for_fragment_parsing)
     , m_editing_host_manager(EditingHostManager::create(realm, *this))
+    , m_dynamic_view_transition_style_sheet(parse_css_stylesheet(CSS::Parser::ParsingParams(realm), ""sv, {}))
+    , m_style_invalidator(realm.heap().allocate<StyleInvalidator>())
 {
     m_legacy_platform_object_flags = PlatformObject::LegacyPlatformObjectFlags {
         .supports_named_properties = true,
@@ -470,14 +480,11 @@ Document::Document(JS::Realm& realm, const URL::URL& url, TemporaryDocumentForFr
         if (!cursor_position)
             return;
 
-        auto node = cursor_position->node();
-        if (!node)
-            return;
-
         auto navigable = this->navigable();
         if (!navigable || !navigable->is_focused())
             return;
 
+        auto node = cursor_position->node();
         node->document().update_layout(UpdateLayoutReason::CursorBlinkTimer);
 
         if (node->paintable()) {
@@ -542,7 +549,8 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_inspected_node);
     visitor.visit(m_highlighted_node);
     visitor.visit(m_active_favicon);
-    visitor.visit(m_focused_element);
+    visitor.visit(m_browsing_context);
+    visitor.visit(m_focused_area);
     visitor.visit(m_active_element);
     visitor.visit(m_target_element);
     visitor.visit(m_implementation);
@@ -551,7 +559,7 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_appropriate_template_contents_owner_document);
     visitor.visit(m_pending_parsing_blocking_script);
     visitor.visit(m_history);
-
+    visitor.visit(m_style_computer);
     visitor.visit(m_browsing_context);
 
     visitor.visit(m_applets);
@@ -575,11 +583,12 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_scripts_to_execute_in_order_as_soon_as_possible);
     visitor.visit(m_scripts_to_execute_as_soon_as_possible);
     visitor.visit(m_node_iterators);
-    visitor.visit(m_document_observers);
     visitor.visit(m_document_observers_being_notified);
     visitor.visit(m_pending_scroll_event_targets);
     visitor.visit(m_pending_scrollend_event_targets);
-    visitor.visit(m_resize_observers);
+    for (auto& resize_observer : m_resize_observers) {
+        visitor.visit(resize_observer);
+    }
 
     visitor.visit(m_shared_resource_requests);
 
@@ -600,8 +609,11 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_adopted_style_sheets);
     visitor.visit(m_script_blocking_style_sheet_set);
 
-    for (auto& shadow_root : m_shadow_roots)
-        visitor.visit(shadow_root);
+    visitor.visit(m_active_view_transition);
+    visitor.visit(m_dynamic_view_transition_style_sheet);
+
+    for (auto& view_transition : m_update_callback_queue)
+        visitor.visit(view_transition);
 
     visitor.visit(m_top_layer_elements);
     visitor.visit(m_top_layer_pending_removals);
@@ -616,6 +628,8 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_session_storage_holder);
     visitor.visit(m_render_blocking_elements);
     visitor.visit(m_policy_container);
+    visitor.visit(m_style_invalidator);
+    visitor.visit(m_registered_custom_properties);
 }
 
 // https://w3c.github.io/selection-api/#dom-document-getselection
@@ -632,14 +646,14 @@ GC::Ptr<Selection::Selection> Document::get_selection() const
 WebIDL::ExceptionOr<void> Document::write(Vector<String> const& text)
 {
     // The document.write(...text) method steps are to run the document write steps with this, text, false, and "Document write".
-    return run_the_document_write_steps(text, AddLineFeed::No, TrustedTypes::InjectionSink::DocumentWrite);
+    return run_the_document_write_steps(text, AddLineFeed::No, TrustedTypes::InjectionSink::Documentwrite);
 }
 
 // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-writeln
 WebIDL::ExceptionOr<void> Document::writeln(Vector<String> const& text)
 {
     // The document.writeln(...text) method steps are to run the document write steps with this, text, true, and "Document writeln".
-    return run_the_document_write_steps(text, AddLineFeed::Yes, TrustedTypes::InjectionSink::DocumentWriteln);
+    return run_the_document_write_steps(text, AddLineFeed::Yes, TrustedTypes::InjectionSink::Documentwriteln);
 }
 
 // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#document-write-steps
@@ -671,11 +685,11 @@ WebIDL::ExceptionOr<void> Document::run_the_document_write_steps(Vector<String> 
 
     // 6. If document is an XML document, then throw an "InvalidStateError" DOMException.
     if (m_type == Type::XML)
-        return WebIDL::InvalidStateError::create(realm(), "write() called on XML document."_string);
+        return WebIDL::InvalidStateError::create(realm(), "write() called on XML document."_utf16);
 
     // 7. If document's throw-on-dynamic-markup-insertion counter is greater than 0, then throw an "InvalidStateError" DOMException.
     if (m_throw_on_dynamic_markup_insertion_counter > 0)
-        return WebIDL::InvalidStateError::create(realm(), "throw-on-dynamic-markup-insertion-counter greater than zero."_string);
+        return WebIDL::InvalidStateError::create(realm(), "throw-on-dynamic-markup-insertion-counter greater than zero."_utf16);
 
     // 8. If document's active parser was aborted is true, then return.
     if (m_active_parser_was_aborted)
@@ -718,18 +732,18 @@ WebIDL::ExceptionOr<Document*> Document::open(Optional<String> const&, Optional<
 
     // 1. If document is an XML document, then throw an "InvalidStateError" DOMException.
     if (m_type == Type::XML)
-        return WebIDL::InvalidStateError::create(realm(), "open() called on XML document."_string);
+        return WebIDL::InvalidStateError::create(realm(), "open() called on XML document."_utf16);
 
     // 2. If document's throw-on-dynamic-markup-insertion counter is greater than 0, then throw an "InvalidStateError" DOMException.
     if (m_throw_on_dynamic_markup_insertion_counter > 0)
-        return WebIDL::InvalidStateError::create(realm(), "throw-on-dynamic-markup-insertion-counter greater than zero."_string);
+        return WebIDL::InvalidStateError::create(realm(), "throw-on-dynamic-markup-insertion-counter greater than zero."_utf16);
 
     // FIXME: 3. Let entryDocument be the entry global object's associated Document.
     auto& entry_document = *this;
 
     // 4. If document's origin is not same origin to entryDocument's origin, then throw a "SecurityError" DOMException.
     if (origin() != entry_document.origin())
-        return WebIDL::SecurityError::create(realm(), "Document.origin() not the same as entryDocument's."_string);
+        return WebIDL::SecurityError::create(realm(), "Document.origin() not the same as entryDocument's."_utf16);
 
     // 5. If document has an active parser whose script nesting level is greater than 0, then return document.
     if (m_parser && m_parser->script_nesting_level() > 0)
@@ -798,7 +812,7 @@ WebIDL::ExceptionOr<GC::Ptr<HTML::WindowProxy>> Document::open(StringView url, S
 {
     // 1. If this is not fully active, then throw an "InvalidAccessError" DOMException.
     if (!is_fully_active())
-        return WebIDL::InvalidAccessError::create(realm(), "Cannot perform open on a document that isn't fully active."_string);
+        return WebIDL::InvalidAccessError::create(realm(), "Cannot perform open on a document that isn't fully active."_utf16);
 
     // 2. Return the result of running the window open steps with url, name, and features.
     return window()->window_open_steps(url, name, features);
@@ -809,11 +823,11 @@ WebIDL::ExceptionOr<void> Document::close()
 {
     // 1. If document is an XML document, then throw an "InvalidStateError" DOMException exception.
     if (m_type == Type::XML)
-        return WebIDL::InvalidStateError::create(realm(), "close() called on XML document."_string);
+        return WebIDL::InvalidStateError::create(realm(), "close() called on XML document."_utf16);
 
     // 2. If document's throw-on-dynamic-markup-insertion counter is greater than 0, then throw an "InvalidStateError" DOMException.
     if (m_throw_on_dynamic_markup_insertion_counter > 0)
-        return WebIDL::InvalidStateError::create(realm(), "throw-on-dynamic-markup-insertion-counter greater than zero."_string);
+        return WebIDL::InvalidStateError::create(realm(), "throw-on-dynamic-markup-insertion-counter greater than zero."_utf16);
 
     // 3. If there is no script-created parser associated with the document, then return.
     if (!m_parser)
@@ -861,24 +875,6 @@ void Document::set_origin(URL::Origin const& origin)
     m_origin = origin;
 }
 
-void Document::schedule_style_update()
-{
-    if (!browsing_context())
-        return;
-
-    // NOTE: Update of the style is a step in HTML event loop processing.
-    HTML::main_thread_event_loop().schedule();
-}
-
-void Document::schedule_layout_update()
-{
-    if (!browsing_context())
-        return;
-
-    // NOTE: Update of the layout is a step in HTML event loop processing.
-    HTML::main_thread_event_loop().schedule();
-}
-
 bool Document::is_child_allowed(Node const& node) const
 {
     switch (node.type()) {
@@ -917,9 +913,7 @@ HTML::HTMLHtmlElement* Document::html_element()
 {
     // The html element of a document is its document element, if it's an html element, and null otherwise.
     auto* html = document_element();
-    if (is<HTML::HTMLHtmlElement>(html))
-        return as<HTML::HTMLHtmlElement>(html);
-    return nullptr;
+    return as_if<HTML::HTMLHtmlElement>(html);
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#the-head-element-2
@@ -989,7 +983,7 @@ HTML::HTMLElement* Document::body()
 WebIDL::ExceptionOr<void> Document::set_body(HTML::HTMLElement* new_body)
 {
     if (!is<HTML::HTMLBodyElement>(new_body) && !is<HTML::HTMLFrameSetElement>(new_body))
-        return WebIDL::HierarchyRequestError::create(realm(), "Invalid document body element, must be 'body' or 'frameset'"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "Invalid document body element, must be 'body' or 'frameset'"_utf16);
 
     auto* existing_body = body();
     if (existing_body) {
@@ -999,16 +993,16 @@ WebIDL::ExceptionOr<void> Document::set_body(HTML::HTMLElement* new_body)
 
     auto* document_element = this->document_element();
     if (!document_element)
-        return WebIDL::HierarchyRequestError::create(realm(), "Missing document element"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "Missing document element"_utf16);
 
     (void)TRY(document_element->append_child(*new_body));
     return {};
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#document.title
-String Document::title() const
+Utf16String Document::title() const
 {
-    String value;
+    Utf16String value;
 
     // 1. If the document element is an SVG svg element, then let value be the child text content of the first SVG title
     //    element that is a child of the document element.
@@ -1020,18 +1014,18 @@ String Document::title() const
     // 2. Otherwise, let value be the child text content of the title element, or the empty string if the title element
     //    is null.
     else if (auto title_element = this->title_element()) {
-        value = title_element->text_content().value_or(String {});
+        value = title_element->text_content().value_or({});
     }
 
     // 3. Strip and collapse ASCII whitespace in value.
-    auto title = Infra::strip_and_collapse_whitespace(value).release_value_but_fixme_should_propagate_errors();
+    auto title = Infra::strip_and_collapse_whitespace(value);
 
     // 4. Return value.
     return title;
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#document.title
-WebIDL::ExceptionOr<void> Document::set_title(String const& title)
+WebIDL::ExceptionOr<void> Document::set_title(Utf16String const& title)
 {
     auto* document_element = this->document_element();
 
@@ -1170,6 +1164,37 @@ GC::Ptr<HTML::HTMLBaseElement> Document::first_base_element_with_target_in_tree_
     return m_first_base_element_with_target_in_tree_order;
 }
 
+// https://html.spec.whatwg.org/multipage/urls-and-fetching.html#respond-to-base-url-changes
+void Document::respond_to_base_url_changes()
+{
+    // To respond to base URL changes for a Document document:
+
+    // 1. The user agent should update any user interface elements which are displaying affected URLs, or data derived
+    //    from such URLs, to the user. Examples of such user interface elements would be a status bar that displays a
+    //    hyperlink's url, or some user interface which displays the URL specified by a q, blockquote, ins, or del
+    //    element's cite attribute.
+    // FIXME: Update those UI elements.
+
+    // 2. Ensure that the CSS :link/:visited/etc. pseudo-classes are updated appropriately.
+    invalidate_style(StyleInvalidationReason::BaseURLChanged);
+}
+
+// https://html.spec.whatwg.org/multipage/urls-and-fetching.html#set-the-url
+void Document::set_url(URL::URL const& url)
+{
+    // OPTIMIZATION: Avoid unnecessary work if the URL is already set.
+    if (m_url == url)
+        return;
+
+    // To set the URL for a Document document to a URL record url:
+
+    // 1. Set document's URL to url.
+    m_url = url;
+
+    // 2. Respond to base URL changes given document.
+    respond_to_base_url_changes();
+}
+
 // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#fallback-base-url
 URL::URL Document::fallback_base_url() const
 {
@@ -1193,12 +1218,12 @@ URL::URL Document::fallback_base_url() const
 // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#document-base-url
 URL::URL Document::base_url() const
 {
-    // 1. If there is no base element that has an href attribute in the Document, then return the Document's fallback base URL.
+    // 1. If document has no descendant base element that has an href attribute, then return document's fallback base URL.
     auto base_element = first_base_element_with_href_in_tree_order();
     if (!base_element)
         return fallback_base_url();
 
-    // 2. Otherwise, return the frozen base URL of the first base element in the Document that has an href attribute, in tree order.
+    // 2. Otherwise, return the frozen base URL of the first base element in document that has an href attribute, in tree order.
     return base_element->frozen_base_url();
 }
 
@@ -1238,7 +1263,6 @@ void Document::invalidate_layout_tree(InvalidateLayoutTreeReason reason)
     if (m_layout_root)
         dbgln_if(UPDATE_LAYOUT_DEBUG, "DROP TREE {}", to_string(reason));
     tear_down_layout_tree();
-    schedule_layout_update();
 }
 
 static void propagate_scrollbar_width_to_viewport(Element& root_element, Layout::Viewport& viewport)
@@ -1409,10 +1433,6 @@ void Document::update_layout(UpdateLayoutReason reason)
     update_paint_and_hit_testing_properties_if_needed();
     paintable()->assign_clip_frames();
 
-    if (navigable->is_traversable()) {
-        page().client().page_did_layout();
-    }
-
     if (auto range = get_selection()->range()) {
         paintable()->recompute_selection_states(*range);
     }
@@ -1444,7 +1464,7 @@ void Document::update_layout(UpdateLayoutReason reason)
     }
 }
 
-[[nodiscard]] static CSS::RequiredInvalidationAfterStyleChange update_style_recursively(Node& node, CSS::StyleComputer& style_computer, bool needs_inherited_style_update)
+[[nodiscard]] static CSS::RequiredInvalidationAfterStyleChange update_style_recursively(Node& node, CSS::StyleComputer& style_computer, bool needs_inherited_style_update, bool recompute_elements_depending_on_custom_properties)
 {
     bool const needs_full_style_update = node.document().needs_full_style_update();
     CSS::RequiredInvalidationAfterStyleChange invalidation;
@@ -1457,12 +1477,14 @@ void Document::update_layout(UpdateLayoutReason reason)
     //       We will still recompute style for the children, though.
     bool is_display_none = false;
 
+    bool did_change_custom_properties = false;
     CSS::RequiredInvalidationAfterStyleChange node_invalidation;
     if (is<Element>(node)) {
-        if (needs_full_style_update || node.needs_style_update()) {
-            node_invalidation = static_cast<Element&>(node).recompute_style();
+        auto& element = static_cast<Element&>(node);
+        if (needs_full_style_update || node.needs_style_update() || (recompute_elements_depending_on_custom_properties && element.style_uses_var_css_function())) {
+            node_invalidation = element.recompute_style(did_change_custom_properties);
         } else if (needs_inherited_style_update) {
-            node_invalidation = static_cast<Element&>(node).recompute_inherited_style();
+            node_invalidation = element.recompute_inherited_style();
         }
         is_display_none = static_cast<Element&>(node).computed_properties()->display().is_none();
     }
@@ -1481,12 +1503,16 @@ void Document::update_layout(UpdateLayoutReason reason)
     node.set_needs_style_update(false);
     invalidation |= node_invalidation;
 
+    if (did_change_custom_properties) {
+        recompute_elements_depending_on_custom_properties = true;
+    }
+
     bool children_need_inherited_style_update = !invalidation.is_none();
-    if (needs_full_style_update || node.child_needs_style_update() || children_need_inherited_style_update) {
+    if (needs_full_style_update || node.child_needs_style_update() || children_need_inherited_style_update || recompute_elements_depending_on_custom_properties) {
         if (node.is_element()) {
             if (auto shadow_root = static_cast<DOM::Element&>(node).shadow_root()) {
                 if (needs_full_style_update || shadow_root->needs_style_update() || shadow_root->child_needs_style_update()) {
-                    auto subtree_invalidation = update_style_recursively(*shadow_root, style_computer, children_need_inherited_style_update);
+                    auto subtree_invalidation = update_style_recursively(*shadow_root, style_computer, children_need_inherited_style_update, recompute_elements_depending_on_custom_properties);
                     if (!is_display_none)
                         invalidation |= subtree_invalidation;
                 }
@@ -1494,8 +1520,8 @@ void Document::update_layout(UpdateLayoutReason reason)
         }
 
         node.for_each_child([&](auto& child) {
-            if (needs_full_style_update || child.needs_style_update() || children_need_inherited_style_update || child.child_needs_style_update()) {
-                auto subtree_invalidation = update_style_recursively(child, style_computer, children_need_inherited_style_update);
+            if (needs_full_style_update || child.needs_style_update() || children_need_inherited_style_update || child.child_needs_style_update() || recompute_elements_depending_on_custom_properties) {
+                auto subtree_invalidation = update_style_recursively(child, style_computer, children_need_inherited_style_update, recompute_elements_depending_on_custom_properties);
                 if (!is_display_none)
                     invalidation |= subtree_invalidation;
             }
@@ -1511,34 +1537,6 @@ void Document::update_layout(UpdateLayoutReason reason)
     return invalidation;
 }
 
-// This function makes a full pass over the entire DOM and converts "entire subtree needs style update"
-// into "needs style update" for each inclusive descendant where it's found.
-static void perform_pending_style_invalidations(Node& node, bool invalidate_entire_subtree)
-{
-    invalidate_entire_subtree |= node.entire_subtree_needs_style_update();
-
-    if (invalidate_entire_subtree) {
-        node.set_needs_style_update_internal(true);
-        if (node.has_child_nodes())
-            node.set_child_needs_style_update(true);
-    }
-
-    for (auto* child = node.first_child(); child; child = child->next_sibling()) {
-        perform_pending_style_invalidations(*child, invalidate_entire_subtree);
-    }
-
-    if (node.is_element()) {
-        auto& element = static_cast<Element&>(node);
-        if (auto shadow_root = element.shadow_root()) {
-            perform_pending_style_invalidations(*shadow_root, invalidate_entire_subtree);
-            if (invalidate_entire_subtree)
-                node.set_child_needs_style_update(true);
-        }
-    }
-
-    node.set_entire_subtree_needs_style_update(false);
-}
-
 void Document::update_style()
 {
     if (!browsing_context())
@@ -1552,10 +1550,10 @@ void Document::update_style()
 
     invalidate_style_of_elements_affected_by_has();
 
-    if (!needs_full_style_update() && !needs_style_update() && !child_needs_style_update())
+    if (!m_style_invalidator->has_pending_invalidations() && !needs_full_style_update() && !needs_style_update() && !child_needs_style_update())
         return;
 
-    perform_pending_style_invalidations(*this, false);
+    m_style_invalidator->invalidate(*this);
 
     // NOTE: If this is a document hosting <template> contents, style update is unnecessary.
     if (m_created_for_appropriate_template_contents)
@@ -1568,7 +1566,7 @@ void Document::update_style()
 
     style_computer().reset_ancestor_filter();
 
-    auto invalidation = update_style_recursively(*this, style_computer(), false);
+    auto invalidation = update_style_recursively(*this, style_computer(), false, false);
     if (!invalidation.is_none())
         invalidate_display_list();
     if (invalidation.rebuild_stacking_context_tree)
@@ -1581,15 +1579,17 @@ void Document::update_animated_style_if_needed()
     if (!m_needs_animated_style_update)
         return;
 
+    Animations::AnimationUpdateContext context;
+
     for (auto& timeline : m_associated_animation_timelines) {
         for (auto& animation : timeline->associated_animations()) {
-            if (animation->is_idle() || animation->is_finished())
+            if (animation->is_idle())
                 continue;
-            if (auto effect = animation->effect()) {
-                effect->update_computed_properties();
-            }
+            if (auto effect = animation->effect())
+                effect->update_computed_properties(context);
         }
     }
+
     m_needs_animated_style_update = false;
 }
 
@@ -1689,14 +1689,12 @@ void Document::obtain_theme_color()
 
             // 4. If color is not failure, then return color.
             if (!css_value.is_null() && css_value->has_color()) {
-                Optional<Layout::NodeWithStyle const&> root_node;
-                CSS::CalculationResolutionContext resolution_context;
+                CSS::ColorResolutionContext color_resolution_context {};
                 if (html_element() && html_element()->layout_node()) {
-                    root_node = *html_element()->layout_node();
-                    resolution_context.length_resolution_context = CSS::Length::ResolutionContext::for_layout_node(*html_element()->layout_node());
+                    color_resolution_context = CSS::ColorResolutionContext::for_layout_node_with_style(*html_element()->layout_node());
                 }
 
-                theme_color = css_value->to_color(root_node, resolution_context);
+                theme_color = css_value->to_color(color_resolution_context).value();
                 return TraversalDecision::Break;
             }
         }
@@ -1847,9 +1845,9 @@ void Document::invalidate_style_for_elements_affected_by_pseudo_class_change(CSS
         return false;
     };
 
-    auto matches_different_set_of_rules_after_state_change = [&](Element const& element) {
+    auto matches_different_set_of_rules_after_state_change = [&](Element& element) {
         bool result = false;
-        rules.for_each_matching_rules(element, {}, [&](auto& rules) {
+        rules.for_each_matching_rules({ element }, [&](auto& rules) {
             for (auto& rule : rules) {
                 bool before = does_rule_match_on_element(element, rule);
                 TemporaryChange change { element_slot, node };
@@ -1917,6 +1915,8 @@ void Document::set_hovered_node(GC::Ptr<Node> node)
         mouse_event_init.cancelable = true;
         mouse_event_init.composed = true;
         mouse_event_init.related_target = m_hovered_node;
+        if (auto navigable = this->navigable())
+            mouse_event_init.view = navigable->active_window_proxy();
         auto event = UIEvents::MouseEvent::create(realm(), UIEvents::EventNames::mouseout, mouse_event_init);
         old_hovered_node->dispatch_event(event);
     }
@@ -1939,6 +1939,8 @@ void Document::set_hovered_node(GC::Ptr<Node> node)
         mouse_event_init.cancelable = true;
         mouse_event_init.composed = true;
         mouse_event_init.related_target = old_hovered_node;
+        if (auto navigable = this->navigable())
+            mouse_event_init.view = navigable->active_window_proxy();
         auto event = UIEvents::MouseEvent::create(realm(), UIEvents::EventNames::mouseover, mouse_event_init);
         m_hovered_node->dispatch_event(event);
     }
@@ -2110,7 +2112,7 @@ WebIDL::ExceptionOr<GC::Ref<Element>> Document::create_element(String const& loc
 {
     // 1. If localName is not a valid element local name, then throw an "InvalidCharacterError" DOMException.
     if (!is_valid_element_local_name(local_name))
-        return WebIDL::InvalidCharacterError::create(realm(), "Invalid character in tag name."_string);
+        return WebIDL::InvalidCharacterError::create(realm(), "Invalid character in tag name."_utf16);
 
     // 2. If this is an HTML document, then set localName to localName in ASCII lowercase.
     auto local_name_lower = document_type() == Type::HTML
@@ -2162,44 +2164,44 @@ GC::Ref<DocumentFragment> Document::create_document_fragment()
     return realm().create<DocumentFragment>(*this);
 }
 
-GC::Ref<Text> Document::create_text_node(String const& data)
+GC::Ref<Text> Document::create_text_node(Utf16String data)
 {
-    return realm().create<Text>(*this, data);
+    return realm().create<Text>(*this, move(data));
 }
 
 // https://dom.spec.whatwg.org/#dom-document-createcdatasection
-WebIDL::ExceptionOr<GC::Ref<CDATASection>> Document::create_cdata_section(String const& data)
+WebIDL::ExceptionOr<GC::Ref<CDATASection>> Document::create_cdata_section(Utf16String data)
 {
     // 1. If this is an HTML document, then throw a "NotSupportedError" DOMException.
     if (is_html_document())
-        return WebIDL::NotSupportedError::create(realm(), "This operation is not supported for HTML documents"_string);
+        return WebIDL::NotSupportedError::create(realm(), "This operation is not supported for HTML documents"_utf16);
 
     // 2. If data contains the string "]]>", then throw an "InvalidCharacterError" DOMException.
     if (data.contains("]]>"sv))
-        return WebIDL::InvalidCharacterError::create(realm(), "String may not contain ']]>'"_string);
+        return WebIDL::InvalidCharacterError::create(realm(), "String may not contain ']]>'"_utf16);
 
     // 3. Return a new CDATASection node with its data set to data and node document set to this.
-    return realm().create<CDATASection>(*this, data);
+    return realm().create<CDATASection>(*this, move(data));
 }
 
-GC::Ref<Comment> Document::create_comment(String const& data)
+GC::Ref<Comment> Document::create_comment(Utf16String data)
 {
-    return realm().create<Comment>(*this, data);
+    return realm().create<Comment>(*this, move(data));
 }
 
 // https://dom.spec.whatwg.org/#dom-document-createprocessinginstruction
-WebIDL::ExceptionOr<GC::Ref<ProcessingInstruction>> Document::create_processing_instruction(String const& target, String const& data)
+WebIDL::ExceptionOr<GC::Ref<ProcessingInstruction>> Document::create_processing_instruction(String const& target, Utf16String data)
 {
     // 1. If target does not match the Name production, then throw an "InvalidCharacterError" DOMException.
     if (!is_valid_name(target))
-        return WebIDL::InvalidCharacterError::create(realm(), "Invalid character in target name."_string);
+        return WebIDL::InvalidCharacterError::create(realm(), "Invalid character in target name."_utf16);
 
     // 2. If data contains the string "?>", then throw an "InvalidCharacterError" DOMException.
     if (data.contains("?>"sv))
-        return WebIDL::InvalidCharacterError::create(realm(), "String may not contain '?>'"_string);
+        return WebIDL::InvalidCharacterError::create(realm(), "String may not contain '?>'"_utf16);
 
     // 3. Return a new ProcessingInstruction node, with target set to target, data set to data, and node document set to this.
-    return realm().create<ProcessingInstruction>(*this, data, target);
+    return realm().create<ProcessingInstruction>(*this, move(data), target);
 }
 
 GC::Ref<Range> Document::create_range()
@@ -2261,7 +2263,7 @@ WebIDL::ExceptionOr<GC::Ref<Event>> Document::create_event(StringView interface)
 
     // 3. If constructor is null, then throw a "NotSupportedError" DOMException.
     if (!event) {
-        return WebIDL::NotSupportedError::create(realm, "No constructor for interface found"_string);
+        return WebIDL::NotSupportedError::create(realm, "No constructor for interface found"_utf16);
     }
 
     // FIXME: 4. If the interface indicated by constructor is not exposed on the relevant global object of this, then throw a "NotSupportedError" DOMException.
@@ -2342,7 +2344,7 @@ WebIDL::ExceptionOr<GC::Ref<Node>> Document::import_node(GC::Ref<Node> node, boo
 {
     // 1. If node is a document or shadow root, then throw a "NotSupportedError" DOMException.
     if (is<Document>(*node) || is<ShadowRoot>(*node))
-        return WebIDL::NotSupportedError::create(realm(), "Cannot import a document or shadow root."_string);
+        return WebIDL::NotSupportedError::create(realm(), "Cannot import a document or shadow root."_utf16);
 
     // 2. Return a clone of node, with this and the clone children flag set if deep is true.
     return node->clone_node(this, deep);
@@ -2416,10 +2418,10 @@ void Document::adopt_node(Node& node)
 WebIDL::ExceptionOr<GC::Ref<Node>> Document::adopt_node_binding(GC::Ref<Node> node)
 {
     if (is<Document>(*node))
-        return WebIDL::NotSupportedError::create(realm(), "Cannot adopt a document into a document"_string);
+        return WebIDL::NotSupportedError::create(realm(), "Cannot adopt a document into a document"_utf16);
 
     if (is<ShadowRoot>(*node))
-        return WebIDL::HierarchyRequestError::create(realm(), "Cannot adopt a shadow root into a document"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "Cannot adopt a shadow root into a document"_utf16);
 
     if (is<DocumentFragment>(*node) && as<DocumentFragment>(*node).host())
         return node;
@@ -2445,95 +2447,62 @@ String const& Document::compat_mode() const
     return css1_compat;
 }
 
-// https://html.spec.whatwg.org/multipage/interaction.html#dom-documentorshadowroot-activeelement
 void Document::update_active_element()
 {
-    // 1. Let candidate be this's node document's focused area's DOM anchor.
-    Node* candidate = focused_element();
-
-    // 2. Set candidate to the result of retargeting candidate against this.
-    candidate = as<Node>(retarget(candidate, this));
-
-    // 3. If candidate's root is not this, then return null.
-    if (&candidate->root() != this) {
-        set_active_element(nullptr);
-        return;
-    }
-
-    // 4. If candidate is not a Document object, then return candidate.
-    if (!is<Document>(candidate)) {
-        set_active_element(as<Element>(candidate));
-        return;
-    }
-
-    auto* candidate_document = static_cast<Document*>(candidate);
-
-    // 5. If candidate has a body element, then return that body element.
-    if (candidate_document->body()) {
-        set_active_element(candidate_document->body());
-        return;
-    }
-
-    // 6. If candidate's document element is non-null, then return that document element.
-    if (candidate_document->document_element()) {
-        set_active_element(candidate_document->document_element());
-        return;
-    }
-
-    // 7. Return null.
-    set_active_element(nullptr);
+    set_active_element(calculate_active_element(*this));
 }
 
-void Document::set_focused_element(GC::Ptr<Element> element)
+void Document::set_focused_area(GC::Ptr<Node> node)
 {
-    if (m_focused_element.ptr() == element)
+    if (m_focused_area == node)
         return;
 
-    GC::Ptr<Element> old_focused_element = move(m_focused_element);
+    GC::Ptr old_focused_area = m_focused_area;
 
-    if (old_focused_element)
+    if (auto* old_focused_element = as_if<Element>(old_focused_area.ptr()))
         old_focused_element->did_lose_focus();
 
-    auto* common_ancestor = find_common_ancestor(old_focused_element, element);
+    auto* common_ancestor = find_common_ancestor(old_focused_area, node);
 
     GC::Ptr<Node> old_focused_node_root = nullptr;
     GC::Ptr<Node> new_focused_node_root = nullptr;
-    if (old_focused_element)
-        old_focused_node_root = old_focused_element->root();
-    if (element)
-        new_focused_node_root = element->root();
+    if (old_focused_area)
+        old_focused_node_root = old_focused_area->root();
+    if (node)
+        new_focused_node_root = node->root();
     if (old_focused_node_root != new_focused_node_root) {
         if (old_focused_node_root) {
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Focus, m_focused_element, *old_focused_node_root, element);
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusWithin, m_focused_element, *old_focused_node_root, element);
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusVisible, m_focused_element, *old_focused_node_root, element);
+            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Focus, m_focused_area, *old_focused_node_root, node);
+            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusWithin, m_focused_area, *old_focused_node_root, node);
+            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusVisible, m_focused_area, *old_focused_node_root, node);
         }
         if (new_focused_node_root) {
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Focus, m_focused_element, *new_focused_node_root, element);
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusWithin, m_focused_element, *new_focused_node_root, element);
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusVisible, m_focused_element, *new_focused_node_root, element);
+            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Focus, m_focused_area, *new_focused_node_root, node);
+            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusWithin, m_focused_area, *new_focused_node_root, node);
+            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusVisible, m_focused_area, *new_focused_node_root, node);
         }
     } else {
-        invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Focus, m_focused_element, *common_ancestor, element);
-        invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusWithin, m_focused_element, *common_ancestor, element);
-        invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusVisible, m_focused_element, *common_ancestor, element);
+        invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Focus, m_focused_area, *common_ancestor, node);
+        invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusWithin, m_focused_area, *common_ancestor, node);
+        invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::FocusVisible, m_focused_area, *common_ancestor, node);
     }
 
-    m_focused_element = element;
+    m_focused_area = node;
 
-    if (m_focused_element)
-        m_focused_element->did_receive_focus();
+    auto* new_focused_element = as_if<Element>(node.ptr());
+    if (new_focused_element)
+        new_focused_element->did_receive_focus();
 
     if (paintable())
         paintable()->set_needs_display();
 
     // Scroll the viewport if necessary to make the newly focused element visible.
-    if (m_focused_element) {
-        m_focused_element->queue_an_element_task(HTML::Task::Source::UserInteraction, [&]() {
+    if (new_focused_element) {
+        new_focused_element->queue_an_element_task(HTML::Task::Source::UserInteraction, [&] {
             ScrollIntoViewOptions scroll_options;
             scroll_options.block = Bindings::ScrollLogicalPosition::Nearest;
             scroll_options.inline_ = Bindings::ScrollLogicalPosition::Nearest;
-            (void)m_focused_element->scroll_into_view(scroll_options);
+            (void)as<Element>(*m_focused_area).scroll_into_view(scroll_options);
         });
     }
 
@@ -2589,15 +2558,12 @@ void Document::set_target_element(GC::Ptr<Element> element)
     if (old_target_node_root != new_target_node_root) {
         if (old_target_node_root) {
             invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Target, m_target_element, *old_target_node_root, element);
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::TargetWithin, m_target_element, *old_target_node_root, element);
         }
         if (new_target_node_root) {
             invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Target, m_target_element, *new_target_node_root, element);
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::TargetWithin, m_target_element, *new_target_node_root, element);
         }
     } else {
         invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Target, m_target_element, *common_ancestor, element);
-        invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::TargetWithin, m_target_element, *common_ancestor, element);
     }
 
     m_target_element = element;
@@ -3150,7 +3116,7 @@ WebIDL::ExceptionOr<String> Document::cookie(Cookie::Source source)
 
     // Otherwise, if the Document's origin is an opaque origin, the user agent must throw a "SecurityError" DOMException.
     if (origin().is_opaque())
-        return WebIDL::SecurityError::create(realm(), "Document origin is opaque"_string);
+        return WebIDL::SecurityError::create(realm(), "Document origin is opaque"_utf16);
 
     // Otherwise, the user agent must return the cookie-string for the document's URL for a "non-HTTP" API, decoded using
     // UTF-8 decode without BOM.
@@ -3166,7 +3132,7 @@ WebIDL::ExceptionOr<void> Document::set_cookie(StringView cookie_string, Cookie:
 
     // Otherwise, if the Document's origin is an opaque origin, the user agent must throw a "SecurityError" DOMException.
     if (origin().is_opaque())
-        return WebIDL::SecurityError::create(realm(), "Document origin is opaque"_string);
+        return WebIDL::SecurityError::create(realm(), "Document origin is opaque"_utf16);
 
     // Otherwise, the user agent must act as it would when receiving a set-cookie-string for the document's URL via a
     // "non-HTTP" API, consisting of the new value encoded as UTF-8.
@@ -3385,7 +3351,8 @@ void Document::update_the_visibility_state(HTML::VisibilityState visibility_stat
 
     // FIXME: 4. Run the screen orientation change steps with document.
 
-    // FIXME: 5. Run the view transition page visibility change steps with document.
+    // 5. Run the view transition page visibility change steps with document.
+    view_transition_page_visibility_change_steps();
 
     // 6. Run any page visibility change steps which may be defined in other specifications, with visibility state and
     //    document.
@@ -3426,8 +3393,6 @@ void Document::run_the_resize_steps()
         visual_viewport_resize_event->set_is_trusted(true);
         visual_viewport()->dispatch_event(visual_viewport_resize_event);
     }
-
-    schedule_layout_update();
 }
 
 // https://w3c.github.io/csswg-drafts/cssom-view-1/#document-run-the-scroll-steps
@@ -3455,12 +3420,17 @@ void Document::run_the_scroll_steps()
 
 void Document::add_media_query_list(GC::Ref<CSS::MediaQueryList> media_query_list)
 {
+    m_needs_media_query_evaluation = true;
     m_media_query_lists.append(*media_query_list);
 }
 
 // https://drafts.csswg.org/cssom-view/#evaluate-media-queries-and-report-changes
 void Document::evaluate_media_queries_and_report_changes()
 {
+    if (!m_needs_media_query_evaluation)
+        return;
+    m_needs_media_query_evaluation = false;
+
     // NOTE: Not in the spec, but we take this opportunity to prune null WeakPtrs.
     m_media_query_lists.remove_all_matching([](auto& it) {
         return it.is_null();
@@ -3545,7 +3515,9 @@ bool Document::allow_focus() const
     if (is_allowed_to_use_feature(PolicyControlledFeature::FocusWithoutUserActivation))
         return true;
 
-    // FIXME: 2. If target's relevant global object has transient activation, then return true.
+    // 2. If target's relevant global object has transient activation, then return true.
+    if (as<HTML::Window>(HTML::relevant_global_object(*this)).has_transient_activation())
+        return true;
 
     // 3. Return false.
     return false;
@@ -3820,7 +3792,7 @@ String Document::domain() const
 }
 
 // https://html.spec.whatwg.org/multipage/browsers.html#is-a-registrable-domain-suffix-of-or-is-equal-to
-static bool is_a_registrable_domain_suffix_of_or_is_equal_to(StringView host_suffix_string, URL::Host const& original_host)
+bool is_a_registrable_domain_suffix_of_or_is_equal_to(StringView host_suffix_string, URL::Host const& original_host)
 {
     // 1. If hostSuffixString is the empty string, then return false.
     if (host_suffix_string.is_empty())
@@ -3875,22 +3847,22 @@ WebIDL::ExceptionOr<void> Document::set_domain(String const& domain)
 
     // 1. If this's browsing context is null, then throw a "SecurityError" DOMException.
     if (!m_browsing_context)
-        return WebIDL::SecurityError::create(realm, "Document.domain setter requires a browsing context"_string);
+        return WebIDL::SecurityError::create(realm, "Document.domain setter requires a browsing context"_utf16);
 
     // 2. If this's active sandboxing flag set has its sandboxed document.domain browsing context flag set, then throw a "SecurityError" DOMException.
     if (has_flag(active_sandboxing_flag_set(), HTML::SandboxingFlagSet::SandboxedDocumentDomain))
-        return WebIDL::SecurityError::create(realm, "Document.domain setter is sandboxed"_string);
+        return WebIDL::SecurityError::create(realm, "Document.domain setter is sandboxed"_utf16);
 
     // 3. Let effectiveDomain be this's origin's effective domain.
     auto effective_domain = origin().effective_domain();
 
     // 4. If effectiveDomain is null, then throw a "SecurityError" DOMException.
     if (!effective_domain.has_value())
-        return WebIDL::SecurityError::create(realm, "Document.domain setter called on a Document with a null effective domain"_string);
+        return WebIDL::SecurityError::create(realm, "Document.domain setter called on a Document with a null effective domain"_utf16);
 
     // 5. If the given value is not a registrable domain suffix of and is not equal to effectiveDomain, then throw a "SecurityError" DOMException.
     if (!is_a_registrable_domain_suffix_of_or_is_equal_to(domain, effective_domain.value()))
-        return WebIDL::SecurityError::create(realm, "Document.domain setter called for an invalid domain"_string);
+        return WebIDL::SecurityError::create(realm, "Document.domain setter called for an invalid domain"_utf16);
 
     // FIXME: 6. If the surrounding agent's agent cluster's is origin-keyed is true, then return.
 
@@ -4172,6 +4144,50 @@ void Document::make_unsalvageable([[maybe_unused]] String reason)
     set_salvageable(false);
 }
 
+struct DocumentDestructionState : public GC::Cell {
+    GC_CELL(DocumentDestructionState, GC::Cell);
+
+    static constexpr int TIMEOUT_MS = 15000;
+
+    DocumentDestructionState(GC::Ref<Document> document, size_t remaining, GC::Ptr<GC::Function<void()>> after)
+        : remaining_children(remaining)
+        , document(document)
+        , after_all(after)
+        , timeout(Platform::Timer::create_single_shot(heap(), TIMEOUT_MS, GC::create_function(heap(), [this] {
+            if (remaining_children > 0)
+                dbgln("FIXME: Document destruction timed out with {} remaining children", remaining_children);
+        })))
+    {
+        timeout->start();
+    }
+
+    virtual void visit_edges(GC::Cell::Visitor& visitor) override
+    {
+        Base::visit_edges(visitor);
+        visitor.visit(document);
+        visitor.visit(after_all);
+        visitor.visit(timeout);
+    }
+
+    void increment_destroyed()
+    {
+        --remaining_children;
+        if (remaining_children > 0)
+            return;
+        timeout->stop();
+        queue_global_task(HTML::Task::Source::NavigationAndTraversal, relevant_global_object(document), GC::create_function(heap(), [document = move(document), after_all = move(after_all)] {
+            document->destroy();
+            if (after_all)
+                after_all->function()();
+        }));
+    }
+
+    size_t remaining_children { 0 };
+    GC::Ref<Document> document;
+    GC::Ptr<GC::Function<void()>> after_all;
+    GC::Ref<Platform::Timer> timeout;
+};
+
 // https://html.spec.whatwg.org/multipage/document-lifecycle.html#destroy-a-document-and-its-descendants
 void Document::destroy_a_document_and_its_descendants(GC::Ptr<GC::Function<void()>> after_all_destruction)
 {
@@ -4187,35 +4203,37 @@ void Document::destroy_a_document_and_its_descendants(GC::Ptr<GC::Function<void(
     // 2. Let childNavigables be document's child navigables.
     IGNORE_USE_IN_ESCAPING_LAMBDA auto child_navigables = document_tree_child_navigables();
 
+    // NOTE: Not in the spec but we could avoid allocating destruction state in case there's no child navigables.
+    if (child_navigables.is_empty()) {
+        HTML::queue_global_task(HTML::Task::Source::NavigationAndTraversal, relevant_global_object(*this), GC::create_function(heap(), [document = this, after_all_destruction] {
+            // 1. Destroy document.
+            document->destroy();
+
+            // 2. If afterAllDestruction was given, then run it.
+            if (after_all_destruction)
+                after_all_destruction->function()();
+        }));
+        return;
+    }
+
     // 3. Let numberDestroyed be 0.
-    IGNORE_USE_IN_ESCAPING_LAMBDA size_t number_destroyed = 0;
+    auto destruction_state = heap().allocate<DocumentDestructionState>(*this, child_navigables.size(), after_all_destruction);
 
     // 4. For each childNavigable of childNavigables, queue a global task on the navigation and traversal task source
     //    given childNavigable's active window to perform the following steps:
     for (auto& child_navigable : child_navigables) {
-        HTML::queue_global_task(HTML::Task::Source::NavigationAndTraversal, *child_navigable->active_window(), GC::create_function(heap(), [&heap = heap(), &number_destroyed, child_navigable = child_navigable.ptr()] {
+        queue_global_task(HTML::Task::Source::NavigationAndTraversal, *child_navigable->active_window(), GC::create_function(heap(), [&heap = heap(), destruction_state, child_navigable] {
             // 1. Let incrementDestroyed be an algorithm step which increments numberDestroyed.
-            auto increment_destroyed = GC::create_function(heap, [&number_destroyed] { ++number_destroyed; });
+            auto increment_destroyed = GC::create_function(heap, [destruction_state] { destruction_state->increment_destroyed(); });
 
             // 2. Destroy a document and its descendants given childNavigable's active document and incrementDestroyed.
-            child_navigable->active_document()->destroy_a_document_and_its_descendants(move(increment_destroyed));
+            child_navigable->active_document()->destroy_a_document_and_its_descendants(increment_destroyed);
         }));
     }
 
+    // NOTE: Both of subsequent steps are handled by DocumentDestructionState.
     // 5. Wait until numberDestroyed equals childNavigable's size.
-    HTML::main_thread_event_loop().spin_until(GC::create_function(heap(), [&] {
-        return number_destroyed == child_navigables.size();
-    }));
-
     // 6. Queue a global task on the navigation and traversal task source given document's relevant global object to perform the following steps:
-    HTML::queue_global_task(HTML::Task::Source::NavigationAndTraversal, relevant_global_object(*this), GC::create_function(heap(), [after_all_destruction = move(after_all_destruction), this] {
-        // 1. Destroy document.
-        destroy();
-
-        // 2. If afterAllDestruction was given, then run it.
-        if (after_all_destruction)
-            after_all_destruction->function()();
-    }));
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#abort-a-document
@@ -4292,7 +4310,7 @@ GC::Ptr<HTML::HTMLParser> Document::active_parser()
     return m_parser;
 }
 
-void Document::set_browsing_context(HTML::BrowsingContext* browsing_context)
+void Document::set_browsing_context(GC::Ptr<HTML::BrowsingContext> browsing_context)
 {
     m_browsing_context = browsing_context;
 }
@@ -4454,6 +4472,10 @@ bool Document::is_allowed_to_use_feature(PolicyControlledFeature feature) const
             return true;
         break;
     case PolicyControlledFeature::FocusWithoutUserActivation:
+    case PolicyControlledFeature::EncryptedMedia:
+        // FIXME: Implement allowlist for this.
+        return true;
+    case PolicyControlledFeature::Gamepad:
         // FIXME: Implement allowlist for this.
         return true;
     }
@@ -4469,9 +4491,6 @@ void Document::did_stop_being_active_document_in_navigable()
     notify_each_document_observer([&](auto const& document_observer) {
         return document_observer.document_became_inactive();
     });
-
-    if (m_animation_driver_timer)
-        m_animation_driver_timer->stop();
 }
 
 void Document::increment_throw_on_dynamic_markup_insertion_counter(Badge<HTML::HTMLParser>)
@@ -4534,7 +4553,7 @@ WebIDL::ExceptionOr<GC::Ref<Attr>> Document::create_attribute(String const& loca
 {
     // 1. If localName is not a valid attribute local name, then throw an "InvalidCharacterError" DOMException.
     if (!is_valid_attribute_local_name(local_name))
-        return WebIDL::InvalidCharacterError::create(realm(), "Invalid character in attribute name."_string);
+        return WebIDL::InvalidCharacterError::create(realm(), "Invalid character in attribute name."_utf16);
 
     // 2. If this is an HTML document, then set localName to localName in ASCII lowercase.
     // 3. Return a new attribute whose local name is localName and node document is this.
@@ -4647,9 +4666,7 @@ void Document::register_resize_observer(Badge<ResizeObserver::ResizeObserver>, R
 
 void Document::unregister_resize_observer(Badge<ResizeObserver::ResizeObserver>, ResizeObserver::ResizeObserver& observer)
 {
-    m_resize_observers.remove_first_matching([&](auto& registered_observer) {
-        return registered_observer.ptr() == &observer;
-    });
+    m_resize_observers.remove(observer);
 }
 
 // https://www.w3.org/TR/intersection-observer/#queue-an-intersection-observer-task
@@ -4869,7 +4886,7 @@ void Document::start_intersection_observing_a_lazy_loading_element(Element& elem
     // 2. If doc's lazy load intersection observer is null, set it to a new IntersectionObserver instance, initialized as follows:
     if (!m_lazy_load_intersection_observer) {
         // - The callback is these steps, with arguments entries and observer:
-        auto callback = JS::NativeFunction::create(realm, ""_fly_string, [this](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+        auto callback = JS::NativeFunction::create(realm, Utf16FlyString {}, [this](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
             // For each entry in entries using a method of iteration which does not trigger developer-modifiable array accessors or iteration hooks:
             auto& entries = as<JS::Array>(vm.argument(0).as_object());
             auto entries_length = MUST(MUST(entries.get(vm.names.length)).to_length(vm));
@@ -5635,8 +5652,8 @@ Element const* Document::element_from_point(double x, double y)
         return static_cast<Element*>(hit_test_result->dom_node());
 
     // 3. If the document has a root element, return the root element and terminate these steps.
-    if (auto const* document_root_element = first_child_of_type<Element>(); document_root_element)
-        return document_root_element;
+    if (auto const* root_element = document_element())
+        return root_element;
 
     // 4. Return null.
     return nullptr;
@@ -5839,13 +5856,13 @@ void Document::gather_active_observations_at_depth(size_t depth)
     // 1. Let depth be the depth passed in.
 
     // 2. For each observer in [[resizeObservers]] run these steps:
-    for (auto const& observer : m_resize_observers) {
+    for (auto& observer : m_resize_observers) {
         // 1. Clear observer’s [[activeTargets]], and [[skippedTargets]].
-        observer->active_targets().clear();
-        observer->skipped_targets().clear();
+        observer.active_targets().clear();
+        observer.skipped_targets().clear();
 
         // 2. For each observation in observer.[[observationTargets]] run this step:
-        for (auto const& observation : observer->observation_targets()) {
+        for (auto& observation : observer.observation_targets()) {
             // 1. If observation.isActive() is true
             if (observation->is_active()) {
                 // 1. Let targetDepth be result of calculate depth for node for observation.target.
@@ -5853,10 +5870,10 @@ void Document::gather_active_observations_at_depth(size_t depth)
 
                 // 2. If targetDepth is greater than depth then add observation to [[activeTargets]].
                 if (target_depth > depth) {
-                    observer->active_targets().append(observation);
+                    observer.active_targets().append(observation);
                 } else {
                     // 3. Else add observation to [[skippedTargets]].
-                    observer->skipped_targets().append(observation);
+                    observer.skipped_targets().append(observation);
                 }
             }
         }
@@ -5872,7 +5889,10 @@ size_t Document::broadcast_active_resize_observations()
     // 2. For each observer in document.[[resizeObservers]] run these steps:
 
     // NOTE: We make a copy of the resize observers list to avoid modifying it while iterating.
-    auto resize_observers = GC::RootVector { heap(), m_resize_observers };
+    auto resize_observers = GC::RootVector<GC::Ref<ResizeObserver::ResizeObserver>> { heap() };
+    for (auto& observer : m_resize_observers)
+        resize_observers.append(observer);
+
     for (auto const& observer : resize_observers) {
         // 1. If observer.[[activeTargets]] slot is empty, continue.
         if (observer->active_targets().is_empty()) {
@@ -5930,9 +5950,9 @@ size_t Document::broadcast_active_resize_observations()
 bool Document::has_active_resize_observations()
 {
     // 1. For each observer in [[resizeObservers]] run this step:
-    for (auto const& observer : m_resize_observers) {
+    for (auto& observer : m_resize_observers) {
         // 1. If observer.[[activeTargets]] is not empty, return true.
-        if (!observer->active_targets().is_empty())
+        if (!observer.active_targets().is_empty())
             return true;
     }
 
@@ -5944,9 +5964,9 @@ bool Document::has_active_resize_observations()
 bool Document::has_skipped_resize_observations()
 {
     // 1. For each observer in [[resizeObservers]] run this step:
-    for (auto const& observer : m_resize_observers) {
+    for (auto& observer : m_resize_observers) {
         // 1. If observer.[[skippedTargets]] is not empty, return true.
-        if (!observer->skipped_targets().is_empty())
+        if (!observer.skipped_targets().is_empty())
             return true;
     }
 
@@ -5992,6 +6012,10 @@ void Document::for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&
             if (!style_sheet.disabled())
                 callback(style_sheet, {});
         });
+    }
+
+    if (m_dynamic_view_transition_style_sheet) {
+        callback(*m_dynamic_view_transition_style_sheet, {});
     }
 
     for_each_shadow_root([&](auto& shadow_root) {
@@ -6101,6 +6125,10 @@ bool Document::is_decoded_svg() const
 // https://drafts.csswg.org/css-position-4/#add-an-element-to-the-top-layer
 void Document::add_an_element_to_the_top_layer(GC::Ref<Element> element)
 {
+    // AD-HOC: The root element is excluded from the top layer
+    if (element == this->document_element())
+        return;
+
     // 1. Let doc be el’s node document.
 
     // 2. If el is already contained in doc’s top layer:
@@ -6210,8 +6238,7 @@ Vector<GC::Root<Range>> Document::find_matching_text(String const& query, CaseSe
     if (text_blocks.is_empty())
         return {};
 
-    auto utf16_query = MUST(AK::utf8_to_utf16(query));
-    Utf16View query_view { utf16_query };
+    auto utf16_query = Utf16String::from_utf8(query);
 
     Vector<GC::Root<Range>> matches;
     for (auto const& text_block : text_blocks) {
@@ -6221,8 +6248,8 @@ Vector<GC::Root<Range>> Document::find_matching_text(String const& query, CaseSe
         auto* match_start_position = text_block.positions.data();
         while (true) {
             auto match_index = case_sensitivity == CaseSensitivity::CaseInsensitive
-                ? text_view.find_code_unit_offset_ignoring_case(query_view, offset)
-                : text_view.find_code_unit_offset(query_view, offset);
+                ? text_view.find_code_unit_offset_ignoring_case(utf16_query, offset)
+                : text_view.find_code_unit_offset(utf16_query, offset);
             if (!match_index.has_value())
                 break;
 
@@ -6233,15 +6260,15 @@ Vector<GC::Root<Range>> Document::find_matching_text(String const& query, CaseSe
             auto& start_dom_node = match_start_position->dom_node;
 
             auto* match_end_position = match_start_position;
-            for (; i < text_block.positions.size() - 1 && (match_index.value() + query_view.length_in_code_units() > text_block.positions[i + 1].start_offset); ++i)
+            for (; i < text_block.positions.size() - 1 && (match_index.value() + utf16_query.length_in_code_units() > text_block.positions[i + 1].start_offset); ++i)
                 match_end_position = &text_block.positions[i + 1];
 
             auto& end_dom_node = match_end_position->dom_node;
-            auto end_position = match_index.value() + query_view.length_in_code_units() - match_end_position->start_offset;
+            auto end_position = match_index.value() + utf16_query.length_in_code_units() - match_end_position->start_offset;
 
             matches.append(Range::create(start_dom_node, start_position, end_dom_node, end_position));
             match_start_position = match_end_position;
-            offset = match_index.value() + query_view.length_in_code_units() + 1;
+            offset = match_index.value() + utf16_query.length_in_code_units() + 1;
             if (offset >= text_view.length_in_code_units())
                 break;
         }
@@ -6343,38 +6370,38 @@ GC::Ref<Document> Document::parse_html_unsafe(JS::VM& vm, StringView html)
 
 InputEventsTarget* Document::active_input_events_target()
 {
-    auto* focused_element = this->focused_element();
-    if (!focused_element)
+    auto focused_area = this->focused_area();
+    if (!focused_area)
         return {};
 
-    if (is<HTML::HTMLInputElement>(*focused_element))
-        return static_cast<HTML::HTMLInputElement*>(focused_element);
-    if (is<HTML::HTMLTextAreaElement>(*focused_element))
-        return static_cast<HTML::HTMLTextAreaElement*>(focused_element);
-    if (focused_element->is_editable_or_editing_host())
+    if (auto* input_element = as_if<HTML::HTMLInputElement>(*focused_area))
+        return input_element;
+    if (auto* text_area_element = as_if<HTML::HTMLTextAreaElement>(*focused_area))
+        return text_area_element;
+    if (focused_area->is_editable_or_editing_host())
         return m_editing_host_manager;
     return nullptr;
 }
 
 GC::Ptr<DOM::Position> Document::cursor_position() const
 {
-    auto const* focused_element = this->focused_element();
-    if (!focused_element)
+    auto const focused_area = this->focused_area();
+    if (!focused_area)
         return nullptr;
 
     Optional<HTML::FormAssociatedTextControlElement const&> target {};
-    if (auto const* input_element = as_if<HTML::HTMLInputElement>(*focused_element)) {
+    if (auto const* input_element = as_if<HTML::HTMLInputElement>(*focused_area)) {
         // Some types of <input> tags shouldn't have a cursor, like buttons
         if (!input_element->can_have_text_editing_cursor())
             return nullptr;
         target = *input_element;
-    } else if (is<HTML::HTMLTextAreaElement>(*focused_element))
-        target = static_cast<HTML::HTMLTextAreaElement const&>(*focused_element);
+    } else if (is<HTML::HTMLTextAreaElement>(*focused_area))
+        target = static_cast<HTML::HTMLTextAreaElement const&>(*focused_area);
 
     if (target.has_value())
         return target->cursor_position();
 
-    if (focused_element->is_editable_or_editing_host())
+    if (focused_area->is_editable_or_editing_host())
         return m_selection->cursor_position();
 
     return nullptr;
@@ -6450,13 +6477,18 @@ void Document::invalidate_display_list()
     }
 }
 
+RefPtr<Painting::DisplayList> Document::cached_display_list() const
+{
+    return m_cached_display_list;
+}
+
 RefPtr<Painting::DisplayList> Document::record_display_list(HTML::PaintConfig config)
 {
     if (m_cached_display_list && m_cached_display_list_paint_config == config) {
         return m_cached_display_list;
     }
 
-    auto display_list = Painting::DisplayList::create();
+    auto display_list = Painting::DisplayList::create(page().client().device_pixels_per_css_pixel());
     Painting::DisplayListRecorder display_list_recorder(display_list);
 
     // https://drafts.csswg.org/css-color-adjust-1/#color-scheme-effect
@@ -6496,7 +6528,7 @@ RefPtr<Painting::DisplayList> Document::record_display_list(HTML::PaintConfig co
         VERIFY_NOT_REACHED();
     }
 
-    Web::PaintContext context(display_list_recorder, page().palette(), page().client().device_pixels_per_css_pixel());
+    Web::DisplayListRecordingContext context(display_list_recorder, page().palette(), page().client().device_pixels_per_css_pixel());
     context.set_device_viewport_rect(viewport_rect);
     context.set_should_show_line_box_borders(config.should_show_line_box_borders);
     context.set_should_paint_overlay(config.paint_overlay);
@@ -6508,8 +6540,6 @@ RefPtr<Painting::DisplayList> Document::record_display_list(HTML::PaintConfig co
     viewport_paintable.refresh_scroll_state();
 
     viewport_paintable.paint_all_phases(context);
-
-    display_list->set_device_pixels_per_css_pixel(page().client().device_pixels_per_css_pixel());
 
     m_cached_display_list = display_list;
     m_cached_display_list_paint_config = config;
@@ -6615,11 +6645,174 @@ void Document::set_onvisibilitychange(WebIDL::CallbackType* value)
     set_event_handler_attribute(HTML::EventNames::visibilitychange, value);
 }
 
+// https://drafts.csswg.org/css-view-transitions-1/#dom-document-startviewtransition
+GC::Ptr<ViewTransition::ViewTransition> Document::start_view_transition(ViewTransition::ViewTransitionUpdateCallback update_callback)
+{
+    // The method steps for startViewTransition(updateCallback) are as follows:
+
+    // 1. Let transition be a new ViewTransition object in this’s relevant Realm.
+    auto& realm = this->realm();
+    auto transition = ViewTransition::ViewTransition::create(realm);
+
+    // 2. If updateCallback is provided, set transition’s update callback to updateCallback.
+    if (update_callback != nullptr)
+        transition->set_update_callback(update_callback);
+
+    // 3. Let document be this’s relevant global object’s associated document.
+    auto& document = as<HTML::Window>(relevant_global_object(*this)).associated_document();
+
+    // 4. If document’s visibility state is "hidden", then skip transition with an "InvalidStateError" DOMException,
+    //    and return transition.
+    if (m_visibility_state == HTML::VisibilityState::Hidden) {
+        transition->skip_the_view_transition(WebIDL::InvalidStateError::create(realm, "The document's visibility state is \"hidden\""_utf16));
+        return transition;
+    }
+
+    // 5. If document’s active view transition is not null, then skip that view transition with an "AbortError"
+    //    DOMException in this’s relevant Realm.
+    if (document.m_active_view_transition)
+        document.m_active_view_transition->skip_the_view_transition(WebIDL::AbortError::create(realm, "Document.startViewTransition() was called"_utf16));
+
+    // 6. Set document’s active view transition to transition.
+    m_active_view_transition = transition;
+
+    // 7. Return transition.
+    return transition;
+}
+
+// https://drafts.csswg.org/css-view-transitions-1/#perform-pending-transition-operations
+void Document::perform_pending_transition_operations()
+{
+    // To perform pending transition operations given a Document document, perform the following steps:
+
+    // 1. If document’s active view transition is not null, then:
+    if (m_active_view_transition) {
+        // 1. If document’s active view transition’s phase is "pending-capture", then setup view transition for
+        //    document’s active view transition.
+        if (m_active_view_transition->phase() == ViewTransition::ViewTransition::Phase::PendingCapture)
+            m_active_view_transition->setup_view_transition();
+        // 2. Otherwise, if document’s active view transition’s phase is "animating", then handle transition frame for
+        //    document’s active view transition.
+        else if (m_active_view_transition->phase() == ViewTransition::ViewTransition::Phase::Animating)
+            m_active_view_transition->handle_transition_frame();
+    }
+}
+
+// https://drafts.csswg.org/css-view-transitions-1/#flush-the-update-callback-queue
+void Document::flush_the_update_callback_queue()
+{
+    // To flush the update callback queue given a Document document:
+
+    // 1. For each transition in document’s update callback queue, call the update callback given transition.
+    for (auto& transition : m_update_callback_queue) {
+        transition->call_the_update_callback();
+    }
+
+    // 2. Set document’s update callback queue to an empty list.
+    m_update_callback_queue.clear();
+}
+
+// https://drafts.csswg.org/css-view-transitions-1/#view-transition-page-visibility-change-steps
+void Document::view_transition_page_visibility_change_steps()
+{
+    // The view transition page-visibility change steps given Document document are:
+
+    // 1. Queue a global task on the DOM manipulation task source, given document’s relevant global object, to
+    //    perform the following steps:
+    HTML::queue_global_task(HTML::Task::Source::DOMManipulation, HTML::relevant_global_object(*this), GC::create_function(realm().heap(), [&] {
+        HTML::TemporaryExecutionContext context(realm());
+        // 1. If document’s visibility state is "hidden", then:
+        if (m_visibility_state == HTML::VisibilityState::Hidden) {
+            // 1. If document’s active view transition is not null, then skip document’s active view transition with an
+            //    "InvalidStateError" DOMException.
+            if (m_active_view_transition) {
+                m_active_view_transition->skip_the_view_transition(WebIDL::InvalidStateError::create(realm(), "The document's visibility state is \"hidden\"."_utf16));
+            }
+        }
+        // 2. Otherwise, assert: active view transition is null.
+        else {
+            VERIFY(!m_active_view_transition);
+        }
+    }));
+}
+
 ElementByIdMap& Document::element_by_id() const
 {
     if (!m_element_by_id)
         m_element_by_id = make<ElementByIdMap>();
     return *m_element_by_id;
+}
+
+String Document::dump_display_list()
+{
+    update_layout(UpdateLayoutReason::DumpDisplayList);
+    auto display_list = record_display_list(HTML::PaintConfig {});
+    if (!display_list)
+        return {};
+    return display_list->dump();
+}
+
+Optional<Vector<CSS::Parser::ComponentValue>> Document::environment_variable_value(CSS::EnvironmentVariable environment_variable, Span<i64> indices) const
+{
+    auto invalid = [] {
+        return Vector { CSS::Parser::ComponentValue { CSS::Parser::GuaranteedInvalidValue {} } };
+    };
+
+    switch (environment_variable) {
+    case CSS::EnvironmentVariable::PreferredTextScale:
+        // FIXME: Report the user's preferred text scale, once we have that as a setting.
+        if (!indices.is_empty())
+            return invalid();
+        return Vector {
+            CSS::Parser::ComponentValue {
+                CSS::Parser::Token::create_number(CSS::Number { CSS::Number::Type::Number, 1 }) }
+        };
+    case CSS::EnvironmentVariable::SafeAreaInsetBottom:
+    case CSS::EnvironmentVariable::SafeAreaInsetLeft:
+    case CSS::EnvironmentVariable::SafeAreaInsetRight:
+    case CSS::EnvironmentVariable::SafeAreaInsetTop:
+    case CSS::EnvironmentVariable::SafeAreaMaxInsetBottom:
+    case CSS::EnvironmentVariable::SafeAreaMaxInsetLeft:
+    case CSS::EnvironmentVariable::SafeAreaMaxInsetRight:
+    case CSS::EnvironmentVariable::SafeAreaMaxInsetTop:
+        // FIXME: Report the safe area, once we can detect our display's shape (and it's not rectangular).
+        if (!indices.is_empty())
+            return invalid();
+        return Vector {
+            CSS::Parser::ComponentValue { CSS::Parser::Token::create_dimension(0, "px"_fly_string) }
+        };
+    case CSS::EnvironmentVariable::ViewportSegmentBottom:
+    case CSS::EnvironmentVariable::ViewportSegmentHeight:
+    case CSS::EnvironmentVariable::ViewportSegmentLeft:
+    case CSS::EnvironmentVariable::ViewportSegmentRight:
+    case CSS::EnvironmentVariable::ViewportSegmentTop:
+    case CSS::EnvironmentVariable::ViewportSegmentWidth:
+        // "These variables are only defined when there are at least two such segments."
+        // https://drafts.csswg.org/css-env/#viewport-segments
+        // FIXME: Report the viewport segment areas, once we can detect that and there are multiple of them.
+        return Vector { CSS::Parser::ComponentValue { CSS::Parser::GuaranteedInvalidValue {} } };
+    }
+    VERIFY_NOT_REACHED();
+}
+
+HashMap<FlyString, GC::Ref<Web::CSS::CSSPropertyRule>>& Document::registered_custom_properties()
+{
+    return m_registered_custom_properties;
+}
+
+NonnullRefPtr<CSS::StyleValue const> Document::custom_property_initial_value(FlyString const& name) const
+{
+    auto maybe_custom_property = m_registered_custom_properties.get(name);
+    if (maybe_custom_property.has_value()) {
+        auto parsed_value = maybe_custom_property.value()->initial_style_value();
+        if (!parsed_value)
+            return CSS::GuaranteedInvalidStyleValue::create();
+        return parsed_value.release_nonnull();
+    }
+
+    // For non-registered properties, the initial value is the guaranteed-invalid value.
+    // See: https://drafts.csswg.org/css-variables/#propdef-
+    return CSS::GuaranteedInvalidStyleValue::create();
 }
 
 GC::Ptr<Element> ElementByIdMap::get(FlyString const& element_id) const

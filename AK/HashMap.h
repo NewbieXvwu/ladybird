@@ -64,6 +64,12 @@ public:
     ErrorOr<HashSetResult> try_set(K const& key, V&& value, HashSetExistingEntryBehavior existing_entry_behavior = HashSetExistingEntryBehavior::Replace) { return m_table.try_set({ key, move(value) }, existing_entry_behavior); }
     ErrorOr<HashSetResult> try_set(K&& key, V&& value, HashSetExistingEntryBehavior existing_entry_behavior = HashSetExistingEntryBehavior::Replace) { return m_table.try_set({ move(key), move(value) }, existing_entry_behavior); }
 
+    void update(HashMap const& other)
+    {
+        for (auto const& [key, value] : other)
+            set(key, value);
+    }
+
     bool remove(K const& key)
     {
         auto it = find(key);
@@ -89,6 +95,14 @@ public:
     bool remove_all_matching(TUnaryPredicate const& predicate)
     {
         return m_table.remove_all_matching([&](auto& entry) {
+            return predicate(entry.key, entry.value);
+        });
+    }
+
+    template<typename TUnaryPredicate>
+    Vector<Entry> take_all_matching(TUnaryPredicate const& predicate)
+    {
+        return m_table.take_all_matching([&](auto& entry) {
             return predicate(entry.key, entry.value);
         });
     }
@@ -314,6 +328,27 @@ public:
         for (auto const& [key, value] : *this)
             hash_map_clone.set(key, value);
         return hash_map_clone;
+    }
+
+    bool operator==(HashMap const& other) const
+    {
+        if (size() != other.size())
+            return false;
+        if (is_empty())
+            return true;
+        for (auto const& [key, value] : *this) {
+            auto it = other.find(key);
+            if (it == other.end())
+                return false;
+            if (!ValueTraits::equals(value, it->value))
+                return false;
+        }
+        return true;
+    }
+
+    bool operator!=(HashMap const& other) const
+    {
+        return !(*this == other);
     }
 
 private:

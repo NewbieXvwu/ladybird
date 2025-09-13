@@ -33,7 +33,7 @@ class HTMLObjectElement final
 public:
     virtual ~HTMLObjectElement() override;
 
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
     virtual void form_associated_element_was_removed(DOM::Node*) override;
 
     String data() const;
@@ -46,8 +46,6 @@ public:
     virtual bool is_listed() const override { return true; }
 
     virtual void visit_edges(Cell::Visitor&) override;
-
-    static bool will_validate();
 
 private:
     HTMLObjectElement(DOM::Document&, DOM::QualifiedName);
@@ -83,9 +81,9 @@ private:
     virtual Optional<CSSPixels> intrinsic_width() const override;
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap(Gfx::IntSize = {}) const override;
+    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap_sized(Gfx::IntSize) const override;
     virtual void set_visible_in_viewport(bool) override;
-    virtual GC::Ref<DOM::Element const> to_html_element() const override { return *this; }
+    virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
 
     GC::Ptr<DecodedImageData> image_data() const;
 

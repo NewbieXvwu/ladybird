@@ -32,7 +32,7 @@ void HTMLOutputElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_html_for);
 }
 
-void HTMLOutputElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const&)
+void HTMLOutputElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const& value, Optional<FlyString> const&)
 {
     if (name == HTML::AttributeNames::for_) {
         if (m_html_for)
@@ -50,7 +50,7 @@ GC::Ref<DOM::DOMTokenList> HTMLOutputElement::html_for()
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-output-defaultvalue
-String HTMLOutputElement::default_value() const
+Utf16String HTMLOutputElement::default_value() const
 {
     // 1. If this element's default value override is non-null, then return it.
     if (m_default_value_override.has_value())
@@ -61,7 +61,7 @@ String HTMLOutputElement::default_value() const
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-output-defaultvalue
-void HTMLOutputElement::set_default_value(String const& default_value)
+void HTMLOutputElement::set_default_value(Utf16String const& default_value)
 {
     // 1. If this's default value override is null, then string replace all with the given value within this and return.
     if (!m_default_value_override.has_value()) {
@@ -74,14 +74,14 @@ void HTMLOutputElement::set_default_value(String const& default_value)
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-output-value
-String HTMLOutputElement::value() const
+Utf16String HTMLOutputElement::value() const
 {
     // The value getter steps are to return this's descendant text content.
     return descendant_text_content();
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-output-value
-void HTMLOutputElement::set_value(String const& value)
+void HTMLOutputElement::set_value(Utf16String const& value)
 {
     // 1. Set this's default value override to its default value.
     m_default_value_override = default_value();
@@ -108,17 +108,6 @@ void HTMLOutputElement::clear_algorithm()
 
     // and then to set the element's textContent IDL attribute to an empty string (thus clearing the element's child nodes).
     string_replace_all({});
-}
-
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-willvalidate
-bool HTMLOutputElement::will_validate()
-{
-    // The willValidate attribute's getter must return true, if this element is a candidate for constraint validation,
-    // and false otherwise (i.e., false if any conditions are barring it from constraint validation).
-    // A submittable element is a candidate for constraint validation
-    // https://html.spec.whatwg.org/multipage/forms.html#category-submit
-    // Submittable elements: button, input, select, textarea, form-associated custom elements [but not output]
-    return false;
 }
 
 }

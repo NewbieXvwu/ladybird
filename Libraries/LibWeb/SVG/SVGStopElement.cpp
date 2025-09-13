@@ -31,9 +31,8 @@ bool SVGStopElement::is_presentational_hint(FlyString const& name) const
 
 void SVGStopElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
 {
-    CSS::Parser::ParsingParams parsing_context { document() };
+    CSS::Parser::ParsingParams parsing_context { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
     for_each_attribute([&](auto& name, auto& value) {
-        CSS::Parser::ParsingParams parsing_context { document() };
         if (name == SVG::AttributeNames::stopColor) {
             if (auto stop_color = parse_css_value(parsing_context, value, CSS::PropertyID::StopColor)) {
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::StopColor, stop_color.release_nonnull());
@@ -46,11 +45,11 @@ void SVGStopElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties>
     });
 }
 
-Gfx::Color SVGStopElement::stop_color() const
+Gfx::Color SVGStopElement::stop_color()
 {
     if (auto computed_properties = this->computed_properties())
-        return computed_properties->stop_color();
-    return Color::Black;
+        return computed_properties->color_or_fallback(CSS::PropertyID::StopColor, CSS::ColorResolutionContext::for_element({ *this }), CSS::InitialValues::stop_color());
+    return CSS::InitialValues::stop_color();
 }
 
 float SVGStopElement::stop_opacity() const

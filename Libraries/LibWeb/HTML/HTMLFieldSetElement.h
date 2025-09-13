@@ -38,11 +38,9 @@ public:
     virtual bool is_listed() const override { return true; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-autocapitalize
-    virtual bool is_auto_capitalize_inheriting() const override { return true; }
+    virtual bool is_autocapitalize_and_autocorrect_inheriting() const override { return true; }
 
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::group; }
-
-    static bool will_validate();
 
     virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
     Layout::FieldSetBox* layout_node();

@@ -30,7 +30,7 @@ static ColorStopData resolve_color_stop_positions(Layout::NodeWithStyle const& n
 
     resolved_color_stops.ensure_capacity(expanded_size);
     for (auto& stop : color_stop_list) {
-        auto resolved_stop = Gfx::ColorStop { .color = stop.color_stop.color->to_color(node, { .length_resolution_context = CSS::Length::ResolutionContext::for_layout_node(node) }) };
+        auto resolved_stop = Gfx::ColorStop { .color = stop.color_stop.color->to_color(CSS::ColorResolutionContext::for_layout_node_with_style(node)).value() };
         for (int i = 0; i < color_stop_length(stop); i++)
             resolved_color_stops.append(resolved_stop);
     }
@@ -126,7 +126,7 @@ LinearGradientData resolve_linear_gradient_data(Layout::NodeWithStyle const& nod
 
 ConicGradientData resolve_conic_gradient_data(Layout::NodeWithStyle const& node, CSS::ConicGradientStyleValue const& conic_gradient)
 {
-    CSS::Angle one_turn(360.0f, CSS::Angle::Type::Deg);
+    CSS::Angle one_turn(360.0f, CSS::AngleUnit::Deg);
     auto resolved_color_stops = resolve_color_stop_positions(
         node, conic_gradient.color_stop_list(), [&](auto const& angle_percentage) {
             return angle_percentage.resolved(node, one_turn).to_degrees() / one_turn.to_degrees();

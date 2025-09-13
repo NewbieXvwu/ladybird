@@ -31,14 +31,13 @@ Layout::SVGSVGBox const& SVGSVGPaintable::layout_box() const
 
 static Gfx::FloatMatrix4x4 matrix_with_scaled_translation(Gfx::FloatMatrix4x4 matrix, float scale)
 {
-    auto* m = matrix.elements();
-    m[0][3] *= scale;
-    m[1][3] *= scale;
-    m[2][3] *= scale;
+    matrix[0, 3] *= scale;
+    matrix[1, 3] *= scale;
+    matrix[2, 3] *= scale;
     return matrix;
 }
 
-void SVGSVGPaintable::paint_svg_box(PaintContext& context, PaintableBox const& svg_box, PaintPhase phase)
+void SVGSVGPaintable::paint_svg_box(DisplayListRecordingContext& context, PaintableBox const& svg_box, PaintPhase phase)
 {
     auto const& computed_values = svg_box.computed_values();
 
@@ -57,8 +56,12 @@ void SVGSVGPaintable::paint_svg_box(PaintContext& context, PaintableBox const& s
         context.display_list_recorder().apply_opacity(computed_values.opacity());
     }
 
-    if (filter.has_value()) {
-        context.display_list_recorder().apply_filter(filter.value());
+    auto filter_applied = false;
+    if (filter.has_filters()) {
+        if (auto resolved_filter = svg_box.resolve_filter(filter); resolved_filter.has_value()) {
+            context.display_list_recorder().apply_filter(*resolved_filter);
+            filter_applied = true;
+        }
     }
 
     if (compositing_and_blending_operator != Gfx::CompositingAndBlendingOperator::Normal) {
@@ -95,7 +98,7 @@ void SVGSVGPaintable::paint_svg_box(PaintContext& context, PaintableBox const& s
         context.display_list_recorder().restore();
     }
 
-    if (filter.has_value()) {
+    if (filter_applied) {
         context.display_list_recorder().restore();
     }
 
@@ -108,7 +111,7 @@ void SVGSVGPaintable::paint_svg_box(PaintContext& context, PaintableBox const& s
     }
 }
 
-void SVGSVGPaintable::paint_descendants(PaintContext& context, PaintableBox const& paintable, PaintPhase phase)
+void SVGSVGPaintable::paint_descendants(DisplayListRecordingContext& context, PaintableBox const& paintable, PaintPhase phase)
 {
     if (phase != PaintPhase::Foreground)
         return;

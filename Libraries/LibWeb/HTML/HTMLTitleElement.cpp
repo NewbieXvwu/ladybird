@@ -32,19 +32,19 @@ void HTMLTitleElement::children_changed(ChildrenChangedMetadata const* metadata)
     HTMLElement::children_changed(metadata);
     auto navigable = this->navigable();
     if (navigable && navigable->is_traversable()) {
-        navigable->traversable_navigable()->page().client().page_did_change_title(document().title().to_byte_string());
+        navigable->traversable_navigable()->page().client().page_did_change_title(document().title());
     }
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#dom-title-text
-String HTMLTitleElement::text() const
+Utf16String HTMLTitleElement::text() const
 {
     // The text attribute's getter must return this title element's child text content.
     return child_text_content();
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#dom-title-text
-void HTMLTitleElement::set_text(String const& value)
+void HTMLTitleElement::set_text(Utf16String const& value)
 {
     // The text attribute's setter must string replace all with the given value within this title element.
     string_replace_all(value);

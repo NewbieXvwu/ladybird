@@ -62,7 +62,6 @@ void EnvironmentSettingsObject::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_responsible_event_loop);
     visitor.visit(m_module_map);
     m_realm_execution_context->visit_edges(visitor);
-    visitor.visit(m_fetch_group);
     visitor.visit(m_storage_manager);
     visitor.visit(m_service_worker_registration_object_map);
     visitor.visit(m_service_worker_object_map);
@@ -294,7 +293,9 @@ bool is_scripting_enabled(JS::Realm const& realm)
     if (!document.page().is_scripting_enabled())
         return false;
 
-    // FIXME: Either settings's global object is not a Window object, or settings's global object's associated Document's active sandboxing flag set does not have its sandboxed scripts browsing context flag set.
+    // Either settings's global object is not a Window object, or settings's global object's associated Document's active sandboxing flag set does not have its sandboxed scripts browsing context flag set.
+    if (has_flag(document.active_sandboxing_flag_set(), SandboxingFlagSet::SandboxedScripts))
+        return false;
 
     return true;
 }
@@ -573,6 +574,7 @@ SerializedEnvironmentSettingsObject EnvironmentSettingsObject::serialize()
         .api_url_character_encoding = api_url_character_encoding(),
         .api_base_url = api_base_url(),
         .origin = origin(),
+        .has_cross_site_ancestor = has_cross_site_ancestor(),
         .policy_container = policy_container()->serialize(),
         .cross_origin_isolated_capability = cross_origin_isolated_capability(),
         .time_origin = this->time_origin(),

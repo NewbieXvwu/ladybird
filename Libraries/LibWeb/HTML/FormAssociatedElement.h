@@ -11,6 +11,7 @@
 #include <AK/WeakPtr.h>
 #include <LibWeb/Bindings/HTMLFormElementPrototype.h>
 #include <LibWeb/DOM/InputEventsTarget.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/WebIDL/Types.h>
 
@@ -56,7 +57,7 @@ private:                                                                        
     {                                                                                                                                                                       \
         ElementBaseClass::attribute_changed(name, old_value, value, namespace_);                                                                                            \
         form_node_attribute_changed(name, value);                                                                                                                           \
-        form_associated_element_attribute_changed(name, value, namespace_);                                                                                                 \
+        form_associated_element_attribute_changed(name, old_value, value, namespace_);                                                                                      \
     }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#selection-direction
@@ -66,7 +67,7 @@ enum class SelectionDirection {
     None,
 };
 
-class FormAssociatedElement {
+class WEB_API FormAssociatedElement {
 public:
     HTMLFormElement* form() { return m_form; }
     HTMLFormElement const* form() const { return m_form; }
@@ -90,7 +91,7 @@ public:
     virtual bool is_resettable() const { return false; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-autocapitalize
-    virtual bool is_auto_capitalize_inheriting() const { return false; }
+    virtual bool is_autocapitalize_and_autocorrect_inheriting() const { return false; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#concept-button
     virtual bool is_button() const { return false; }
@@ -125,7 +126,7 @@ public:
     virtual bool suffering_from_bad_input() const { return false; }
     bool suffering_from_a_custom_error() const;
 
-    virtual String value() const { return String {}; }
+    virtual Utf16String value() const { return {}; }
     virtual Optional<String> optional_value() const { VERIFY_NOT_REACHED(); }
 
     virtual HTMLElement& form_associated_element_to_html_element() = 0;
@@ -139,11 +140,26 @@ public:
     String form_action() const;
     WebIDL::ExceptionOr<void> set_form_action(String const&);
 
+    // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-reportvalidity
+    bool report_validity();
+
+    // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-checkvalidity
+    bool check_validity();
+
+    // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-willvalidate
+    bool will_validate() const;
+
+    // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-validationmessage
+    Utf16String validation_message() const;
+
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-validity
     GC::Ref<ValidityState const> validity() const;
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-setcustomvalidity
     void set_custom_validity(String& error);
+
+    // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#mutability
+    virtual bool is_mutable() const { return true; }
 
 protected:
     FormAssociatedElement() = default;
@@ -152,7 +168,7 @@ protected:
     virtual void form_associated_element_was_inserted() { }
     virtual void form_associated_element_was_removed(DOM::Node*) { }
     virtual void form_associated_element_was_moved(GC::Ptr<DOM::Node>) { }
-    virtual void form_associated_element_attribute_changed(FlyString const&, Optional<String> const&, Optional<FlyString> const&) { }
+    virtual void form_associated_element_attribute_changed(FlyString const&, Optional<String> const&, Optional<String> const&, Optional<FlyString> const&) { }
 
     void form_node_was_inserted();
     void form_node_was_removed();
@@ -176,13 +192,13 @@ enum class SelectionSource {
     DOM,
 };
 
-class FormAssociatedTextControlElement
+class WEB_API FormAssociatedTextControlElement
     : public FormAssociatedElement
     , public InputEventsTarget {
 public:
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-textarea/input-relevant-value
-    virtual String relevant_value() = 0;
-    virtual WebIDL::ExceptionOr<void> set_relevant_value(String const&) = 0;
+    virtual Utf16String relevant_value() = 0;
+    virtual WebIDL::ExceptionOr<void> set_relevant_value(Utf16String const&) = 0;
 
     virtual void set_dirty_value_flag(bool flag) = 0;
 
@@ -206,9 +222,9 @@ public:
     SelectionDirection selection_direction_state() const { return m_selection_direction; }
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-setrangetext
-    WebIDL::ExceptionOr<void> set_range_text_binding(String const& replacement);
-    WebIDL::ExceptionOr<void> set_range_text_binding(String const& replacement, WebIDL::UnsignedLong start, WebIDL::UnsignedLong end, Bindings::SelectionMode = Bindings::SelectionMode::Preserve);
-    WebIDL::ExceptionOr<void> set_range_text(String const& replacement, WebIDL::UnsignedLong start, WebIDL::UnsignedLong end, Bindings::SelectionMode = Bindings::SelectionMode::Preserve);
+    WebIDL::ExceptionOr<void> set_range_text_binding(Utf16String const& replacement);
+    WebIDL::ExceptionOr<void> set_range_text_binding(Utf16String const& replacement, WebIDL::UnsignedLong start, WebIDL::UnsignedLong end, Bindings::SelectionMode = Bindings::SelectionMode::Preserve);
+    WebIDL::ExceptionOr<void> set_range_text(Utf16String const& replacement, WebIDL::UnsignedLong start, WebIDL::UnsignedLong end, Bindings::SelectionMode = Bindings::SelectionMode::Preserve);
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-setselectionrange
     void set_the_selection_range(Optional<WebIDL::UnsignedLong> start, Optional<WebIDL::UnsignedLong> end, SelectionDirection direction = SelectionDirection::None, SelectionSource source = SelectionSource::DOM);
@@ -220,15 +236,12 @@ public:
     bool has_scheduled_selectionchange_event() const { return m_has_scheduled_selectionchange_event; }
     void set_scheduled_selectionchange_event(bool value) { m_has_scheduled_selectionchange_event = value; }
 
-    bool is_mutable() const { return m_is_mutable; }
-    void set_is_mutable(bool is_mutable) { m_is_mutable = is_mutable; }
-
     virtual void did_edit_text_node() = 0;
 
     virtual GC::Ptr<DOM::Text> form_associated_element_to_text_node() = 0;
     virtual GC::Ptr<DOM::Text const> form_associated_element_to_text_node() const { return const_cast<FormAssociatedTextControlElement&>(*this).form_associated_element_to_text_node(); }
 
-    virtual void handle_insert(String const&) override;
+    virtual void handle_insert(Utf16String const&) override;
     virtual void handle_delete(DeleteDirection) override;
     virtual EventResult handle_return_key(FlyString const& ui_input_type) override;
     virtual void select_all() override;
@@ -240,6 +253,8 @@ public:
     virtual void decrement_cursor_position_offset(CollapseSelection) override;
     virtual void increment_cursor_position_to_next_word(CollapseSelection) override;
     virtual void decrement_cursor_position_to_previous_word(CollapseSelection) override;
+    virtual void increment_cursor_position_to_next_line(CollapseSelection) override;
+    virtual void decrement_cursor_position_to_previous_line(CollapseSelection) override;
 
     GC::Ptr<DOM::Position> cursor_position() const;
 
@@ -260,9 +275,6 @@ private:
 
     // https://w3c.github.io/selection-api/#dfn-has-scheduled-selectionchange-event
     bool m_has_scheduled_selectionchange_event { false };
-
-    // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#mutability
-    bool m_is_mutable { true };
 };
 
 }

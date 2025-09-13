@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include <LibWeb/CSS/CSSStyleValue.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
 
@@ -26,7 +26,7 @@ public:
 
     size_t size() const { return m_properties.values.size(); }
     StyleValueVector const& values() const { return m_properties.values; }
-    ValueComparingNonnullRefPtr<CSSStyleValue const> value_at(size_t i, bool allow_loop) const
+    ValueComparingNonnullRefPtr<StyleValue const> value_at(size_t i, bool allow_loop) const
     {
         if (allow_loop)
             return m_properties.values[i % size()];
@@ -34,10 +34,15 @@ public:
     }
 
     virtual String to_string(SerializationMode) const override;
+    virtual Vector<Parser::ComponentValue> tokenize() const override;
+
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const override;
 
     bool properties_equal(StyleValueList const& other) const { return m_properties == other.m_properties; }
 
     Separator separator() const { return m_properties.separator; }
+
+    virtual void set_style_sheet(GC::Ptr<CSSStyleSheet>) override;
 
 private:
     StyleValueList(StyleValueVector&& values, Separator separator)
@@ -45,8 +50,6 @@ private:
         , m_properties { .separator = separator, .values = move(values) }
     {
     }
-
-    virtual void set_style_sheet(GC::Ptr<CSSStyleSheet>) override;
 
     struct Properties {
         Separator separator;

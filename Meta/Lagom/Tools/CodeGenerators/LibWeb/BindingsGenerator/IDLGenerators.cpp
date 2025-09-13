@@ -54,6 +54,13 @@ static bool is_platform_object(Type const& type)
         "Credential"sv,
         "CredentialsContainer"sv,
         "CryptoKey"sv,
+        "CSSKeywordValue"sv,
+        "CSSNumericArray"sv,
+        "CSSNumericValue"sv,
+        "CSSStyleValue"sv,
+        "CSSUnitValue"sv,
+        "CSSUnparsedValue"sv,
+        "CSSVariableReferenceValue"sv,
         "CustomStateSet"sv,
         "DataTransfer"sv,
         "Document"sv,
@@ -67,18 +74,23 @@ static bool is_platform_object(Type const& type)
         "FileList"sv,
         "FontFace"sv,
         "FormData"sv,
+        "Gamepad"sv,
+        "GamepadButton"sv,
+        "GamepadHapticActuator"sv,
         "HTMLCollection"sv,
         "IDBCursor"sv,
         "IDBCursorWithValue"sv,
         "IDBIndex"sv,
         "IDBKeyRange"sv,
         "IDBObjectStore"sv,
+        "IDBRecord"sv,
         "IDBTransaction"sv,
         "ImageBitmap"sv,
         "ImageData"sv,
         "Instance"sv,
         "IntersectionObserverEntry"sv,
         "KeyframeEffect"sv,
+        "MediaKeySystemAccess"sv,
         "MediaList"sv,
         "Memory"sv,
         "MessagePort"sv,
@@ -106,6 +118,7 @@ static bool is_platform_object(Type const& type)
         "Selection"sv,
         "ServiceWorkerContainer"sv,
         "ServiceWorkerRegistration"sv,
+        "SVGAnimationElement"sv,
         "SVGTransform"sv,
         "ShadowRoot"sv,
         "SourceBuffer"sv,
@@ -115,10 +128,16 @@ static bool is_platform_object(Type const& type)
         "TextMetrics"sv,
         "TextTrack"sv,
         "TimeRanges"sv,
+        "TrustedHTML"sv,
+        "TrustedScript"sv,
+        "TrustedScriptURL"sv,
+        "TrustedTypePolicy"sv,
+        "TrustedTypePolicyFactory"sv,
         "URLSearchParams"sv,
         "VTTRegion"sv,
         "VideoTrack"sv,
         "VideoTrackList"sv,
+        "ViewTransition"sv,
         "WebGL2RenderingContext"sv,
         "WebGLActiveInfo"sv,
         "WebGLBuffer"sv,
@@ -224,8 +243,11 @@ CppType idl_type_name_to_cpp_type(Type const& type, Interface const& interface)
     if (interface.callback_functions.contains(type.name()))
         return { .name = "GC::Root<WebIDL::CallbackType>", .sequence_storage_type = SequenceStorageType::RootVector };
 
-    if (type.is_string())
+    if (type.is_string()) {
+        if (type.name().contains("Utf16"sv))
+            return { .name = "Utf16String", .sequence_storage_type = SequenceStorageType::Vector };
         return { .name = "String", .sequence_storage_type = SequenceStorageType::Vector };
+    }
 
     if ((type.name() == "double" || type.name() == "unrestricted double") && !type.is_nullable())
         return { .name = "double", .sequence_storage_type = SequenceStorageType::Vector };
@@ -281,6 +303,9 @@ CppType idl_type_name_to_cpp_type(Type const& type, Interface const& interface)
     if (type.name() == "Promise")
         return { .name = "GC::Root<WebIDL::Promise>", .sequence_storage_type = SequenceStorageType::RootVector };
 
+    if (type.name() == "MediaSource")
+        return { .name = "GC::Root<MediaSourceExtensions::MediaSource>", .sequence_storage_type = SequenceStorageType::RootVector };
+
     if (type.name().is_one_of("sequence"sv, "FrozenArray"sv)) {
         auto& parameterized_type = as<ParameterizedType>(type);
         auto& sequence_type = parameterized_type.parameters().first();
@@ -324,7 +349,22 @@ CppType idl_type_name_to_cpp_type(Type const& type, Interface const& interface)
 
 static ByteString make_input_acceptable_cpp(ByteString const& input)
 {
-    if (input.is_one_of("class", "template", "for", "default", "char", "namespace", "delete", "inline", "register", "switch", "mutable", "continue")) {
+    if (input.is_one_of(
+            "break",
+            "char",
+            "class",
+            "continue",
+            "default",
+            "delete",
+            "for",
+            "initialize",
+            "inline",
+            "mutable",
+            "namespace",
+            "operator",
+            "register",
+            "switch",
+            "template")) {
         StringBuilder builder;
         builder.append(input);
         builder.append('_');
@@ -399,17 +439,27 @@ static void emit_includes_for_all_imports(auto& interface, auto& generator, bool
 template<typename ParameterType>
 static void generate_to_string(SourceGenerator& scoped_generator, ParameterType const& parameter, bool variadic, bool optional, Optional<ByteString> const& optional_default_value)
 {
-    if (parameter.type->name() == "USVString") {
-        scoped_generator.set("to_string", "to_usv_string"sv);
-    } else if (parameter.type->name() == "ByteString") {
-        scoped_generator.set("to_string", "to_byte_string"sv);
+    auto is_utf16_string = parameter.type->name().contains("Utf16"sv);
+    auto is_fly_string = parameter.extended_attributes.contains("FlyString"sv);
+
+    if (is_utf16_string) {
+        scoped_generator.set("string_type", is_fly_string ? "Utf16FlyString"sv : "Utf16String"sv);
+        scoped_generator.set("string_suffix", "_utf16"sv);
     } else {
-        scoped_generator.set("to_string", "to_string"sv);
+        scoped_generator.set("string_type", is_fly_string ? "FlyString"sv : "String"sv);
+        scoped_generator.set("string_suffix", "_string"sv);
     }
+
+    if (parameter.type->name().is_one_of("USVString"sv, "Utf16USVString"sv))
+        scoped_generator.set("to_string", is_utf16_string ? "to_utf16_usv_string"sv : "to_usv_string"sv);
+    else if (parameter.type->name() == "ByteString")
+        scoped_generator.set("to_string", "to_byte_string"sv);
+    else
+        scoped_generator.set("to_string", is_utf16_string ? "to_utf16_string"sv : "to_string"sv);
 
     if (variadic) {
         scoped_generator.append(R"~~~(
-    Vector<String> @cpp_name@;
+    Vector<@string_type@> @cpp_name@;
 
     if (vm.argument_count() > @js_suffix@) {
         @cpp_name@.ensure_capacity(vm.argument_count() - @js_suffix@);
@@ -460,9 +510,10 @@ static void generate_to_string(SourceGenerator& scoped_generator, ParameterType 
             @cpp_name@ = TRY(WebIDL::@to_string@(vm, @js_name@@js_suffix@));
     })~~~");
         }
+
         if (!may_be_null) {
             scoped_generator.append(R"~~~( else {
-        @cpp_name@ = MUST(@string_type@::from_utf8(@parameter.optional_default_value@sv));
+        @cpp_name@ = @parameter.optional_default_value@@string_suffix@;
     }
 )~~~");
         } else {
@@ -472,7 +523,7 @@ static void generate_to_string(SourceGenerator& scoped_generator, ParameterType 
     }
 }
 
-static void generate_from_integral(SourceGenerator& scoped_generator, IDL::Type const& type)
+static void generate_from_integral(SourceGenerator& scoped_generator, IDL::Type const& type, bool const optional_integral_type)
 {
     struct TypeMap {
         StringView idl_type;
@@ -496,7 +547,7 @@ static void generate_from_integral(SourceGenerator& scoped_generator, IDL::Type 
     VERIFY(it != idl_type_map.end());
     scoped_generator.set("cpp_type"sv, it->cpp_type);
 
-    if (type.is_nullable()) {
+    if (type.is_nullable() || optional_integral_type) {
         scoped_generator.append(R"~~~(
     @result_expression@ JS::Value(static_cast<@cpp_type@>(@value@.release_value()));
 )~~~");
@@ -574,7 +625,7 @@ static void generate_to_integral(SourceGenerator& scoped_generator, ParameterTyp
 }
 
 template<typename ParameterType>
-static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter, ByteString const& js_name, ByteString const& js_suffix, ByteString const& cpp_name, IDL::Interface const& interface, bool legacy_null_to_empty_string = false, bool optional = false, Optional<ByteString> optional_default_value = {}, bool variadic = false, size_t recursion_depth = 0, bool string_to_fly_string = false)
+static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter, ByteString const& js_name, ByteString const& js_suffix, ByteString const& cpp_name, IDL::Interface const& interface, bool legacy_null_to_empty_string = false, bool optional = false, Optional<ByteString> optional_default_value = {}, bool variadic = false, size_t recursion_depth = 0)
 {
     auto scoped_generator = generator.fork();
     auto acceptable_cpp_name = make_input_acceptable_cpp(cpp_name);
@@ -583,8 +634,24 @@ static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter
     scoped_generator.set("js_name", js_name);
     scoped_generator.set("js_suffix", js_suffix);
     scoped_generator.set("legacy_null_to_empty_string", legacy_null_to_empty_string ? "true" : "false");
-    scoped_generator.set("string_type", string_to_fly_string ? "FlyString" : "String");
-    scoped_generator.set("parameter.type.name", parameter.type->name());
+
+    auto const& type = parameter.type;
+    scoped_generator.set("parameter.type.name", type->name());
+
+    if (!libweb_interface_namespaces.span().contains_slow(type->name())) {
+        if (is_javascript_builtin(type))
+            scoped_generator.set("parameter.type.name.normalized", ByteString::formatted("JS::{}", type->name()));
+        else
+            scoped_generator.set("parameter.type.name.normalized", type->name());
+    } else {
+        // e.g. Document.getSelection which returns Selection, which is in the Selection namespace.
+        StringBuilder builder;
+        builder.append(type->name());
+        builder.append("::"sv);
+        builder.append(type->name());
+        scoped_generator.set("parameter.type.name.normalized", builder.to_byte_string());
+    }
+
     scoped_generator.set("parameter.name", parameter.name);
 
     if (explicit_null) {
@@ -639,41 +706,41 @@ static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter
         if (!parameter.type->is_nullable()) {
             if (!optional) {
                 scoped_generator.append(R"~~~(
-    if (!@js_name@@js_suffix@.is_object() || !is<@parameter.type.name@>(@js_name@@js_suffix@.as_object()))
+    if (!@js_name@@js_suffix@.is_object() || !is<@parameter.type.name.normalized@>(@js_name@@js_suffix@.as_object()))
         return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "@parameter.type.name@");
 
-    auto& @cpp_name@ = static_cast<@parameter.type.name@&>(@js_name@@js_suffix@.as_object());
+    auto& @cpp_name@ = static_cast<@parameter.type.name.normalized@&>(@js_name@@js_suffix@.as_object());
 )~~~");
             } else {
                 scoped_generator.append(R"~~~(
-    GC::Ptr<@parameter.type.name@> @cpp_name@;
+    GC::Ptr<@parameter.type.name.normalized@> @cpp_name@;
     if (!@js_name@@js_suffix@.is_undefined()) {
-        if (!@js_name@@js_suffix@.is_object() || !is<@parameter.type.name@>(@js_name@@js_suffix@.as_object()))
+        if (!@js_name@@js_suffix@.is_object() || !is<@parameter.type.name.normalized@>(@js_name@@js_suffix@.as_object()))
             return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "@parameter.type.name@");
 
-        @cpp_name@ = static_cast<@parameter.type.name@&>(@js_name@@js_suffix@.as_object());
+        @cpp_name@ = static_cast<@parameter.type.name.normalized@&>(@js_name@@js_suffix@.as_object());
     }
 )~~~");
             }
         } else {
             if (explicit_null) {
                 scoped_generator.append(R"~~~(
-    Optional<GC::Ptr<@parameter.type.name@>> @cpp_name@;
+    Optional<GC::Ptr<@parameter.type.name.normalized@>> @cpp_name@;
     if (maybe_@js_name@@js_suffix@.has_value()) {
         auto @js_name@@js_suffix@ = maybe_@js_name@@js_suffix@.release_value();
 )~~~");
             } else {
                 scoped_generator.append(R"~~~(
-    GC::Ptr<@parameter.type.name@> @cpp_name@;
+    GC::Ptr<@parameter.type.name.normalized@> @cpp_name@;
 )~~~");
             }
 
             scoped_generator.append(R"~~~(
     if (!@js_name@@js_suffix@.is_nullish()) {
-        if (!@js_name@@js_suffix@.is_object() || !is<@parameter.type.name@>(@js_name@@js_suffix@.as_object()))
+        if (!@js_name@@js_suffix@.is_object() || !is<@parameter.type.name.normalized@>(@js_name@@js_suffix@.as_object()))
             return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "@parameter.type.name@");
 
-        @cpp_name@ = &static_cast<@parameter.type.name@&>(@js_name@@js_suffix@.as_object());
+        @cpp_name@ = &static_cast<@parameter.type.name.normalized@&>(@js_name@@js_suffix@.as_object());
     }
 )~~~");
 
@@ -747,21 +814,32 @@ static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter
     auto @cpp_name@ = GC::make_root(promise_capability);
 )~~~");
     } else if (parameter.type->name() == "object") {
+        // https://webidl.spec.whatwg.org/#js-object
+        // 1. If V is not an Object, then throw a TypeError.
+        // 2. Return the IDL object value that is a reference to the same object as V.
         if (parameter.type->is_nullable()) {
             scoped_generator.append(R"~~~(
     Optional<GC::Root<JS::Object>> @cpp_name@;
-    if (!@js_name@@js_suffix@.is_null() && !@js_name@@js_suffix@.is_undefined())
-        @cpp_name@ = GC::make_root(TRY(@js_name@@js_suffix@.to_object(vm)));
+    if (!@js_name@@js_suffix@.is_null() && !@js_name@@js_suffix@.is_undefined()) {
+        if (!@js_name@@js_suffix@.is_object())
+            return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObject, @js_name@@js_suffix@);
+        @cpp_name@ = GC::make_root(@js_name@@js_suffix@.as_object());
+    }
 )~~~");
         } else if (optional) {
             scoped_generator.append(R"~~~(
     Optional<GC::Root<JS::Object>> @cpp_name@;
-    if (!@js_name@@js_suffix@.is_undefined())
-        @cpp_name@ = GC::make_root(TRY(@js_name@@js_suffix@.to_object(vm)));
+    if (!@js_name@@js_suffix@.is_undefined()) {
+        if (!@js_name@@js_suffix@.is_object())
+            return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObject, @js_name@@js_suffix@);
+        @cpp_name@ = GC::make_root(@js_name@@js_suffix@.as_object());
+    }
 )~~~");
         } else {
             scoped_generator.append(R"~~~(
-    auto @cpp_name@ = GC::make_root(TRY(@js_name@@js_suffix@.to_object(vm)));
+    if (!@js_name@@js_suffix@.is_object())
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObject, @js_name@@js_suffix@);
+    auto @cpp_name@ = GC::make_root(@js_name@@js_suffix@.as_object());
 )~~~");
         }
     } else if (is_javascript_builtin(parameter.type) || parameter.type->name() == "BufferSource"sv) {
@@ -868,7 +946,7 @@ static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter
         enum_generator.set("enum.default.cpp_value", *default_value_cpp_name);
         enum_generator.set("js_name.as_string", ByteString::formatted("{}{}_string", enum_generator.get("js_name"sv), enum_generator.get("js_suffix"sv)));
         enum_generator.append(R"~~~(
-    @parameter.type.name@ @cpp_name@ { @parameter.type.name@::@enum.default.cpp_value@ };
+    @parameter.type.name.normalized@ @cpp_name@ { @parameter.type.name.normalized@::@enum.default.cpp_value@ };
 )~~~");
 
         if (optional) {
@@ -890,7 +968,7 @@ static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter
 
             enum_generator.append(R"~~~(
     @else@if (@js_name.as_string@ == "@enum.alt.name@"sv)
-        @cpp_name@ = @parameter.type.name@::@enum.alt.value@;
+        @cpp_name@ = @parameter.type.name.normalized@::@enum.alt.value@;
 )~~~");
         }
 
@@ -920,7 +998,7 @@ static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter
     if (!@js_name@@js_suffix@.is_nullish() && !@js_name@@js_suffix@.is_object())
         return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "@parameter.type.name@");
 
-    @parameter.type.name@ @cpp_name@ {};
+    @parameter.type.name.normalized@ @cpp_name@ {};
 )~~~");
         auto current_dictionary_name = parameter.type->name();
         auto* current_dictionary = &interface.dictionaries.find(current_dictionary_name)->value;
@@ -949,7 +1027,7 @@ static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter
                 dictionary_generator.append(R"~~~(
     auto @member_property_value_name@ = JS::js_undefined();
     if (@js_name@@js_suffix@.is_object())
-        @member_property_value_name@ = TRY(@js_name@@js_suffix@.as_object().get("@member_key@"_fly_string));
+        @member_property_value_name@ = TRY(@js_name@@js_suffix@.as_object().get("@member_key@"_utf16_fly_string));
 )~~~");
                 if (member.required) {
                     dictionary_generator.append(R"~~~(
@@ -1011,17 +1089,22 @@ static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter
         // 1. If the result of calling IsCallable(V) is false and the conversion to an IDL value is not being performed due to V being assigned to an attribute whose type is a nullable callback function that is annotated with [LegacyTreatNonObjectAsNull], then throw a TypeError.
         if (!parameter.type->is_nullable() && !callback_function.is_legacy_treat_non_object_as_null) {
             callback_function_generator.append(R"~~~(
-    if (!@js_name@@js_suffix@.is_function())
+    if (!@js_name@@js_suffix@.is_function()
+)~~~");
+            if (optional)
+                callback_function_generator.append("&& !@js_name@@js_suffix@.is_undefined()");
+            callback_function_generator.append(R"~~~()
         return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAFunction, @js_name@@js_suffix@.to_string_without_side_effects());
 )~~~");
         }
         // 2. Return the IDL callback function type value that represents a reference to the same object that V represents, with the incumbent realm as the callback context.
-        if (parameter.type->is_nullable() || callback_function.is_legacy_treat_non_object_as_null) {
+        if (optional || parameter.type->is_nullable() || callback_function.is_legacy_treat_non_object_as_null) {
             callback_function_generator.append(R"~~~(
     GC::Ptr<WebIDL::CallbackType> @cpp_name@;
     if (@js_name@@js_suffix@.is_object())
         @cpp_name@ = vm.heap().allocate<WebIDL::CallbackType>(@js_name@@js_suffix@.as_object(), HTML::incumbent_realm(), @operation_returns_promise@);
 )~~~");
+            // FIXME: Handle default value for optional parameter here.
         } else {
             callback_function_generator.append(R"~~~(
     auto @cpp_name@ = vm.heap().allocate<WebIDL::CallbackType>(@js_name@@js_suffix@.as_object(), HTML::incumbent_realm(), @operation_returns_promise@);
@@ -1641,7 +1724,12 @@ static void generate_to_cpp(SourceGenerator& generator, ParameterType& parameter
                         union_generator.append(R"~~~(
     @union_type@ @cpp_name@ = @js_name@@js_suffix@.is_undefined() ? @parameter.optional_default_value@ : TRY(@js_name@@js_suffix@_to_variant(@js_name@@js_suffix@));
 )~~~");
+                    } else if (optional_default_value == "true"sv || optional_default_value == "false"sv) {
+                        union_generator.append(R"~~~(
+    @union_type@ @cpp_name@ = @js_name@@js_suffix@.is_undefined() ? @parameter.optional_default_value@ : TRY(@js_name@@js_suffix@_to_variant(@js_name@@js_suffix@));
+)~~~");
                     } else {
+                        dbgln("Don't know how to handle optional default value of `{}`", *optional_default_value);
                         TODO();
                     }
                 }
@@ -1720,8 +1808,7 @@ static void generate_arguments(SourceGenerator& generator, Vector<IDL::Parameter
         }
 
         bool legacy_null_to_empty_string = parameter.extended_attributes.contains("LegacyNullToEmptyString");
-        bool fly_string = parameter.extended_attributes.contains("FlyString");
-        generate_to_cpp(generator, parameter, "arg", ByteString::number(argument_index), parameter.name.to_snakecase(), interface, legacy_null_to_empty_string, parameter.optional, parameter.optional_default_value, parameter.variadic, 0, fly_string);
+        generate_to_cpp(generator, parameter, "arg", ByteString::number(argument_index), parameter.name.to_snakecase(), interface, legacy_null_to_empty_string, parameter.optional, parameter.optional_default_value, parameter.variadic, 0);
         ++argument_index;
     }
 
@@ -1784,15 +1871,11 @@ void IDL::ParameterizedType::generate_sequence_from_iterable(SourceGenerator& ge
 )~~~");
 }
 
-enum class WrappingReference {
-    No,
-    Yes,
-};
-
-static void generate_wrap_statement(SourceGenerator& generator, ByteString const& value, IDL::Type const& type, IDL::Interface const& interface, StringView result_expression, WrappingReference wrapping_reference = WrappingReference::No, size_t recursion_depth = 0, bool is_optional = false)
+static void generate_wrap_statement(SourceGenerator& generator, ByteString const& value, IDL::Type const& type, IDL::Interface const& interface, StringView result_expression, size_t recursion_depth = 0, bool is_optional = false, size_t iteration_index = 0)
 {
     auto scoped_generator = generator.fork();
     scoped_generator.set("value", value);
+    scoped_generator.set("value_cpp_name", value.replace("."sv, "_"sv));
     if (!libweb_interface_namespaces.span().contains_slow(type.name())) {
         if (is_javascript_builtin(type))
             scoped_generator.set("type", ByteString::formatted("JS::{}", type.name()));
@@ -1808,6 +1891,7 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
     }
     scoped_generator.set("result_expression", result_expression);
     scoped_generator.set("recursion_depth", ByteString::number(recursion_depth));
+    scoped_generator.set("iteration_index", ByteString::number(iteration_index));
 
     if (type.name() == "undefined") {
         scoped_generator.append(R"~~~(
@@ -1816,16 +1900,20 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
         return;
     }
 
+    bool generate_optional_integral_type = false;
     if ((is_optional || type.is_nullable()) && !is<UnionType>(type)) {
+        generate_optional_integral_type = true;
         if (type.is_string()) {
             scoped_generator.append(R"~~~(
     if (@value@.has_value()) {
 )~~~");
         } else if (type.name().is_one_of("sequence"sv, "FrozenArray"sv)) {
+            generate_optional_integral_type = true;
             scoped_generator.append(R"~~~(
     if (@value@.has_value()) {
 )~~~");
         } else if (type.is_primitive() || interface.enumerations.contains(type.name()) || interface.dictionaries.contains(type.name())) {
+            generate_optional_integral_type = true;
             scoped_generator.append(R"~~~(
     if (@value@.has_value()) {
 )~~~");
@@ -1855,14 +1943,14 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
         auto& sequence_generic_type = as<IDL::ParameterizedType>(type);
 
         scoped_generator.append(R"~~~(
-    auto new_array@recursion_depth@ = MUST(JS::Array::create(realm, 0));
+    auto new_array@recursion_depth@_@iteration_index@ = MUST(JS::Array::create(realm, 0));
 )~~~");
 
         if (type.is_nullable() || is_optional) {
             scoped_generator.append(R"~~~(
-    auto& @value@_non_optional = @value@.value();
-    for (size_t i@recursion_depth@ = 0; i@recursion_depth@ < @value@_non_optional.size(); ++i@recursion_depth@) {
-        auto& element@recursion_depth@ = @value@_non_optional.at(i@recursion_depth@);
+    auto& @value_cpp_name@_non_optional = @value@.value();
+    for (size_t i@recursion_depth@ = 0; i@recursion_depth@ < @value_cpp_name@_non_optional.size(); ++i@recursion_depth@) {
+        auto& element@recursion_depth@ = @value_cpp_name@_non_optional.at(i@recursion_depth@);
 )~~~");
         } else {
             scoped_generator.append(R"~~~(
@@ -1880,23 +1968,23 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
 )~~~");
         } else {
             scoped_generator.append("JS::Value wrapped_element@recursion_depth@;\n"sv);
-            generate_wrap_statement(scoped_generator, ByteString::formatted("element{}", recursion_depth), sequence_generic_type.parameters().first(), interface, ByteString::formatted("wrapped_element{} =", recursion_depth), WrappingReference::Yes, recursion_depth + 1);
+            generate_wrap_statement(scoped_generator, ByteString::formatted("element{}", recursion_depth), sequence_generic_type.parameters().first(), interface, ByteString::formatted("wrapped_element{} =", recursion_depth), recursion_depth + 1);
         }
 
         scoped_generator.append(R"~~~(
         auto property_index@recursion_depth@ = JS::PropertyKey { i@recursion_depth@ };
-        MUST(new_array@recursion_depth@->create_data_property(property_index@recursion_depth@, wrapped_element@recursion_depth@));
+        MUST(new_array@recursion_depth@_@iteration_index@->create_data_property(property_index@recursion_depth@, wrapped_element@recursion_depth@));
     }
 )~~~");
 
         if (type.name() == "FrozenArray"sv) {
             scoped_generator.append(R"~~~(
-    TRY(new_array@recursion_depth@->set_integrity_level(IntegrityLevel::Frozen));
+    TRY(new_array@recursion_depth@_@iteration_index@->set_integrity_level(IntegrityLevel::Frozen));
 )~~~");
         }
 
         scoped_generator.append(R"~~~(
-    @result_expression@ new_array@recursion_depth@;
+    @result_expression@ new_array@recursion_depth@_@iteration_index@;
 )~~~");
     } else if (type.name() == "record") {
         // https://webidl.spec.whatwg.org/#es-record
@@ -1914,11 +2002,11 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
         // 2. For each key → value of D:
         for (auto const& [key, value] : @value@) {
             // 1. Let jsKey be key converted to a JavaScript value.
-            auto js_key = JS::PropertyKey { key };
+            auto js_key = JS::PropertyKey { Utf16FlyString::from_utf8(key) };
 
             // 2. Let jsValue be value converted to a JavaScript value.
 )~~~");
-        generate_wrap_statement(scoped_generator, "value"sv, parameterized_type.parameters()[1], interface, "auto js_value ="sv, WrappingReference::Yes, recursion_depth + 1);
+        generate_wrap_statement(scoped_generator, "value"sv, parameterized_type.parameters()[1], interface, "auto js_value ="sv, recursion_depth + 1);
         scoped_generator.append(R"~~~(
 
             // 3. Let created be ! CreateDataProperty(result, jsKey, jsValue).
@@ -1942,7 +2030,7 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
 )~~~");
         }
     } else if (type.is_integer()) {
-        generate_from_integral(scoped_generator, type);
+        generate_from_integral(scoped_generator, type, generate_optional_integral_type);
     } else if (type.name() == "Location" || type.name() == "Uint8Array" || type.name() == "Uint8ClampedArray" || type.name() == "any") {
         scoped_generator.append(R"~~~(
     @result_expression@ @value@;
@@ -1976,7 +2064,7 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
 )~~~");
 
             // NOTE: While we are using const&, the underlying type for wrappable types in unions is (Nonnull)RefPtr, which are not references.
-            generate_wrap_statement(union_generator, ByteString::formatted("visited_union_value{}", recursion_depth), current_union_type, interface, "return"sv, WrappingReference::No, recursion_depth + 1);
+            generate_wrap_statement(union_generator, ByteString::formatted("visited_union_value{}", recursion_depth), current_union_type, interface, "return"sv, recursion_depth + 1);
 
             // End of current visit lambda.
             // The last lambda cannot have a trailing comma on the closing brace, unless the type is nullable, where an extra lambda will be generated for the Empty case.
@@ -2005,7 +2093,7 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
 )~~~");
     } else if (interface.enumerations.contains(type.name())) {
         // Handle Enum? values, which were null-checked above
-        if (type.is_nullable())
+        if (type.is_nullable() || is_optional)
             scoped_generator.set("value", ByteString::formatted("{}.value()", value));
         scoped_generator.append(R"~~~(
     @result_expression@ JS::PrimitiveString::create(vm, Bindings::idl_enum_to_string(@value@));
@@ -2039,6 +2127,7 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
         auto dictionary_object@recursion_depth@ = JS::Object::create(realm, realm.intrinsics().object_prototype());
 )~~~");
 
+        auto next_iteration_index = iteration_index + 1;
         auto* current_dictionary = &interface.dictionaries.find(type.name())->value;
         while (true) {
             for (auto& member : current_dictionary->members) {
@@ -2067,16 +2156,18 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
         JS::Value @wrapped_value_name@;
 )~~~");
                 }
-                generate_wrap_statement(dictionary_generator, ByteString::formatted("{}{}{}", value, type.is_nullable() ? "->" : ".", member.name.to_snakecase()), member.type, interface, ByteString::formatted("{} =", wrapped_value_name), WrappingReference::No, recursion_depth + 1, is_optional);
+
+                next_iteration_index++;
+                generate_wrap_statement(dictionary_generator, ByteString::formatted("{}{}{}", value, type.is_nullable() ? "->" : ".", member.name.to_snakecase()), member.type, interface, ByteString::formatted("{} =", wrapped_value_name), recursion_depth + 1, is_optional, next_iteration_index);
 
                 if (is_optional) {
                     dictionary_generator.append(R"~~~(
         if (@wrapped_value_name@.has_value())
-            MUST(dictionary_object@recursion_depth@->create_data_property("@member_key@"_fly_string, @wrapped_value_name@.release_value()));
+            MUST(dictionary_object@recursion_depth@->create_data_property("@member_key@"_utf16_fly_string, @wrapped_value_name@.release_value()));
 )~~~");
                 } else {
                     dictionary_generator.append(R"~~~(
-        MUST(dictionary_object@recursion_depth@->create_data_property("@member_key@"_fly_string, @wrapped_value_name@));
+        MUST(dictionary_object@recursion_depth@->create_data_property("@member_key@"_utf16_fly_string, @wrapped_value_name@));
 )~~~");
                 }
             }
@@ -2096,15 +2187,9 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
     @result_expression@ JS::Value(const_cast<JS::Object*>(@value@));
 )~~~");
     } else {
-        if (wrapping_reference == WrappingReference::No) {
-            scoped_generator.append(R"~~~(
+        scoped_generator.append(R"~~~(
     @result_expression@ &const_cast<@type@&>(*@value@);
 )~~~");
-        } else {
-            scoped_generator.append(R"~~~(
-    @result_expression@ &const_cast<@type@&>(static_cast<@type@ const&>(@value@));
-)~~~");
-        }
     }
 
     if (type.is_nullable() && !is<UnionType>(type)) {
@@ -2704,22 +2789,24 @@ static void generate_html_constructor(SourceGenerator& generator, IDL::Construct
 
         // https://webidl.spec.whatwg.org/#internally-create-a-new-object-implementing-the-interface
         // Important steps from "internally create a new object implementing the interface"
-        // 3.2: Let prototype be ? Get(newTarget, "prototype").
-        auto prototype = TRY(new_target.get(vm.names.prototype));
+        {
+            // 3.2: Let prototype be ? Get(newTarget, "prototype").
+            auto prototype = TRY(new_target.get(vm.names.prototype));
 
-        // 3.3. If Type(prototype) is not Object, then:
-        if (!prototype.is_object()) {
-            // 1. Let targetRealm be ? GetFunctionRealm(newTarget).
-            auto* target_realm = TRY(JS::get_function_realm(vm, new_target));
+            // 3.3. If Type(prototype) is not an Object, then:
+            if (!prototype.is_object()) {
+                // 1. Let targetRealm be ? GetFunctionRealm(newTarget).
+                auto* target_realm = TRY(JS::get_function_realm(vm, new_target));
 
-            // 2. Set prototype to the interface prototype object for interface in targetRealm.
-            VERIFY(target_realm);
-            prototype = &Bindings::ensure_web_prototype<@prototype_class@>(*target_realm, "@name@"_fly_string);
+                // 2. Set prototype to the interface prototype object for interface in targetRealm.
+                VERIFY(target_realm);
+                prototype = &Bindings::ensure_web_prototype<@prototype_class@>(*target_realm, "@name@"_fly_string);
+            }
+
+            // 9. Set instance.[[Prototype]] to prototype.
+            VERIFY(prototype.is_object());
+            MUST(element->internal_set_prototype_of(&prototype.as_object()));
         }
-
-        // 7. Set instance.[[Prototype]] to prototype.
-        VERIFY(prototype.is_object());
-        MUST(element->internal_set_prototype_of(&prototype.as_object()));
 
         // 6. Set element's custom element state to "custom".
         // 7. Set element's custom element definition to definition.
@@ -2914,6 +3001,33 @@ static ByteString get_best_value_for_underlying_enum_type(size_t size)
     VERIFY_NOT_REACHED();
 }
 
+static void generate_dictionaries(SourceGenerator& generator, IDL::Interface const& interface)
+{
+    for (auto const& it : interface.dictionaries) {
+        if (!it.value.is_original_definition)
+            continue;
+        if (!it.value.extended_attributes.contains("GenerateToValue"sv))
+            continue;
+        auto dictionary_generator = generator.fork();
+        dictionary_generator.set("dictionary.name", make_input_acceptable_cpp(it.key));
+        dictionary_generator.set("dictionary.name:snakecase", make_input_acceptable_cpp(it.key.to_snakecase()));
+        dictionary_generator.append(R"~~~(
+JS::Value @dictionary.name:snakecase@_to_value(JS::Realm&, @dictionary.name@ const&);
+JS::Value @dictionary.name:snakecase@_to_value(JS::Realm& realm, @dictionary.name@ const& dictionary)
+{
+    auto& vm = realm.vm();
+    @dictionary.name@ copy = dictionary;
+)~~~");
+        // FIXME: Support generating wrap statements for lvalues and get rid of the copy above
+        auto dictionary_type = adopt_ref(*new Type(it.key, false));
+        generate_wrap_statement(dictionary_generator, "copy", dictionary_type, interface, "return"sv);
+
+        dictionary_generator.append(R"~~~(
+}
+)~~~");
+    }
+}
+
 static void generate_enumerations(HashMap<ByteString, Enumeration> const& enumerations, StringBuilder& builder)
 {
     SourceGenerator generator { builder };
@@ -3104,6 +3218,19 @@ static void collect_attribute_values_of_an_inheritance_stack(SourceGenerator& fu
 
         // FIXME: Check if the attributes are exposed.
 
+        // NOTE: Add more specified exposed global interface groups when needed.
+        StringBuilder window_exposed_only_members_builder;
+        SourceGenerator window_exposed_only_members_generator { window_exposed_only_members_builder, function_generator.clone_mapping() };
+        auto generator_for_member = [&](auto const& name, auto& extended_attributes) -> SourceGenerator {
+            if (auto maybe_exposed = extended_attributes.get("Exposed"); maybe_exposed.has_value()) {
+                auto exposed_to = MUST(IDL::parse_exposure_set(name, *maybe_exposed));
+                if (exposed_to == IDL::ExposedTo::Window) {
+                    return window_exposed_only_members_generator.fork();
+                }
+            }
+            return function_generator.fork();
+        };
+
         // 1. Let id be the identifier of attr.
         // 2. Let value be the result of running the getter steps of attr with object as this.
 
@@ -3122,7 +3249,7 @@ static void collect_attribute_values_of_an_inheritance_stack(SourceGenerator& fu
             if (!attribute.type->is_json(interface_in_chain))
                 continue;
 
-            auto attribute_generator = function_generator.fork();
+            auto attribute_generator = generator_for_member(attribute.name, attribute.extended_attributes);
             auto return_value_name = ByteString::formatted("{}_retval", attribute.name.to_snakecase());
 
             attribute_generator.set("attribute.name", attribute.name);
@@ -3132,7 +3259,7 @@ static void collect_attribute_values_of_an_inheritance_stack(SourceGenerator& fu
                 auto implemented_as = attribute.extended_attributes.get("ImplementedAs").value();
                 attribute_generator.set("attribute.cpp_name", implemented_as);
             } else {
-                attribute_generator.set("attribute.cpp_name", attribute.name.to_snakecase());
+                attribute_generator.set("attribute.cpp_name", make_input_acceptable_cpp(attribute.name.to_snakecase()));
             }
 
             if (attribute.extended_attributes.contains("Reflect")) {
@@ -3167,7 +3294,7 @@ static void collect_attribute_values_of_an_inheritance_stack(SourceGenerator& fu
             generate_wrap_statement(attribute_generator, return_value_name, attribute.type, interface_in_chain, ByteString::formatted("{}_wrapped =", return_value_name));
 
             attribute_generator.append(R"~~~(
-    MUST(result->create_data_property("@attribute.name@"_fly_string, @attribute.return_value_name@_wrapped));
+    MUST(result->create_data_property("@attribute.name@"_utf16_fly_string, @attribute.return_value_name@_wrapped));
 )~~~");
         }
 
@@ -3178,7 +3305,17 @@ static void collect_attribute_values_of_an_inheritance_stack(SourceGenerator& fu
             generate_wrap_statement(constant_generator, constant.value, constant.type, interface_in_chain, ByteString::formatted("auto constant_{}_value =", constant.name));
 
             constant_generator.append(R"~~~(
-    MUST(result->create_data_property("@constant.name@"_fly_string, constant_@constant.name@_value));
+    MUST(result->create_data_property("@constant.name@"_utf16_fly_string, constant_@constant.name@_value));
+)~~~");
+        }
+
+        if (!window_exposed_only_members_generator.as_string_view().is_empty()) {
+            auto window_only_property_declarations = function_generator.fork();
+            window_only_property_declarations.set("defines", window_exposed_only_members_generator.as_string_view());
+            window_only_property_declarations.append(R"~~~(
+    if (is<HTML::Window>(realm.global_object())) {
+@defines@
+    }
 )~~~");
         }
     }
@@ -3318,7 +3455,7 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> @named_properties_class@
 
     // 4. If the result of running the named property visibility algorithm with property name P and object object is true, then:
     if (TRY(object.is_named_property_exposed_on_object(property_name))) {
-        auto property_name_string = property_name.to_string();
+        auto property_name_string = property_name.to_string().to_utf8_but_should_be_ported_to_utf16();
 
         // 1. Let operation be the operation used to declare the named property getter.
         // 2. Let value be an uninitialized variable.
@@ -3521,7 +3658,7 @@ void @class_name@::initialize(JS::Realm& realm)
         if (attribute.extended_attributes.contains("FIXME")) {
             attribute_generator.set("attribute.name", attribute.name);
             attribute_generator.append(R"~~~(
-    @define_direct_property@("@attribute.name@"_fly_string, JS::js_undefined(), default_attributes | JS::Attribute::Unimplemented);
+    @define_direct_property@("@attribute.name@"_utf16_fly_string, JS::js_undefined(), default_attributes | JS::Attribute::Unimplemented);
             )~~~");
             continue;
         }
@@ -3536,12 +3673,12 @@ void @class_name@::initialize(JS::Realm& realm)
 
         if (attribute.extended_attributes.contains("Unscopable")) {
             attribute_generator.append(R"~~~(
-    MUST(unscopable_object->create_data_property("@attribute.name@"_fly_string, JS::Value(true)));
+    MUST(unscopable_object->create_data_property("@attribute.name@"_utf16_fly_string, JS::Value(true)));
 )~~~");
         }
 
         attribute_generator.append(R"~~~(
-    @define_native_accessor@(realm, "@attribute.name@"_fly_string, @attribute.getter_callback@, @attribute.setter_callback@, default_attributes);
+    @define_native_accessor@(realm, "@attribute.name@"_utf16_fly_string, @attribute.getter_callback@, @attribute.setter_callback@, default_attributes);
 )~~~");
     }
 
@@ -3554,7 +3691,7 @@ void @class_name@::initialize(JS::Realm& realm)
             auto function_generator = generator_for_member(function.name, function.extended_attributes);
             function_generator.set("function.name", function.name);
             function_generator.append(R"~~~(
-        @define_direct_property@("@function.name@"_fly_string, JS::js_undefined(), default_attributes | JS::Attribute::Unimplemented);
+        @define_direct_property@("@function.name@"_utf16_fly_string, JS::js_undefined(), default_attributes | JS::Attribute::Unimplemented);
             )~~~");
         }
     }
@@ -3570,7 +3707,7 @@ void @class_name@::initialize(JS::Realm& realm)
             generate_wrap_statement(constant_generator, constant.value, constant.type, interface, ByteString::formatted("auto constant_{}_value =", constant.name));
 
             constant_generator.append(R"~~~(
-    @define_direct_property@("@constant.name@"_fly_string, constant_@constant.name@_value, JS::Attribute::Enumerable);
+    @define_direct_property@("@constant.name@"_utf16_fly_string, constant_@constant.name@_value, JS::Attribute::Enumerable);
 )~~~");
         }
     }
@@ -3591,12 +3728,12 @@ void @class_name@::initialize(JS::Realm& realm)
         if (any_of(overload_set.value, [](auto const& function) { return function.extended_attributes.contains("Unscopable"); })) {
             VERIFY(all_of(overload_set.value, [](auto const& function) { return function.extended_attributes.contains("Unscopable"); }));
             function_generator.append(R"~~~(
-    MUST(unscopable_object->create_data_property("@function.name@"_fly_string, JS::Value(true)));
+    MUST(unscopable_object->create_data_property("@function.name@"_utf16_fly_string, JS::Value(true)));
 )~~~");
         }
 
         function_generator.append(R"~~~(
-    @define_native_function@(realm, "@function.name@"_fly_string, @function.name:snakecase@, @function.length@, default_attributes);
+    @define_native_function@(realm, "@function.name@"_utf16_fly_string, @function.name:snakecase@, @function.length@, default_attributes);
 )~~~");
     }
 
@@ -3612,7 +3749,7 @@ void @class_name@::initialize(JS::Realm& realm)
             ? generator_for_member("stringifier"sv, *interface.stringifier_extended_attributes)
             : generator.fork();
         stringifier_generator.append(R"~~~(
-    @define_native_function@(realm, "toString"_fly_string, to_string, 0, default_attributes);
+    @define_native_function@(realm, "toString"_utf16_fly_string, to_string, 0, default_attributes);
 )~~~");
     }
 
@@ -3789,7 +3926,7 @@ static void generate_prototype_or_global_mixin_definitions(IDL::Interface const&
             auto implemented_as = attribute.extended_attributes.get("ImplementedAs").value();
             attribute_generator.set("attribute.cpp_name", implemented_as);
         } else {
-            attribute_generator.set("attribute.cpp_name", attribute.name.to_snakecase());
+            attribute_generator.set("attribute.cpp_name", make_input_acceptable_cpp(attribute.name.to_snakecase()));
         }
 
         if (attribute.extended_attributes.contains("Reflect")) {
@@ -3821,6 +3958,17 @@ JS_DEFINE_NATIVE_FUNCTION(@class_name@::@attribute.getter_callback@)
         attribute_generator.append(R"~~~(
     [[maybe_unused]] auto* impl = TRY(impl_from(vm));
 )~~~");
+
+        auto cache_result = false;
+        if (attribute.extended_attributes.contains("CachedAttribute")) {
+            VERIFY(attribute.readonly);
+            cache_result = true;
+            attribute_generator.append(R"~~~(
+    auto cached_@attribute.cpp_name@ = impl->cached_@attribute.cpp_name@();
+    if (cached_@attribute.cpp_name@)
+        return cached_@attribute.cpp_name@;
+)~~~");
+        }
 
         if (attribute.extended_attributes.contains("CEReactions")) {
             // 1. Push a new element queue onto this object's relevant agent's custom element reactions stack.
@@ -4166,7 +4314,15 @@ JS_DEFINE_NATIVE_FUNCTION(@class_name@::@attribute.getter_callback@)
 )~~~");
         }
 
-        generate_return_statement(generator, *attribute.type, interface);
+        if (cache_result) {
+            generate_wrap_statement(generator, "retval", *attribute.type, interface, ByteString::formatted("cached_{} =", attribute_generator.get("attribute.cpp_name")));
+            attribute_generator.append(R"~~~(
+    impl->set_cached_@attribute.cpp_name@(cached_@attribute.cpp_name@);
+    return cached_@attribute.cpp_name@;
+)~~~");
+        } else {
+            generate_return_statement(generator, *attribute.type, interface);
+        }
 
         if (generated_reflected_element_array) {
             // 3. Let elementsAsFrozenArray be elements, converted to a FrozenArray<T>?.
@@ -4368,7 +4524,7 @@ JS_DEFINE_NATIVE_FUNCTION(@class_name@::@attribute.setter_callback@)
         return vm.throw_completion<JS::TypeError>(JS::ErrorType::BadArgCountOne, "@namespaced_name@ setter");
 
     auto* impl = TRY(impl_from(vm));
-    TRY(impl->internal_define_own_property("@attribute.name@"_fly_string, JS::PropertyDescriptor { .value = vm.argument(0), .writable = true }));
+    TRY(impl->internal_define_own_property("@attribute.name@"_utf16_fly_string, JS::PropertyDescriptor { .value = vm.argument(0), .writable = true }));
     return JS::js_undefined();
 }
 )~~~");
@@ -4387,7 +4543,7 @@ JS_DEFINE_NATIVE_FUNCTION(@class_name@::@attribute.setter_callback@)
 
     auto receiver = TRY(throw_dom_exception_if_needed(vm, [&]() { return impl->@attribute.cpp_name@(); }));
     if (receiver != JS::js_null())
-        TRY(receiver->set(JS::PropertyKey { "@put_forwards_identifier@"_fly_string, JS::PropertyKey::StringMayBeNumber::No }, value, JS::Object::ShouldThrowExceptions::Yes));
+        TRY(receiver->set(JS::PropertyKey { "@put_forwards_identifier@"_utf16_fly_string, JS::PropertyKey::StringMayBeNumber::No }, value, JS::Object::ShouldThrowExceptions::Yes));
 
     return JS::js_undefined();
 }
@@ -4686,6 +4842,8 @@ JS_DEFINE_NATIVE_FUNCTION(@class_name@::clear)
 )~~~");
         }
     }
+
+    generate_dictionaries(generator, interface);
 }
 
 void generate_namespace_header(IDL::Interface const& interface, StringBuilder& builder)
@@ -4754,16 +4912,19 @@ static void generate_using_namespace_definitions(SourceGenerator& generator)
 using namespace Web::Animations;
 using namespace Web::Clipboard;
 using namespace Web::ContentSecurityPolicy;
+using namespace Web::CookieStore;
 using namespace Web::CredentialManagement;
 using namespace Web::Crypto;
 using namespace Web::CSS;
 using namespace Web::DOM;
 using namespace Web::DOMURL;
 using namespace Web::Encoding;
+using namespace Web::EncryptedMediaExtensions;
 using namespace Web::EntriesAPI;
 using namespace Web::EventTiming;
 using namespace Web::Fetch;
 using namespace Web::FileAPI;
+using namespace Web::Gamepad;
 using namespace Web::Geolocation;
 using namespace Web::Geometry;
 using namespace Web::HighResolutionTime;
@@ -4779,10 +4940,12 @@ using namespace Web::RequestIdleCallback;
 using namespace Web::ResizeObserver;
 using namespace Web::ResourceTiming;
 using namespace Web::Selection;
+using namespace Web::Serial;
 using namespace Web::ServiceWorker;
 using namespace Web::StorageAPI;
 using namespace Web::Streams;
 using namespace Web::SVG;
+using namespace Web::TrustedTypes;
 using namespace Web::UIEvents;
 using namespace Web::URLPattern;
 using namespace Web::UserTiming;
@@ -4794,6 +4957,27 @@ using namespace Web::WebIDL;
 using namespace Web::WebVTT;
 using namespace Web::XHR;
 )~~~"sv);
+}
+
+// https://webidl.spec.whatwg.org/#define-the-operations
+static void define_the_operations(SourceGenerator& generator, OrderedHashMap<ByteString, Vector<Function&>> const& operations)
+{
+    for (auto const& operation : operations) {
+        auto function_generator = generator.fork();
+        function_generator.set("function.name", operation.key);
+        function_generator.set("function.name:snakecase", make_input_acceptable_cpp(operation.key.to_snakecase()));
+        function_generator.set("function.length", ByteString::number(get_shortest_function_length(operation.value)));
+
+        // NOTE: This assumes that every function in the overload set has the same attribute set.
+        if (operation.value[0].extended_attributes.contains("LegacyUnforgable"sv))
+            function_generator.set("function.attributes", "JS::Attribute::Enumerable");
+        else
+            function_generator.set("function.attributes", "JS::Attribute::Writable | JS::Attribute::Enumerable | JS::Attribute::Configurable");
+
+        function_generator.append(R"~~~(
+    define_native_function(realm, "@function.name@"_utf16_fly_string, @function.name:snakecase@, @function.length@, @function.attributes@);
+)~~~");
+    }
 }
 
 void generate_namespace_implementation(IDL::Interface const& interface, StringBuilder& builder)
@@ -4850,7 +5034,6 @@ GC_DEFINE_ALLOCATOR(@namespace_class@);
 void @namespace_class@::initialize(JS::Realm& realm)
 {
     [[maybe_unused]] auto& vm = this->vm();
-    [[maybe_unused]] u8 default_attributes = JS::Attribute::Enumerable | JS::Attribute::Configurable | JS::Attribute::Writable;
 
     Base::initialize(realm);
 
@@ -4858,17 +5041,7 @@ void @namespace_class@::initialize(JS::Realm& realm)
 
 )~~~");
 
-    // https://webidl.spec.whatwg.org/#es-operations
-    for (auto const& overload_set : interface.overload_sets) {
-        auto function_generator = generator.fork();
-        function_generator.set("function.name", overload_set.key);
-        function_generator.set("function.name:snakecase", make_input_acceptable_cpp(overload_set.key.to_snakecase()));
-        function_generator.set("function.length", ByteString::number(get_shortest_function_length(overload_set.value)));
-
-        function_generator.append(R"~~~(
-    define_native_function(realm, "@function.name@"_fly_string, @function.name:snakecase@, @function.length@, default_attributes);
-)~~~");
-    }
+    define_the_operations(generator, interface.overload_sets);
 
     if (interface.extended_attributes.contains("WithInitializer"sv)) {
         generator.append(R"~~~(
@@ -4993,27 +5166,6 @@ private:
 )~~~");
 }
 
-// https://webidl.spec.whatwg.org/#define-the-operations
-static void define_the_operations(SourceGenerator& generator, HashMap<ByteString, Vector<Function&>> const& operations)
-{
-    for (auto const& operation : operations) {
-        auto function_generator = generator.fork();
-        function_generator.set("function.name", operation.key);
-        function_generator.set("function.name:snakecase", make_input_acceptable_cpp(operation.key.to_snakecase()));
-        function_generator.set("function.length", ByteString::number(get_shortest_function_length(operation.value)));
-
-        // NOTE: This assumes that every function in the overload set has the same attribute set.
-        if (operation.value[0].extended_attributes.contains("LegacyUnforgable"sv))
-            function_generator.set("function.attributes", "JS::Attribute::Enumerable");
-        else
-            function_generator.set("function.attributes", "JS::Attribute::Writable | JS::Attribute::Enumerable | JS::Attribute::Configurable");
-
-        function_generator.append(R"~~~(
-    define_native_function(realm, "@function.name@"_fly_string, @function.name:snakecase@, @function.length@, @function.attributes@);
-)~~~");
-    }
-}
-
 void generate_constructor_implementation(IDL::Interface const& interface, StringBuilder& builder)
 {
     SourceGenerator generator { builder };
@@ -5029,6 +5181,7 @@ void generate_constructor_implementation(IDL::Interface const& interface, String
     generator.append(R"~~~(
 #include <LibIDL/Types.h>
 #include <LibGC/Heap.h>
+#include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/DataView.h>
 #include <LibJS/Runtime/GlobalObject.h>
@@ -5078,7 +5231,7 @@ namespace Web::Bindings {
 GC_DEFINE_ALLOCATOR(@constructor_class@);
 
 @constructor_class@::@constructor_class@(JS::Realm& realm)
-    : NativeFunction("@name@"_fly_string, realm.intrinsics().function_prototype())
+    : NativeFunction("@name@"_utf16_fly_string, realm.intrinsics().function_prototype())
 {
 }
 
@@ -5113,7 +5266,7 @@ void @constructor_class@::initialize(JS::Realm& realm)
 
     generator.append(R"~~~(
     define_direct_property(vm.names.length, JS::Value(@constructor.length@), JS::Attribute::Configurable);
-    define_direct_property(vm.names.name, JS::PrimitiveString::create(vm, "@namespaced_name@"_string), JS::Attribute::Configurable);
+    define_direct_property(vm.names.name, JS::PrimitiveString::create(vm, "@name@"_string), JS::Attribute::Configurable);
     define_direct_property(vm.names.prototype, &ensure_web_prototype<@prototype_class@>(realm, "@namespaced_name@"_fly_string), 0);
 
 )~~~");
@@ -5125,7 +5278,7 @@ void @constructor_class@::initialize(JS::Realm& realm)
         generate_wrap_statement(constant_generator, constant.value, constant.type, interface, ByteString::formatted("auto constant_{}_value =", constant.name));
 
         constant_generator.append(R"~~~(
-    define_direct_property("@constant.name@"_fly_string, constant_@constant.name@_value, JS::Attribute::Enumerable);
+    define_direct_property("@constant.name@"_utf16_fly_string, constant_@constant.name@_value, JS::Attribute::Enumerable);
 )~~~");
     }
 
@@ -5141,7 +5294,7 @@ void @constructor_class@::initialize(JS::Realm& realm)
             attribute_generator.set("attribute.setter_callback", "nullptr");
 
         attribute_generator.append(R"~~~(
-    define_native_accessor(realm, "@attribute.name@"_fly_string, @attribute.getter_callback@, @attribute.setter_callback@, default_attributes);
+    define_native_accessor(realm, "@attribute.name@"_utf16_fly_string, @attribute.getter_callback@, @attribute.setter_callback@, default_attributes);
 )~~~");
     }
 

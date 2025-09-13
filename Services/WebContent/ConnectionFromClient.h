@@ -46,6 +46,7 @@ public:
     PageHost& page_host() { return *m_page_host; }
     PageHost const& page_host() const { return *m_page_host; }
 
+    Function<void(IPC::File const&)> on_request_server_connection;
     Function<void(IPC::File const&)> on_image_decoder_connection;
 
     Queue<Web::QueuedInputEvent>& input_event_queue() { return m_input_event_queue; }
@@ -62,6 +63,7 @@ private:
     virtual void set_window_handle(u64 page_id, String handle) override;
     virtual void connect_to_webdriver(u64 page_id, ByteString webdriver_ipc_path) override;
     virtual void connect_to_web_ui(u64 page_id, IPC::File web_ui_socket) override;
+    virtual void connect_to_request_server(IPC::File request_server_socket) override;
     virtual void connect_to_image_decoder(IPC::File image_decoder_socket) override;
     virtual void update_system_theme(u64 page_id, Core::AnonymousBuffer) override;
     virtual void update_screen_rects(u64 page_id, Vector<Web::DevicePixelRect>, u32) override;
@@ -112,6 +114,7 @@ private:
     virtual void set_has_focus(u64 page_id, bool) override;
     virtual void set_is_scripting_enabled(u64 page_id, bool) override;
     virtual void set_device_pixels_per_css_pixel(u64 page_id, float) override;
+    virtual void set_maximum_frames_per_second(u64 page_id, double) override;
     virtual void set_window_position(u64 page_id, Web::DevicePixelPoint) override;
     virtual void set_window_size(u64 page_id, Web::DevicePixelSize) override;
     virtual void did_update_window_rect(u64 page_id) override;
@@ -155,6 +158,7 @@ private:
     virtual void paste(u64 page_id, String text) override;
 
     virtual void system_time_zone_changed() override;
+    virtual void cookies_changed(Vector<Web::Cookie::Cookie>) override;
 
     NonnullOwnPtr<PageHost> m_page_host;
 

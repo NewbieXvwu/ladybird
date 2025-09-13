@@ -224,4 +224,29 @@ Filter Filter::hue_rotate(float angle_degrees, Optional<Filter const&> input)
     return Filter(Impl::create(SkImageFilters::ColorFilter(color_filter, input_skia)));
 }
 
+Filter Filter::image(Gfx::ImmutableBitmap const& bitmap, Gfx::IntRect const& src_rect, Gfx::IntRect const& dest_rect, Gfx::ScalingMode scaling_mode)
+{
+    auto skia_src_rect = to_skia_rect(src_rect);
+    auto skia_dest_rect = to_skia_rect(dest_rect);
+    auto sampling_options = to_skia_sampling_options(scaling_mode);
+
+    return Filter(Impl::create(SkImageFilters::Image(sk_ref_sp(bitmap.sk_image()), skia_src_rect, skia_dest_rect, sampling_options)));
+}
+
+Filter Filter::merge(Vector<Optional<Filter>> const& inputs)
+{
+    Vector<sk_sp<SkImageFilter>> skia_filters;
+    skia_filters.ensure_capacity(inputs.size());
+    for (auto& filter : inputs)
+        skia_filters.unchecked_append(filter.has_value() ? filter->m_impl->filter : nullptr);
+
+    return Filter(Impl::create(SkImageFilters::Merge(skia_filters.data(), skia_filters.size())));
+}
+
+Filter Filter::offset(float dx, float dy, Optional<Filter const&> input)
+{
+    sk_sp<SkImageFilter> input_skia = input.has_value() ? input->m_impl->filter : nullptr;
+    return Filter(Impl::create(SkImageFilters::Offset(dx, dy, input_skia)));
+}
+
 }

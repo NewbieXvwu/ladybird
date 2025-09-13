@@ -6,6 +6,7 @@
 
 #include <AK/Math.h>
 #include <AK/Stream.h>
+#include <AK/Time.h>
 #include <LibMedia/FFmpeg/FFmpegDemuxer.h>
 #include <LibMedia/FFmpeg/FFmpegHelpers.h>
 
@@ -51,66 +52,84 @@ ErrorOr<NonnullOwnPtr<FFmpegDemuxer>> FFmpegDemuxer::create(NonnullOwnPtr<Seekab
     return demuxer;
 }
 
-DecoderErrorOr<AK::Duration> FFmpegDemuxer::duration_of_track_in_milliseconds(Track const& track)
+static inline AK::Duration time_units_to_duration(i64 time_units, int numerator, int denominator)
+{
+    VERIFY(numerator != 0);
+    VERIFY(denominator != 0);
+    auto seconds = time_units * numerator / denominator;
+    auto seconds_in_time_units = seconds * denominator / numerator;
+    auto remainder_in_time_units = time_units - seconds_in_time_units;
+    auto nanoseconds = ((remainder_in_time_units * 1'000'000'000 * numerator) + (denominator / 2)) / denominator;
+    return AK::Duration::from_seconds(seconds) + AK::Duration::from_nanoseconds(nanoseconds);
+}
+
+static inline AK::Duration time_units_to_duration(i64 time_units, AVRational const& time_base)
+{
+    return time_units_to_duration(time_units, time_base.num, time_base.den);
+}
+
+DecoderErrorOr<AK::Duration> FFmpegDemuxer::total_duration()
+{
+    if (m_format_context->duration < 0) {
+        return DecoderError::format(DecoderErrorCategory::Unknown, "Negative stream duration");
+    }
+
+    return time_units_to_duration(m_format_context->duration, 1, AV_TIME_BASE);
+}
+
+DecoderErrorOr<AK::Duration> FFmpegDemuxer::duration_of_track(Track const& track)
 {
     VERIFY(track.identifier() < m_format_context->nb_streams);
     auto* stream = m_format_context->streams[track.identifier()];
 
     if (stream->duration >= 0) {
-        auto time_base = av_q2d(stream->time_base);
-        double duration_in_milliseconds = static_cast<double>(stream->duration) * time_base * 1000.0;
-        return AK::Duration::from_milliseconds(AK::round_to<int64_t>(duration_in_milliseconds));
+        return time_units_to_duration(stream->duration, stream->time_base);
     }
 
     // If the stream doesn't specify the duration, fallback to what the container says the duration is.
-    // If the container doesn't know the duration, then we're out of luck. Return an error.
-    if (m_format_context->duration < 0)
-        return DecoderError::format(DecoderErrorCategory::Unknown, "Negative stream duration");
+    return total_duration();
+}
 
-    double duration_in_milliseconds = (static_cast<double>(m_format_context->duration) / AV_TIME_BASE) * 1000.0;
-    return AK::Duration::from_milliseconds(AK::round_to<int64_t>(duration_in_milliseconds));
+DecoderErrorOr<Track> FFmpegDemuxer::get_track_for_stream_index(u32 stream_index)
+{
+    VERIFY(stream_index < m_format_context->nb_streams);
+
+    auto& stream = *m_format_context->streams[stream_index];
+    auto type = track_type_from_ffmpeg_media_type(stream.codecpar->codec_type);
+    Track track(type, stream_index);
+
+    if (type == TrackType::Video) {
+        track.set_video_data({
+            .pixel_width = static_cast<u64>(stream.codecpar->width),
+            .pixel_height = static_cast<u64>(stream.codecpar->height),
+        });
+    }
+
+    return track;
 }
 
 DecoderErrorOr<Vector<Track>> FFmpegDemuxer::get_tracks_for_type(TrackType type)
 {
-    AVMediaType media_type;
+    auto media_type = ffmpeg_media_type_from_track_type(type);
+    Vector<Track> tracks = {};
+    for (u32 i = 0; i < m_format_context->nb_streams; i++) {
+        auto& stream = *m_format_context->streams[i];
+        if (stream.codecpar->codec_type != media_type)
+            continue;
 
-    switch (type) {
-    case TrackType::Video:
-        media_type = AVMediaType::AVMEDIA_TYPE_VIDEO;
-        break;
-    case TrackType::Audio:
-        media_type = AVMediaType::AVMEDIA_TYPE_AUDIO;
-        break;
-    case TrackType::Subtitles:
-        media_type = AVMediaType::AVMEDIA_TYPE_SUBTITLE;
-        break;
+        tracks.append(TRY(get_track_for_stream_index(i)));
     }
-
-    // Find the best stream to play within the container
-    int best_stream_index = av_find_best_stream(m_format_context, media_type, -1, -1, nullptr, 0);
-    if (best_stream_index == AVERROR_STREAM_NOT_FOUND)
-        return DecoderError::format(DecoderErrorCategory::Unknown, "No stream for given type found in container");
-    if (best_stream_index == AVERROR_DECODER_NOT_FOUND)
-        return DecoderError::format(DecoderErrorCategory::Unknown, "No suitable decoder found for stream");
-    if (best_stream_index < 0)
-        return DecoderError::format(DecoderErrorCategory::Unknown, "Failed to find a stream for the given type");
-
-    auto* stream = m_format_context->streams[best_stream_index];
-
-    Track track(type, best_stream_index);
-
-    if (type == TrackType::Video) {
-        track.set_video_data({
-            .duration = TRY(duration_of_track_in_milliseconds(track)),
-            .pixel_width = static_cast<u64>(stream->codecpar->width),
-            .pixel_height = static_cast<u64>(stream->codecpar->height),
-        });
-    }
-
-    Vector<Track> tracks;
-    tracks.append(move(track));
     return tracks;
+}
+
+DecoderErrorOr<Optional<Track>> FFmpegDemuxer::get_preferred_track_for_type(TrackType type)
+{
+    auto media_type = ffmpeg_media_type_from_track_type(type);
+    auto best_stream_index = av_find_best_stream(m_format_context, media_type, -1, -1, nullptr, 0);
+    if (best_stream_index < 0)
+        return OptionalNone();
+
+    return get_track_for_stream_index(best_stream_index);
 }
 
 DecoderErrorOr<Optional<AK::Duration>> FFmpegDemuxer::seek_to_most_recent_keyframe(Track track, AK::Duration timestamp, Optional<AK::Duration> earliest_available_sample)
@@ -128,11 +147,6 @@ DecoderErrorOr<Optional<AK::Duration>> FFmpegDemuxer::seek_to_most_recent_keyfra
         return DecoderError::format(DecoderErrorCategory::Unknown, "Failed to seek");
 
     return timestamp;
-}
-
-DecoderErrorOr<AK::Duration> FFmpegDemuxer::duration(Track track)
-{
-    return duration_of_track_in_milliseconds(track);
 }
 
 DecoderErrorOr<CodecID> FFmpegDemuxer::get_codec_id_for_track(Track track)
@@ -181,15 +195,12 @@ DecoderErrorOr<Sample> FFmpegDemuxer::get_next_sample_for_track(Track track)
             }
         }();
 
-        auto time_base = av_q2d(stream->time_base);
-        double timestamp_in_milliseconds = static_cast<double>(m_packet->pts) * time_base * 1000.0;
-
         // Copy the packet data so that we have a permanent reference to it whilst the Sample is alive, which allows us
         // to wipe the packet afterwards.
         auto packet_data = DECODER_TRY_ALLOC(ByteBuffer::copy(m_packet->data, m_packet->size));
 
         auto sample = Sample(
-            AK::Duration::from_milliseconds(AK::round_to<int64_t>(timestamp_in_milliseconds)),
+            time_units_to_duration(m_packet->pts, stream->time_base),
             move(packet_data),
             VideoSampleData(CodingIndependentCodePoints(color_primaries, transfer_characteristics, matrix_coefficients, color_range)));
 

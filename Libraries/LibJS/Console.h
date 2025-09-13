@@ -14,6 +14,7 @@
 #include <AK/Vector.h>
 #include <LibCore/ElapsedTimer.h>
 #include <LibGC/CellAllocator.h>
+#include <LibJS/Export.h>
 #include <LibJS/Forward.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibJS/Runtime/Value.h>
@@ -78,6 +79,7 @@ public:
     ThrowCompletionOr<Value> trace();
     ThrowCompletionOr<Value> warn();
     ThrowCompletionOr<Value> dir();
+    ThrowCompletionOr<Value> dirxml();
     ThrowCompletionOr<Value> count();
     ThrowCompletionOr<Value> count_reset();
     ThrowCompletionOr<Value> group();

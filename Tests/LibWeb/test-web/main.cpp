@@ -3,6 +3,7 @@
  * Copyright (c) 2023-2025, Tim Flynn <trflynn89@ladybird.org>
  * Copyright (c) 2023, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2023-2024, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -14,8 +15,8 @@
 #include <AK/ByteBuffer.h>
 #include <AK/Enumerate.h>
 #include <AK/LexicalPath.h>
+#include <AK/NumberFormat.h>
 #include <AK/QuickSort.h>
-#include <AK/Vector.h>
 #include <LibCore/ConfigFile.h>
 #include <LibCore/DirIterator.h>
 #include <LibCore/Directory.h>
@@ -28,13 +29,16 @@
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/ImageFormats/PNGWriter.h>
 #include <LibGfx/SystemTheme.h>
+#include <LibURL/Parser.h>
 #include <LibURL/URL.h>
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWebView/Utilities.h>
 
 namespace TestWeb {
 
+static RefPtr<Core::Promise<Empty>> s_all_tests_complete;
 static Vector<ByteString> s_skipped_tests;
+static HashMap<WebView::ViewImplementation const*, Test const*> s_test_by_view;
 
 static constexpr StringView test_result_to_string(TestResult result)
 {
@@ -66,7 +70,6 @@ static ErrorOr<void> load_test_config(StringView test_root_path)
     }
 
     auto config = config_or_error.release_value();
-
     for (auto const& group : config->groups()) {
         if (group == "Skipped"sv) {
             for (auto& key : config->keys(group))
@@ -155,6 +158,40 @@ static void clear_test_callbacks(TestWebView& view)
     view.on_test_finish = {};
     view.on_web_content_crashed = {};
 }
+
+static String generate_wait_for_test_string(StringView wait_class)
+{
+    return MUST(String::formatted(R"(
+function hasTestWaitClass() {{
+    return document.documentElement.classList.contains('{}');
+}}
+
+if (!hasTestWaitClass()) {{
+    document.fonts.ready.then(() => {{
+        requestAnimationFrame(function() {{
+            requestAnimationFrame(function() {{
+                internals.signalTestIsDone("PASS");
+            }});
+        }});
+    }});
+}} else {{
+    const observer = new MutationObserver(() => {{
+        if (!hasTestWaitClass()) {{
+            internals.signalTestIsDone("PASS");
+        }}
+    }});
+
+    observer.observe(document.documentElement, {{
+        attributes: true,
+        attributeFilter: ['class'],
+    }});
+}}
+)"sv,
+        wait_class));
+}
+
+static auto wait_for_crash_test_completion = generate_wait_for_test_string("test-wait"sv);
+static auto wait_for_reftest_completion = generate_wait_for_test_string("reftest-wait"sv);
 
 static void run_dump_test(TestWebView& view, Test& test, URL::URL const& url, int timeout_in_milliseconds)
 {
@@ -285,11 +322,23 @@ static void run_dump_test(TestWebView& view, Test& test, URL::URL const& url, in
                 on_test_complete();
         };
     } else if (test.mode == TestMode::Crash) {
-        view.on_load_finish = [on_test_complete = move(on_test_complete), url](auto const& loaded_url) {
+        view.on_load_finish = [on_test_complete, url, &view, &test](auto const& loaded_url) {
             // We don't want subframe loads to trigger the test finish.
             if (!url.equals(loaded_url, URL::ExcludeFragment::Yes))
                 return;
-            on_test_complete();
+
+            test.did_finish_loading = true;
+            view.run_javascript(wait_for_crash_test_completion);
+
+            if (test.did_finish_test)
+                on_test_complete();
+        };
+
+        view.on_test_finish = [&test, on_test_complete](auto const&) {
+            test.did_finish_test = true;
+
+            if (test.did_finish_loading)
+                on_test_complete();
         };
     }
 
@@ -300,40 +349,9 @@ static void run_dump_test(TestWebView& view, Test& test, URL::URL const& url, in
         timer->start(milliseconds);
     };
 
-    view.on_set_browser_zoom = [&view](double factor) {
-        view.set_zoom(factor);
-    };
-
     view.load(url);
     timer->start();
 }
-
-static String wait_for_reftest_completion = R"(
-function hasReftestWaitClass() {
-    return document.documentElement.classList.contains('reftest-wait');
-}
-
-if (!hasReftestWaitClass()) {
-    document.fonts.ready.then(() => {
-        requestAnimationFrame(function() {
-            requestAnimationFrame(function() {
-                internals.signalTestIsDone("PASS");
-            });
-        });
-    });
-} else {
-    const observer = new MutationObserver(() => {
-        if (!hasReftestWaitClass()) {
-            internals.signalTestIsDone("PASS");
-        }
-    });
-
-    observer.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ['class'],
-    });
-}
-)"_string;
 
 static void run_ref_test(TestWebView& view, Test& test, URL::URL const& url, int timeout_in_milliseconds)
 {
@@ -346,10 +364,11 @@ static void run_ref_test(TestWebView& view, Test& test, URL::URL const& url, int
         view.on_test_complete({ test, TestResult::Timeout });
     });
 
-    auto handle_completed_test = [&test, url]() -> ErrorOr<TestResult> {
+    auto handle_completed_test = [&view, &test, url]() -> ErrorOr<TestResult> {
         VERIFY(test.ref_test_expectation_type.has_value());
         auto should_match = test.ref_test_expectation_type == RefTestExpectationType::Match;
-        auto screenshot_matches = test.actual_screenshot->visually_equals(*test.expectation_screenshot);
+        auto screenshot_matches = fuzzy_screenshot_match(
+            url, view.url(), *test.actual_screenshot, *test.expectation_screenshot, test.fuzzy_matches);
         if (should_match == screenshot_matches)
             return TestResult::Pass;
 
@@ -398,23 +417,67 @@ static void run_ref_test(TestWebView& view, Test& test, URL::URL const& url, int
 
     view.on_test_finish = [&view, &test, on_test_complete = move(on_test_complete)](auto const&) {
         if (test.actual_screenshot) {
-            if (view.url().query().has_value() && view.url().query()->equals_ignoring_ascii_case("mismatch"sv)) {
-                test.ref_test_expectation_type = RefTestExpectationType::Mismatch;
-            } else {
-                test.ref_test_expectation_type = RefTestExpectationType::Match;
-            }
+            // The reference has finished loading; take another screenshot and move on to handling the result.
             view.take_screenshot()->when_resolved([&view, &test, on_test_complete = move(on_test_complete)](RefPtr<Gfx::Bitmap const> screenshot) {
                 test.expectation_screenshot = move(screenshot);
                 view.reset_zoom();
                 on_test_complete();
             });
         } else {
+            // When the test initially finishes, we take a screenshot and request the reference test metadata.
             view.take_screenshot()->when_resolved([&view, &test](RefPtr<Gfx::Bitmap const> screenshot) {
                 test.actual_screenshot = move(screenshot);
                 view.reset_zoom();
-                view.debug_request("load-reference-page");
+                view.run_javascript("internals.loadReferenceTestMetadata();"_string);
             });
         }
+    };
+
+    view.on_reference_test_metadata = [&view, &test](JsonValue const& metadata) {
+        auto metadata_object = metadata.as_object();
+
+        auto match_references = metadata_object.get_array("match_references"sv);
+        auto mismatch_references = metadata_object.get_array("mismatch_references"sv);
+        VERIFY(!match_references->is_empty() || !mismatch_references->is_empty());
+
+        // Read fuzzy configurations.
+        test.fuzzy_matches.clear_with_capacity();
+        auto fuzzy_values = metadata_object.get_array("fuzzy"sv);
+        for (size_t i = 0; i < fuzzy_values->size(); ++i) {
+            auto fuzzy_configuration = fuzzy_values->at(i).as_object();
+
+            Optional<URL::URL> reference_url;
+            auto reference = fuzzy_configuration.get_string("reference"sv);
+            if (reference.has_value())
+                reference_url = URL::Parser::basic_parse(reference.release_value());
+
+            auto content = fuzzy_configuration.get_string("content"sv).release_value();
+            auto fuzzy_match_or_error = parse_fuzzy_match(reference_url, content);
+            if (fuzzy_match_or_error.is_error()) {
+                warnln("Failed to parse fuzzy configuration '{}' (reference: {}): {}", content, reference_url, fuzzy_match_or_error.error());
+                continue;
+            }
+
+            test.fuzzy_matches.append(fuzzy_match_or_error.release_value());
+        }
+
+        // Read (mis)match reference tests to load.
+        // FIXME: Currently we only support single match or mismatch reference.
+        String reference_to_load;
+        if (!match_references->is_empty()) {
+            if (match_references->size() > 1)
+                dbgln("FIXME: Only a single ref test match reference is supported");
+
+            test.ref_test_expectation_type = RefTestExpectationType::Match;
+            reference_to_load = match_references->at(0).as_string();
+        } else {
+            if (mismatch_references->size() > 1)
+                dbgln("FIXME: Only a single ref test mismatch reference is supported");
+
+            test.ref_test_expectation_type = RefTestExpectationType::Mismatch;
+            reference_to_load = mismatch_references->at(0).as_string();
+        }
+        view.load(URL::Parser::basic_parse(reference_to_load).release_value());
     };
 
     view.on_set_test_timeout = [timer, timeout_in_milliseconds](double milliseconds) {
@@ -424,16 +487,14 @@ static void run_ref_test(TestWebView& view, Test& test, URL::URL const& url, int
         timer->start(milliseconds);
     };
 
-    view.on_set_browser_zoom = [&view](double factor) {
-        view.set_zoom(factor);
-    };
-
     view.load(url);
     timer->start();
 }
 
 static void run_test(TestWebView& view, Test& test, Application& app)
 {
+    s_test_by_view.set(&view, &test);
+
     // Clear the current document.
     // FIXME: Implement a debug-request to do this more thoroughly.
     auto promise = Core::Promise<Empty>::construct();
@@ -534,20 +595,22 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
     TRY(collect_dump_tests(app, tests, ByteString::formatted("{}/Text", app.test_root_path), "."sv, TestMode::Text));
     TRY(collect_ref_tests(app, tests, ByteString::formatted("{}/Ref", app.test_root_path), "."sv));
     TRY(collect_crash_tests(app, tests, ByteString::formatted("{}/Crash", app.test_root_path), "."sv));
-#if defined(AK_OS_LINUX) && ARCH(X86_64)
     TRY(collect_ref_tests(app, tests, ByteString::formatted("{}/Screenshot", app.test_root_path), "."sv));
-#endif
 
     tests.remove_all_matching([&](auto const& test) {
         static constexpr Array support_file_patterns {
             "*/wpt-import/*/support/*"sv,
             "*/wpt-import/*/resources/*"sv,
             "*/wpt-import/common/*"sv,
+            "*/wpt-import/images/*"sv,
         };
         bool is_support_file = any_of(support_file_patterns, [&](auto pattern) { return test.input_path.matches(pattern); });
         bool match_glob = any_of(app.test_globs, [&](auto const& glob) { return test.relative_path.matches(glob, CaseSensitivity::CaseSensitive); });
         return is_support_file || !match_glob;
     });
+
+    if (app.shuffle)
+        shuffle(tests);
 
     if (app.test_dry_run) {
         outln("Found {} tests...", tests.size());
@@ -573,6 +636,8 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
     for (size_t i = 0; i < concurrency; ++i) {
         auto view = TestWebView::create(theme, window_size);
         view->on_load_finish = [&](auto const&) { ++loaded_web_views; };
+        // FIXME: Figure out a better way to ensure that tests use default browser settings.
+        view->reset_zoom();
 
         views.unchecked_append(move(view));
     }
@@ -593,7 +658,7 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
     bool log_on_one_line = app.verbosity < Application::VERBOSITY_LEVEL_LOG_TEST_DURATION && TRY(Core::System::isatty(STDOUT_FILENO));
     outln("Running {} tests...", tests.size());
 
-    auto all_tests_complete = Core::Promise<Empty>::construct();
+    s_all_tests_complete = Core::Promise<Empty>::construct();
     auto tests_remaining = tests.size();
     auto current_test = 0uz;
 
@@ -629,6 +694,7 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
 
         view->test_promise().when_resolved([&, run_next_test](auto result) {
             result.test.end_time = UnixDateTime::now();
+            s_test_by_view.remove(view);
 
             if (app.verbosity >= Application::VERBOSITY_LEVEL_LOG_TEST_DURATION) {
                 auto duration = result.test.end_time - result.test.start_time;
@@ -657,7 +723,7 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
                 non_passing_tests.append(move(result));
 
             if (--tests_remaining == 0)
-                all_tests_complete->resolve({});
+                s_all_tests_complete->resolve({});
             else
                 run_next_test();
         });
@@ -667,9 +733,11 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
         });
     }
 
-    MUST(all_tests_complete->await());
+    auto result_or_rejection = s_all_tests_complete->await();
 
-    if (log_on_one_line)
+    if (result_or_rejection.is_error())
+        outln("Halted; {} tests not executed.", tests_remaining);
+    else if (log_on_one_line)
         outln("\33[2K\rDone!");
 
     outln("==========================================================");
@@ -709,7 +777,42 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
         }
     }
 
-    return fail_count + timeout_count + crashed_count;
+    return fail_count + timeout_count + crashed_count + tests_remaining;
+}
+
+static void handle_signal(int signal)
+{
+    VERIFY(signal == SIGINT || signal == SIGTERM);
+
+    // Quit our event loop. This makes `::exec()` return as soon as possible, and signals to WebView::Application that
+    // we should no longer automatically restart processes in `::process_did_exit()`.
+    Core::EventLoop::current().quit(0);
+
+    // Report current view statuses
+    dbgln();
+    dbgln("{} received. Active test views:", signal == SIGINT ? "SIGINT"sv : "SIGTERM"sv);
+    dbgln();
+
+    auto now = UnixDateTime::now();
+    WebView::ViewImplementation::for_each_view([&](WebView::ViewImplementation const& view) {
+        dbg("- View {}: ", view.view_id());
+
+        auto maybe_test = s_test_by_view.get(&view);
+        if (maybe_test.has_value()) {
+            auto const& test = *maybe_test.release_value();
+            dbgln("{} (duration: {})", test.relative_path, human_readable_time(now - test.start_time));
+        } else {
+            dbgln("{} (no active test)", view.url());
+        }
+
+        return IterationDecision::Continue;
+    });
+    dbgln();
+
+    // Stop running tests
+    s_all_tests_complete->reject(signal == SIGINT
+            ? Error::from_string_view("SIGINT received"sv)
+            : Error::from_string_view("SIGTERM received"sv));
 }
 
 }
@@ -721,6 +824,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 #else
     auto app = TRY(TestWeb::Application::create(arguments, OptionalNone {}));
 #endif
+
+    Core::EventLoop::register_signal(SIGINT, TestWeb::handle_signal);
+    Core::EventLoop::register_signal(SIGTERM, TestWeb::handle_signal);
 
     auto theme_path = LexicalPath::join(WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
     auto theme = TRY(Gfx::load_system_theme(theme_path.string()));

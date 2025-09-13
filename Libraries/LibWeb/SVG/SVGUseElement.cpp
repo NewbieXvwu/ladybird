@@ -20,6 +20,7 @@
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/SVGDecodedImageData.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
+#include <LibWeb/SVG/SVGSymbolElement.h>
 #include <LibWeb/SVG/SVGUseElement.h>
 
 namespace Web::SVG {
@@ -36,8 +37,10 @@ void SVGUseElement::initialize(JS::Realm& realm)
     WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGUseElement);
     Base::initialize(realm);
 
-    // The shadow tree is open (inspectable by script), but read-only.
-    auto shadow_root = realm.create<DOM::ShadowRoot>(document(), *this, Bindings::ShadowRootMode::Open);
+    // NOTE: The spec says "The shadow tree is open (inspectable by script), but read-only."
+    //       This doesn't actually match other browsers, and there's a spec issue to change it.
+    //       Spec bug: https://github.com/w3c/svgwg/issues/875
+    auto shadow_root = realm.create<DOM::ShadowRoot>(document(), *this, Bindings::ShadowRootMode::Closed);
 
     // The user agent must create a use-element shadow tree whose host is the ‘use’ element itself
     set_shadow_root(shadow_root);
@@ -182,6 +185,20 @@ void SVGUseElement::clone_element_tree_as_our_shadow_tree(Element* to_clone)
     if (to_clone && is_valid_reference_element(*to_clone)) {
         // The ‘use’ element references another element, a copy of which is rendered in place of the ‘use’ in the document.
         auto cloned_reference_node = MUST(to_clone->clone_node(nullptr, true));
+        if (is<SVGSVGElement>(cloned_reference_node.ptr()) || is<SVGSymbolElement>(cloned_reference_node.ptr())) {
+            auto& cloned_element = as<SVGElement>(*cloned_reference_node);
+
+            // The width and height properties on the ‘use’ element override the values for the corresponding
+            // properties on a referenced ‘svg’ or ‘symbol’ element when determining the used value for that property
+            // on the instance root element. However, if the computed value for the property on the ‘use’ element is
+            // auto, then the property is computed as normal for the element instance.
+            if (has_attribute(AttributeNames::width)) {
+                MUST(cloned_element.set_attribute(AttributeNames::width, get_attribute_value(AttributeNames::width)));
+            }
+            if (has_attribute(AttributeNames::height)) {
+                MUST(cloned_element.set_attribute(AttributeNames::height, get_attribute_value(AttributeNames::height)));
+            }
+        }
         shadow_root()->append_child(cloned_reference_node).release_value_but_fixme_should_propagate_errors();
     }
 }
@@ -198,9 +215,9 @@ GC::Ref<SVGAnimatedLength> SVGUseElement::x() const
 {
     // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
     // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_x.value_or(0));
-    auto anim_length = SVGLength::create(realm(), 0, m_x.value_or(0));
-    return SVGAnimatedLength::create(realm(), move(base_length), move(anim_length));
+    auto base_length = SVGLength::create(realm(), 0, m_x.value_or(0), SVGLength::ReadOnly::No);
+    auto anim_length = SVGLength::create(realm(), 0, m_x.value_or(0), SVGLength::ReadOnly::Yes);
+    return SVGAnimatedLength::create(realm(), base_length, anim_length);
 }
 
 // https://www.w3.org/TR/SVG11/shapes.html#RectElementYAttribute
@@ -208,21 +225,19 @@ GC::Ref<SVGAnimatedLength> SVGUseElement::y() const
 {
     // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
     // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_y.value_or(0));
-    auto anim_length = SVGLength::create(realm(), 0, m_y.value_or(0));
-    return SVGAnimatedLength::create(realm(), move(base_length), move(anim_length));
+    auto base_length = SVGLength::create(realm(), 0, m_y.value_or(0), SVGLength::ReadOnly::No);
+    auto anim_length = SVGLength::create(realm(), 0, m_y.value_or(0), SVGLength::ReadOnly::Yes);
+    return SVGAnimatedLength::create(realm(), base_length, anim_length);
 }
 
 GC::Ref<SVGAnimatedLength> SVGUseElement::width() const
 {
-    // FIXME: Implement this properly.
-    return SVGAnimatedLength::create(realm(), SVGLength::create(realm(), 0, 0), SVGLength::create(realm(), 0, 0));
+    return fake_animated_length_fixme();
 }
 
 GC::Ref<SVGAnimatedLength> SVGUseElement::height() const
 {
-    // FIXME: Implement this properly.
-    return SVGAnimatedLength::create(realm(), SVGLength::create(realm(), 0, 0), SVGLength::create(realm(), 0, 0));
+    return fake_animated_length_fixme();
 }
 
 // https://svgwg.org/svg2-draft/struct.html#TermInstanceRoot

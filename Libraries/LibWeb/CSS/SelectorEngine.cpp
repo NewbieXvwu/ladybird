@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2018-2024, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2021-2024, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -552,8 +552,8 @@ static inline bool matches_pseudo_class(CSS::Selector::SimpleSelector::PseudoCla
     case CSS::PseudoClass::FocusVisible:
         return element.is_focused() && element.should_indicate_focus();
     case CSS::PseudoClass::FocusWithin: {
-        auto* focused_element = element.document().focused_element();
-        return focused_element && element.is_inclusive_ancestor_of(*focused_element);
+        auto focused_area = element.document().focused_area();
+        return focused_area && element.is_inclusive_ancestor_of(*focused_area);
     }
     case CSS::PseudoClass::FirstChild:
         if (context.collect_per_element_selector_involvement_metadata) {
@@ -616,6 +616,8 @@ static inline bool matches_pseudo_class(CSS::Selector::SimpleSelector::PseudoCla
         return element.matches_enabled_pseudo_class();
     case CSS::PseudoClass::Checked:
         return element.matches_checked_pseudo_class();
+    case CSS::PseudoClass::Unchecked:
+        return element.matches_unchecked_pseudo_class();
     case CSS::PseudoClass::Indeterminate:
         return matches_indeterminate_pseudo_class(element);
     case CSS::PseudoClass::HighValue:
@@ -668,11 +670,6 @@ static inline bool matches_pseudo_class(CSS::Selector::SimpleSelector::PseudoCla
     case CSS::PseudoClass::NthLastChild:
     case CSS::PseudoClass::NthOfType:
     case CSS::PseudoClass::NthLastOfType: {
-        auto const step_size = pseudo_class.nth_child_pattern.step_size;
-        auto const offset = pseudo_class.nth_child_pattern.offset;
-        if (step_size == 0 && offset == 0)
-            return false; // "If both a and b are equal to zero, the pseudo-class represents no element in the document tree."
-
         auto const* parent = element.parent();
         if (!parent)
             return false;
@@ -727,38 +724,7 @@ static inline bool matches_pseudo_class(CSS::Selector::SimpleSelector::PseudoCla
         default:
             VERIFY_NOT_REACHED();
         }
-
-        // When "step_size == -1", selector represents first "offset" elements in document tree.
-        if (step_size == -1)
-            return !(offset <= 0 || index > offset);
-
-        // When "step_size == 1", selector represents last "offset" elements in document tree.
-        if (step_size == 1)
-            return !(offset < 0 || index < offset);
-
-        // When "step_size == 0", selector picks only the "offset" element.
-        if (step_size == 0)
-            return index == offset;
-
-        // If both are negative, nothing can match.
-        if (step_size < 0 && offset < 0)
-            return false;
-
-        // Like "a % b", but handles negative integers correctly.
-        auto const canonical_modulo = [](int a, int b) -> int {
-            int c = a % b;
-            if ((c < 0 && b > 0) || (c > 0 && b < 0)) {
-                c += b;
-            }
-            return c;
-        };
-
-        // When "step_size < 0", we start at "offset" and count backwards.
-        if (step_size < 0)
-            return index <= offset && canonical_modulo(index - offset, -step_size) == 0;
-
-        // Otherwise, we start at "offset" and count forwards.
-        return index >= offset && canonical_modulo(index - offset, step_size) == 0;
+        return pseudo_class.an_plus_b_pattern.matches(index);
     }
     case CSS::PseudoClass::Playing: {
         if (!is<HTML::HTMLMediaElement>(element))
@@ -803,12 +769,6 @@ static inline bool matches_pseudo_class(CSS::Selector::SimpleSelector::PseudoCla
     }
     case CSS::PseudoClass::Target:
         return element.is_target();
-    case CSS::PseudoClass::TargetWithin: {
-        auto* target_element = element.document().target_element();
-        if (!target_element)
-            return false;
-        return element.is_inclusive_ancestor_of(*target_element);
-    }
     case CSS::PseudoClass::Dir: {
         // "Values other than ltr and rtl are not invalid, but do not match anything."
         // - https://www.w3.org/TR/selectors-4/#the-dir-pseudo
@@ -1070,6 +1030,40 @@ static inline bool matches_pseudo_class(CSS::Selector::SimpleSelector::PseudoCla
             return custom_state_set->has_state(pseudo_class.ident->string_value);
         return false;
     }
+    case CSS::PseudoClass::Heading: {
+        // https://html.spec.whatwg.org/multipage/semantics-other.html#selector-heading
+        // The :heading pseudo-class must match all h1, h2, h3, h4, h5, and h6 elements.
+
+        // https://html.spec.whatwg.org/multipage/semantics-other.html#selector-heading-functional
+        // The :heading(integer#) pseudo-class must match all h1, h2, h3, h4, h5, and h6 elements that have a heading level of integer. [CSSSYNTAX] [CSSVALUES]
+
+        // NB: We combine the "is this an h* element?" and "what is it's level?" checks together here.
+        if (!element.is_html_element())
+            return false;
+        auto heading_level = [](auto& local_name) -> Optional<int> {
+            if (local_name == HTML::TagNames::h1)
+                return 1;
+            if (local_name == HTML::TagNames::h2)
+                return 2;
+            if (local_name == HTML::TagNames::h3)
+                return 3;
+            if (local_name == HTML::TagNames::h4)
+                return 4;
+            if (local_name == HTML::TagNames::h5)
+                return 5;
+            if (local_name == HTML::TagNames::h6)
+                return 6;
+            return {};
+        }(element.lowercased_local_name());
+
+        if (!heading_level.has_value())
+            return false;
+
+        if (pseudo_class.levels.is_empty())
+            return true;
+
+        return pseudo_class.levels.contains_slow(heading_level.value());
+    }
     }
 
     return false;
@@ -1142,6 +1136,10 @@ static inline bool matches(CSS::Selector::SimpleSelector const& component, DOM::
     case CSS::Selector::SimpleSelector::Type::PseudoClass:
         return matches_pseudo_class(component.pseudo_class(), element, shadow_host, context, scope, selector_kind);
     case CSS::Selector::SimpleSelector::Type::PseudoElement:
+        if (component.pseudo_element().type() == CSS::PseudoElement::Slotted) {
+            VERIFY(context.slotted_element);
+            return matches(component.pseudo_element().compound_selector(), *context.slotted_element, shadow_host, context);
+        }
         // Pseudo-element matching/not-matching is handled in the top level matches().
         return true;
     case CSS::Selector::SimpleSelector::Type::Nesting:

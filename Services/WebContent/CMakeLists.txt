@@ -1,4 +1,5 @@
 include(audio)
+include(SDL3)
 
 set(SOURCES
     ConnectionFromClient.cpp
@@ -31,6 +32,7 @@ target_include_directories(webcontentservice PUBLIC $<BUILD_INTERFACE:${LADYBIRD
 
 target_link_libraries(webcontentservice PUBLIC LibCore LibCrypto LibFileSystem LibGfx LibIPC LibJS LibMain LibMedia LibWeb LibWebSocket LibRequests LibWebView LibImageDecoderClient LibGC)
 target_link_libraries(webcontentservice PRIVATE OpenSSL::Crypto OpenSSL::SSL)
+target_link_libraries(webcontentservice PRIVATE SDL3::SDL3)
 
 if (ENABLE_QT AND NOT DEFINED LADYBIRD_AUDIO_BACKEND)
     find_package(Qt6 REQUIRED COMPONENTS Multimedia)
@@ -50,6 +52,12 @@ else()
 endif()
 
 target_link_libraries(WebContent PRIVATE webcontentservice LibURL)
+
+if(WIN32)
+    find_package(unofficial-angle REQUIRED CONFIG)
+    target_link_libraries(WebContent PRIVATE LibTextCodec unofficial::angle::libGLESv2)
+endif()
+
 
 target_sources(webcontentservice PUBLIC FILE_SET server TYPE HEADERS
     BASE_DIRS ${LADYBIRD_SOURCE_DIR}/Services

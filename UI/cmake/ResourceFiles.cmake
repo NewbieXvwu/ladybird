@@ -12,6 +12,7 @@ set(16x16_ICONS
     close-tab.png
     download.png
     edit-copy.png
+    error.png
     filetype-css.png
     filetype-folder-open.png
     filetype-html.png
@@ -75,6 +76,7 @@ set(ABOUT_PAGES
 list(TRANSFORM ABOUT_PAGES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/about-pages/")
 
 set(ABOUT_SETTINGS_RESOURCES
+    default-zoom-level.js
     languages.js
     network.js
     new-tab-page.js

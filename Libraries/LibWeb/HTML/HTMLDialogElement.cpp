@@ -110,7 +110,7 @@ WebIDL::ExceptionOr<void> HTMLDialogElement::show()
 
     // 2. If this has an open attribute, then throw an "InvalidStateError" DOMException.
     if (has_attribute(AttributeNames::open))
-        return WebIDL::InvalidStateError::create(realm(), "Dialog already open"_string);
+        return WebIDL::InvalidStateError::create(realm(), "Dialog already open"_utf16);
 
     // 3. If the result of firing an event named beforetoggle, using ToggleEvent,
     //  with the cancelable attribute initialized to true, the oldState attribute initialized to "closed",
@@ -132,7 +132,7 @@ WebIDL::ExceptionOr<void> HTMLDialogElement::show()
     queue_a_dialog_toggle_event_task("closed"_string, "open"_string, nullptr);
 
     // 6. Add an open attribute to this, whose value is the empty string.
-    TRY(set_attribute(AttributeNames::open, {}));
+    TRY(set_attribute(AttributeNames::open, String {}));
 
     // 7. Assert: this's node document's open dialogs list does not contain this.
     VERIFY(!m_document->open_dialogs_list().contains_slow(GC::Ref(*this)));
@@ -185,19 +185,19 @@ WebIDL::ExceptionOr<void> HTMLDialogElement::show_a_modal_dialog(HTMLDialogEleme
 
     // 2. If subject has an open attribute, then throw an "InvalidStateError" DOMException.
     if (subject.has_attribute(AttributeNames::open))
-        return WebIDL::InvalidStateError::create(realm, "Dialog already open"_string);
+        return WebIDL::InvalidStateError::create(realm, "Dialog already open"_utf16);
 
     // 3. If subject's node document is not fully active, then throw an "InvalidStateError" DOMException.
     if (!subject.document().is_fully_active())
-        return WebIDL::InvalidStateError::create(realm, "Document is not fully active"_string);
+        return WebIDL::InvalidStateError::create(realm, "Document is not fully active"_utf16);
 
     // 4. If subject is not connected, then throw an "InvalidStateError" DOMException.
     if (!subject.is_connected())
-        return WebIDL::InvalidStateError::create(realm, "Dialog not connected"_string);
+        return WebIDL::InvalidStateError::create(realm, "Dialog not connected"_utf16);
 
     // 5. If subject is in the popover showing state, then throw an "InvalidStateError" DOMException.
     if (subject.popover_visibility_state() == PopoverVisibilityState::Showing)
-        return WebIDL::InvalidStateError::create(realm, "Dialog already open as popover"_string);
+        return WebIDL::InvalidStateError::create(realm, "Dialog already open as popover"_utf16);
 
     // 6. If the result of firing an event named beforetoggle, using ToggleEvent,
     //  with the cancelable attribute initialized to true, the oldState attribute initialized to "closed",
@@ -227,7 +227,7 @@ WebIDL::ExceptionOr<void> HTMLDialogElement::show_a_modal_dialog(HTMLDialogEleme
     subject.queue_a_dialog_toggle_event_task("closed"_string, "open"_string, source);
 
     // 11. Add an open attribute to subject, whose value is the empty string.
-    TRY(subject.set_attribute(AttributeNames::open, {}));
+    TRY(subject.set_attribute(AttributeNames::open, String {}));
 
     // 12. Set is modal of subject to true.
     subject.set_is_modal(true);
@@ -412,7 +412,7 @@ void HTMLDialogElement::set_close_watcher()
                 event.prevent_default();
             return JS::js_undefined();
         },
-        0, ""_fly_string, &realm());
+        0, Utf16FlyString {}, &realm());
     auto cancel_callback = realm().heap().allocate<WebIDL::CallbackType>(*cancel_callback_function, realm());
     m_close_watcher->add_event_listener_without_options(HTML::EventNames::cancel, DOM::IDLEventListener::create(realm(), cancel_callback));
     // - closeAction being to close the dialog given dialog, dialog's request close return value, and dialog's request close source element.
@@ -422,7 +422,7 @@ void HTMLDialogElement::set_close_watcher()
 
             return JS::js_undefined();
         },
-        0, ""_fly_string, &realm());
+        0, Utf16FlyString {}, &realm());
     auto close_callback = realm().heap().allocate<WebIDL::CallbackType>(*close_callback_function, realm());
     m_close_watcher->add_event_listener_without_options(HTML::EventNames::close, DOM::IDLEventListener::create(realm(), close_callback));
     // - getEnabledState being to return true if dialog's enable close watcher for requestClose() is true or dialog's computed closed-by state is not None; otherwise false.
@@ -467,7 +467,7 @@ void HTMLDialogElement::set_is_modal(bool is_modal)
     if (m_is_modal == is_modal)
         return;
     m_is_modal = is_modal;
-    invalidate_style(DOM::StyleInvalidationReason::NodeRemove);
+    invalidate_style(DOM::StyleInvalidationReason::HTMLDialogElementSetIsModal);
 }
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#the-dialog-element:is-valid-invoker-command-steps
@@ -510,7 +510,7 @@ void HTMLDialogElement::invoker_command_steps(DOM::Element& invoker, String& com
 }
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#nearest-clicked-dialog
-GC::Ptr<HTMLDialogElement> HTMLDialogElement::nearest_clicked_dialog(UIEvents::PointerEvent const& event, const GC::Ptr<DOM::Node> target)
+GC::Ptr<HTMLDialogElement> HTMLDialogElement::nearest_clicked_dialog(UIEvents::PointerEvent const& event, GC::Ptr<DOM::Node> const target)
 {
     // To find the nearest clicked dialog, given a PointerEvent event:
 
@@ -542,7 +542,7 @@ GC::Ptr<HTMLDialogElement> HTMLDialogElement::nearest_clicked_dialog(UIEvents::P
 }
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#light-dismiss-open-dialogs
-void HTMLDialogElement::light_dismiss_open_dialogs(UIEvents::PointerEvent const& event, const GC::Ptr<DOM::Node> target)
+void HTMLDialogElement::light_dismiss_open_dialogs(UIEvents::PointerEvent const& event, GC::Ptr<DOM::Node> const target)
 {
     // To light dismiss open dialogs, given a PointerEvent event:
 

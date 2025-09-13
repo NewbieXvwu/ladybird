@@ -9,18 +9,18 @@
 
 #include <AK/Badge.h>
 #include <AK/RefPtr.h>
-#include <AK/TypeCasts.h>
 #include <LibGC/Heap.h>
-#include <LibURL/URL.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/WindowGlobalMixin.h>
 #include <LibWeb/DOM/EventTarget.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/BarProp.h>
 #include <LibWeb/HTML/CrossOrigin/CrossOriginPropertyDescriptorMap.h>
 #include <LibWeb/HTML/GlobalEventHandlers.h>
 #include <LibWeb/HTML/MimeType.h>
 #include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/Navigation.h>
 #include <LibWeb/HTML/Plugin.h>
 #include <LibWeb/HTML/ScrollOptions.h>
 #include <LibWeb/HTML/StructuredSerializeOptions.h>
@@ -64,7 +64,7 @@ struct SpecifierResolution {
     bool specifier_is_null_or_url_like_that_is_special { false };
 };
 
-class Window final
+class WEB_API Window final
     : public DOM::EventTarget
     , public GlobalEventHandlers
     , public WindowEventHandlers
@@ -194,6 +194,7 @@ public:
 
     [[nodiscard]] GC::Ref<Navigator> navigator();
     [[nodiscard]] GC::Ref<CloseWatcherManager> close_watcher_manager();
+    [[nodiscard]] GC::Ref<CookieStore::CookieStore> cookie_store();
 
     void alert(String const& message = {});
     bool confirm(Optional<String> const& message);
@@ -204,7 +205,7 @@ public:
 
     Variant<GC::Root<DOM::Event>, Empty> event() const;
 
-    [[nodiscard]] GC::Ref<CSS::CSSStyleDeclaration> get_computed_style(DOM::Element&, Optional<String> const& pseudo_element) const;
+    [[nodiscard]] GC::Ref<CSS::CSSStyleProperties> get_computed_style(DOM::Element&, Optional<String> const& pseudo_element) const;
 
     WebIDL::ExceptionOr<GC::Ref<CSS::MediaQueryList>> match_media(String const& query);
     [[nodiscard]] GC::Ref<CSS::Screen> screen();
@@ -310,6 +311,7 @@ private:
     GC::Ptr<Navigator> m_navigator;
     GC::Ptr<Location> m_location;
     GC::Ptr<CloseWatcherManager> m_close_watcher_manager;
+    GC::Ptr<CookieStore::CookieStore> m_cookie_store;
 
     // https://html.spec.whatwg.org/multipage/nav-history-apis.html#window-navigation-api
     GC::Ptr<Navigation> m_navigation;

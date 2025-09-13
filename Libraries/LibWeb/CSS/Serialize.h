@@ -13,21 +13,24 @@
 #include <LibGfx/Color.h>
 #include <LibGfx/Font/UnicodeRange.h>
 #include <LibWeb/CSS/StyleProperty.h>
+#include <LibWeb/Export.h>
 
 namespace Web::CSS {
 
 void escape_a_character(StringBuilder&, u32 character);
 void escape_a_character_as_code_point(StringBuilder&, u32 character);
-void serialize_an_identifier(StringBuilder&, StringView ident);
+WEB_API void serialize_an_identifier(StringBuilder&, StringView ident);
 void serialize_a_string(StringBuilder&, StringView string);
-void serialize_a_url(StringBuilder&, StringView url);
+WEB_API void serialize_a_url(StringBuilder&, StringView url);
 void serialize_unicode_ranges(StringBuilder&, Vector<Gfx::UnicodeRange> const& unicode_ranges);
 void serialize_a_srgb_value(StringBuilder&, Color color);
+void serialize_a_number(StringBuilder&, double value);
 
 String serialize_an_identifier(StringView ident);
 String serialize_a_string(StringView string);
 String serialize_a_url(StringView url);
 String serialize_a_srgb_value(Color color);
+String serialize_a_number(double value);
 
 // https://www.w3.org/TR/cssom/#serialize-a-comma-separated-list
 template<typename T, typename SerializeItem>

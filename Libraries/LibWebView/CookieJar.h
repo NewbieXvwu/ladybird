@@ -29,14 +29,14 @@ struct CookieStorageKey {
     String path;
 };
 
-class CookieJar {
+class WEBVIEW_API CookieJar {
     struct Statements {
         Database::StatementID insert_cookie { 0 };
         Database::StatementID expire_cookie { 0 };
         Database::StatementID select_all_cookies { 0 };
     };
 
-    class TransientStorage {
+    class WEBVIEW_API TransientStorage {
     public:
         using Cookies = HashMap<CookieStorageKey, Web::Cookie::Cookie>;
 
@@ -72,7 +72,7 @@ class CookieJar {
         Cookies m_dirty_cookies;
     };
 
-    struct PersistedStorage {
+    struct WEBVIEW_API PersistedStorage {
         void insert_cookie(Web::Cookie::Cookie const& cookie);
         TransientStorage::Cookies select_all_cookies();
 
@@ -87,13 +87,14 @@ public:
 
     ~CookieJar();
 
-    String get_cookie(const URL::URL& url, Web::Cookie::Source source);
-    void set_cookie(const URL::URL& url, Web::Cookie::ParsedCookie const& parsed_cookie, Web::Cookie::Source source);
+    String get_cookie(URL::URL const& url, Web::Cookie::Source source);
+    void set_cookie(URL::URL const& url, Web::Cookie::ParsedCookie const& parsed_cookie, Web::Cookie::Source source);
     void update_cookie(Web::Cookie::Cookie);
     void dump_cookies();
     void clear_all_cookies();
     Vector<Web::Cookie::Cookie> get_all_cookies();
-    Vector<Web::Cookie::Cookie> get_all_cookies(URL::URL const& url);
+    Vector<Web::Cookie::Cookie> get_all_cookies_webdriver(URL::URL const& url);
+    Vector<Web::Cookie::Cookie> get_all_cookies_cookiestore(URL::URL const& url);
     Optional<Web::Cookie::Cookie> get_named_cookie(URL::URL const& url, StringView name);
     void expire_cookies_with_time_offset(AK::Duration);
 
@@ -103,16 +104,13 @@ private:
     AK_MAKE_NONCOPYABLE(CookieJar);
     AK_MAKE_NONMOVABLE(CookieJar);
 
-    static Optional<String> canonicalize_domain(const URL::URL& url);
-    static bool path_matches(StringView request_path, StringView cookie_path);
-
     enum class MatchingCookiesSpecMode {
         RFC6265,
         WebDriver,
     };
 
-    void store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, const URL::URL& url, String canonicalized_domain, Web::Cookie::Source source);
-    Vector<Web::Cookie::Cookie> get_matching_cookies(const URL::URL& url, StringView canonicalized_domain, Web::Cookie::Source source, MatchingCookiesSpecMode mode = MatchingCookiesSpecMode::RFC6265);
+    void store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, URL::URL const& url, String canonicalized_domain, Web::Cookie::Source source);
+    Vector<Web::Cookie::Cookie> get_matching_cookies(URL::URL const& url, StringView canonicalized_domain, Web::Cookie::Source source, MatchingCookiesSpecMode mode = MatchingCookiesSpecMode::RFC6265);
 
     Optional<PersistedStorage> m_persisted_storage;
     TransientStorage m_transient_storage;

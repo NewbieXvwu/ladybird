@@ -76,7 +76,7 @@ String module_type_from_module_request(JS::ModuleRequest const& module_request)
             module_type = ""_string; // FIXME: This should be null!
         // 2. Otherwise, set moduleType to entry.[[Value]].
         else
-            module_type = entry.value;
+            module_type = entry.value.to_utf8_but_should_be_ported_to_utf16();
     }
 
     // 3. Return moduleType.
@@ -314,7 +314,7 @@ ScriptFetchOptions get_descendant_script_fetch_options(ScriptFetchOptions const&
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#resolving-a-module-integrity-metadata
-String resolve_a_module_integrity_metadata(const URL::URL& url, EnvironmentSettingsObject& settings_object)
+String resolve_a_module_integrity_metadata(URL::URL const& url, EnvironmentSettingsObject& settings_object)
 {
     // 1. Let map be settingsObject's global object's import map.
     auto map = as<UniversalGlobalScopeMixin>(settings_object.global_object()).import_map();
@@ -528,7 +528,7 @@ WebIDL::ExceptionOr<GC::Ref<ClassicScript>> fetch_a_classic_worker_imported_scri
     if (body_bytes.template has<Empty>() || body_bytes.template has<Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag>()
         || !Fetch::Infrastructure::is_ok_status(response->status())
         || !response->header_list()->extract_mime_type().has_value() || !response->header_list()->extract_mime_type()->is_javascript()) {
-        return WebIDL::NetworkError::create(realm, "Network error"_string);
+        return WebIDL::NetworkError::create(realm, "Network error"_utf16);
     }
 
     // 8. Let sourceText be the result of UTF-8 decoding bodyBytes.
@@ -713,7 +713,7 @@ void fetch_single_module_script(JS::Realm& realm,
         // 7. If mimeType is a JavaScript MIME type and moduleType is "javascript", then set moduleScript to the result of creating a JavaScript module script given sourceText, moduleMapRealm, response's URL, and options.
         // FIXME: Pass options.
         if (mime_type.has_value() && mime_type->is_javascript() && module_type == "javascript")
-            module_script = JavaScriptModuleScript::create(url.basename(), source_text, module_map_realm, response->url().value_or({})).release_value_but_fixme_should_propagate_errors();
+            module_script = JavaScriptModuleScript::create(url.to_byte_string(), source_text, module_map_realm, response->url().value_or({})).release_value_but_fixme_should_propagate_errors();
 
         // FIXME: 8. If the MIME type essence of mimeType is "text/css" and moduleType is "css", then set moduleScript to the result of creating a CSS module script given sourceText and settingsObject.
         // FIXME: 9. If mimeType is a JSON MIME type and moduleType is "json", then set moduleScript to the result of creating a JSON module script given sourceText and settingsObject.

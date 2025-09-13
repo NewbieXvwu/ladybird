@@ -11,12 +11,15 @@
 #include <LibWeb/Bindings/BlobPrototype.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Bindings/Serializable.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::FileAPI {
 
 using BlobPart = Variant<GC::Root<WebIDL::BufferSource>, GC::Root<Blob>, String>;
+using BlobParts = Vector<BlobPart>;
+using BlobPartsOrByteBuffer = Variant<BlobParts, ByteBuffer>;
 
 struct BlobPropertyBag {
     String type = String {};
@@ -24,10 +27,10 @@ struct BlobPropertyBag {
 };
 
 [[nodiscard]] ErrorOr<String> convert_line_endings_to_native(StringView string);
-[[nodiscard]] ErrorOr<ByteBuffer> process_blob_parts(Vector<BlobPart> const& blob_parts, Optional<BlobPropertyBag> const& options = {});
+[[nodiscard]] ErrorOr<ByteBuffer> process_blob_parts(BlobParts const& blob_parts, Optional<BlobPropertyBag> const& options = {});
 [[nodiscard]] bool is_basic_latin(StringView view);
 
-class Blob
+class WEB_API Blob
     : public Bindings::PlatformObject
     , public Bindings::Serializable {
     WEB_PLATFORM_OBJECT(Blob, Bindings::PlatformObject);
@@ -37,8 +40,8 @@ public:
     virtual ~Blob() override;
 
     [[nodiscard]] static GC::Ref<Blob> create(JS::Realm&, ByteBuffer, String type);
-    [[nodiscard]] static GC::Ref<Blob> create(JS::Realm&, Optional<Vector<BlobPart>> const& blob_parts = {}, Optional<BlobPropertyBag> const& options = {});
-    static WebIDL::ExceptionOr<GC::Ref<Blob>> construct_impl(JS::Realm&, Optional<Vector<BlobPart>> const& blob_parts = {}, Optional<BlobPropertyBag> const& options = {});
+    [[nodiscard]] static GC::Ref<Blob> create(JS::Realm&, Optional<BlobPartsOrByteBuffer> const& blob_parts_or_byte_buffer = {}, Optional<BlobPropertyBag> const& options = {});
+    static WebIDL::ExceptionOr<GC::Ref<Blob>> construct_impl(JS::Realm&, Optional<BlobParts> const& blob_parts = {}, Optional<BlobPropertyBag> const& options = {});
 
     // https://w3c.github.io/FileAPI/#dfn-size
     u64 size() const { return m_byte_buffer.size(); }
@@ -52,14 +55,14 @@ public:
     GC::Ref<WebIDL::Promise> array_buffer();
     GC::Ref<WebIDL::Promise> bytes();
 
-    ReadonlyBytes raw_bytes() const { return m_byte_buffer.bytes(); }
+    ReadonlyBytes raw_bytes() const LIFETIME_BOUND { return m_byte_buffer.bytes(); }
 
     GC::Ref<Streams::ReadableStream> get_stream();
 
-    virtual StringView interface_name() const override { return "Blob"sv; }
+    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::Blob; }
 
-    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::SerializationRecord& record, bool for_storage, HTML::SerializationMemory&) override;
-    virtual WebIDL::ExceptionOr<void> deserialization_steps(ReadonlySpan<u32> const& record, size_t& position, HTML::DeserializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
 
 protected:
     Blob(JS::Realm&, ByteBuffer, String type);

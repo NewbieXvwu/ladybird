@@ -6,16 +6,16 @@
 
 #pragma once
 
-#include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/PercentageOr.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
 
-class FitContentStyleValue final : public CSSStyleValue {
+class FitContentStyleValue final : public StyleValue {
 public:
     static ValueComparingNonnullRefPtr<FitContentStyleValue const> create()
     {
-        return adopt_ref(*new (nothrow) FitContentStyleValue(LengthPercentage { Length::make_auto() }));
+        return adopt_ref(*new (nothrow) FitContentStyleValue());
     }
     static ValueComparingNonnullRefPtr<FitContentStyleValue const> create(LengthPercentage length_percentage)
     {
@@ -23,30 +23,30 @@ public:
     }
     virtual ~FitContentStyleValue() override = default;
 
-    virtual String to_string(SerializationMode) const override
+    virtual String to_string(SerializationMode mode) const override
     {
-        if (m_length_percentage.is_auto())
+        if (!m_length_percentage.has_value())
             return "fit-content"_string;
-        return MUST(String::formatted("fit-content({})", m_length_percentage.to_string()));
+        return MUST(String::formatted("fit-content({})", m_length_percentage->to_string(mode)));
     }
 
-    bool equals(CSSStyleValue const& other) const override
+    bool equals(StyleValue const& other) const override
     {
         if (type() != other.type())
             return false;
         return m_length_percentage == other.as_fit_content().m_length_percentage;
     }
 
-    [[nodiscard]] LengthPercentage const& length_percentage() const { return m_length_percentage; }
+    [[nodiscard]] Optional<LengthPercentage> const& length_percentage() const { return m_length_percentage; }
 
 private:
-    FitContentStyleValue(LengthPercentage length_percentage)
-        : CSSStyleValue(Type::FitContent)
+    FitContentStyleValue(Optional<LengthPercentage> length_percentage = {})
+        : StyleValue(Type::FitContent)
         , m_length_percentage(move(length_percentage))
     {
     }
 
-    LengthPercentage m_length_percentage;
+    Optional<LengthPercentage> m_length_percentage;
 };
 
 }

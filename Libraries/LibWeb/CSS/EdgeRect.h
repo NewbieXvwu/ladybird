@@ -11,14 +11,15 @@
 
 #include <LibGfx/Rect.h>
 #include <LibWeb/CSS/Length.h>
+#include <LibWeb/Export.h>
 
 namespace Web::CSS {
 
-struct EdgeRect {
-    Length top_edge;
-    Length right_edge;
-    Length bottom_edge;
-    Length left_edge;
+struct WEB_API EdgeRect {
+    LengthOrAuto top_edge;
+    LengthOrAuto right_edge;
+    LengthOrAuto bottom_edge;
+    LengthOrAuto left_edge;
     CSSPixelRect resolved(Layout::Node const&, CSSPixelRect) const;
     bool operator==(EdgeRect const&) const = default;
 };

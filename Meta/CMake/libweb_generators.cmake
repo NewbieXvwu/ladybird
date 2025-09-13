@@ -21,6 +21,15 @@ function (generate_css_implementation)
     )
 
     invoke_cpp_generator(
+        "EnvironmentVariable.cpp"
+        Lagom::GenerateCSSEnvironmentVariable
+        "${LIBWEB_INPUT_FOLDER}/CSS/EnvironmentVariables.json"
+        "CSS/EnvironmentVariable.h"
+        "CSS/EnvironmentVariable.cpp"
+        arguments -j "${LIBWEB_INPUT_FOLDER}/CSS/EnvironmentVariables.json"
+    )
+
+    invoke_cpp_generator(
         "MathFunctions.cpp"
         Lagom::GenerateCSSMathFunctions
         "${LIBWEB_INPUT_FOLDER}/CSS/MathFunctions.json"
@@ -44,8 +53,10 @@ function (generate_css_implementation)
         "${LIBWEB_INPUT_FOLDER}/CSS/Properties.json"
         "CSS/PropertyID.h"
         "CSS/PropertyID.cpp"
-        arguments -j "${LIBWEB_INPUT_FOLDER}/CSS/Properties.json" -g "${LIBWEB_INPUT_FOLDER}/CSS/LogicalPropertyGroups.json"
-        dependencies "${LIBWEB_INPUT_FOLDER}/CSS/LogicalPropertyGroups.json"
+        arguments -j "${LIBWEB_INPUT_FOLDER}/CSS/Properties.json"
+                  -e "${LIBWEB_INPUT_FOLDER}/CSS/Enums.json"
+                  -g "${LIBWEB_INPUT_FOLDER}/CSS/LogicalPropertyGroups.json"
+        dependencies "${LIBWEB_INPUT_FOLDER}/CSS/Enums.json" "${LIBWEB_INPUT_FOLDER}/CSS/LogicalPropertyGroups.json"
     )
 
     invoke_cpp_generator(
@@ -76,12 +87,32 @@ function (generate_css_implementation)
     )
 
     invoke_cpp_generator(
+        "Units.cpp"
+        Lagom::GenerateCSSUnits
+        "${LIBWEB_INPUT_FOLDER}/CSS/Units.json"
+        "CSS/Units.h"
+        "CSS/Units.cpp"
+        arguments -j "${LIBWEB_INPUT_FOLDER}/CSS/Units.json"
+    )
+
+    invoke_cpp_generator(
         "Keyword.cpp"
         Lagom::GenerateCSSKeyword
         "${LIBWEB_INPUT_FOLDER}/CSS/Keywords.json"
         "CSS/Keyword.h"
         "CSS/Keyword.cpp"
         arguments -j "${LIBWEB_INPUT_FOLDER}/CSS/Keywords.json"
+    )
+
+    invoke_idl_generator(
+        "GeneratedCSSNumericFactoryMethods.cpp"
+        "GeneratedCSSNumericFactoryMethods.idl"
+        Lagom::GenerateCSSNumericFactoryMethods
+        "${LIBWEB_INPUT_FOLDER}/CSS/Units.json"
+        "CSS/GeneratedCSSNumericFactoryMethods.h"
+        "CSS/GeneratedCSSNumericFactoryMethods.cpp"
+        "CSS/GeneratedCSSNumericFactoryMethods.idl"
+        arguments -j "${LIBWEB_INPUT_FOLDER}/CSS/Units.json"
     )
 
     invoke_idl_generator(
@@ -129,7 +160,9 @@ function (generate_css_implementation)
 
     set(CSS_GENERATED_HEADERS
        "CSS/Enums.h"
+       "CSS/EnvironmentVariable.h"
        "CSS/GeneratedCSSStyleProperties.h"
+       "CSS/GeneratedCSSNumericFactoryMethods.h"
        "CSS/Keyword.h"
        "CSS/MathFunctions.h"
        "CSS/MediaFeatureID.h"
@@ -147,6 +180,7 @@ function (generate_css_implementation)
 
     set(CSS_GENERATED_IDL
         "GeneratedCSSStyleProperties.idl"
+        "GeneratedCSSNumericFactoryMethods.idl"
     )
     list(APPEND LIBWEB_ALL_GENERATED_IDL ${CSS_GENERATED_IDL})
     set(LIBWEB_ALL_GENERATED_IDL ${LIBWEB_ALL_GENERATED_IDL} PARENT_SCOPE)

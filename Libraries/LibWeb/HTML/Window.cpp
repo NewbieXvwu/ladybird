@@ -24,6 +24,7 @@
 #include <LibWeb/CSS/MediaQueryList.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/Screen.h>
+#include <LibWeb/CookieStore/CookieStore.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/Event.h>
@@ -53,6 +54,7 @@
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Storage.h>
+#include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/TokenizedFeatures.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
@@ -129,6 +131,7 @@ void Window::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_pdf_viewer_plugin_objects);
     visitor.visit(m_pdf_viewer_mime_type_objects);
     visitor.visit(m_close_watcher_manager);
+    visitor.visit(m_cookie_store);
     visitor.visit(m_locationbar);
     visitor.visit(m_menubar);
     visitor.visit(m_personalbar);
@@ -208,7 +211,7 @@ WebIDL::ExceptionOr<Window::OpenedWindow> Window::window_open_steps_internal(Str
 
         // 2. If urlRecord is failure, then throw a "SyntaxError" DOMException.
         if (!url_record.has_value())
-            return WebIDL::SyntaxError::create(realm(), MUST(String::formatted("Invalid URL '{}'", url)));
+            return WebIDL::SyntaxError::create(realm(), Utf16String::formatted("Invalid URL '{}'", url));
     }
 
     // 5. If target is the empty string, then set target to "_blank".
@@ -369,9 +372,8 @@ Optional<CSS::MediaFeatureValue> Window::query_media_feature(CSS::MediaFeatureID
             return CSS::MediaFeatureValue(CSS::Keyword::Light);
         case CSS::PreferredColorScheme::Dark:
             return CSS::MediaFeatureValue(CSS::Keyword::Dark);
-        case CSS::PreferredColorScheme::Auto:
         default:
-            return CSS::MediaFeatureValue(page().palette().is_dark() ? CSS::Keyword::Dark : CSS::Keyword::Light);
+            VERIFY_NOT_REACHED();
         }
     }
     case CSS::MediaFeatureID::PrefersContrast:
@@ -405,7 +407,7 @@ Optional<CSS::MediaFeatureValue> Window::query_media_feature(CSS::MediaFeatureID
         // FIXME: Make this a preference
         return CSS::MediaFeatureValue(CSS::Keyword::NoPreference);
     case CSS::MediaFeatureID::Resolution:
-        return CSS::MediaFeatureValue(CSS::Resolution(device_pixel_ratio(), CSS::Resolution::Type::Dppx));
+        return CSS::MediaFeatureValue(CSS::Resolution::make_dots_per_pixel(device_pixel_ratio()));
     case CSS::MediaFeatureID::Scan:
         // FIXME: Detect this from the display, if we can. Most displays aren't scanning and should return None.
         return CSS::MediaFeatureValue(CSS::Keyword::None);
@@ -473,10 +475,10 @@ WebIDL::ExceptionOr<GC::Ref<Storage>> Window::local_storage()
 
     // 3. If map is failure, then throw a "SecurityError" DOMException.
     if (!map)
-        return WebIDL::SecurityError::create(realm, "localStorage is not available"_string);
+        return WebIDL::SecurityError::create(realm, "localStorage is not available"_utf16);
 
     // 4. Let storage be a new Storage object whose map is map.
-    auto storage = Storage::create(realm, Storage::Type::Session, *map);
+    auto storage = Storage::create(realm, Storage::Type::Local, *map);
 
     // 5. Set this's associated Document's local storage holder to storage.
     associated_document.set_local_storage_holder(storage);
@@ -500,7 +502,7 @@ WebIDL::ExceptionOr<GC::Ref<Storage>> Window::session_storage()
 
     // 3. If map is failure, then throw a "SecurityError" DOMException.
     if (!map)
-        return WebIDL::SecurityError::create(realm, "sessionStorage is not available"_string);
+        return WebIDL::SecurityError::create(realm, "sessionStorage is not available"_utf16);
 
     // 4. Let storage be a new Storage object whose map is map.
     auto storage = Storage::create(realm, Storage::Type::Session, *map);
@@ -748,7 +750,7 @@ WebIDL::ExceptionOr<void> Window::initialize_web_interfaces(Badge<WindowEnvironm
     WindowOrWorkerGlobalScopeMixin::initialize(realm);
 
     if (s_internals_object_exposed)
-        define_direct_property("internals"_fly_string, realm.create<Internals::Internals>(realm), JS::default_attributes);
+        define_direct_property("internals"_utf16_fly_string, realm.create<Internals::Internals>(realm), JS::default_attributes);
 
     return {};
 }
@@ -1121,6 +1123,17 @@ GC::Ref<CloseWatcherManager> Window::close_watcher_manager()
     return GC::Ref { *m_close_watcher_manager };
 }
 
+// https://cookiestore.spec.whatwg.org/#Window
+GC::Ref<CookieStore::CookieStore> Window::cookie_store()
+{
+    auto& realm = this->realm();
+
+    // The cookieStore getter steps are to return this’s associated CookieStore.
+    if (!m_cookie_store)
+        m_cookie_store = realm.create<CookieStore::CookieStore>(realm, page().client());
+    return *m_cookie_store;
+}
+
 // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#dom-alert
 void Window::alert(String const& message)
 {
@@ -1170,7 +1183,7 @@ WebIDL::ExceptionOr<void> Window::window_post_message_steps(JS::Value message, W
 
         // 2. If parsedURL is failure, then throw a "SyntaxError" DOMException.
         if (!parsed_url.has_value())
-            return WebIDL::SyntaxError::create(target_realm, MUST(String::formatted("Invalid URL for targetOrigin: '{}'", options.target_origin)));
+            return WebIDL::SyntaxError::create(target_realm, Utf16String::formatted("Invalid URL for targetOrigin: '{}'", options.target_origin));
 
         // 3. Set targetOrigin to parsedURL's origin.
         target_origin = parsed_url->origin();
@@ -1225,8 +1238,8 @@ WebIDL::ExceptionOr<void> Window::window_post_message_steps(JS::Value message, W
         // FIXME: Use a FrozenArray
         Vector<GC::Root<MessagePort>> new_ports;
         for (auto const& object : deserialize_record.transferred_values) {
-            if (is<HTML::MessagePort>(*object)) {
-                new_ports.append(as<MessagePort>(*object));
+            if (auto* message_port = as_if<HTML::MessagePort>(*object)) {
+                new_ports.append(*message_port);
             }
         }
 
@@ -1272,8 +1285,8 @@ Variant<GC::Root<DOM::Event>, Empty> Window::event() const
     return Empty {};
 }
 
-// https://w3c.github.io/csswg-drafts/cssom/#dom-window-getcomputedstyle
-GC::Ref<CSS::CSSStyleDeclaration> Window::get_computed_style(DOM::Element& element, Optional<String> const& pseudo_element) const
+// https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle
+GC::Ref<CSS::CSSStyleProperties> Window::get_computed_style(DOM::Element& element, Optional<String> const& pseudo_element) const
 {
     // 1. Let doc be elt’s node document.
 
@@ -1286,13 +1299,21 @@ GC::Ref<CSS::CSSStyleDeclaration> Window::get_computed_style(DOM::Element& eleme
         auto type = parse_pseudo_element_selector(CSS::Parser::ParsingParams(associated_document()), pseudo_element.value());
 
         // 2. If type is failure, or is a ::slotted() or ::part() pseudo-element, let obj be null.
-        if (!type.has_value()) {
+        // FIXME: Handle ::part() here too when we support it.
+        if (!type.has_value() || type.value().type() == CSS::PseudoElement::Slotted) {
             object = {};
         }
         // 3. Otherwise let obj be the given pseudo-element of elt.
         else {
             // TODO: Keep the function arguments of the pseudo-element if there are any.
             object = { element, type.value().type() };
+        }
+
+        // https://drafts.csswg.org/css-view-transitions-1/#update-pseudo-element-styles
+        // This algorithm must be executed to update styles in user-agent origin if its effects can be observed by a web API.
+        // NB: View transition pseudo-elements only ever originate from the document element and only ::view-transition-group() and its descendants can be affected by update_pseudo_element_styles().
+        if (element.is_document_element() && first_is_one_of(type.value().type(), CSS::PseudoElement::ViewTransitionGroup, CSS::PseudoElement::ViewTransitionImagePair, CSS::PseudoElement::ViewTransitionOld, CSS::PseudoElement::ViewTransitionNew)) {
+            (void)element.document().active_view_transition()->update_pseudo_element_styles();
         }
     }
 

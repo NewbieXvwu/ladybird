@@ -30,7 +30,11 @@ GC_DEFINE_ALLOCATOR(Blob);
 
 GC::Ref<Blob> Blob::create(JS::Realm& realm, ByteBuffer byte_buffer, String type)
 {
-    return realm.create<Blob>(realm, move(byte_buffer), move(type));
+    BlobPropertyBag options = {
+        .type = move(type),
+        .endings = Bindings::EndingType::Transparent
+    };
+    return create(realm, move(byte_buffer), move(options));
 }
 
 // https://w3c.github.io/FileAPI/#convert-line-endings-to-native
@@ -81,7 +85,7 @@ ErrorOr<String> convert_line_endings_to_native(StringView string)
 }
 
 // https://w3c.github.io/FileAPI/#process-blob-parts
-ErrorOr<ByteBuffer> process_blob_parts(Vector<BlobPart> const& blob_parts, Optional<BlobPropertyBag> const& options)
+ErrorOr<ByteBuffer> process_blob_parts(BlobParts const& blob_parts, Optional<BlobPropertyBag> const& options)
 {
     // 1. Let bytes be an empty sequence of bytes.
     ByteBuffer bytes {};
@@ -151,49 +155,53 @@ void Blob::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-WebIDL::ExceptionOr<void> Blob::serialization_steps(HTML::SerializationRecord& record, bool, HTML::SerializationMemory&)
+WebIDL::ExceptionOr<void> Blob::serialization_steps(HTML::TransferDataEncoder& serialized, bool, HTML::SerializationMemory&)
 {
-    auto& vm = this->vm();
-
     //  FIXME: 1. Set serialized.[[SnapshotState]] to value’s snapshot state.
 
     // NON-STANDARD: FileAPI spec doesn't specify that type should be serialized, although
     //               to be conformant with other browsers this needs to be serialized.
-    TRY(HTML::serialize_string(vm, record, m_type));
+    serialized.encode(m_type);
 
     // 2. Set serialized.[[ByteSequence]] to value’s underlying byte sequence.
-    TRY(HTML::serialize_bytes(vm, record, m_byte_buffer.bytes()));
+    serialized.encode(m_byte_buffer);
 
     return {};
 }
 
-WebIDL::ExceptionOr<void> Blob::deserialization_steps(ReadonlySpan<u32> const& record, size_t& position, HTML::DeserializationMemory&)
+WebIDL::ExceptionOr<void> Blob::deserialization_steps(HTML::TransferDataDecoder& serialized, HTML::DeserializationMemory&)
 {
-    auto& vm = this->vm();
+    auto& realm = this->realm();
 
     // FIXME: 1. Set value’s snapshot state to serialized.[[SnapshotState]].
 
     // NON-STANDARD: FileAPI spec doesn't specify that type should be deserialized, although
     //               to be conformant with other browsers this needs to be deserialized.
-    m_type = TRY(HTML::deserialize_string(vm, record, position));
+    m_type = serialized.decode<String>();
 
     // 2. Set value’s underlying byte sequence to serialized.[[ByteSequence]].
-    m_byte_buffer = TRY(HTML::deserialize_bytes(vm, record, position));
+    m_byte_buffer = TRY(serialized.decode_buffer(realm));
 
     return {};
 }
 
 // https://w3c.github.io/FileAPI/#ref-for-dom-blob-blob
-GC::Ref<Blob> Blob::create(JS::Realm& realm, Optional<Vector<BlobPart>> const& blob_parts, Optional<BlobPropertyBag> const& options)
+GC::Ref<Blob> Blob::create(JS::Realm& realm, Optional<BlobPartsOrByteBuffer> const& blob_parts_or_byte_buffer, Optional<BlobPropertyBag> const& options)
 {
     // 1. If invoked with zero parameters, return a new Blob object consisting of 0 bytes, with size set to 0, and with type set to the empty string.
-    if (!blob_parts.has_value() && !options.has_value())
+    if (!blob_parts_or_byte_buffer.has_value() && !options.has_value())
         return realm.create<Blob>(realm);
 
     ByteBuffer byte_buffer {};
     // 2. Let bytes be the result of processing blob parts given blobParts and options.
-    if (blob_parts.has_value()) {
-        byte_buffer = MUST(process_blob_parts(blob_parts.value(), options));
+    if (blob_parts_or_byte_buffer.has_value()) {
+        byte_buffer = blob_parts_or_byte_buffer->visit(
+            [&](BlobParts const& blob_parts) {
+                return MUST(process_blob_parts(blob_parts, options));
+            },
+            [](ByteBuffer const& byte_buffer) {
+                return byte_buffer;
+            });
     }
 
     auto type = String {};
@@ -204,21 +212,18 @@ GC::Ref<Blob> Blob::create(JS::Realm& realm, Optional<Vector<BlobPart>> const& b
         // FIXME: 2. Convert every character in t to ASCII lowercase.
 
         // NOTE: The spec is out of date, and we are supposed to call into the MimeType parser here.
-        if (!options->type.is_empty()) {
-            auto maybe_parsed_type = Web::MimeSniff::MimeType::parse(options->type);
-
-            if (maybe_parsed_type.has_value())
-                type = maybe_parsed_type->serialized();
-        }
+        auto maybe_parsed_type = MimeSniff::MimeType::parse(options->type);
+        if (maybe_parsed_type.has_value())
+            type = maybe_parsed_type->serialized();
     }
 
     // 4. Return a Blob object referring to bytes as its associated byte sequence, with its size set to the length of bytes, and its type set to the value of t from the substeps above.
     return realm.create<Blob>(realm, move(byte_buffer), move(type));
 }
 
-WebIDL::ExceptionOr<GC::Ref<Blob>> Blob::construct_impl(JS::Realm& realm, Optional<Vector<BlobPart>> const& blob_parts, Optional<BlobPropertyBag> const& options)
+WebIDL::ExceptionOr<GC::Ref<Blob>> Blob::construct_impl(JS::Realm& realm, Optional<BlobParts> const& blob_parts, Optional<BlobPropertyBag> const& options)
 {
-    return Blob::create(realm, blob_parts, options);
+    return create(realm, blob_parts.has_value() ? blob_parts.value() : Optional<BlobPartsOrByteBuffer> {}, options);
 }
 
 // https://w3c.github.io/FileAPI/#dfn-slice
@@ -388,7 +393,7 @@ GC::Ref<WebIDL::Promise> Blob::text()
     return WebIDL::upon_fulfillment(*promise, GC::create_function(heap(), [&vm](JS::Value first_argument) -> WebIDL::ExceptionOr<JS::Value> {
         auto const& object = first_argument.as_object();
         VERIFY(is<JS::ArrayBuffer>(object));
-        auto const& buffer = static_cast<const JS::ArrayBuffer&>(object).buffer();
+        auto const& buffer = static_cast<JS::ArrayBuffer const&>(object).buffer();
 
         auto decoder = TextCodec::decoder_for("UTF-8"sv);
         auto utf8_text = TRY_OR_THROW_OOM(vm, TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(*decoder, buffer));
@@ -417,7 +422,7 @@ GC::Ref<WebIDL::Promise> Blob::array_buffer()
     return WebIDL::upon_fulfillment(*promise, GC::create_function(heap(), [&realm](JS::Value first_argument) -> WebIDL::ExceptionOr<JS::Value> {
         auto const& object = first_argument.as_object();
         VERIFY(is<JS::ArrayBuffer>(object));
-        auto const& buffer = static_cast<const JS::ArrayBuffer&>(object).buffer();
+        auto const& buffer = static_cast<JS::ArrayBuffer const&>(object).buffer();
 
         return JS::ArrayBuffer::create(realm, buffer);
     }));

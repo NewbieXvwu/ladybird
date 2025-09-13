@@ -9,14 +9,14 @@
 #include <LibWeb/Painting/BorderPainting.h>
 #include <LibWeb/Painting/BorderRadiusCornerClipper.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
+#include <LibWeb/Painting/DisplayListRecordingContext.h>
 #include <LibWeb/Painting/PaintBoxShadowParams.h>
-#include <LibWeb/Painting/PaintContext.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/ShadowPainting.h>
 
 namespace Web::Painting {
 
-void paint_box_shadow(PaintContext& context,
+void paint_box_shadow(DisplayListRecordingContext& context,
     CSSPixelRect const& bordered_content_rect,
     CSSPixelRect const& borderless_content_rect,
     BordersData const& borders_data,
@@ -41,10 +41,10 @@ void paint_box_shadow(PaintContext& context,
             .color = box_shadow_data.color,
             .placement = box_shadow_data.placement,
             .corner_radii = CornerRadii {
-                .top_left = border_radii.top_left.as_corner(context),
-                .top_right = border_radii.top_right.as_corner(context),
-                .bottom_right = border_radii.bottom_right.as_corner(context),
-                .bottom_left = border_radii.bottom_left.as_corner(context) },
+                .top_left = border_radii.top_left.as_corner(context.device_pixel_converter()),
+                .top_right = border_radii.top_right.as_corner(context.device_pixel_converter()),
+                .bottom_right = border_radii.bottom_right.as_corner(context.device_pixel_converter()),
+                .bottom_left = border_radii.bottom_left.as_corner(context.device_pixel_converter()) },
             .offset_x = offset_x.value(),
             .offset_y = offset_y.value(),
             .blur_radius = blur_radius.value(),
@@ -56,15 +56,15 @@ void paint_box_shadow(PaintContext& context,
             auto shrinked_border_radii = border_radii;
             shrinked_border_radii.shrink(borders_data.top.width, borders_data.right.width, borders_data.bottom.width, borders_data.left.width);
             ScopedCornerRadiusClip corner_clipper { context, device_content_rect, shrinked_border_radii, CornerClip::Outside };
-            context.display_list_recorder().paint_inner_box_shadow_params(params);
+            context.display_list_recorder().paint_inner_box_shadow(params);
         } else {
             ScopedCornerRadiusClip corner_clipper { context, device_content_rect, border_radii, CornerClip::Inside };
-            context.display_list_recorder().paint_outer_box_shadow_params(params);
+            context.display_list_recorder().paint_outer_box_shadow(params);
         }
     }
 }
 
-void paint_text_shadow(PaintContext& context, PaintableFragment const& fragment, Vector<ShadowData> const& shadow_layers)
+void paint_text_shadow(DisplayListRecordingContext& context, PaintableFragment const& fragment, Vector<ShadowData> const& shadow_layers)
 {
     if (shadow_layers.is_empty())
         return;

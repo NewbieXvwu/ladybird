@@ -20,6 +20,7 @@
 #include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/FontFace.h>
 #include <LibWeb/CSS/MediaList.h>
+#include <LibWeb/CSS/Parser/ErrorReporter.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyName.h>
 #include <LibWeb/CSS/Sizing.h>
@@ -145,6 +146,13 @@ GC::RootVector<GC::Ref<CSSRule>> Parser::convert_rules(Vector<Rule> const& raw_r
 
             m_declared_namespaces.set(as<CSSNamespaceRule>(*rule).prefix());
             break;
+        case CSSRule::Type::Property: {
+            auto& property_rule = as<CSSPropertyRule>(*rule);
+            if (m_document) {
+                const_cast<DOM::Document*>(m_document.ptr())->registered_custom_properties().set(property_rule.name(), property_rule);
+            }
+            [[fallthrough]];
+        }
         default:
             import_rules_valid = false;
             namespace_rules_valid = false;
@@ -1369,7 +1377,7 @@ Parser::PropertiesAndCustomProperties Parser::parse_as_property_declaration_bloc
         Vector<StyleProperty> expanded_properties;
         for (auto& property : properties) {
             if (property_is_shorthand(property.property_id)) {
-                StyleComputer::for_each_property_expanding_shorthands(property.property_id, *property.value, [&](PropertyID longhand_property_id, CSSStyleValue const& longhand_value) {
+                StyleComputer::for_each_property_expanding_shorthands(property.property_id, *property.value, [&](PropertyID longhand_property_id, StyleValue const& longhand_value) {
                     expanded_properties.append(CSS::StyleProperty {
                         .important = property.important,
                         .property_id = longhand_property_id,
@@ -1615,8 +1623,8 @@ Optional<StyleProperty> Parser::convert_to_style_property(Declaration const& dec
             property_id = PropertyID::Custom;
         } else if (has_ignored_vendor_prefix(property_name)) {
             return {};
-        } else if (!property_name.bytes_as_string_view().starts_with('-')) {
-            dbgln_if(CSS_PARSER_DEBUG, "Unrecognized CSS property '{}'", property_name);
+        } else {
+            ErrorReporter::the().report(UnknownPropertyError { .property_name = property_name });
             return {};
         }
     }
@@ -1625,10 +1633,11 @@ Optional<StyleProperty> Parser::convert_to_style_property(Declaration const& dec
     auto value = parse_css_value(property_id.value(), value_token_stream, declaration.original_text);
     if (value.is_error()) {
         if (value.error() == ParseError::SyntaxError) {
-            dbgln_if(CSS_PARSER_DEBUG, "Unable to parse value for CSS property '{}'.", property_name);
-            if constexpr (CSS_PARSER_DEBUG) {
-                value_token_stream.dump_all_tokens();
-            }
+            ErrorReporter::the().report(InvalidPropertyError {
+                .property_name = property_name,
+                .value_string = value_token_stream.dump_string(),
+                .description = "Failed to parse."_string,
+            });
         }
         return {};
     }
@@ -1639,14 +1648,19 @@ Optional<StyleProperty> Parser::convert_to_style_property(Declaration const& dec
     return StyleProperty { declaration.important, property_id.value(), value.release_value(), {} };
 }
 
-Optional<LengthOrCalculated> Parser::parse_source_size_value(TokenStream<ComponentValue>& tokens)
+Optional<LengthOrAutoOrCalculated> Parser::parse_source_size_value(TokenStream<ComponentValue>& tokens)
 {
     if (tokens.next_token().is_ident("auto"sv)) {
         tokens.discard_a_token(); // auto
-        return LengthOrCalculated { Length::make_auto() };
+        return LengthOrAutoOrCalculated { LengthOrAuto::make_auto() };
     }
 
-    return parse_length(tokens);
+    if (auto parsed = parse_length(tokens); parsed.has_value()) {
+        if (parsed->is_calculated())
+            return LengthOrAutoOrCalculated { parsed->calculated() };
+        return LengthOrAutoOrCalculated { parsed->value() };
+    }
+    return {};
 }
 
 bool Parser::context_allows_quirky_length() const
@@ -1676,7 +1690,7 @@ bool Parser::context_allows_quirky_length() const
             [top_level_property](FunctionContext const& function_context) {
                 return function_context.name == "rect"sv && top_level_property == PropertyID::Clip;
             },
-            [](DescriptorContext const&) { return false; });
+            [](auto const&) { return false; });
     }
 
     return unitless_length_allowed;
@@ -1687,7 +1701,7 @@ Vector<ComponentValue> Parser::parse_as_list_of_component_values()
     return parse_a_list_of_component_values(m_token_stream);
 }
 
-RefPtr<CSSStyleValue const> Parser::parse_as_css_value(PropertyID property_id)
+RefPtr<StyleValue const> Parser::parse_as_css_value(PropertyID property_id)
 {
     auto component_values = parse_a_list_of_component_values(m_token_stream);
     auto tokens = TokenStream(component_values);
@@ -1697,7 +1711,7 @@ RefPtr<CSSStyleValue const> Parser::parse_as_css_value(PropertyID property_id)
     return parsed_value.release_value();
 }
 
-RefPtr<CSSStyleValue const> Parser::parse_as_descriptor_value(AtRuleID at_rule_id, DescriptorID descriptor_id)
+RefPtr<StyleValue const> Parser::parse_as_descriptor_value(AtRuleID at_rule_id, DescriptorID descriptor_id)
 {
     auto component_values = parse_a_list_of_component_values(m_token_stream);
     auto tokens = TokenStream(component_values);
@@ -1715,7 +1729,7 @@ LengthOrCalculated Parser::parse_as_sizes_attribute(DOM::Element const& element,
     // AD-HOC: If element has no sizes attribute, this algorithm always logs a parse error and then returns 100vw.
     //         The attribute is optional, so avoid spamming the debug log with false positives by just returning early.
     if (!element.has_attribute(HTML::AttributeNames::sizes))
-        return Length(100, Length::Type::Vw);
+        return Length(100, LengthUnit::Vw);
 
     // 1. Let unparsed sizes list be the result of parsing a comma-separated list of component values
     //    from the value of element's sizes attribute (or the empty string, if the attribute is absent).
@@ -1723,11 +1737,7 @@ LengthOrCalculated Parser::parse_as_sizes_attribute(DOM::Element const& element,
     auto unparsed_sizes_list = parse_a_comma_separated_list_of_component_values(m_token_stream);
 
     // 2. Let size be null.
-    Optional<LengthOrCalculated> size;
-
-    auto size_is_auto = [&size]() {
-        return !size->is_calculated() && size->value().is_auto();
-    };
+    Optional<LengthOrAutoOrCalculated> size;
 
     auto remove_all_consecutive_whitespace_tokens_from_the_end_of = [](auto& tokens) {
         while (!tokens.is_empty() && tokens.last().is_token() && tokens.last().token().is(Token::Type::Whitespace))
@@ -1743,7 +1753,11 @@ LengthOrCalculated Parser::parse_as_sizes_attribute(DOM::Element const& element,
         remove_all_consecutive_whitespace_tokens_from_the_end_of(unparsed_size);
         if (unparsed_size.is_empty()) {
             log_parse_error();
-            dbgln_if(CSS_PARSER_DEBUG, "-> Failed in step 3.1; all whitespace");
+            ErrorReporter::the().report(InvalidValueError {
+                .value_type = "sizes attribute"_fly_string,
+                .value_string = m_token_stream.dump_string(),
+                .description = "Failed in step 3.1; all whitespace"_string,
+            });
             continue;
         }
 
@@ -1757,14 +1771,18 @@ LengthOrCalculated Parser::parse_as_sizes_attribute(DOM::Element const& element,
             unparsed_size.take_last();
         } else {
             log_parse_error();
-            dbgln_if(CSS_PARSER_DEBUG, "-> Failed in step 3.2; couldn't parse {} as a <source-size-value>", unparsed_size.last().to_debug_string());
+            ErrorReporter::the().report(InvalidValueError {
+                .value_type = "sizes attribute"_fly_string,
+                .value_string = m_token_stream.dump_string(),
+                .description = "Failed in step 3.2; couldn't parse {} as a <source-size-value>"_string,
+            });
             continue;
         }
 
         // 3. If size is auto, and img is not null, and img is being rendered, and img allows auto-sizes,
         //    then set size to the concrete object size width of img, in CSS pixels.
         // FIXME: "img is being rendered" - we just see if it has a bitmap for now
-        if (size_is_auto() && img && img->immutable_bitmap() && img->allows_auto_sizes()) {
+        if (size->is_auto() && img && img->immutable_bitmap() && img->allows_auto_sizes()) {
             // FIXME: The spec doesn't seem to tell us how to determine the concrete size of an <img>, so use the default sizing algorithm.
             //        Should this use some of the methods from FormattingContext?
             auto concrete_size = run_default_sizing_algorithm(
@@ -1782,12 +1800,16 @@ LengthOrCalculated Parser::parse_as_sizes_attribute(DOM::Element const& element,
             // 1. If this was not the last item in unparsed sizes list, that is a parse error.
             if (i != unparsed_sizes_list.size() - 1) {
                 log_parse_error();
-                dbgln_if(CSS_PARSER_DEBUG, "-> Failed in step 3.4.1; is unparsed size #{}, count {}", i, unparsed_sizes_list.size());
+                ErrorReporter::the().report(InvalidValueError {
+                    .value_type = "sizes attribute"_fly_string,
+                    .value_string = m_token_stream.dump_string(),
+                    .description = MUST(String::formatted("Failed in step 3.4.1; is unparsed size #{}, count {}", i, unparsed_sizes_list.size())),
+                });
             }
 
             // 2. If size is not auto, then return size. Otherwise, continue.
-            if (!size_is_auto())
-                return size.release_value();
+            if (!size->is_auto())
+                return size->without_auto();
             continue;
         }
 
@@ -1801,12 +1823,12 @@ LengthOrCalculated Parser::parse_as_sizes_attribute(DOM::Element const& element,
         }
 
         // 5. If size is not auto, then return size. Otherwise, continue.
-        if (!size_is_auto())
-            return size.value();
+        if (!size->is_auto())
+            return size->without_auto();
     }
 
     // 4. Return 100vw.
-    return Length(100, Length::Type::Vw);
+    return Length(100, LengthUnit::Vw);
 }
 
 bool Parser::has_ignored_vendor_prefix(StringView string)

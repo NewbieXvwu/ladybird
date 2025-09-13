@@ -9,8 +9,8 @@
 
 #include <AK/String.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/StyleProperty.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/DOM/AbstractElement.h>
 
 namespace Web::CSS {
@@ -56,6 +56,9 @@ public:
     // https://drafts.csswg.org/cssom/#cssstyledeclaration-updating-flag
     [[nodiscard]] bool is_updating() const { return m_updating; }
     void set_is_updating(bool value) { m_updating = value; }
+
+    virtual bool has_property(StringView property_name) const = 0;
+    virtual RefPtr<StyleValue const> get_property_style_value(StringView property_name) const = 0;
 
 protected:
     enum class Computed : u8 {

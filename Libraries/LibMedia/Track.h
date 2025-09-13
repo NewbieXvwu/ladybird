@@ -18,11 +18,11 @@ enum class TrackType : u32 {
     Video,
     Audio,
     Subtitles,
+    Unknown,
 };
 
 class Track {
     struct VideoData {
-        AK::Duration duration {};
         u64 pixel_width { 0 };
         u64 pixel_height { 0 };
     };
@@ -68,8 +68,8 @@ public:
     }
 
 private:
-    TrackType m_type;
-    size_t m_identifier;
+    TrackType m_type { 0 };
+    size_t m_identifier { 0 };
 
     Variant<Empty, VideoData> m_track_data;
 };

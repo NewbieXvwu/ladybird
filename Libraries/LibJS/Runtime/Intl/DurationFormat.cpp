@@ -203,7 +203,7 @@ static GC::Ref<ListFormat> construct_list_format(VM& vm, DurationFormat const& d
 
 // 13.5.6.1 ValidateDurationUnitStyle ( unit, style, display, prevStyle ), https://tc39.es/ecma402/#sec-validatedurationunitstyle
 // AD-HOC: Our implementation takes extra parameters for better exception messages.
-static ThrowCompletionOr<void> validate_duration_unit_style(VM& vm, PropertyKey const& unit, DurationFormat::ValueStyle style, DurationFormat::Display display, Optional<DurationFormat::ValueStyle> previous_style, StringView display_field)
+static ThrowCompletionOr<void> validate_duration_unit_style(VM& vm, PropertyKey const& unit, DurationFormat::ValueStyle style, DurationFormat::Display display, Optional<DurationFormat::ValueStyle> previous_style, Utf16View const& display_field)
 {
     // 1. If display is "always" and style is "fractional", throw a RangeError exception.
     if (display == DurationFormat::Display::Always && style == DurationFormat::ValueStyle::Fractional)
@@ -277,7 +277,7 @@ ThrowCompletionOr<DurationFormat::DurationUnitOptions> get_duration_unit_options
     }
 
     // 5. Let displayField be the string-concatenation of unit and "Display".
-    auto display_field = MUST(String::formatted("{}Display", unit_property_key));
+    auto display_field = Utf16String::formatted("{}Display", unit_property_key);
 
     // 6. Let display be ? GetOption(options, displayField, STRING, « "auto", "always" », displayDefault).
     auto display_value = TRY(get_option(vm, options, display_field, OptionType::String, { "auto"sv, "always"sv }, display_default));
@@ -731,13 +731,13 @@ Vector<DurationFormatPart> list_format_parts(VM& vm, DurationFormat const& durat
     auto list_format = construct_list_format(vm, duration_format, list_format_options);
 
     // 7. Let strings be a new empty List.
-    Vector<String> strings;
+    Vector<Utf16String> strings;
     strings.ensure_capacity(partitioned_parts_list.size());
 
     // 8. For each element parts of partitionedPartsList, do
     for (auto const& parts : partitioned_parts_list) {
         // a. Let string be the empty String.
-        StringBuilder string;
+        StringBuilder string(StringBuilder::Mode::UTF16);
 
         // b. For each Record { [[Type]], [[Value]], [[Unit]] } part in parts, do
         for (auto const& part : parts) {
@@ -746,7 +746,7 @@ Vector<DurationFormatPart> list_format_parts(VM& vm, DurationFormat const& durat
         }
 
         // c. Append string to strings.
-        strings.unchecked_append(MUST(string.to_string()));
+        strings.unchecked_append(string.to_utf16_string());
     }
 
     // 9. Let formattedPartsList be CreatePartsFromList(lf, strings).
@@ -922,7 +922,7 @@ Vector<DurationFormatPart> partition_duration_format_pattern(VM& vm, DurationFor
 
                 for (auto& part : parts) {
                     // a. Append the Record { [[Type]]: part.[[Type]], [[Value]]: part.[[Value]], [[Unit]]: numberFormatUnit } to list.
-                    list.unchecked_append({ .type = part.type, .value = move(part.value), .unit = number_format_unit.as_string() });
+                    list.unchecked_append({ .type = part.type, .value = move(part.value), .unit = number_format_unit.as_string().view() });
                 }
 
                 // 11. Append list to result.

@@ -20,6 +20,7 @@
 #include <LibGC/Heap.h>
 #include <LibGC/RootVector.h>
 #include <LibJS/CyclicModule.h>
+#include <LibJS/Export.h>
 #include <LibJS/ModuleLoading.h>
 #include <LibJS/Runtime/Agent.h>
 #include <LibJS/Runtime/CommonPropertyNames.h>
@@ -101,7 +102,7 @@ public:
         // Keep this last:
         __Count,
     };
-    String const& error_message(ErrorMessage) const;
+    Utf16String const& error_message(ErrorMessage) const;
 
     bool did_reach_stack_space_limit() const
     {
@@ -195,14 +196,14 @@ public:
 
     StackInfo const& stack_info() const { return m_stack_info; }
 
-    HashMap<String, GC::Ref<Symbol>> const& global_symbol_registry() const { return m_global_symbol_registry; }
-    HashMap<String, GC::Ref<Symbol>>& global_symbol_registry() { return m_global_symbol_registry; }
+    HashMap<Utf16String, GC::Ref<Symbol>> const& global_symbol_registry() const { return m_global_symbol_registry; }
+    HashMap<Utf16String, GC::Ref<Symbol>>& global_symbol_registry() { return m_global_symbol_registry; }
 
     u32 execution_generation() const { return m_execution_generation; }
     void finish_execution_generation() { ++m_execution_generation; }
 
-    ThrowCompletionOr<Reference> resolve_binding(FlyString const&, Environment* = nullptr);
-    ThrowCompletionOr<Reference> get_identifier_reference(Environment*, FlyString, bool strict, size_t hops = 0);
+    ThrowCompletionOr<Reference> resolve_binding(Utf16FlyString const&, Environment* = nullptr);
+    ThrowCompletionOr<Reference> get_identifier_reference(Environment*, Utf16FlyString, bool strict, size_t hops = 0);
 
     // 5.2.3.2 Throw an Exception, https://tc39.es/ecma262/#sec-throw-an-exception
     template<typename T, typename... Args>
@@ -215,15 +216,15 @@ public:
     }
 
     template<typename T>
-    Completion throw_completion(ErrorType type)
+    Completion throw_completion(ErrorType const& type)
     {
-        return throw_completion<T>(String::from_utf8_without_validation(type.message().bytes()));
+        return throw_completion<T>(type.message());
     }
 
     template<typename T, typename... Args>
-    Completion throw_completion(ErrorType type, Args&&... args)
+    Completion throw_completion(ErrorType const& type, Args&&... args)
     {
-        return throw_completion<T>(MUST(String::formatted(type.message(), forward<Args>(args)...)));
+        return throw_completion<T>(Utf16String::formatted(type.format(), forward<Args>(args)...));
     }
 
     Value get_new_target();
@@ -282,7 +283,7 @@ public:
     Function<HashMap<PropertyKey, Value>(SourceTextModule&)> host_get_import_meta_properties;
     Function<void(Object*, SourceTextModule const&)> host_finalize_import_meta;
 
-    Function<Vector<String>()> host_get_supported_import_attributes;
+    Function<Vector<Utf16String>()> host_get_supported_import_attributes;
 
     void set_dynamic_imports_allowed(bool value) { m_dynamic_imports_allowed = value; }
 
@@ -302,7 +303,7 @@ public:
     Vector<StackTraceElement> stack_trace() const;
 
 private:
-    using ErrorMessages = AK::Array<String, to_underlying(ErrorMessage::__Count)>;
+    using ErrorMessages = AK::Array<Utf16String, to_underlying(ErrorMessage::__Count)>;
 
     struct WellKnownSymbols {
 #define __JS_ENUMERATE(SymbolName, snake_name) \
@@ -332,7 +333,7 @@ private:
     StackInfo m_stack_info;
 
     // GlobalSymbolRegistry, https://tc39.es/ecma262/#table-globalsymbolregistry-record-fields
-    HashMap<String, GC::Ref<Symbol>> m_global_symbol_registry;
+    HashMap<Utf16String, GC::Ref<Symbol>> m_global_symbol_registry;
 
     Vector<GC::Ref<GC::Function<ThrowCompletionOr<Value>()>>> m_promise_jobs;
 
@@ -350,7 +351,7 @@ private:
         bool has_once_started_linking { false };
     };
 
-    StoredModule* get_stored_module(ImportedModuleReferrer const& script_or_module, ByteString const& filename, String const& type);
+    StoredModule* get_stored_module(ImportedModuleReferrer const& script_or_module, ByteString const& filename, Utf16String const& type);
 
     Vector<StoredModule> m_loaded_modules;
 

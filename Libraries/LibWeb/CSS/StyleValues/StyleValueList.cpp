@@ -8,6 +8,7 @@
  */
 
 #include "StyleValueList.h"
+#include <LibWeb/CSS/Parser/ComponentValue.h>
 
 namespace Web::CSS {
 
@@ -16,8 +17,22 @@ bool StyleValueList::Properties::operator==(Properties const& other) const
     return separator == other.separator && values.span() == other.values.span();
 }
 
+ValueComparingNonnullRefPtr<StyleValue const> StyleValueList::absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const
+{
+    StyleValueVector absolutized_style_values;
+    absolutized_style_values.ensure_capacity(m_properties.values.size());
+
+    for (auto const& value : m_properties.values)
+        absolutized_style_values.append(value->absolutized(viewport_rect, font_metrics, root_font_metrics));
+
+    return StyleValueList::create(move(absolutized_style_values), m_properties.separator);
+}
+
 String StyleValueList::to_string(SerializationMode mode) const
 {
+    if (m_properties.values.is_empty())
+        return {};
+
     auto separator = ""sv;
     switch (m_properties.separator) {
     case Separator::Space:
@@ -29,6 +44,10 @@ String StyleValueList::to_string(SerializationMode mode) const
     default:
         VERIFY_NOT_REACHED();
     }
+
+    auto first_value = m_properties.values.first();
+    if (all_of(m_properties.values, [&](auto const& property) { return property == first_value; }))
+        return first_value->to_string(mode);
 
     StringBuilder builder;
     for (size_t i = 0; i < m_properties.values.size(); ++i) {
@@ -43,7 +62,25 @@ void StyleValueList::set_style_sheet(GC::Ptr<CSSStyleSheet> style_sheet)
 {
     Base::set_style_sheet(style_sheet);
     for (auto& value : m_properties.values)
-        const_cast<CSSStyleValue&>(*value).set_style_sheet(style_sheet);
+        const_cast<StyleValue&>(*value).set_style_sheet(style_sheet);
+}
+
+Vector<Parser::ComponentValue> StyleValueList::tokenize() const
+{
+    Vector<Parser::ComponentValue> component_values;
+    bool first = true;
+    for (auto const& value : m_properties.values) {
+        if (first) {
+            first = false;
+        } else {
+            if (m_properties.separator == Separator::Comma)
+                component_values.empend(Parser::Token::create(Parser::Token::Type::Comma));
+            component_values.empend(Parser::Token::create_whitespace(" "_string));
+        }
+        component_values.extend(value->tokenize());
+    }
+
+    return component_values;
 }
 
 }

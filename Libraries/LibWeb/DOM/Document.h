@@ -21,24 +21,28 @@
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
 #include <LibUnicode/Forward.h>
+#include <LibWeb/CSS/CSSPropertyRule.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
+#include <LibWeb/CSS/EnvironmentVariable.h>
 #include <LibWeb/CSS/StyleSheetList.h>
 #include <LibWeb/Cookie/Cookie.h>
 #include <LibWeb/DOM/ParentNode.h>
 #include <LibWeb/DOM/ShadowRoot.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CrossOrigin/OpenerPolicy.h>
 #include <LibWeb/HTML/DocumentReadyState.h>
 #include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/History.h>
-#include <LibWeb/HTML/LazyLoadingElement.h>
 #include <LibWeb/HTML/NavigationType.h>
 #include <LibWeb/HTML/SandboxingFlagSet.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/VisibilityState.h>
 #include <LibWeb/InvalidateDisplayList.h>
+#include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/TrustedTypes/InjectionSink.h>
+#include <LibWeb/ViewTransition/ViewTransition.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/WebIDL/ObservableArray.h>
 
@@ -71,6 +75,7 @@ enum class InvalidateLayoutTreeReason {
     X(DocumentElementsFromPoint)           \
     X(DocumentFindMatchingText)            \
     X(DocumentSetDesignMode)               \
+    X(DumpDisplayList)                     \
     X(ElementCheckVisibility)              \
     X(ElementClientHeight)                 \
     X(ElementClientLeft)                   \
@@ -154,10 +159,12 @@ struct ElementCreationOptions {
 
 enum class PolicyControlledFeature : u8 {
     Autoplay,
+    EncryptedMedia,
     FocusWithoutUserActivation,
+    Gamepad,
 };
 
-class Document
+class WEB_API Document
     : public ParentNode
     , public HTML::GlobalEventHandlers {
     WEB_PLATFORM_OBJECT(Document, ParentNode);
@@ -218,7 +225,7 @@ public:
     String referrer() const;
     void set_referrer(String);
 
-    void set_url(const URL::URL& url) { m_url = url; }
+    void set_url(URL::URL const& url);
     URL::URL url() const { return m_url; }
     URL::URL fallback_base_url() const;
     URL::URL base_url() const;
@@ -226,6 +233,7 @@ public:
     void update_base_element(Badge<HTML::HTMLBaseElement>);
     GC::Ptr<HTML::HTMLBaseElement> first_base_element_with_href_in_tree_order() const;
     GC::Ptr<HTML::HTMLBaseElement> first_base_element_with_target_in_tree_order() const;
+    void respond_to_base_url_changes();
 
     String url_string() const { return m_url.to_string(); }
     String document_uri() const { return url_string(); }
@@ -240,7 +248,7 @@ public:
     Optional<String> encoding_parse_and_serialize_url(StringView) const;
 
     CSS::StyleComputer& style_computer() { return *m_style_computer; }
-    const CSS::StyleComputer& style_computer() const { return *m_style_computer; }
+    CSS::StyleComputer const& style_computer() const { return *m_style_computer; }
 
     CSS::StyleSheetList& style_sheets();
     CSS::StyleSheetList const& style_sheets() const;
@@ -304,13 +312,13 @@ public:
 
     WebIDL::ExceptionOr<void> set_body(HTML::HTMLElement* new_body);
 
-    String title() const;
-    WebIDL::ExceptionOr<void> set_title(String const&);
+    Utf16String title() const;
+    WebIDL::ExceptionOr<void> set_title(Utf16String const&);
 
-    HTML::BrowsingContext* browsing_context() { return m_browsing_context.ptr(); }
-    HTML::BrowsingContext const* browsing_context() const { return m_browsing_context.ptr(); }
+    GC::Ptr<HTML::BrowsingContext> browsing_context() { return m_browsing_context; }
+    GC::Ptr<HTML::BrowsingContext const> browsing_context() const { return m_browsing_context; }
 
-    void set_browsing_context(HTML::BrowsingContext*);
+    void set_browsing_context(GC::Ptr<HTML::BrowsingContext>);
 
     Page& page();
     Page const& page() const;
@@ -348,9 +356,6 @@ public:
     Painting::ViewportPaintable const* paintable() const;
     Painting::ViewportPaintable* paintable();
 
-    void schedule_style_update();
-    void schedule_layout_update();
-
     GC::Ref<NodeList> get_elements_by_name(FlyString const&);
 
     GC::Ref<HTMLCollection> applets();
@@ -378,10 +383,10 @@ public:
     WebIDL::ExceptionOr<GC::Ref<Element>> create_element(String const& local_name, Variant<String, ElementCreationOptions> const& options);
     WebIDL::ExceptionOr<GC::Ref<Element>> create_element_ns(Optional<FlyString> const& namespace_, String const& qualified_name, Variant<String, ElementCreationOptions> const& options);
     GC::Ref<DocumentFragment> create_document_fragment();
-    GC::Ref<Text> create_text_node(String const& data);
-    WebIDL::ExceptionOr<GC::Ref<CDATASection>> create_cdata_section(String const& data);
-    GC::Ref<Comment> create_comment(String const& data);
-    WebIDL::ExceptionOr<GC::Ref<ProcessingInstruction>> create_processing_instruction(String const& target, String const& data);
+    GC::Ref<Text> create_text_node(Utf16String data);
+    WebIDL::ExceptionOr<GC::Ref<CDATASection>> create_cdata_section(Utf16String data);
+    GC::Ref<Comment> create_comment(Utf16String data);
+    WebIDL::ExceptionOr<GC::Ref<ProcessingInstruction>> create_processing_instruction(String const& target, Utf16String data);
 
     WebIDL::ExceptionOr<GC::Ref<Attr>> create_attribute(String const& local_name);
     WebIDL::ExceptionOr<GC::Ref<Attr>> create_attribute_ns(Optional<FlyString> const& namespace_, String const& qualified_name);
@@ -410,6 +415,9 @@ public:
     bool in_limited_quirks_mode() const { return m_quirks_mode == QuirksMode::Limited; }
     void set_quirks_mode(QuirksMode mode) { m_quirks_mode = mode; }
 
+    bool parser_cannot_change_the_mode() const { return m_parser_cannot_change_the_mode; }
+    void set_parser_cannot_change_the_mode(bool parser_cannot_change_the_mode) { m_parser_cannot_change_the_mode = parser_cannot_change_the_mode; }
+
     Type document_type() const { return m_type; }
     void set_document_type(Type type) { m_type = type; }
 
@@ -428,10 +436,10 @@ public:
 
     void set_editable(bool editable) { m_editable = editable; }
 
-    Element* focused_element() { return m_focused_element.ptr(); }
-    Element const* focused_element() const { return m_focused_element.ptr(); }
-
-    void set_focused_element(GC::Ptr<Element>);
+    // // https://html.spec.whatwg.org/multipage/interaction.html#focused-area-of-the-document
+    GC::Ptr<Node> focused_area() { return m_focused_area; }
+    GC::Ptr<Node const> focused_area() const { return m_focused_area; }
+    void set_focused_area(GC::Ptr<Node>);
 
     HTML::FocusTrigger last_focus_trigger() const { return m_last_focus_trigger; }
     void set_last_focus_trigger(HTML::FocusTrigger trigger) { m_last_focus_trigger = trigger; }
@@ -540,6 +548,7 @@ public:
     void run_the_scroll_steps();
 
     void evaluate_media_queries_and_report_changes();
+    void set_needs_media_query_evaluation() { m_needs_media_query_evaluation = true; }
     void add_media_query_list(GC::Ref<CSS::MediaQueryList>);
 
     GC::Ref<CSS::VisualViewport> visual_viewport();
@@ -666,7 +675,7 @@ public:
     void set_previous_document_unload_timing(DocumentUnloadTimingInfo const& previous_document_unload_timing) { m_previous_document_unload_timing = previous_document_unload_timing; }
 
     // https://w3c.github.io/editing/docs/execCommand/
-    WebIDL::ExceptionOr<bool> exec_command(FlyString const& command, bool show_ui, String const& value);
+    WebIDL::ExceptionOr<bool> exec_command(FlyString const& command, bool show_ui, Utf16String const& value);
     WebIDL::ExceptionOr<bool> query_command_enabled(FlyString const& command);
     WebIDL::ExceptionOr<bool> query_command_indeterm(FlyString const& command);
     WebIDL::ExceptionOr<bool> query_command_state(FlyString const& command);
@@ -832,6 +841,7 @@ public:
     void set_needs_display(InvalidateDisplayList = InvalidateDisplayList::Yes);
     void set_needs_display(CSSPixelRect const&, InvalidateDisplayList = InvalidateDisplayList::Yes);
 
+    RefPtr<Painting::DisplayList> cached_display_list() const;
     RefPtr<Painting::DisplayList> record_display_list(HTML::PaintConfig);
 
     void invalidate_display_list();
@@ -850,6 +860,23 @@ public:
 
     [[nodiscard]] WebIDL::CallbackType* onvisibilitychange();
     void set_onvisibilitychange(WebIDL::CallbackType*);
+
+    // https://drafts.csswg.org/css-view-transitions-1/#dom-document-startviewtransition
+    GC::Ptr<ViewTransition::ViewTransition> start_view_transition(ViewTransition::ViewTransitionUpdateCallback update_callback);
+    // https://drafts.csswg.org/css-view-transitions-1/#perform-pending-transition-operations
+    void perform_pending_transition_operations();
+    // https://drafts.csswg.org/css-view-transitions-1/#flush-the-update-callback-queue
+    void flush_the_update_callback_queue();
+    // https://drafts.csswg.org/css-view-transitions-1/#view-transition-page-visibility-change-steps
+    void view_transition_page_visibility_change_steps();
+
+    GC::Ptr<ViewTransition::ViewTransition> active_view_transition() const { return m_active_view_transition; }
+    void set_active_view_transition(GC::Ptr<ViewTransition::ViewTransition> view_transition) { m_active_view_transition = view_transition; }
+    bool rendering_suppression_for_view_transitions() const { return m_rendering_suppression_for_view_transitions; }
+    void set_rendering_suppression_for_view_transitions(bool value) { m_rendering_suppression_for_view_transitions = value; }
+    GC::Ptr<CSS::CSSStyleSheet> dynamic_view_transition_style_sheet() const { return m_dynamic_view_transition_style_sheet; }
+    void set_show_view_transition_tree(bool value) { m_show_view_transition_tree = value; }
+    Vector<GC::Ptr<ViewTransition::ViewTransition>>& update_callback_queue() { return m_update_callback_queue; }
 
     void reset_cursor_blink_cycle();
 
@@ -870,8 +897,8 @@ public:
     void reset_command_state_overrides() { m_command_state_override.clear(); }
 
     // https://w3c.github.io/editing/docs/execCommand/#value-override
-    Optional<String const&> command_value_override(FlyString const& command) const { return m_command_value_override.get(command); }
-    void set_command_value_override(FlyString const& command, String const& value);
+    Optional<Utf16String const&> command_value_override(FlyString const& command) const { return m_command_value_override.get(command); }
+    void set_command_value_override(FlyString const& command, Utf16String const& value);
     void clear_command_value_override(FlyString const& command);
     void reset_command_value_overrides() { m_command_value_override.clear(); }
 
@@ -902,6 +929,17 @@ public:
 
     auto& script_blocking_style_sheet_set() { return m_script_blocking_style_sheet_set; }
     auto const& script_blocking_style_sheet_set() const { return m_script_blocking_style_sheet_set; }
+
+    String dump_display_list();
+
+    StyleInvalidator& style_invalidator() { return m_style_invalidator; }
+
+    Optional<Vector<CSS::Parser::ComponentValue>> environment_variable_value(CSS::EnvironmentVariable, Span<i64> indices = {}) const;
+
+    // https://www.w3.org/TR/css-properties-values-api-1/#dom-window-registeredpropertyset-slot
+    HashMap<FlyString, GC::Ref<Web::CSS::CSSPropertyRule>>& registered_custom_properties();
+
+    NonnullRefPtr<CSS::StyleValue const> custom_property_initial_value(FlyString const& name) const;
 
 protected:
     virtual void initialize(JS::Realm&) override;
@@ -955,10 +993,10 @@ private:
     void run_csp_initialization() const;
 
     GC::Ref<Page> m_page;
-    OwnPtr<CSS::StyleComputer> m_style_computer;
+    GC::Ptr<CSS::StyleComputer> m_style_computer;
     GC::Ptr<CSS::StyleSheetList> m_style_sheets;
     GC::Ptr<Node> m_active_favicon;
-    WeakPtr<HTML::BrowsingContext> m_browsing_context;
+    GC::Ptr<HTML::BrowsingContext> m_browsing_context;
     URL::URL m_url;
     mutable OwnPtr<ElementByIdMap> m_element_by_id;
 
@@ -996,12 +1034,16 @@ private:
 
     QuirksMode m_quirks_mode { QuirksMode::No };
 
+    bool m_parser_cannot_change_the_mode { false };
+
     // https://dom.spec.whatwg.org/#concept-document-type
     Type m_type { Type::XML };
 
     bool m_editable { false };
 
-    GC::Ptr<Element> m_focused_element;
+    // https://html.spec.whatwg.org/multipage/interaction.html#focused-area-of-the-document
+    GC::Ptr<Node> m_focused_area;
+
     HTML::FocusTrigger m_last_focus_trigger { HTML::FocusTrigger::Other };
 
     GC::Ptr<Element> m_active_element;
@@ -1063,6 +1105,7 @@ private:
     Vector<GC::Ref<EventTarget>> m_pending_scrollend_event_targets;
 
     // Used by evaluate_media_queries_and_report_changes().
+    bool m_needs_media_query_evaluation { false };
     Vector<WeakPtr<CSS::MediaQueryList>> m_media_query_lists;
 
     bool m_needs_full_style_update { false };
@@ -1072,7 +1115,9 @@ private:
 
     HashTable<GC::Ptr<NodeIterator>> m_node_iterators;
 
-    HashTable<GC::Ref<DocumentObserver>> m_document_observers;
+    // Document should not visit DocumentObserver to avoid leaks.
+    // It's responsibility of object that requires DocumentObserver to keep it alive.
+    HashTable<GC::RawRef<DocumentObserver>> m_document_observers;
     Vector<GC::Ref<DocumentObserver>> m_document_observers_being_notified;
 
     // https://html.spec.whatwg.org/multipage/dom.html#is-initial-about:blank
@@ -1146,7 +1191,7 @@ private:
     // Each Document has a lazy load intersection observer, initially set to null but can be set to an IntersectionObserver instance.
     GC::Ptr<IntersectionObserver::IntersectionObserver> m_lazy_load_intersection_observer;
 
-    Vector<GC::Ref<ResizeObserver::ResizeObserver>> m_resize_observers;
+    ResizeObserver::ResizeObserver::ResizeObserversList m_resize_observers;
 
     // https://html.spec.whatwg.org/multipage/semantics.html#will-declaratively-refresh
     // A Document object has an associated will declaratively refresh (a boolean). It is initially false.
@@ -1170,7 +1215,6 @@ private:
 
     // https://www.w3.org/TR/web-animations-1/#pending-animation-event-queue
     Vector<PendingAnimationEvent> m_pending_animation_event_queue;
-    RefPtr<Core::Timer> m_animation_driver_timer;
 
     // https://drafts.csswg.org/css-transitions-2/#current-transition-generation
     size_t m_transition_generation { 0 };
@@ -1190,6 +1234,8 @@ private:
 
     mutable GC::Ptr<WebIDL::ObservableArray> m_adopted_style_sheets;
 
+    // Document should not visit ShadowRoot list to avoid leaks.
+    // It's responsibility of object that allocated ShadowRoot to keep it alive.
     ShadowRoot::DocumentShadowRootList m_shadow_roots;
 
     Optional<AK::UnixDateTime> m_last_modified;
@@ -1248,7 +1294,7 @@ private:
     HashMap<FlyString, bool> m_command_state_override;
 
     // https://w3c.github.io/editing/docs/execCommand/#value-override
-    HashMap<FlyString, String> m_command_value_override;
+    HashMap<FlyString, Utf16String> m_command_value_override;
 
     // https://html.spec.whatwg.org/multipage/webstorage.html#session-storage-holder
     // A Document object has an associated session storage holder, which is null or a Storage object. It is initially null.
@@ -1261,10 +1307,32 @@ private:
     // https://html.spec.whatwg.org/multipage/dom.html#render-blocking-element-set
     HashTable<GC::Ref<Element>> m_render_blocking_elements;
 
+    // https://drafts.csswg.org/css-view-transitions-1/#document-active-view-transition
+    GC::Ptr<ViewTransition::ViewTransition> m_active_view_transition;
+
+    // https://drafts.csswg.org/css-view-transitions-1/#document-rendering-suppression-for-view-transitions
+    bool m_rendering_suppression_for_view_transitions { false };
+
+    // https://drafts.csswg.org/css-view-transitions-1/#document-dynamic-view-transition-style-sheet
+    GC::Ptr<CSS::CSSStyleSheet> m_dynamic_view_transition_style_sheet;
+
+    // https://drafts.csswg.org/css-view-transitions-1/#document-show-view-transition-tree
+    bool m_show_view_transition_tree { false };
+
+    // https://drafts.csswg.org/css-view-transitions-1/#document-update-callback-queue
+    Vector<GC::Ptr<ViewTransition::ViewTransition>> m_update_callback_queue = {};
+
     HashTable<WeakPtr<Node>> m_pending_nodes_for_style_invalidation_due_to_presence_of_has;
+
+    GC::Ref<StyleInvalidator> m_style_invalidator;
+
+    // https://www.w3.org/TR/css-properties-values-api-1/#dom-window-registeredpropertyset-slot
+    HashMap<FlyString, GC::Ref<Web::CSS::CSSPropertyRule>> m_registered_custom_properties;
 };
 
 template<>
 inline bool Node::fast_is<Document>() const { return is_document(); }
+
+bool is_a_registrable_domain_suffix_of_or_is_equal_to(StringView host_suffix_string, URL::Host const& original_host);
 
 }

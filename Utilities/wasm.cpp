@@ -9,42 +9,41 @@
 #include <AK/Hex.h>
 #include <AK/MemoryStream.h>
 #include <AK/StackInfo.h>
+#include <AK/Utf16String.h>
 #include <LibCore/ArgsParser.h>
+#include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
 #include <LibCore/MappedFile.h>
+#include <LibCrypto/BigInt/SignedBigInteger.h>
 #include <LibFileSystem/FileSystem.h>
-#include <LibLine/Editor.h>
+#include <LibJS/Bytecode/Interpreter.h>
+#include <LibJS/Runtime/AbstractOperations.h>
+#include <LibJS/Runtime/BigInt.h>
+#include <LibJS/Runtime/VM.h>
+#include <LibJS/Script.h>
+#if !defined(AK_OS_WINDOWS)
+#    include <LibLine/Editor.h>
+#endif
 #include <LibMain/Main.h>
 #include <LibWasm/AbstractMachine/AbstractMachine.h>
 #include <LibWasm/AbstractMachine/BytecodeInterpreter.h>
 #include <LibWasm/Printer/Printer.h>
 #include <LibWasm/Types.h>
-#include <LibWasm/Wasi.h>
+#if !defined(AK_OS_WINDOWS)
+#    include <LibWasm/Wasi.h>
+#endif
 #include <math.h>
 #include <signal.h>
-#include <unistd.h>
 
-RefPtr<Line::Editor> g_line_editor;
 static OwnPtr<Stream> g_stdout {};
 static OwnPtr<Wasm::Printer> g_printer {};
-static bool g_continue { false };
-static void (*old_signal)(int);
 static StackInfo g_stack_info;
-static Wasm::DebuggerBytecodeInterpreter g_interpreter(g_stack_info);
+static Wasm::BytecodeInterpreter g_interpreter(g_stack_info);
 
 struct ParsedValue {
     Wasm::Value value;
     Wasm::ValueType type;
 };
-
-static void sigint_handler(int)
-{
-    if (!g_continue) {
-        signal(SIGINT, old_signal);
-        kill(getpid(), SIGINT);
-    }
-    g_continue = false;
-}
 
 static Optional<u128> convert_to_uint(StringView string)
 {
@@ -259,239 +258,6 @@ static ErrorOr<ParsedValue> parse_value(StringView spec)
     return Error::from_string_literal("Invalid value");
 }
 
-static bool post_interpret_hook(Wasm::Configuration&, Wasm::InstructionPointer& ip, Wasm::Instruction const& instr, Wasm::Interpreter const& interpreter)
-{
-    if (interpreter.did_trap()) {
-        g_continue = false;
-        warnln("Trapped when executing ip={}", ip);
-        g_printer->print(instr);
-        warnln("Trap reason: {}", interpreter.trap().format());
-        const_cast<Wasm::Interpreter&>(interpreter).clear_trap();
-    }
-    return true;
-}
-
-static bool pre_interpret_hook(Wasm::Configuration& config, Wasm::InstructionPointer& ip, Wasm::Instruction const& instr)
-{
-    static bool always_print_stack = false;
-    static bool always_print_instruction = false;
-    if (always_print_stack)
-        config.dump_stack();
-    if (always_print_instruction) {
-        g_stdout->write_until_depleted(ByteString::formatted("{:0>4} ", ip.value())).release_value_but_fixme_should_propagate_errors();
-        g_printer->print(instr);
-    }
-    if (g_continue)
-        return true;
-    g_stdout->write_until_depleted(ByteString::formatted("{:0>4} ", ip.value())).release_value_but_fixme_should_propagate_errors();
-    g_printer->print(instr);
-    ByteString last_command = "";
-    for (;;) {
-        auto result = g_line_editor->get_line("> ");
-        if (result.is_error()) {
-            return false;
-        }
-        auto str = result.release_value();
-        g_line_editor->add_to_history(str);
-        if (str.is_empty())
-            str = last_command;
-        else
-            last_command = str;
-        auto args = str.split_view(' ');
-        if (args.is_empty())
-            continue;
-        auto& cmd = args[0];
-        if (cmd.is_one_of("h", "help")) {
-            warnln("Wasm shell commands");
-            warnln("Toplevel:");
-            warnln("- [s]tep                     Run one instruction");
-            warnln("- next                       Alias for step");
-            warnln("- [c]ontinue                 Execute until a trap or the program exit point");
-            warnln("- [p]rint <args...>          Print various things (see section on print)");
-            warnln("- call <fn> <args...>        Call the function <fn> with the given arguments");
-            warnln("- set <args...>              Set shell option (see section on settings)");
-            warnln("- unset <args...>            Unset shell option (see section on settings)");
-            warnln("- [h]elp                     Print this help");
-            warnln();
-            warnln("Print:");
-            warnln("- print [s]tack              Print the contents of the stack, including frames and labels");
-            warnln("- print [[m]em]ory <index>   Print the contents of the memory identified by <index>");
-            warnln("- print [[i]nstr]uction      Print the current instruction");
-            warnln("- print [[f]unc]tion <index> Print the function identified by <index>");
-            warnln();
-            warnln("Settings:");
-            warnln("- set print stack            Make the shell print the stack on every instruction executed");
-            warnln("- set print [instr]uction    Make the shell print the instruction that will be executed next");
-            warnln();
-            continue;
-        }
-        if (cmd.is_one_of("s", "step", "next")) {
-            return true;
-        }
-        if (cmd.is_one_of("p", "print")) {
-            if (args.size() < 2) {
-                warnln("Print what?");
-                continue;
-            }
-            auto& what = args[1];
-            if (what.is_one_of("s", "stack")) {
-                config.dump_stack();
-                continue;
-            }
-            if (what.is_one_of("m", "mem", "memory")) {
-                if (args.size() < 3) {
-                    warnln("print what memory?");
-                    continue;
-                }
-                auto value = args[2].to_number<u64>();
-                if (!value.has_value()) {
-                    warnln("invalid memory index {}", args[2]);
-                    continue;
-                }
-                auto mem = config.store().get(Wasm::MemoryAddress(value.value()));
-                if (!mem) {
-                    warnln("invalid memory index {} (not found)", args[2]);
-                    continue;
-                }
-                warnln("{:>32hex-dump}", mem->data().bytes());
-                continue;
-            }
-            if (what.is_one_of("i", "instr", "instruction")) {
-                g_printer->print(instr);
-                continue;
-            }
-            if (what.is_one_of("f", "func", "function")) {
-                if (args.size() < 3) {
-                    warnln("print what function?");
-                    continue;
-                }
-                auto value = args[2].to_number<u64>();
-                if (!value.has_value()) {
-                    warnln("invalid function index {}", args[2]);
-                    continue;
-                }
-                auto fn = config.store().get(Wasm::FunctionAddress(value.value()));
-                if (!fn) {
-                    warnln("invalid function index {} (not found)", args[2]);
-                    continue;
-                }
-                if (auto* fn_value = fn->get_pointer<Wasm::HostFunction>()) {
-                    warnln("Host function at {:p}", &fn_value->function());
-                    continue;
-                }
-                if (auto* fn_value = fn->get_pointer<Wasm::WasmFunction>()) {
-                    g_printer->print(fn_value->code());
-                    continue;
-                }
-            }
-        }
-        if (cmd == "call"sv) {
-            if (args.size() < 2) {
-                warnln("call what?");
-                continue;
-            }
-            Optional<Wasm::FunctionAddress> address;
-            auto index = args[1].to_number<u64>();
-            if (index.has_value()) {
-                address = config.frame().module().functions()[index.value()];
-            } else {
-                auto& name = args[1];
-                for (auto& export_ : config.frame().module().exports()) {
-                    if (export_.name() == name) {
-                        if (auto addr = export_.value().get_pointer<Wasm::FunctionAddress>()) {
-                            address = *addr;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (!address.has_value()) {
-            failed_to_find:;
-                warnln("Could not find a function {}", args[1]);
-                continue;
-            }
-
-            auto fn = config.store().get(*address);
-            if (!fn)
-                goto failed_to_find;
-
-            auto type = fn->visit([&](auto& value) { return value.type(); });
-            if (type.parameters().size() + 2 != args.size()) {
-                warnln("Expected {} arguments for call, but found only {}", type.parameters().size(), args.size() - 2);
-                continue;
-            }
-            Vector<ParsedValue> values_to_push;
-            Vector<Wasm::Value> values;
-            auto ok = true;
-            for (size_t index = 2; index < args.size(); ++index) {
-                auto r = parse_value(args[index]);
-                if (r.is_error()) {
-                    warnln("Failed to parse argument {}: {}", args[index], r.error());
-                    ok = false;
-                    break;
-                }
-                values_to_push.append(r.release_value());
-            }
-            if (!ok)
-                continue;
-            for (auto& param : type.parameters()) {
-                auto v = values_to_push.take_last();
-                if (v.type != param) {
-                    warnln("Type mismatch in argument: expected {}, but got {}", Wasm::ValueType::kind_name(param.kind()), Wasm::ValueType::kind_name(v.type.kind()));
-                    ok = false;
-                    break;
-                }
-                values.append(v.value);
-            }
-            if (!ok)
-                continue;
-
-            Wasm::Result result { Wasm::Trap::from_string("") };
-            {
-                Wasm::BytecodeInterpreter::CallFrameHandle handle { g_interpreter, config };
-                result = config.call(g_interpreter, *address, move(values));
-            }
-            if (result.is_trap()) {
-                warnln("Execution trapped: {}", result.trap().format());
-            } else {
-                if (!result.values().is_empty())
-                    warnln("Returned:");
-                size_t index = 0;
-                for (auto& value : result.values()) {
-                    g_stdout->write_until_depleted("  -> "sv.bytes()).release_value_but_fixme_should_propagate_errors();
-                    g_printer->print(value, type.results()[index]);
-                    ++index;
-                }
-            }
-            continue;
-        }
-        if (cmd.is_one_of("set", "unset")) {
-            auto value = !cmd.starts_with('u');
-            if (args.size() < 3) {
-                warnln("(un)set what (to what)?");
-                continue;
-            }
-            if (args[1] == "print"sv) {
-                if (args[2] == "stack"sv)
-                    always_print_stack = value;
-                else if (args[2].is_one_of("instr", "instruction"))
-                    always_print_instruction = value;
-                else
-                    warnln("Unknown print category '{}'", args[2]);
-                continue;
-            }
-            warnln("Unknown set category '{}'", args[1]);
-            continue;
-        }
-        if (cmd.is_one_of("c", "continue")) {
-            g_continue = true;
-            return true;
-        }
-        warnln("Command not understood: {}", cmd);
-    }
-}
-
 static RefPtr<Wasm::Module> parse(StringView filename)
 {
     auto result = Core::MappedFile::map(filename);
@@ -515,30 +281,241 @@ static void print_link_error(Wasm::LinkError const& error)
         warnln("Missing import '{}'", missing);
 }
 
+template<typename T>
+static ErrorOr<T, Wasm::Result> trap_for_js_exception(JS::VM& vm, JS::ThrowCompletionOr<T> const& result)
+{
+    if (!result.is_error())
+        return result.value();
+
+    auto const& completion = result.error();
+    auto& exception = completion.value();
+    warnln("JS exception: {}", MUST(exception.to_string(vm)));
+    return Wasm::Trap { ByteString("JS exception") };
+}
+
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
 {
     StringView filename;
     bool print = false;
+    bool print_compiled = false;
     bool attempt_instantiate = false;
-    bool debug = false;
     bool export_all_imports = false;
-    bool shell_mode = false;
-    bool wasi = false;
+    [[maybe_unused]] bool wasi = false;
+    Optional<u64> specific_function_address;
     ByteString exported_function_to_execute;
     Vector<ParsedValue> values_to_push;
     Vector<ByteString> modules_to_link_in;
     Vector<StringView> args_if_wasi;
     Vector<StringView> wasi_preopened_mappings;
+    HashMap<Wasm::Linker::Name, Wasm::ExternValue> js_exports;
+
+    Wasm::AbstractMachine machine;
+    auto vm = JS::VM::create();
+    auto root_execution_context = JS::create_simple_execution_context<JS::GlobalObject>(*vm);
+    auto& realm = *root_execution_context->realm;
 
     Core::ArgsParser parser;
     parser.add_positional_argument(filename, "File name to parse", "file");
-    parser.add_option(debug, "Open a debugger", "debug", 'd');
     parser.add_option(print, "Print the parsed module", "print", 'p');
+    parser.add_option(print_compiled, "Print the compiled module", "print-compiled");
+    parser.add_option(specific_function_address, "Optional compiled function address to print", "print-function", 'f', "address");
     parser.add_option(attempt_instantiate, "Attempt to instantiate the module", "instantiate", 'i');
     parser.add_option(exported_function_to_execute, "Attempt to execute the named exported function from the module (implies -i)", "execute", 'e', "name");
     parser.add_option(export_all_imports, "Export noop functions corresponding to imports", "export-noop");
-    parser.add_option(shell_mode, "Launch a REPL in the module's context (implies -i)", "shell", 's');
+#if !defined(AK_OS_WINDOWS)
     parser.add_option(wasi, "Enable WASI", "wasi", 'w');
+#endif
+    parser.add_option(Core::ArgsParser::Option {
+        .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
+        .help_string = "Export js `function(arg...) { source }` returning T as [module].[function]",
+        .long_name = "export-js",
+        .short_name = 0,
+        .value_name = "module.function(arg:T...):T=source",
+        .accept_value = [&](StringView str) {
+            GenericLexer lexer(str);
+            // [module] <.> [function] <(> {[name] <:> [type]} <)> (<:> [type])? <=> [text]
+            auto module = lexer.consume_until('.');
+            if (!lexer.consume_specific('.')) {
+                warnln("Invalid JS export module in '{}'", str);
+                return false;
+            }
+            auto fn_name = lexer.consume_until(is_any_of("(=:"sv));
+            struct Arg {
+                Wasm::ValueType::Kind type;
+                StringView name;
+            };
+            Vector<Arg> formal_params;
+            if (lexer.consume_specific('(')) {
+                while (!lexer.consume_specific(')')) {
+                    auto name = lexer.consume_until(is_any_of(",:)"sv));
+                    if (name.is_empty()) {
+                        warnln("Invalid JS export argument name in '{}'", str);
+                        return false;
+                    }
+                    auto type = Wasm::ValueType::I32;
+                    if (lexer.consume_specific(':')) {
+                        if (lexer.consume_specific("i32"sv)) {
+                            type = Wasm::ValueType::I32;
+                        } else if (lexer.consume_specific("i64"sv)) {
+                            type = Wasm::ValueType::I64;
+                        } else if (lexer.consume_specific("f32"sv)) {
+                            type = Wasm::ValueType::F32;
+                        } else if (lexer.consume_specific("f64"sv)) {
+                            type = Wasm::ValueType::F64;
+                        } else if (lexer.consume_specific("v128"sv)) {
+                            type = Wasm::ValueType::V128;
+                        } else {
+                            warnln("Invalid JS export argument type in '{}'", str);
+                            return false;
+                        }
+                    }
+                    formal_params.append(Arg { type, name });
+                    lexer.consume_specific(',');
+                }
+            }
+            Vector<Wasm::ValueType::Kind> returns;
+            if (lexer.consume_specific(':')) {
+                if (lexer.consume_specific("i32"sv)) {
+                    returns.append(Wasm::ValueType::I32);
+                } else if (lexer.consume_specific("i64"sv)) {
+                    returns.append(Wasm::ValueType::I64);
+                } else if (lexer.consume_specific("f32"sv)) {
+                    returns.append(Wasm::ValueType::F32);
+                } else if (lexer.consume_specific("f64"sv)) {
+                    returns.append(Wasm::ValueType::F64);
+                } else if (lexer.consume_specific("v128"sv)) {
+                    returns.append(Wasm::ValueType::V128);
+                } else {
+                    warnln("Invalid JS export return type in '{}'", str);
+                    return false;
+                }
+            }
+
+            if (!lexer.consume_specific('=') || lexer.is_eof()) {
+                warnln("Invalid JS export source in '{}'", str);
+                return false;
+            }
+
+            auto source_text = lexer.consume_all().trim_whitespace();
+            StringBuilder builder;
+            builder.append("("sv);
+            auto first = true;
+            for (auto& arg : formal_params) {
+                if (!first)
+                    builder.append(", "sv);
+                first = false;
+                builder.append(arg.name);
+            }
+            builder.appendff(") => {}", source_text);
+            auto js_function = builder.to_byte_string();
+            auto name = ByteString::formatted("{}.{}", module, fn_name);
+            auto script = JS::Script::parse(js_function, realm, name);
+            if (script.is_error()) {
+                warnln("Failed to parse JS export source '{}':", js_function);
+                return false;
+            }
+
+            auto js_script = script.release_value();
+            JS::Bytecode::Interpreter interp(vm);
+            auto maybe_function = interp.run(*js_script);
+            if (maybe_function.is_error()) {
+                warnln("Failed to run JS export source '{}'", js_function);
+                return false;
+            }
+            auto function_val = maybe_function.release_value();
+            if (!function_val.is_function()) {
+                warnln("JS export source '{}' did not parse as a function", js_function);
+                return false;
+            }
+
+            auto& function = function_val.as_function();
+
+            Vector<Wasm::ValueType> results;
+            Vector<Wasm::ValueType> params;
+            for (auto& type : returns)
+                results.append(Wasm::ValueType(type));
+            for (auto& arg : formal_params)
+                params.append(Wasm::ValueType(arg.type));
+
+            Wasm::FunctionType function_type = { move(params), move(results) };
+            auto host_function = Wasm::HostFunction {
+                [&vm, &function, formal_params, returns, name](Wasm::Configuration&, Vector<Wasm::Value>& args) mutable -> Wasm::Result {
+                    Vector<JS::Value> js_args;
+                    js_args.ensure_capacity(args.size());
+                    for (size_t i = 0; i < formal_params.size(); ++i) {
+                        auto type = formal_params[i].type;
+                        if (i >= args.size()) {
+                            warnln("Not enough arguments provided to JS export function '{}'", name);
+                            return Wasm::Trap { ByteString("Not enough arguments") };
+                        }
+                        auto& arg = args[i];
+                        switch (type) {
+                        case Wasm::ValueType::I32:
+                            js_args.append(JS::Value(arg.to<u32>()));
+                            break;
+                        case Wasm::ValueType::I64:
+                            js_args.append(JS::Value(arg.to<u64>()));
+                            break;
+                        case Wasm::ValueType::F32:
+                            js_args.append(JS::Value(arg.to<f32>()));
+                            break;
+                        case Wasm::ValueType::F64:
+                            js_args.append(JS::Value(arg.to<f64>()));
+                            break;
+                        case Wasm::ValueType::V128: {
+                            auto value = arg.to<u128>();
+                            ReadonlyBytes data { bit_cast<u8 const*>(&value), sizeof(u128) };
+                            js_args.append(vm->heap().allocate<JS::BigInt>(Crypto::SignedBigInteger { Crypto::UnsignedBigInteger { data } }));
+                            break;
+                        }
+                        default:
+                            warnln("Unsupported argument type '{}' for JS export function '{}'", Wasm::ValueType::kind_name(type), name);
+                            return Wasm::Trap { ByteString("Unsupported argument type") };
+                        }
+                    }
+                    auto result = TRY(trap_for_js_exception(vm, JS::call(vm, function, JS::js_null(), js_args.span())));
+                    if (returns.is_empty())
+                        return Wasm::Result { Vector<Wasm::Value> {} };
+
+                    if (returns.size() != 1)
+                        return Wasm::Trap { ByteString("NYI") };
+
+                    switch (returns[0]) {
+                    case Wasm::ValueType::I32:
+                        return Wasm::Result { Vector<Wasm::Value> { Wasm::Value { TRY(trap_for_js_exception(*vm, result.to_u32(vm))) } } };
+                    case Wasm::ValueType::I64:
+                        return Wasm::Result { Vector<Wasm::Value> { Wasm::Value { TRY(trap_for_js_exception(*vm, result.to_bigint_uint64(vm))) } } };
+                    case Wasm::ValueType::F32:
+                        return Wasm::Result { Vector<Wasm::Value> { Wasm::Value { static_cast<f32>(TRY(trap_for_js_exception(*vm, result.to_double(vm)))) } } };
+                    case Wasm::ValueType::F64:
+                        return Wasm::Result { Vector<Wasm::Value> { Wasm::Value { TRY(trap_for_js_exception(*vm, result.to_double(vm))) } } };
+                    case Wasm::ValueType::V128: {
+                        auto value = TRY(trap_for_js_exception(*vm, result.to_bigint(vm)));
+                        u128 out {};
+                        Bytes data { bit_cast<u8*>(&out), sizeof(u128) };
+                        if (value->big_integer().unsigned_value().export_data(data).size() != data.size()) {
+                            dbgln("JS export function '{}' returned a v128 value that is not 128 bits wide", name);
+                            return Wasm::Trap { ByteString("Invalid v128 value") };
+                        }
+                        return Wasm::Result { Vector<Wasm::Value> { Wasm::Value { out } } };
+                    }
+                    default:
+                        warnln("Unsupported return type for JS export function '{}'", name);
+                        return Wasm::Trap { ByteString("Unsupported return type") };
+                    }
+                },
+                function_type,
+                name,
+            };
+            auto host_function_instance = machine.store().allocate(move(host_function));
+            if (!host_function_instance.has_value()) {
+                warnln("Failed to allocate host function instance for '{}'", name);
+                return false;
+            }
+            js_exports.set({ .module = module, .name = fn_name, .type = function_type }, *host_function_instance);
+            return true;
+        },
+    });
     parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
         .help_string = "Directory mappings to expose via WASI",
@@ -586,20 +563,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     parser.add_positional_argument(args_if_wasi, "Arguments to pass to the WASI module", "args", Core::ArgsParser::Required::No);
     parser.parse(arguments);
 
-    if (shell_mode) {
-        debug = true;
-        attempt_instantiate = true;
-    }
-
-    if (!shell_mode && debug && exported_function_to_execute.is_empty()) {
-        warnln("Debug what? (pass -e fn)");
-        return 1;
-    }
-
-    if (debug || shell_mode) {
-        old_signal = signal(SIGINT, sigint_handler);
-    }
-
     if (!exported_function_to_execute.is_empty())
         attempt_instantiate = true;
 
@@ -615,8 +578,8 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         printer.print(*parse_result);
     }
 
-    if (attempt_instantiate) {
-        Wasm::AbstractMachine machine;
+    if (attempt_instantiate || print_compiled) {
+#if !defined(AK_OS_WINDOWS)
         Optional<Wasm::Wasi::Implementation> wasi_impl;
 
         if (wasi) {
@@ -644,14 +607,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                     return paths; },
             });
         }
+#endif
 
         Core::EventLoop main_loop;
-        if (debug) {
-            g_line_editor = Line::Editor::construct();
-            g_interpreter.pre_interpret_hook = pre_interpret_hook;
-            g_interpreter.post_interpret_hook = post_interpret_hook;
-        }
-
         // First, resolve the linked modules
         Vector<NonnullOwnPtr<Wasm::ModuleInstance>> linked_instances;
         Vector<NonnullRefPtr<Wasm::Module>> linked_modules;
@@ -683,6 +641,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         for (auto& instance : linked_instances)
             linker.link(*instance);
 
+#if !defined(AK_OS_WINDOWS)
         if (wasi) {
             HashMap<Wasm::Linker::Name, Wasm::ExternValue> wasi_exports;
             for (auto& entry : linker.unresolved_imports()) {
@@ -699,6 +658,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
             linker.link(wasi_exports);
         }
+#endif
+
+        linker.link(js_exports);
 
         if (export_all_imports) {
             HashMap<Wasm::Linker::Name, Wasm::ExternValue> exports;
@@ -745,6 +707,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             print_link_error(link_result.error());
             return 1;
         }
+
         auto result = machine.instantiate(*parse_result, link_result.release_value());
         if (result.is_error()) {
             warnln("Module instantiation failed: {}", result.error().error);
@@ -752,20 +715,82 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         }
         auto module_instance = result.release_value();
 
-        auto launch_repl = [&] {
-            Wasm::Configuration config { machine.store() };
-            Wasm::Expression expression { {} };
-            config.set_frame(Wasm::Frame {
-                *module_instance,
-                Vector<Wasm::Value> {},
-                expression,
-                0,
-            });
-            Wasm::Instruction instr { Wasm::Instructions::nop };
-            Wasm::InstructionPointer ip { 0 };
-            g_continue = false;
-            pre_interpret_hook(config, ip, instr);
-        };
+        if (print_compiled) {
+            Span<Wasm::FunctionAddress const> functions = module_instance->functions();
+            Wasm::FunctionAddress spec = specific_function_address.value_or(0);
+
+            if (specific_function_address.has_value())
+                functions = { &spec, 1 };
+            for (auto address : functions) {
+                auto function = machine.store().get(address)->get_pointer<Wasm::WasmFunction>();
+                if (!function)
+                    continue;
+                auto& expression = function->code().func().body();
+                if (expression.compiled_instructions.dispatches.is_empty())
+                    continue;
+
+                ByteString export_name;
+                for (auto& entry : function->module().exports()) {
+                    if (entry.value() == address) {
+                        export_name = ByteString::formatted(" '{}'", entry.name());
+                        break;
+                    }
+                }
+
+                TRY(g_stdout->write_until_depleted(ByteString::formatted("Function #{}{} (stack usage = {}):\n", address.value(), export_name, expression.stack_usage_hint())));
+                Wasm::Printer printer { *g_stdout, 1 };
+                for (size_t ip = 0; ip < expression.compiled_instructions.dispatches.size(); ++ip) {
+                    auto& dispatch = expression.compiled_instructions.dispatches[ip];
+                    ByteString regs;
+                    auto first = true;
+                    ssize_t in_count = 0;
+                    bool has_out = false;
+#define M(name, _, ins, outs)              \
+    case Wasm::Instructions::name.value(): \
+        in_count = ins;                    \
+        has_out = outs != 0;               \
+        break;
+                    switch (dispatch.instruction->opcode().value()) {
+                        ENUMERATE_WASM_OPCODES(M)
+                    }
+#undef M
+                    constexpr auto reg_name = [](Wasm::Dispatch::RegisterOrStack reg) -> ByteString {
+                        if (reg == Wasm::Dispatch::RegisterOrStack::Stack)
+                            return "stack"sv;
+                        return ByteString::formatted("reg{}", to_underlying(reg));
+                    };
+                    if (in_count > -1) {
+                        for (ssize_t index = 0; index < in_count; ++index) {
+                            if (first)
+                                regs = ByteString::formatted("{} ({}", regs, reg_name(dispatch.sources[index]));
+                            else
+                                regs = ByteString::formatted("{}, {}", regs, reg_name(dispatch.sources[index]));
+                            first = false;
+                        }
+                        if (has_out) {
+                            if (first)
+                                regs = ByteString::formatted(" () -> {}", reg_name(dispatch.destination));
+                            else
+                                regs = ByteString::formatted("{}) -> {}", regs, reg_name(dispatch.destination));
+                        } else {
+                            if (first)
+                                regs = ByteString::formatted(" () -x");
+                            else
+                                regs = ByteString::formatted("{}) -x", regs);
+                        }
+                    }
+
+                    if (!regs.is_empty())
+                        regs = ByteString::formatted(" {{{:<33} }}", regs);
+
+                    TRY(g_stdout->write_until_depleted(ByteString::formatted("  [{:>03}]", ip)));
+                    TRY(g_stdout->write_until_depleted(regs.bytes()));
+                    printer.print(*dispatch.instruction);
+                }
+
+                TRY(g_stdout->write_until_depleted("\n"sv.bytes()));
+            }
+        }
 
         auto print_func = [&](auto const& address) {
             Wasm::FunctionInstance* fn = machine.store().get(address);
@@ -788,11 +813,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             for (auto& address : module_instance->functions()) {
                 print_func(address);
             }
-        }
-
-        if (shell_mode) {
-            launch_repl();
-            return 0;
         }
 
         if (!exported_function_to_execute.is_empty()) {
@@ -835,10 +855,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             }
 
             auto result = machine.invoke(g_interpreter, run_address.value(), move(values));
-
-            if (debug)
-                launch_repl();
-
             if (result.is_trap()) {
                 auto trap_reason = result.trap().format();
                 if (trap_reason.starts_with("exit:"sv))

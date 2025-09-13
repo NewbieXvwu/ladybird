@@ -305,4 +305,33 @@ void EffectiveOverloadSet::remove_all_other_entries()
     m_items = move(new_items);
 }
 
+void Interface::extend_with_partial_interface(Interface const& partial)
+{
+    for (auto const& attribute : partial.attributes) {
+        auto attribute_copy = attribute;
+        attribute_copy.extended_attributes.update(partial.extended_attributes);
+        attributes.append(move(attribute_copy));
+    }
+
+    for (auto const& static_attribute : partial.static_attributes) {
+        auto static_attribute_copy = static_attribute;
+        static_attribute_copy.extended_attributes.update(partial.extended_attributes);
+        static_attributes.append(move(static_attribute_copy));
+    }
+
+    constants.extend(partial.constants);
+
+    for (auto const& function : partial.functions) {
+        auto function_copy = function;
+        function_copy.extended_attributes.update(partial.extended_attributes);
+        functions.append(move(function_copy));
+    }
+
+    for (auto const& static_function : partial.static_functions) {
+        auto static_function_copy = static_function;
+        static_function_copy.extended_attributes.update(partial.extended_attributes);
+        static_functions.append(move(static_function_copy));
+    }
+}
+
 }

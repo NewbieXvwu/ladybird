@@ -10,11 +10,12 @@
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
 #include <LibWeb/CSS/GeneratedCSSStyleProperties.h>
 #include <LibWeb/DOM/Node.h>
+#include <LibWeb/Export.h>
 
 namespace Web::CSS {
 
 // https://drafts.csswg.org/cssom/#cssstyleproperties
-class CSSStyleProperties
+class WEB_API CSSStyleProperties
     : public CSSStyleDeclaration
     , public Bindings::GeneratedCSSStyleProperties {
     WEB_PLATFORM_OBJECT(CSSStyleProperties, CSSStyleDeclaration);
@@ -49,6 +50,9 @@ public:
 
     size_t custom_property_count() const { return m_custom_properties.size(); }
 
+    virtual bool has_property(StringView property_name) const override;
+    virtual RefPtr<StyleValue const> get_property_style_value(StringView property_name) const override;
+
     String css_float() const;
     WebIDL::ExceptionOr<void> set_css_float(StringView);
 
@@ -68,10 +72,10 @@ private:
 
     virtual void visit_edges(Cell::Visitor&) override;
 
-    RefPtr<CSSStyleValue const> style_value_for_computed_property(Layout::NodeWithStyle const&, PropertyID) const;
+    RefPtr<StyleValue const> style_value_for_computed_property(Layout::NodeWithStyle const&, PropertyID) const;
     Optional<StyleProperty> get_property_internal(PropertyID) const;
 
-    bool set_a_css_declaration(PropertyID, NonnullRefPtr<CSSStyleValue const>, Important);
+    bool set_a_css_declaration(PropertyID, NonnullRefPtr<StyleValue const>, Important);
     void empty_the_declarations();
     void set_the_declarations(Vector<StyleProperty> properties, HashMap<FlyString, StyleProperty> custom_properties);
 

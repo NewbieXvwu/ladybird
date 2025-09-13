@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/DOM/CDATASection.h>
 #include <LibWeb/DOM/DocumentType.h>
 #include <LibWeb/DOM/Event.h>
+#include <LibWeb/DOM/ProcessingInstruction.h>
 #include <LibWeb/HTML/HTMLTemplateElement.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
@@ -53,6 +55,7 @@ ErrorOr<Variant<ByteString, Vector<XML::MarkupDeclaration>>> resolve_xml_resourc
 
 XMLDocumentBuilder::XMLDocumentBuilder(DOM::Document& document, XMLScriptingSupport scripting_support)
     : m_document(document)
+    , m_template_node_stack(document.realm().heap())
     , m_current_node(m_document)
     , m_scripting_support(scripting_support)
 {
@@ -89,7 +92,7 @@ void XMLDocumentBuilder::set_doctype(XML::Doctype doctype)
     m_document->insert_before(document_type, m_document->first_child(), false);
 }
 
-void XMLDocumentBuilder::element_start(const XML::Name& name, HashMap<XML::Name, ByteString> const& attributes)
+void XMLDocumentBuilder::element_start(XML::Name const& name, OrderedHashMap<XML::Name, ByteString> const& attributes)
 {
     if (m_has_error)
         return;
@@ -148,6 +151,7 @@ void XMLDocumentBuilder::element_start(const XML::Name& name, HashMap<XML::Name,
     }
     if (m_current_node->is_html_template_element()) {
         // When an XML parser would append a node to a template element, it must instead append it to the template element's template contents (a DocumentFragment node).
+        m_template_node_stack.append(*m_current_node);
         MUST(static_cast<HTML::HTMLTemplateElement&>(*m_current_node).content()->append_child(node));
     } else {
         MUST(m_current_node->append_child(node));
@@ -180,7 +184,7 @@ void XMLDocumentBuilder::element_start(const XML::Name& name, HashMap<XML::Name,
     m_current_node = node.ptr();
 }
 
-void XMLDocumentBuilder::element_end(const XML::Name& name)
+void XMLDocumentBuilder::element_end(XML::Name const& name)
 {
     if (m_has_error)
         return;
@@ -229,33 +233,55 @@ void XMLDocumentBuilder::element_end(const XML::Name& name)
         script_element.process_the_script_element();
     };
 
-    m_current_node = m_current_node->parent_node();
+    auto* parent = m_current_node->parent_node();
+    if (parent && parent->is_document_fragment()) {
+        auto template_parent_node = m_template_node_stack.take_last();
+        parent = template_parent_node.ptr();
+    }
+    m_current_node = parent;
 }
 
 void XMLDocumentBuilder::text(StringView data)
 {
     if (m_has_error)
         return;
-    auto last = m_current_node->last_child();
-    if (last && last->is_text()) {
+
+    if (auto* last = m_current_node->last_child(); last && last->is_text()) {
         auto& text_node = static_cast<DOM::Text&>(*last);
-        text_builder.append(text_node.data());
-        text_builder.append(data);
-        text_node.set_data(MUST(text_builder.to_string()));
-        text_builder.clear();
-    } else {
-        if (!data.is_empty()) {
-            auto node = m_document->create_text_node(MUST(String::from_utf8(data)));
-            MUST(m_current_node->append_child(node));
-        }
+        m_text_builder.append(text_node.data());
+        m_text_builder.append(data);
+        text_node.set_data(m_text_builder.to_utf16_string());
+        m_text_builder.clear();
+    } else if (!data.is_empty()) {
+        auto node = m_document->create_text_node(Utf16String::from_utf8(data));
+        MUST(m_current_node->append_child(node));
     }
 }
 
 void XMLDocumentBuilder::comment(StringView data)
 {
-    if (m_has_error)
+    if (m_has_error || !m_current_node)
         return;
-    MUST(m_document->append_child(m_document->create_comment(MUST(String::from_utf8(data)))));
+
+    MUST(m_current_node->append_child(m_document->create_comment(Utf16String::from_utf8(data))));
+}
+
+void XMLDocumentBuilder::cdata_section(StringView data)
+{
+    if (m_has_error || !m_current_node)
+        return;
+
+    auto section = MUST(m_document->create_cdata_section(Utf16String::from_utf8(data)));
+    MUST(m_current_node->append_child(section));
+}
+
+void XMLDocumentBuilder::processing_instruction(StringView target, StringView data)
+{
+    if (m_has_error || !m_current_node)
+        return;
+
+    auto processing_instruction = MUST(m_document->create_processing_instruction(MUST(String::from_utf8(target)), Utf16String::from_utf8(data)));
+    MUST(m_current_node->append_child(processing_instruction));
 }
 
 void XMLDocumentBuilder::document_end()
@@ -267,6 +293,7 @@ void XMLDocumentBuilder::document_end()
     // NOTE: Noop.
 
     // Set the insertion point to undefined.
+    m_template_node_stack.clear();
     m_current_node = nullptr;
 
     // Update the current document readiness to "interactive".

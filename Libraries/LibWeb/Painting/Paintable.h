@@ -8,6 +8,7 @@
 
 #include <LibGC/Root.h>
 #include <LibWeb/CSS/ComputedValues.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/PixelUnits.h>
@@ -48,7 +49,7 @@ enum class HitTestType {
     TextCursor, // Clicking past the right/bottom edge of text will still hit the text
 };
 
-class Paintable
+class WEB_API Paintable
     : public JS::Cell
     , public TreeNode<Paintable> {
     GC_CELL(Paintable, JS::Cell);
@@ -56,7 +57,9 @@ class Paintable
 public:
     virtual ~Paintable();
 
-    [[nodiscard]] bool is_visible() const { return m_visible; }
+    void detach_from_layout_node();
+
+    [[nodiscard]] bool is_visible() const;
     [[nodiscard]] bool is_positioned() const { return m_positioned; }
     [[nodiscard]] bool is_fixed_position() const { return m_fixed_position; }
     [[nodiscard]] bool is_sticky_position() const { return m_sticky_position; }
@@ -68,10 +71,10 @@ public:
     bool has_stacking_context() const;
     StackingContext* enclosing_stacking_context();
 
-    virtual void before_paint(PaintContext&, PaintPhase) const { }
-    virtual void after_paint(PaintContext&, PaintPhase) const { }
+    virtual void before_paint(DisplayListRecordingContext&, PaintPhase) const { }
+    virtual void after_paint(DisplayListRecordingContext&, PaintPhase) const { }
 
-    virtual void paint(PaintContext&, PaintPhase) const { }
+    virtual void paint(DisplayListRecordingContext&, PaintPhase) const { }
 
     [[nodiscard]] virtual TraversalDecision hit_test(CSSPixelPoint, HitTestType, Function<TraversalDecision(HitTestResult)> const& callback) const;
 
@@ -89,6 +92,7 @@ public:
     virtual DispatchEventOfSameName handle_mousedown(Badge<EventHandler>, CSSPixelPoint, unsigned button, unsigned modifiers);
     virtual DispatchEventOfSameName handle_mouseup(Badge<EventHandler>, CSSPixelPoint, unsigned button, unsigned modifiers);
     virtual DispatchEventOfSameName handle_mousemove(Badge<EventHandler>, CSSPixelPoint, unsigned buttons, unsigned modifiers);
+    virtual void handle_mouseleave(Badge<EventHandler>) { }
 
     virtual bool handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned buttons, unsigned modifiers, int wheel_delta_x, int wheel_delta_y);
 
@@ -112,6 +116,7 @@ public:
     template<typename T>
     bool fast_is() const = delete;
 
+    [[nodiscard]] virtual bool is_navigable_container_viewport_paintable() const { return false; }
     [[nodiscard]] virtual bool is_paintable_box() const { return false; }
     [[nodiscard]] virtual bool is_paintable_with_lines() const { return false; }
     [[nodiscard]] virtual bool is_svg_paintable() const { return false; }
@@ -159,7 +164,6 @@ private:
 
     SelectionState m_selection_state { SelectionState::None };
 
-    bool m_visible : 1 { false };
     bool m_positioned : 1 { false };
     bool m_fixed_position : 1 { false };
     bool m_sticky_position : 1 { false };
@@ -187,6 +191,6 @@ inline bool Paintable::fast_is<PaintableWithLines>() const { return is_paintable
 template<>
 inline bool Paintable::fast_is<TextPaintable>() const { return is_text_paintable(); }
 
-Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, CSSPixelRect const& rect, CSS::BorderRadiusData const& top_left_radius, CSS::BorderRadiusData const& top_right_radius, CSS::BorderRadiusData const& bottom_right_radius, CSS::BorderRadiusData const& bottom_left_radius);
+WEB_API Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, CSSPixelRect const& rect, CSS::BorderRadiusData const& top_left_radius, CSS::BorderRadiusData const& top_right_radius, CSS::BorderRadiusData const& bottom_right_radius, CSS::BorderRadiusData const& bottom_left_radius);
 
 }

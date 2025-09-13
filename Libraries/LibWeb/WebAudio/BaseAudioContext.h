@@ -18,6 +18,7 @@
 #include <LibWeb/WebAudio/ConstantSourceNode.h>
 #include <LibWeb/WebAudio/DelayNode.h>
 #include <LibWeb/WebAudio/PeriodicWave.h>
+#include <LibWeb/WebAudio/ScriptProcessorNode.h>
 #include <LibWeb/WebAudio/StereoPannerNode.h>
 #include <LibWeb/WebIDL/Types.h>
 
@@ -42,6 +43,8 @@ public:
     // This doesn't seem consistent between browsers. We use what firefox accepts from testing BaseAudioContext.createAudioBuffer.
     static constexpr float MIN_SAMPLE_RATE { 8000 };
     static constexpr float MAX_SAMPLE_RATE { 192000 };
+
+    static WebIDL::UnsignedLong render_quantum_size() { return s_render_quantum_size; }
 
     GC::Ref<AudioDestinationNode> destination() const { return *m_destination; }
     float sample_rate() const { return m_sample_rate; }
@@ -75,6 +78,8 @@ public:
     WebIDL::ExceptionOr<GC::Ref<GainNode>> create_gain();
     WebIDL::ExceptionOr<GC::Ref<PannerNode>> create_panner();
     WebIDL::ExceptionOr<GC::Ref<PeriodicWave>> create_periodic_wave(Vector<float> const& real, Vector<float> const& imag, Optional<PeriodicWaveConstraints> const& constraints = {});
+    WebIDL::ExceptionOr<GC::Ref<ScriptProcessorNode>> create_script_processor(WebIDL::UnsignedLong buffer_size,
+        WebIDL::UnsignedLong number_of_input_channels, WebIDL::UnsignedLong number_of_output_channels);
     WebIDL::ExceptionOr<GC::Ref<StereoPannerNode>> create_stereo_panner();
 
     GC::Ref<WebIDL::Promise> decode_audio_data(GC::Root<WebIDL::BufferSource>, GC::Ptr<WebIDL::CallbackType>, GC::Ptr<WebIDL::CallbackType>);
@@ -91,6 +96,9 @@ protected:
     Vector<GC::Ref<WebIDL::Promise>> m_pending_promises;
 
 private:
+    // https://webaudio.github.io/web-audio-api/#render-quantum-size
+    static constexpr WebIDL::UnsignedLong s_render_quantum_size { 128 };
+
     void queue_a_decoding_operation(GC::Ref<JS::PromiseCapability>, GC::Root<WebIDL::BufferSource>, GC::Ptr<WebIDL::CallbackType>, GC::Ptr<WebIDL::CallbackType>);
 
     float m_sample_rate { 0 };

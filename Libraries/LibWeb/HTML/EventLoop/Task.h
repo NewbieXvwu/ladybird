@@ -9,6 +9,7 @@
 #include <AK/DistinctNumeric.h>
 #include <LibGC/CellAllocator.h>
 #include <LibJS/Heap/Cell.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::HTML {
@@ -80,6 +81,9 @@ public:
         // https://w3c.github.io/media-capabilities/#media-capabilities-task-source
         MediaCapabilities,
 
+        // https://w3c.github.io/gamepad/#dfn-gamepad-task-source
+        Gamepad,
+
         // !!! IMPORTANT: Keep this field last!
         // This serves as the base value of all unique task sources.
         // Some elements, such as the HTMLMediaElement, must have a unique task source per instance.
@@ -109,11 +113,20 @@ private:
     GC::Ptr<DOM::Document const> m_document;
 };
 
-struct UniqueTaskSource {
+struct WEB_API UniqueTaskSource {
     UniqueTaskSource();
     ~UniqueTaskSource();
 
     Task::Source const source;
+};
+
+class WEB_API ParallelQueue : public RefCounted<ParallelQueue> {
+public:
+    static NonnullRefPtr<ParallelQueue> create();
+    TaskID enqueue(GC::Ref<GC::Function<void()>>);
+
+private:
+    UniqueTaskSource m_task_source;
 };
 
 }

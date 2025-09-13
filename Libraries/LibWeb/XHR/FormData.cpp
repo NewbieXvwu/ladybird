@@ -28,10 +28,10 @@ WebIDL::ExceptionOr<GC::Ref<FormData>> FormData::construct_impl(JS::Realm& realm
         // 1. If submitter is non-null, then:
         if (submitter) {
             // 1. If submitter is not a submit button, then throw a TypeError.
-            if (!is<HTML::FormAssociatedElement>(*submitter)) {
+            auto form_associated_element = as_if<HTML::FormAssociatedElement>(*submitter);
+            if (!form_associated_element) {
                 return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Submitter is not associated with a form."sv };
             }
-            auto* form_associated_element = dynamic_cast<HTML::FormAssociatedElement*>(submitter.ptr());
 
             if (!form_associated_element->is_submit_button()) {
                 return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Submitter is not a valid submit button."sv };
@@ -39,15 +39,15 @@ WebIDL::ExceptionOr<GC::Ref<FormData>> FormData::construct_impl(JS::Realm& realm
             // 2. If submitter’s form owner is not form, then throw a "NotFoundError" DOMException.
             auto* form_owner = form_associated_element->form();
             if (form_owner && form_owner != form) {
-                return WebIDL::NotFoundError::create(realm, "Submitter does not belong to the provided form."_string);
+                return WebIDL::NotFoundError::create(realm, "Submitter does not belong to the provided form."_utf16);
             }
         }
 
-        // 2. Let list be the result of constructing the entry list for form.
-        auto entry_list = TRY(construct_entry_list(realm, *form));
+        // 2. Let list be the result of constructing the entry list for form and submitter.
+        auto entry_list = TRY(construct_entry_list(realm, *form, submitter));
         // 3. If list is null, then throw an "InvalidStateError" DOMException.
         if (!entry_list.has_value())
-            return WebIDL::InvalidStateError::create(realm, "Form element does not contain any entries."_string);
+            return WebIDL::InvalidStateError::create(realm, "Form element does not contain any entries."_utf16);
         // 4. Set this’s entry list to list.
         list = entry_list.release_value();
     }

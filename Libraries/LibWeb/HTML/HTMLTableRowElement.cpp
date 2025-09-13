@@ -8,9 +8,9 @@
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
-#include <LibWeb/CSS/StyleValues/CSSColorValue.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
+#include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/HTMLCollection.h>
@@ -58,7 +58,7 @@ void HTMLTableRowElement::apply_presentational_hints(GC::Ref<CSS::CascadedProper
             // https://html.spec.whatwg.org/multipage/rendering.html#tables-2:rules-for-parsing-a-legacy-colour-value
             auto color = parse_legacy_color_value(value);
             if (color.has_value())
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BackgroundColor, CSS::CSSColorValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy));
+                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BackgroundColor, CSS::ColorStyleValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy));
         } else if (name == HTML::AttributeNames::background) {
             // https://html.spec.whatwg.org/multipage/rendering.html#tables-2:encoding-parsing-and-serializing-a-url
             if (auto parsed_value = document().encoding_parse_url(value); parsed_value.has_value())
@@ -151,7 +151,7 @@ WebIDL::ExceptionOr<GC::Ref<HTMLTableCellElement>> HTMLTableRowElement::insert_c
 
     // 1. If index is less than −1 or greater than the number of elements in the cells collection, then throw an "IndexSizeError" DOMException.
     if (index < -1 || index > cells_collection_size)
-        return WebIDL::IndexSizeError::create(realm(), "Index is negative or greater than the number of cells"_string);
+        return WebIDL::IndexSizeError::create(realm(), "Index is negative or greater than the number of cells"_utf16);
 
     // 2. Let table cell be the result of creating an element given this tr element's node document, "td", and the HTML namespace.
     auto& table_cell = static_cast<HTMLTableCellElement&>(*TRY(DOM::create_element(document(), HTML::TagNames::td, Namespace::HTML)));
@@ -176,7 +176,7 @@ WebIDL::ExceptionOr<void> HTMLTableRowElement::delete_cell(i32 index)
 
     // 1. If index is less than −1 or greater than or equal to the number of elements in the cells collection, then throw an "IndexSizeError" DOMException.
     if (index < -1 || index >= cells_collection_size)
-        return WebIDL::IndexSizeError::create(realm(), "Index is negative or greater than or equal to the number of cells"_string);
+        return WebIDL::IndexSizeError::create(realm(), "Index is negative or greater than or equal to the number of cells"_utf16);
 
     // 2. If index is −1, then remove the last element in the cells collection from its parent, or do nothing if the cells collection is empty.
     if (index == -1) {

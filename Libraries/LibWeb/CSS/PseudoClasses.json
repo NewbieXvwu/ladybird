@@ -50,6 +50,9 @@
   "has": {
     "argument": "<relative-selector-list>"
   },
+  "heading": {
+    "argument": "<level>#?"
+  },
   "high-value": {
     "argument": ""
   },
@@ -164,7 +167,7 @@
   "target": {
     "argument": ""
   },
-  "target-within": {
+  "unchecked": {
     "argument": ""
   },
   "user-invalid": {

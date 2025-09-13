@@ -260,7 +260,7 @@ void HTMLParser::run(HTMLTokenizer::StopAtInsertionPoint stop_at_insertion_point
     flush_character_insertions();
 }
 
-void HTMLParser::run(const URL::URL& url, HTMLTokenizer::StopAtInsertionPoint stop_at_insertion_point)
+void HTMLParser::run(URL::URL const& url, HTMLTokenizer::StopAtInsertionPoint stop_at_insertion_point)
 {
     m_document->set_url(url);
     m_document->set_source(m_tokenizer.source());
@@ -576,7 +576,7 @@ void HTMLParser::handle_initial(HTMLToken& token)
     // -> A comment token
     if (token.is_comment()) {
         // Insert a comment as the last child of the Document object.
-        auto comment = realm().create<DOM::Comment>(document(), token.comment());
+        auto comment = realm().create<DOM::Comment>(document(), Utf16String::from_utf8(token.comment()));
         MUST(document().append_child(*comment));
         return;
     }
@@ -606,16 +606,26 @@ void HTMLParser::handle_initial(HTMLToken& token)
         // Otherwise, if the document is not an iframe srcdoc document, and the parser cannot change the mode flag is false,
         // and the DOCTYPE token matches one of the conditions in the following list, then set the Document to limited-quirks mode:
         // [...]
-        document().set_quirks_mode(which_quirks_mode(token));
+        if (!document().parser_cannot_change_the_mode())
+            document().set_quirks_mode(which_quirks_mode(token));
 
         // Then, switch the insertion mode to "before html".
         m_insertion_mode = InsertionMode::BeforeHTML;
         return;
     }
+    // -> Anything else
+
+    // FIXME: If the document is not an iframe srcdoc document, then this is a parse error
 
     log_parse_error();
-    document().set_quirks_mode(DOM::QuirksMode::Yes);
+
+    // if the parser cannot change the mode flag is false, set the Document to quirks mode.
+    if (!document().parser_cannot_change_the_mode())
+        document().set_quirks_mode(DOM::QuirksMode::Yes);
+
+    // In any case, switch the insertion mode to "before html"
     m_insertion_mode = InsertionMode::BeforeHTML;
+    // then reprocess the token.
     process_using_the_rules_for(InsertionMode::BeforeHTML, token);
 }
 
@@ -632,7 +642,7 @@ void HTMLParser::handle_before_html(HTMLToken& token)
     // -> A comment token
     if (token.is_comment()) {
         // Insert a comment as the last child of the Document object.
-        auto comment = realm().create<DOM::Comment>(document(), token.comment());
+        auto comment = realm().create<DOM::Comment>(document(), Utf16String::from_utf8(token.comment()));
         MUST(document().append_child(*comment));
         return;
     }
@@ -766,8 +776,8 @@ HTMLParser::AdjustedInsertionLocation HTMLParser::find_appropriate_place_for_ins
 
     // 3. If the adjusted insertion location is inside a template element,
     //    let it instead be inside the template element's template contents, after its last child (if any).
-    if (is<HTMLTemplateElement>(*adjusted_insertion_location.parent))
-        adjusted_insertion_location = { static_cast<HTMLTemplateElement const&>(*adjusted_insertion_location.parent).content().ptr(), nullptr };
+    if (auto* template_element = as_if<HTMLTemplateElement>(*adjusted_insertion_location.parent))
+        adjusted_insertion_location = { template_element->content().ptr(), nullptr };
 
     // 4. Return the adjusted insertion location.
     return adjusted_insertion_location;
@@ -985,7 +995,7 @@ void HTMLParser::handle_before_head(HTMLToken& token)
 void HTMLParser::insert_comment(HTMLToken& token)
 {
     auto adjusted_insertion_location = find_appropriate_place_for_inserting_node();
-    adjusted_insertion_location.parent->insert_before(realm().create<DOM::Comment>(document(), token.comment()), adjusted_insertion_location.insert_before_sibling);
+    adjusted_insertion_location.parent->insert_before(realm().create<DOM::Comment>(document(), Utf16String::from_utf8(token.comment())), adjusted_insertion_location.insert_before_sibling);
 }
 
 // https://html.spec.whatwg.org/multipage/parsing.html#parsing-main-inhead
@@ -1392,7 +1402,7 @@ DOM::Text* HTMLParser::find_character_insertion_node()
     if (adjusted_insertion_location.insert_before_sibling) {
         if (is_text_node(adjusted_insertion_location.insert_before_sibling->previous_sibling()))
             return static_cast<DOM::Text*>(adjusted_insertion_location.insert_before_sibling->previous_sibling());
-        auto new_text_node = realm().create<DOM::Text>(document(), String {});
+        auto new_text_node = realm().create<DOM::Text>(document(), Utf16String {});
         adjusted_insertion_location.parent->insert_before(*new_text_node, *adjusted_insertion_location.insert_before_sibling);
         return new_text_node;
     }
@@ -1400,7 +1410,7 @@ DOM::Text* HTMLParser::find_character_insertion_node()
         return nullptr;
     if (is_text_node(adjusted_insertion_location.parent->last_child()))
         return static_cast<DOM::Text*>(adjusted_insertion_location.parent->last_child());
-    auto new_text_node = realm().create<DOM::Text>(document(), String {});
+    auto new_text_node = realm().create<DOM::Text>(document(), Utf16String {});
     MUST(adjusted_insertion_location.parent->append_child(*new_text_node));
     return new_text_node;
 }
@@ -1410,9 +1420,9 @@ void HTMLParser::flush_character_insertions()
     if (m_character_insertion_builder.is_empty())
         return;
     if (m_character_insertion_node->data().is_empty())
-        m_character_insertion_node->set_data(MUST(m_character_insertion_builder.to_string()));
+        m_character_insertion_node->set_data(m_character_insertion_builder.to_utf16_string());
     else
-        (void)m_character_insertion_node->append_data(MUST(m_character_insertion_builder.to_string()));
+        (void)m_character_insertion_node->append_data(m_character_insertion_builder.to_utf16_string());
     m_character_insertion_builder.clear();
 }
 
@@ -1579,7 +1589,7 @@ void HTMLParser::handle_after_body(HTMLToken& token)
     if (token.is_comment()) {
         // Insert a comment as the last child of the first element in the stack of open elements (the html element).
         auto& insertion_location = m_stack_of_open_elements.first();
-        MUST(insertion_location.append_child(realm().create<DOM::Comment>(document(), token.comment())));
+        MUST(insertion_location.append_child(realm().create<DOM::Comment>(document(), Utf16String::from_utf8(token.comment()))));
         return;
     }
 
@@ -1631,7 +1641,7 @@ void HTMLParser::handle_after_after_body(HTMLToken& token)
     // -> A comment token
     if (token.is_comment()) {
         // Insert a comment as the last child of the Document object.
-        auto comment = realm().create<DOM::Comment>(document(), token.comment());
+        auto comment = realm().create<DOM::Comment>(document(), Utf16String::from_utf8(token.comment()));
         MUST(document().append_child(*comment));
         return;
     }
@@ -4626,7 +4636,7 @@ void HTMLParser::handle_after_after_frameset(HTMLToken& token)
     // -> A comment token
     if (token.is_comment()) {
         // Insert a comment as the last child of the Document object.
-        auto comment = document().realm().create<DOM::Comment>(document(), token.comment());
+        auto comment = document().realm().create<DOM::Comment>(document(), Utf16String::from_utf8(token.comment()));
         MUST(document().append_child(comment));
         return;
     }
@@ -5123,11 +5133,12 @@ enum class AttributeMode {
     Yes,
 };
 
-static String escape_string(StringView string, AttributeMode attribute_mode)
+template<OneOf<Utf8View, Utf16View> ViewType>
+static String escape_string(ViewType const& string, AttributeMode attribute_mode)
 {
     // https://html.spec.whatwg.org/multipage/parsing.html#escapingString
     StringBuilder builder;
-    for (auto code_point : Utf8View { string }) {
+    for (auto code_point : string) {
         // 1. Replace any occurrence of the "&" character by the string "&amp;".
         if (code_point == '&')
             builder.append("&amp;"sv);
@@ -5179,7 +5190,7 @@ String HTMLParser::serialize_html_fragment(DOM::Node const& node, SerializableSh
         // followed by a U+0022 QUOTATION MARK character (").
         if (element.is_value().has_value() && !element.has_attribute(AttributeNames::is)) {
             builder.append(" is=\""sv);
-            builder.append(escape_string(element.is_value().value(), AttributeMode::Yes));
+            builder.append(escape_string(element.is_value().value().code_points(), AttributeMode::Yes));
             builder.append('"');
         }
 
@@ -5212,7 +5223,7 @@ String HTMLParser::serialize_html_fragment(DOM::Node const& node, SerializableSh
             builder.append(attribute.name());
 
             builder.append("=\""sv);
-            builder.append(escape_string(attribute.value(), AttributeMode::Yes));
+            builder.append(escape_string(attribute.value().code_points(), AttributeMode::Yes));
             builder.append('"');
         });
 
@@ -5335,7 +5346,7 @@ String HTMLParser::serialize_html_fragment(DOM::Node const& node, SerializableSh
             }
 
             // Otherwise, append the value of current node's data IDL attribute, escaped as described below.
-            builder.append(escape_string(text_node.data(), AttributeMode::No));
+            builder.append(escape_string(text_node.data().utf16_view(), AttributeMode::No));
         }
 
         if (is<DOM::Comment>(current_node)) {
@@ -5385,7 +5396,7 @@ String HTMLParser::serialize_html_fragment(DOM::Node const& node, SerializableSh
 }
 
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#current-dimension-value
-static RefPtr<CSS::CSSStyleValue const> parse_current_dimension_value(float value, Utf8View input, Utf8View::Iterator position)
+static RefPtr<CSS::StyleValue const> parse_current_dimension_value(float value, Utf8View input, Utf8View::Iterator position)
 {
     // 1. If position is past the end of input, then return value as a length.
     if (position == input.end())
@@ -5400,7 +5411,7 @@ static RefPtr<CSS::CSSStyleValue const> parse_current_dimension_value(float valu
 }
 
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#rules-for-parsing-dimension-values
-RefPtr<CSS::CSSStyleValue const> parse_dimension_value(StringView string)
+RefPtr<CSS::StyleValue const> parse_dimension_value(StringView string)
 {
     // 1. Let input be the string being parsed.
     auto input = Utf8View(string);
@@ -5474,7 +5485,7 @@ RefPtr<CSS::CSSStyleValue const> parse_dimension_value(StringView string)
 }
 
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#rules-for-parsing-non-zero-dimension-values
-RefPtr<CSS::CSSStyleValue const> parse_nonzero_dimension_value(StringView string)
+RefPtr<CSS::StyleValue const> parse_nonzero_dimension_value(StringView string)
 {
     // 1. Let input be the string being parsed.
     // 2. Let value be the result of parsing input using the rules for parsing dimension values.
@@ -5485,7 +5496,7 @@ RefPtr<CSS::CSSStyleValue const> parse_nonzero_dimension_value(StringView string
         return nullptr;
 
     // 4. If value is zero, return an error.
-    if (value->is_length() && value->as_length().length().raw_value() == 0)
+    if (value->is_length() && value->as_length().raw_value() == 0)
         return nullptr;
     if (value->is_percentage() && value->as_percentage().percentage().value() == 0)
         return nullptr;

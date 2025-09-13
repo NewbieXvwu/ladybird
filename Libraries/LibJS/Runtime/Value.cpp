@@ -12,6 +12,7 @@
 #include <AK/CharacterTypes.h>
 #include <AK/StringBuilder.h>
 #include <AK/StringFloatingPointConversions.h>
+#include <AK/Utf16String.h>
 #include <AK/Utf8View.h>
 #include <LibCrypto/BigInt/SignedBigInteger.h>
 #include <LibJS/Runtime/AbstractOperations.h>
@@ -34,7 +35,6 @@
 #include <LibJS/Runtime/StringObject.h>
 #include <LibJS/Runtime/StringPrototype.h>
 #include <LibJS/Runtime/SymbolObject.h>
-#include <LibJS/Runtime/Utf16String.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibJS/Runtime/Value.h>
 #include <LibJS/Runtime/ValueInlines.h>
@@ -59,12 +59,12 @@ static inline bool same_type_for_equality(Value const& lhs, Value const& rhs)
 
 static Crypto::SignedBigInteger const BIGINT_ZERO { 0 };
 
-ALWAYS_INLINE bool both_number(Value const& lhs, Value const& rhs)
+static ALWAYS_INLINE bool both_number(Value const& lhs, Value const& rhs)
 {
     return lhs.is_number() && rhs.is_number();
 }
 
-ALWAYS_INLINE bool both_bigint(Value const& lhs, Value const& rhs)
+static ALWAYS_INLINE bool both_bigint(Value const& lhs, Value const& rhs)
 {
     return lhs.is_bigint() && rhs.is_bigint();
 }
@@ -207,7 +207,14 @@ String number_to_string(double d, NumberToStringMode mode)
 {
     StringBuilder builder;
     number_to_string_impl(builder, d, mode);
-    return builder.to_string().release_value();
+    return MUST(builder.to_string());
+}
+
+Utf16String number_to_utf16_string(double d, NumberToStringMode mode)
+{
+    StringBuilder builder(StringBuilder::Mode::UTF16);
+    number_to_string_impl(builder, d, mode);
+    return builder.to_utf16_string();
 }
 
 ByteString number_to_byte_string(double d, NumberToStringMode mode)
@@ -376,7 +383,7 @@ String Value::to_string_without_side_effects() const
     case STRING_TAG:
         return as_string().utf8_string();
     case SYMBOL_TAG:
-        return as_symbol().descriptive_string().release_value();
+        return as_symbol().descriptive_string().to_utf8_but_should_be_ported_to_utf16();
     case BIGINT_TAG:
         return as_bigint().to_string().release_value();
     case OBJECT_TAG:
@@ -385,6 +392,37 @@ String Value::to_string_without_side_effects() const
         return "<accessor>"_string;
     case EMPTY_TAG:
         return "<empty>"_string;
+    default:
+        VERIFY_NOT_REACHED();
+    }
+}
+
+Utf16String Value::to_utf16_string_without_side_effects() const
+{
+    if (is_double())
+        return number_to_utf16_string(m_value.as_double);
+
+    switch (m_value.tag) {
+    case UNDEFINED_TAG:
+        return "undefined"_utf16;
+    case NULL_TAG:
+        return "null"_utf16;
+    case BOOLEAN_TAG:
+        return as_bool() ? "true"_utf16 : "false"_utf16;
+    case INT32_TAG:
+        return Utf16String::number(as_i32());
+    case STRING_TAG:
+        return as_string().utf16_string();
+    case SYMBOL_TAG:
+        return as_symbol().descriptive_string();
+    case BIGINT_TAG:
+        return as_bigint().to_utf16_string();
+    case OBJECT_TAG:
+        return Utf16String::formatted("[object {}]", as_object().class_name());
+    case ACCESSOR_TAG:
+        return "<accessor>"_utf16;
+    case EMPTY_TAG:
+        return "<empty>"_utf16;
     default:
         VERIFY_NOT_REACHED();
     }
@@ -455,12 +493,7 @@ ThrowCompletionOr<Utf16String> Value::to_utf16_string(VM& vm) const
         return as_string().utf16_string();
 
     auto utf8_string = TRY(to_string(vm));
-    return Utf16String::create(utf8_string.bytes_as_string_view());
-}
-
-ThrowCompletionOr<String> Value::to_well_formed_string(VM& vm) const
-{
-    return ::JS::to_well_formed_string(TRY(to_utf16_string(vm)));
+    return Utf16String::from_utf8(utf8_string);
 }
 
 // 7.1.2 ToBoolean ( argument ), https://tc39.es/ecma262/#sec-toboolean
@@ -907,7 +940,7 @@ ThrowCompletionOr<PropertyKey> Value::to_property_key(VM& vm) const
 
     // OPTIMIZATION: If this is already a string, we can skip all the ceremony.
     if (is_string())
-        return PropertyKey { as_string().utf8_string() };
+        return PropertyKey { as_string().utf16_string() };
 
     // 1. Let key be ? ToPrimitive(argument, string).
     auto key = TRY(to_primitive(vm, PreferredType::String));
@@ -919,7 +952,7 @@ ThrowCompletionOr<PropertyKey> Value::to_property_key(VM& vm) const
     }
 
     // 3. Return ! ToString(key).
-    return MUST(key.to_string(vm));
+    return MUST(key.to_utf16_string(vm));
 }
 
 // 7.1.6 ToInt32 ( argument ), https://tc39.es/ecma262/#sec-toint32
@@ -1048,6 +1081,11 @@ ThrowCompletionOr<i8> Value::to_i8(VM& vm) const
 // 7.1.11 ToUint8 ( argument ), https://tc39.es/ecma262/#sec-touint8
 ThrowCompletionOr<u8> Value::to_u8(VM& vm) const
 {
+    // OPTIMIZATION: Fast path for the common case of an int32.
+    if (is_int32()) {
+        return static_cast<u8>(as_i32() & NumericLimits<u8>::max());
+    }
+
     // 1. Let number be ? ToNumber(argument).
     double number = TRY(to_number(vm)).as_double();
 

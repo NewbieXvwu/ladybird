@@ -68,7 +68,11 @@ PageClient::PageClient(PageHost& owner, u64 id)
 {
     setup_palette();
 
-    int refresh_interval = 1000 / 60; // FIXME: Account for the actual refresh rate of the display
+    // FIXME: This removes the decimal part, so the refresh interval will actually be higher than the maximum FPS.
+    //        For example, 60 FPS = 1000ms / 60 = 16.6666...ms, but it will become 16ms, making the interval equivalent
+    //        to 62.5 FPS.
+    int refresh_interval = static_cast<int>(1000.0 / m_maximum_frames_per_second);
+
     m_paint_refresh_timer = Core::Timer::create_repeating(refresh_interval, [] {
         Web::HTML::main_thread_event_loop().queue_task_to_update_the_rendering();
     });
@@ -141,22 +145,28 @@ void PageClient::set_palette_impl(Gfx::PaletteImpl& impl)
 void PageClient::set_preferred_color_scheme(Web::CSS::PreferredColorScheme color_scheme)
 {
     m_preferred_color_scheme = color_scheme;
-    if (auto* document = page().top_level_browsing_context().active_document())
+    if (auto* document = page().top_level_browsing_context().active_document()) {
         document->invalidate_style(Web::DOM::StyleInvalidationReason::SettingsChange);
+        document->set_needs_media_query_evaluation();
+    }
 }
 
 void PageClient::set_preferred_contrast(Web::CSS::PreferredContrast contrast)
 {
     m_preferred_contrast = contrast;
-    if (auto* document = page().top_level_browsing_context().active_document())
+    if (auto* document = page().top_level_browsing_context().active_document()) {
         document->invalidate_style(Web::DOM::StyleInvalidationReason::SettingsChange);
+        document->set_needs_media_query_evaluation();
+    }
 }
 
 void PageClient::set_preferred_motion(Web::CSS::PreferredMotion motion)
 {
     m_preferred_motion = motion;
-    if (auto* document = page().top_level_browsing_context().active_document())
+    if (auto* document = page().top_level_browsing_context().active_document()) {
         document->invalidate_style(Web::DOM::StyleInvalidationReason::SettingsChange);
+        document->set_needs_media_query_evaluation();
+    }
 }
 
 void PageClient::set_is_scripting_enabled(bool is_scripting_enabled)
@@ -172,14 +182,6 @@ void PageClient::set_window_position(Web::DevicePixelPoint position)
 void PageClient::set_window_size(Web::DevicePixelSize size)
 {
     page().set_window_size(size);
-}
-
-Web::Layout::Viewport* PageClient::layout_root()
-{
-    auto* document = page().top_level_browsing_context().active_document();
-    if (!document)
-        return nullptr;
-    return document->layout_node();
 }
 
 void PageClient::ready_to_paint()
@@ -202,23 +204,25 @@ void PageClient::set_viewport_size(Web::DevicePixelSize const& size)
     page().top_level_traversable()->set_viewport_size(page().device_to_css_size(size));
 }
 
+void PageClient::set_maximum_frames_per_second(u64 maximum_frames_per_second)
+{
+    m_maximum_frames_per_second = maximum_frames_per_second;
+
+    // FIXME: This removes the decimal part, so the refresh interval will actually be higher than the maximum FPS.
+    //        For example, 60 FPS = 1000ms / 60 = 16.6666...ms, but it will become 16ms, making the interval equivalent
+    //        to 62.5 FPS.
+    int refresh_interval = static_cast<int>(1000.0 / m_maximum_frames_per_second);
+
+    VERIFY(m_paint_refresh_timer);
+    m_paint_refresh_timer->set_interval(refresh_interval);
+}
+
 void PageClient::page_did_request_cursor_change(Gfx::Cursor const& cursor)
 {
     client().async_did_request_cursor_change(m_id, cursor);
 }
 
-void PageClient::page_did_layout()
-{
-    auto* layout_root = this->layout_root();
-    VERIFY(layout_root);
-
-    if (layout_root->paintable_box()->has_scrollable_overflow())
-        m_content_size = page().enclosing_device_rect(layout_root->paintable_box()->scrollable_overflow_rect().value()).size();
-    else
-        m_content_size = page().enclosing_device_rect(layout_root->paintable_box()->absolute_rect()).size();
-}
-
-void PageClient::page_did_change_title(ByteString const& title)
+void PageClient::page_did_change_title(Utf16String const& title)
 {
     client().async_did_change_title(m_id, title);
 }
@@ -342,6 +346,11 @@ void PageClient::page_did_finish_test(String const& text)
 void PageClient::page_did_set_test_timeout(double milliseconds)
 {
     client().async_did_set_test_timeout(m_id, milliseconds);
+}
+
+void PageClient::page_did_receive_reference_test_metadata(JsonValue metadata)
+{
+    client().async_did_receive_reference_test_metadata(m_id, metadata);
 }
 
 void PageClient::page_did_set_browser_zoom(double factor)
@@ -473,9 +482,14 @@ void PageClient::page_did_change_favicon(Gfx::Bitmap const& favicon)
     client().async_did_change_favicon(m_id, favicon.to_shareable_bitmap());
 }
 
-Vector<Web::Cookie::Cookie> PageClient::page_did_request_all_cookies(URL::URL const& url)
+Vector<Web::Cookie::Cookie> PageClient::page_did_request_all_cookies_webdriver(URL::URL const& url)
 {
-    return client().did_request_all_cookies(url);
+    return client().did_request_all_cookies_webdriver(url);
+}
+
+Vector<Web::Cookie::Cookie> PageClient::page_did_request_all_cookies_cookiestore(URL::URL const& url)
+{
+    return client().did_request_all_cookies_cookiestore(url);
 }
 
 Optional<Web::Cookie::Cookie> PageClient::page_did_request_named_cookie(URL::URL const& url, String const& name)
@@ -673,7 +687,7 @@ void PageClient::page_did_mutate_dom(FlyString const& type, Web::DOM::Node const
         mutation = WebView::AttributeMutation { *attribute_name, element.attribute(*attribute_name) };
     } else if (type == Web::DOM::MutationType::characterData) {
         auto const& character_data = as<Web::DOM::CharacterData>(target);
-        mutation = WebView::CharacterDataMutation { character_data.data() };
+        mutation = WebView::CharacterDataMutation { character_data.data().to_utf8_but_should_be_ported_to_utf16() };
     } else if (type == Web::DOM::MutationType::childList) {
         Vector<Web::UniqueNodeID> added;
         added.ensure_capacity(added_nodes.length());

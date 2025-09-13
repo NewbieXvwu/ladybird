@@ -2,8 +2,8 @@ Harness status: OK
 
 Found 1781 tests
 
-942 Pass
-839 Fail
+970 Pass
+811 Fail
 Pass	idl_test setup
 Pass	idl_test validation
 Pass	Partial interface Document: original interface defined
@@ -386,18 +386,18 @@ Fail	SVGAnimatedLengthList must be primary interface of objects.text.x
 Fail	Stringification of objects.text.x
 Fail	SVGAnimatedLengthList interface: objects.text.x must inherit property "baseVal" with the proper type
 Fail	SVGAnimatedLengthList interface: objects.text.x must inherit property "animVal" with the proper type
-Fail	SVGUnitTypes interface: existence and properties of interface object
-Fail	SVGUnitTypes interface object length
-Fail	SVGUnitTypes interface object name
-Fail	SVGUnitTypes interface: existence and properties of interface prototype object
-Fail	SVGUnitTypes interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGUnitTypes interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGUnitTypes interface: constant SVG_UNIT_TYPE_UNKNOWN on interface object
-Fail	SVGUnitTypes interface: constant SVG_UNIT_TYPE_UNKNOWN on interface prototype object
-Fail	SVGUnitTypes interface: constant SVG_UNIT_TYPE_USERSPACEONUSE on interface object
-Fail	SVGUnitTypes interface: constant SVG_UNIT_TYPE_USERSPACEONUSE on interface prototype object
-Fail	SVGUnitTypes interface: constant SVG_UNIT_TYPE_OBJECTBOUNDINGBOX on interface object
-Fail	SVGUnitTypes interface: constant SVG_UNIT_TYPE_OBJECTBOUNDINGBOX on interface prototype object
+Pass	SVGUnitTypes interface: existence and properties of interface object
+Pass	SVGUnitTypes interface object length
+Pass	SVGUnitTypes interface object name
+Pass	SVGUnitTypes interface: existence and properties of interface prototype object
+Pass	SVGUnitTypes interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGUnitTypes interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGUnitTypes interface: constant SVG_UNIT_TYPE_UNKNOWN on interface object
+Pass	SVGUnitTypes interface: constant SVG_UNIT_TYPE_UNKNOWN on interface prototype object
+Pass	SVGUnitTypes interface: constant SVG_UNIT_TYPE_USERSPACEONUSE on interface object
+Pass	SVGUnitTypes interface: constant SVG_UNIT_TYPE_USERSPACEONUSE on interface prototype object
+Pass	SVGUnitTypes interface: constant SVG_UNIT_TYPE_OBJECTBOUNDINGBOX on interface object
+Pass	SVGUnitTypes interface: constant SVG_UNIT_TYPE_OBJECTBOUNDINGBOX on interface prototype object
 Pass	SVGSVGElement interface: existence and properties of interface object
 Pass	SVGSVGElement interface object length
 Pass	SVGSVGElement interface object name
@@ -1606,17 +1606,17 @@ Pass	SVGElement interface: objects.a must inherit property "ownerSVGElement" wit
 Pass	SVGElement interface: objects.a must inherit property "viewportElement" with the proper type
 Fail	SVGElement interface: objects.a must inherit property "correspondingElement" with the proper type
 Fail	SVGElement interface: objects.a must inherit property "correspondingUseElement" with the proper type
-Fail	SVGViewElement interface: existence and properties of interface object
-Fail	SVGViewElement interface object length
-Fail	SVGViewElement interface object name
-Fail	SVGViewElement interface: existence and properties of interface prototype object
-Fail	SVGViewElement interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGViewElement interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGViewElement interface: attribute viewBox
+Pass	SVGViewElement interface: existence and properties of interface object
+Pass	SVGViewElement interface object length
+Pass	SVGViewElement interface object name
+Pass	SVGViewElement interface: existence and properties of interface prototype object
+Pass	SVGViewElement interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGViewElement interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGViewElement interface: attribute viewBox
 Fail	SVGViewElement interface: attribute preserveAspectRatio
-Fail	SVGViewElement must be primary interface of objects.view
-Fail	Stringification of objects.view
-Fail	SVGViewElement interface: objects.view must inherit property "viewBox" with the proper type
+Pass	SVGViewElement must be primary interface of objects.view
+Pass	Stringification of objects.view
+Pass	SVGViewElement interface: objects.view must inherit property "viewBox" with the proper type
 Fail	SVGViewElement interface: objects.view must inherit property "preserveAspectRatio" with the proper type
 Pass	SVGElement interface: objects.view must inherit property "className" with the proper type
 Pass	SVGElement interface: objects.view must inherit property "ownerSVGElement" with the proper type
@@ -1632,12 +1632,12 @@ Fail	TimeEvent interface: existence and properties of interface prototype object
 Fail	TimeEvent interface: attribute view
 Fail	TimeEvent interface: attribute detail
 Fail	TimeEvent interface: operation initTimeEvent(DOMString, Window?, long)
-Fail	SVGAnimationElement interface: existence and properties of interface object
-Fail	SVGAnimationElement interface object length
-Fail	SVGAnimationElement interface object name
-Fail	SVGAnimationElement interface: existence and properties of interface prototype object
-Fail	SVGAnimationElement interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGAnimationElement interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGAnimationElement interface: existence and properties of interface object
+Pass	SVGAnimationElement interface object length
+Pass	SVGAnimationElement interface object name
+Pass	SVGAnimationElement interface: existence and properties of interface prototype object
+Pass	SVGAnimationElement interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGAnimationElement interface: existence and properties of interface prototype object's @@unscopables property
 Fail	SVGAnimationElement interface: attribute targetElement
 Fail	SVGAnimationElement interface: attribute onbegin
 Fail	SVGAnimationElement interface: attribute onend

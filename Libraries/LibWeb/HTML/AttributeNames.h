@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/FlyString.h>
+#include <LibWeb/Export.h>
 
 namespace Web::HTML {
 namespace AttributeNames {
@@ -25,7 +26,9 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(archive, "archive")                                       \
     __ENUMERATE_HTML_ATTRIBUTE(as, "as")                                                 \
     __ENUMERATE_HTML_ATTRIBUTE(async, "async")                                           \
+    __ENUMERATE_HTML_ATTRIBUTE(autocapitalize, "autocapitalize")                         \
     __ENUMERATE_HTML_ATTRIBUTE(autocomplete, "autocomplete")                             \
+    __ENUMERATE_HTML_ATTRIBUTE(autocorrect, "autocorrect")                               \
     __ENUMERATE_HTML_ATTRIBUTE(autofocus, "autofocus")                                   \
     __ENUMERATE_HTML_ATTRIBUTE(autoplay, "autoplay")                                     \
     __ENUMERATE_HTML_ATTRIBUTE(axis, "axis")                                             \
@@ -73,6 +76,7 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(dirname, "dirname")                                       \
     __ENUMERATE_HTML_ATTRIBUTE(disabled, "disabled")                                     \
     __ENUMERATE_HTML_ATTRIBUTE(download, "download")                                     \
+    __ENUMERATE_HTML_ATTRIBUTE(draggable, "draggable")                                   \
     __ENUMERATE_HTML_ATTRIBUTE(enctype, "enctype")                                       \
     __ENUMERATE_HTML_ATTRIBUTE(ended, "ended")                                           \
     __ENUMERATE_HTML_ATTRIBUTE(enterkeyhint, "enterkeyhint")                             \
@@ -175,6 +179,8 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(onfocusin, "onfocusin")                                   \
     __ENUMERATE_HTML_ATTRIBUTE(onfocusout, "onfocusout")                                 \
     __ENUMERATE_HTML_ATTRIBUTE(onformdata, "onformdata")                                 \
+    __ENUMERATE_HTML_ATTRIBUTE(ongamepadconnected, "ongamepadconnected")                 \
+    __ENUMERATE_HTML_ATTRIBUTE(ongamepaddisconnected, "ongamepaddisconnected")           \
     __ENUMERATE_HTML_ATTRIBUTE(ongotpointercapture, "ongotpointercapture")               \
     __ENUMERATE_HTML_ATTRIBUTE(onhashchange, "onhashchange")                             \
     __ENUMERATE_HTML_ATTRIBUTE(oninput, "oninput")                                       \
@@ -284,6 +290,7 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(sizes, "sizes")                                           \
     __ENUMERATE_HTML_ATTRIBUTE(slot, "slot")                                             \
     __ENUMERATE_HTML_ATTRIBUTE(span, "span")                                             \
+    __ENUMERATE_HTML_ATTRIBUTE(spellcheck, "spellcheck")                                 \
     __ENUMERATE_HTML_ATTRIBUTE(src, "src")                                               \
     __ENUMERATE_HTML_ATTRIBUTE(srcdoc, "srcdoc")                                         \
     __ENUMERATE_HTML_ATTRIBUTE(srclang, "srclang")                                       \
@@ -311,14 +318,15 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(vspace, "vspace")                                         \
     __ENUMERATE_HTML_ATTRIBUTE(width, "width")                                           \
     __ENUMERATE_HTML_ATTRIBUTE(willvalidate, "willvalidate")                             \
-    __ENUMERATE_HTML_ATTRIBUTE(wrap, "wrap")
+    __ENUMERATE_HTML_ATTRIBUTE(wrap, "wrap")                                             \
+    __ENUMERATE_HTML_ATTRIBUTE(writingsuggestions, "writingsuggestions")
 
-#define __ENUMERATE_HTML_ATTRIBUTE(name, attribute) extern FlyString name;
+#define __ENUMERATE_HTML_ATTRIBUTE(name, attribute) extern WEB_API FlyString name;
 ENUMERATE_HTML_ATTRIBUTES
 #undef __ENUMERATE_HTML_ATTRIBUTE
 
 }
 
-bool is_boolean_attribute(FlyString const& attribute);
+WEB_API bool is_boolean_attribute(FlyString const& attribute);
 
 }

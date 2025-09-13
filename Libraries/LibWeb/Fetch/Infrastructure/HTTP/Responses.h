@@ -16,6 +16,8 @@
 #include <LibJS/Forward.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibURL/URL.h>
+#include <LibWeb/Export.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Headers.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Statuses.h>
@@ -23,7 +25,7 @@
 namespace Web::Fetch::Infrastructure {
 
 // https://fetch.spec.whatwg.org/#concept-response
-class Response : public JS::Cell {
+class WEB_API Response : public JS::Cell {
     GC_CELL(Response, JS::Cell);
     GC_DECLARE_ALLOCATOR(Response);
 
@@ -76,7 +78,7 @@ public:
     [[nodiscard]] virtual Status status() const { return m_status; }
     virtual void set_status(Status status) { m_status = status; }
 
-    [[nodiscard]] virtual ReadonlyBytes status_message() const { return m_status_message; }
+    [[nodiscard]] virtual ReadonlyBytes status_message() const LIFETIME_BOUND { return m_status_message; }
     virtual void set_status_message(ByteBuffer status_message) { m_status_message = move(status_message); }
 
     [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const { return m_header_list; }
@@ -103,8 +105,8 @@ public:
     [[nodiscard]] virtual BodyInfo const& body_info() const { return m_body_info; }
     virtual void set_body_info(BodyInfo body_info) { m_body_info = body_info; }
 
-    [[nodiscard]] bool has_cross_origin_redirects() const { return m_has_cross_origin_redirects; }
-    void set_has_cross_origin_redirects(bool has_cross_origin_redirects) { m_has_cross_origin_redirects = has_cross_origin_redirects; }
+    [[nodiscard]] RedirectTaint redirect_taint() const { return m_redirect_taint; }
+    void set_redirect_taint(RedirectTaint redirect_taint) { m_redirect_taint = move(redirect_taint); }
 
     [[nodiscard]] bool is_aborted_network_error() const;
     [[nodiscard]] bool is_network_error() const;
@@ -188,9 +190,9 @@ private:
     // https://fetch.spec.whatwg.org/#response-service-worker-timing-info
     // FIXME: A response has an associated service worker timing info (null or a service worker timing info), which is initially null.
 
-    // https://fetch.spec.whatwg.org/#response-has-cross-origin-redirects
-    // A response has an associated has-cross-origin-redirects (a boolean), which is initially false.
-    bool m_has_cross_origin_redirects { false };
+    // https://fetch.spec.whatwg.org/#response-redirect-taint
+    // A response has an associated redirect taint ("same-origin", "same-site", or "cross-site"), which is initially "same-origin".
+    RedirectTaint m_redirect_taint { RedirectTaint::SameOrigin };
 
     // FIXME is the type correct?
     u64 current_age() const;
@@ -228,7 +230,7 @@ public:
     [[nodiscard]] virtual Status status() const override { return m_internal_response->status(); }
     virtual void set_status(Status status) override { m_internal_response->set_status(status); }
 
-    [[nodiscard]] virtual ReadonlyBytes status_message() const override { return m_internal_response->status_message(); }
+    [[nodiscard]] virtual ReadonlyBytes status_message() const LIFETIME_BOUND override { return m_internal_response->status_message(); }
     virtual void set_status_message(ByteBuffer status_message) override { m_internal_response->set_status_message(move(status_message)); }
 
     [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const override { return m_internal_response->header_list(); }
@@ -266,7 +268,7 @@ private:
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-basic
-class BasicFilteredResponse final : public FilteredResponse {
+class WEB_API BasicFilteredResponse final : public FilteredResponse {
     GC_CELL(BasicFilteredResponse, FilteredResponse);
     GC_DECLARE_ALLOCATOR(BasicFilteredResponse);
 
@@ -285,7 +287,7 @@ private:
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-cors
-class CORSFilteredResponse final : public FilteredResponse {
+class WEB_API CORSFilteredResponse final : public FilteredResponse {
     GC_CELL(CORSFilteredResponse, FilteredResponse);
     GC_DECLARE_ALLOCATOR(CORSFilteredResponse);
 
@@ -304,7 +306,7 @@ private:
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-opaque
-class OpaqueFilteredResponse final : public FilteredResponse {
+class WEB_API OpaqueFilteredResponse final : public FilteredResponse {
     GC_CELL(OpaqueFilteredResponse, FilteredResponse);
     GC_DECLARE_ALLOCATOR(OpaqueFilteredResponse);
 
@@ -315,7 +317,7 @@ public:
     [[nodiscard]] virtual Vector<URL::URL> const& url_list() const override { return m_url_list; }
     [[nodiscard]] virtual Vector<URL::URL>& url_list() override { return m_url_list; }
     [[nodiscard]] virtual Status status() const override { return 0; }
-    [[nodiscard]] virtual ReadonlyBytes status_message() const override { return {}; }
+    [[nodiscard]] virtual ReadonlyBytes status_message() const LIFETIME_BOUND override { return {}; }
     [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const override { return m_header_list; }
     [[nodiscard]] virtual GC::Ptr<Body> body() const override { return nullptr; }
 
@@ -329,7 +331,7 @@ private:
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-opaque-redirect
-class OpaqueRedirectFilteredResponse final : public FilteredResponse {
+class WEB_API OpaqueRedirectFilteredResponse final : public FilteredResponse {
     GC_CELL(OpaqueRedirectFilteredResponse, FilteredResponse);
     GC_DECLARE_ALLOCATOR(OpaqueRedirectFilteredResponse);
 
@@ -338,7 +340,7 @@ public:
 
     [[nodiscard]] virtual Type type() const override { return Type::OpaqueRedirect; }
     [[nodiscard]] virtual Status status() const override { return 0; }
-    [[nodiscard]] virtual ReadonlyBytes status_message() const override { return {}; }
+    [[nodiscard]] virtual ReadonlyBytes status_message() const LIFETIME_BOUND override { return {}; }
     [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const override { return m_header_list; }
     [[nodiscard]] virtual GC::Ptr<Body> body() const override { return nullptr; }
 

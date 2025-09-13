@@ -50,6 +50,7 @@
 #include <LibWeb/HTML/WorkletGlobalScope.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/ServiceWorker/ServiceWorkerGlobalScope.h>
+#include <LibWeb/WebAssembly/WebAssembly.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 
 namespace Web::Bindings {
@@ -162,25 +163,24 @@ void initialize_main_thread_vm(AgentType type)
         auto& realm = script ? script->realm() : *vm.current_realm();
 
         // 5. Let global be realm's global object.
-        auto* global_mixin = dynamic_cast<HTML::UniversalGlobalScopeMixin*>(&realm.global_object());
-        VERIFY(global_mixin);
-        auto& global = global_mixin->this_impl();
+        auto& global_mixin = as<HTML::UniversalGlobalScopeMixin>(realm.global_object());
+        auto& global = global_mixin.this_impl();
 
         switch (operation) {
         // 6. If operation is "reject",
         case JS::Promise::RejectionOperation::Reject:
             // 1. Append promise to global's about-to-be-notified rejected promises list.
-            global_mixin->push_onto_about_to_be_notified_rejected_promises_list(promise);
+            global_mixin.push_onto_about_to_be_notified_rejected_promises_list(promise);
             break;
         // 7. If operation is "handle",
         case JS::Promise::RejectionOperation::Handle: {
             // 1. If global's about-to-be-notified rejected promises list contains promise, then remove promise from that list and return.
-            bool removed_about_to_be_notified_rejected_promise = global_mixin->remove_from_about_to_be_notified_rejected_promises_list(promise);
+            bool removed_about_to_be_notified_rejected_promise = global_mixin.remove_from_about_to_be_notified_rejected_promises_list(promise);
             if (removed_about_to_be_notified_rejected_promise)
                 return;
 
             // 3. Remove promise from global's outstanding rejected promises weak set.
-            bool removed_outstanding_rejected_promise = global_mixin->remove_from_outstanding_rejected_promises_weak_set(&promise);
+            bool removed_outstanding_rejected_promise = global_mixin.remove_from_outstanding_rejected_promises_weak_set(&promise);
 
             // 2. If global's outstanding rejected promises weak set does not contain promise, then return.
             // NOTE: This is done out of order because removed_outstanding_rejected_promise will be false if the promise wasn't in the set or true if it was and got removed.
@@ -411,16 +411,16 @@ void initialize_main_thread_vm(AgentType type)
 
         // 5. Return « Record { [[Key]]: "url", [[Value]]: urlString }, Record { [[Key]]: "resolve", [[Value]]: resolveFunction } ».
         HashMap<JS::PropertyKey, JS::Value> meta;
-        meta.set("url"_fly_string, JS::PrimitiveString::create(vm, move(url_string)));
-        meta.set("resolve"_fly_string, resolve_function);
+        meta.set("url"_utf16_fly_string, JS::PrimitiveString::create(vm, move(url_string)));
+        meta.set("resolve"_utf16_fly_string, resolve_function);
 
         return meta;
     };
 
     // 8.1.6.7.2 HostGetSupportedImportAttributes(), https://html.spec.whatwg.org/multipage/webappapis.html#hostgetsupportedimportassertions
-    s_main_thread_vm->host_get_supported_import_attributes = []() -> Vector<String> {
+    s_main_thread_vm->host_get_supported_import_attributes = []() -> Vector<Utf16String> {
         // 1. Return « "type" ».
-        return { "type"_string };
+        return { "type"_utf16 };
     };
 
     // 8.1.6.7.3 HostLoadImportedModule(referrer, moduleRequest, loadState, payload), https://html.spec.whatwg.org/multipage/webappapis.html#hostloadimportedmodule
@@ -494,7 +494,7 @@ void initialize_main_thread_vm(AgentType type)
 
                 // 2. Resolve a module specifier given referencingScript and moduleRequest.[[Specifier]], catching any
                 //    exceptions. If they throw an exception, let resolutionError be the thrown exception.
-                auto maybe_exception = HTML::resolve_module_specifier(referencing_script, module_request.module_specifier.to_string());
+                auto maybe_exception = HTML::resolve_module_specifier(referencing_script, module_request.module_specifier.view().to_utf8_but_should_be_ported_to_utf16());
 
                 // 3. If the previous step threw an exception, then:
                 if (maybe_exception.is_exception()) {
@@ -544,7 +544,7 @@ void initialize_main_thread_vm(AgentType type)
 
         // 8. Let url be the result of resolving a module specifier given referencingScript and moduleRequest.[[Specifier]],
         //    catching any exceptions. If they throw an exception, let resolutionError be the thrown exception.
-        auto url = HTML::resolve_module_specifier(referencing_script, module_request.module_specifier.to_string());
+        auto url = HTML::resolve_module_specifier(referencing_script, module_request.module_specifier.view().to_utf8_but_should_be_ported_to_utf16());
 
         // 9. If the previous step threw an exception, then:
         if (url.is_exception()) {
@@ -690,6 +690,14 @@ void initialize_main_thread_vm(AgentType type)
 
     s_main_thread_vm->host_unrecognized_date_string = [](StringView date) {
         dbgln("Unable to parse date string: \"{}\"", date);
+    };
+
+    s_main_thread_vm->host_resize_array_buffer = [default_host_resize_array_buffer = move(s_main_thread_vm->host_resize_array_buffer)](JS::ArrayBuffer& buffer, size_t new_byte_length) -> JS::ThrowCompletionOr<JS::HandledByHost> {
+        auto wasm_handled = TRY(WebAssembly::Detail::host_resize_array_buffer(*s_main_thread_vm, buffer, new_byte_length));
+        if (wasm_handled == JS::HandledByHost::Handled)
+            return JS::HandledByHost::Handled;
+
+        return default_host_resize_array_buffer(buffer, new_byte_length);
     };
 }
 

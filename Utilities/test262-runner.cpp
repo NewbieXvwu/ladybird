@@ -13,12 +13,9 @@
 #include <AK/Vector.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/File.h>
-#include <LibJS/Bytecode/BasicBlock.h>
-#include <LibJS/Bytecode/Generator.h>
 #include <LibJS/Bytecode/Interpreter.h>
 #include <LibJS/Contrib/Test262/GlobalObject.h>
 #include <LibJS/Parser.h>
-#include <LibJS/Runtime/Agent.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibJS/Runtime/ValueInlines.h>
 #include <LibJS/Script.h>
@@ -90,19 +87,19 @@ static ErrorOr<void, TestError> run_program(InterpreterT& interpreter, ScriptOrM
         if (error_value.is_object()) {
             auto& object = error_value.as_object();
 
-            auto name = object.get_without_side_effects("name"_fly_string);
+            auto name = object.get_without_side_effects("name"_utf16_fly_string);
             if (!name.is_undefined() && !name.is_accessor()) {
                 error.type = name.to_string_without_side_effects();
             } else {
-                auto constructor = object.get_without_side_effects("constructor"_fly_string);
+                auto constructor = object.get_without_side_effects("constructor"_utf16_fly_string);
                 if (constructor.is_object()) {
-                    name = constructor.as_object().get_without_side_effects("name"_fly_string);
+                    name = constructor.as_object().get_without_side_effects("name"_utf16_fly_string);
                     if (!name.is_undefined())
                         error.type = name.to_string_without_side_effects();
                 }
             }
 
-            auto message = object.get_without_side_effects("message"_fly_string);
+            auto message = object.get_without_side_effects("message"_utf16_fly_string);
             if (!message.is_undefined() && !message.is_accessor())
                 error.details = message.to_string_without_side_effects();
         }

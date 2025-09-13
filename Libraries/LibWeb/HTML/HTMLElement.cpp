@@ -18,6 +18,7 @@
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/DOM/LiveNodeList.h>
 #include <LibWeb/DOM/Position.h>
+#include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CloseWatcher.h>
@@ -30,7 +31,9 @@
 #include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLDialogElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
+#include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLLabelElement.h>
+#include <LibWeb/HTML/HTMLObjectElement.h>
 #include <LibWeb/HTML/HTMLParagraphElement.h>
 #include <LibWeb/HTML/PopoverInvokerElement.h>
 #include <LibWeb/HTML/ToggleEvent.h>
@@ -41,6 +44,7 @@
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Selection/Selection.h>
 #include <LibWeb/UIEvents/EventNames.h>
 #include <LibWeb/UIEvents/PointerEvent.h>
 #include <LibWeb/WebIDL/DOMException.h>
@@ -190,11 +194,11 @@ WebIDL::ExceptionOr<void> HTMLElement::set_content_editable(StringView content_e
         MUST(set_attribute(HTML::AttributeNames::contenteditable, "false"_string));
         return {};
     }
-    return WebIDL::SyntaxError::create(realm(), "Invalid contentEditable value, must be 'true', 'false', 'plaintext-only' or 'inherit'"_string);
+    return WebIDL::SyntaxError::create(realm(), "Invalid contentEditable value, must be 'true', 'false', 'plaintext-only' or 'inherit'"_utf16);
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#set-the-inner-text-steps
-void HTMLElement::set_inner_text(StringView text)
+void HTMLElement::set_inner_text(Utf16View const& text)
 {
     // 1. Let fragment be the rendered text fragment for value given element's node document.
     auto fragment = rendered_text_fragment(text);
@@ -212,22 +216,23 @@ static void merge_with_the_next_text_node(DOM::Text& node)
     auto next = node.next_sibling();
 
     // 2. If next is not a Text node, then return.
-    if (!is<DOM::Text>(next))
+    auto* text = as_if<DOM::Text>(next);
+    if (!text)
         return;
 
     // 3. Replace data with node, node's data's length, 0, and next's data.
-    MUST(node.replace_data(node.length_in_utf16_code_units(), 0, static_cast<DOM::Text const&>(*next).data()));
+    MUST(node.replace_data(node.length_in_utf16_code_units(), 0, text->data()));
 
     // 4. Remove next.
     next->remove();
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#the-innertext-idl-attribute:dom-outertext-2
-WebIDL::ExceptionOr<void> HTMLElement::set_outer_text(String const& value)
+WebIDL::ExceptionOr<void> HTMLElement::set_outer_text(Utf16View const& value)
 {
     // 1. If this's parent is null, then throw a "NoModificationAllowedError" DOMException.
     if (!parent())
-        return WebIDL::NoModificationAllowedError::create(realm(), "setOuterText: parent is null"_string);
+        return WebIDL::NoModificationAllowedError::create(realm(), "setOuterText: parent is null"_utf16);
 
     // 2. Let next be this's next sibling.
     auto* next = next_sibling();
@@ -240,7 +245,7 @@ WebIDL::ExceptionOr<void> HTMLElement::set_outer_text(String const& value)
 
     // 5. If fragment has no children, then append a new Text node whose data is the empty string and node document is this's node document to fragment.
     if (!fragment->has_children())
-        MUST(fragment->append_child(document().create_text_node(String {})));
+        MUST(fragment->append_child(document().create_text_node({})));
 
     // 6. Replace this with fragment within this's parent.
     MUST(parent()->replace_child(fragment, *this));
@@ -250,48 +255,54 @@ WebIDL::ExceptionOr<void> HTMLElement::set_outer_text(String const& value)
         merge_with_the_next_text_node(static_cast<DOM::Text&>(*next->previous_sibling()));
 
     // 8. If previous is a Text node, then merge with the next text node given previous.
-    if (is<DOM::Text>(previous))
-        merge_with_the_next_text_node(static_cast<DOM::Text&>(*previous));
+    if (auto* previous_text = as_if<DOM::Text>(previous))
+        merge_with_the_next_text_node(*previous_text);
 
     set_needs_style_update(true);
     return {};
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#rendered-text-fragment
-GC::Ref<DOM::DocumentFragment> HTMLElement::rendered_text_fragment(StringView input)
+GC::Ref<DOM::DocumentFragment> HTMLElement::rendered_text_fragment(Utf16View const& input)
 {
     // 1. Let fragment be a new DocumentFragment whose node document is document.
-    //    Instead of creating a DocumentFragment the nodes are appended directly.
     auto fragment = realm().create<DOM::DocumentFragment>(document());
 
     // 2. Let position be a position variable for input, initially pointing at the start of input.
+    size_t position = 0;
+
     // 3. Let text be the empty string.
     // 4. While position is not past the end of input:
-    while (!input.is_empty()) {
-        // 1. Collect a sequence of code points that are not U+000A LF or U+000D CR from input given position, and set text to the result.
-        auto newline_index = input.find_any_of("\n\r"sv);
-        size_t const sequence_end_index = newline_index.value_or(input.length());
-        StringView const text = input.substring_view(0, sequence_end_index);
-        input = input.substring_view_starting_after_substring(text);
+    while (position < input.length_in_code_units()) {
+        auto start = position;
 
-        // 2. If text is not the empty string, then append a new Text node whose data is text and node document is document to fragment.
+        // 1. Collect a sequence of code points that are not U+000A LF or U+000D CR from input given position, and set
+        //    text to the result.
+        while (position < input.length_in_code_units() && !first_is_one_of(input.code_unit_at(position), u'\n', u'\r'))
+            ++position;
+
+        auto text = input.substring_view(start, position - start);
+
+        // 2. If text is not the empty string, then append a new Text node whose data is text and node document is
+        //    document to fragment.
         if (!text.is_empty()) {
-            MUST(fragment->append_child(document().create_text_node(MUST(String::from_utf8(text)))));
+            MUST(fragment->append_child(document().create_text_node(Utf16String::from_utf16(text))));
         }
 
         // 3. While position is not past the end of input, and the code point at position is either U+000A LF or U+000D CR:
-        while (input.starts_with('\n') || input.starts_with('\r')) {
-            // 1. If the code point at position is U+000D CR and the next code point is U+000A LF, then advance position to the next code point in input.
-            if (input.starts_with("\r\n"sv)) {
-                // 2. Advance position to the next code point in input.
-                input = input.substring_view(2);
-            } else {
-                // 2. Advance position to the next code point in input.
-                input = input.substring_view(1);
+        while (position < input.length_in_code_units() && first_is_one_of(input.code_unit_at(position), u'\n', u'\r')) {
+            // 1. If the code point at position is U+000D CR and the next code point is U+000A LF, then advance position
+            //    to the next code point in input.
+            if (input.code_unit_at(position) == '\r') {
+                if (position + 1 < input.length_in_code_units() && input.code_unit_at(position + 1) == '\n')
+                    ++position;
             }
 
+            // 2. Advance position to the next code point in input.
+            ++position;
+
             // 3. Append the result of creating an element given document, "br", and the HTML namespace to fragment.
-            auto br_element = DOM::create_element(document(), HTML::TagNames::br, Namespace::HTML).release_value();
+            auto br_element = MUST(DOM::create_element(document(), HTML::TagNames::br, Namespace::HTML));
             MUST(fragment->append_child(br_element));
         }
     }
@@ -305,10 +316,11 @@ struct RequiredLineBreakCount {
 };
 
 // https://html.spec.whatwg.org/multipage/dom.html#rendered-text-collection-steps
-static Vector<Variant<String, RequiredLineBreakCount>> rendered_text_collection_steps(DOM::Node const& node)
+static Vector<Variant<Utf16String, RequiredLineBreakCount>> rendered_text_collection_steps(DOM::Node const& node)
 {
-    // 1. Let items be the result of running the rendered text collection steps with each child node of node in tree order, and then concatenating the results to a single list.
-    Vector<Variant<String, RequiredLineBreakCount>> items;
+    // 1. Let items be the result of running the rendered text collection steps with each child node of node in tree
+    //    order, and then concatenating the results to a single list.
+    Vector<Variant<Utf16String, RequiredLineBreakCount>> items;
     node.for_each_child([&](auto const& child) {
         auto child_items = rendered_text_collection_steps(child);
         items.extend(move(child_items));
@@ -337,24 +349,28 @@ static Vector<Variant<String, RequiredLineBreakCount>> rendered_text_collection_
     if (computed_values.content_visibility() == CSS::ContentVisibility::Hidden)
         return items;
 
-    // 4. If node is a Text node, then for each CSS text box produced by node, in content order,
-    //    compute the text of the box after application of the CSS 'white-space' processing rules
-    //    and 'text-transform' rules, set items to the list of the resulting strings, and return items.
+    // 4. If node is a Text node, then for each CSS text box produced by node, in content order, compute the text of the
+    //    box after application of the CSS 'white-space' processing rules and 'text-transform' rules, set items to the
+    //    list of the resulting strings, and return items.
 
-    //    FIXME: The CSS 'white-space' processing rules are slightly modified:
-    //           collapsible spaces at the end of lines are always collapsed,
-    //           but they are only removed if the line is the last line of the block,
-    //           or it ends with a br element. Soft hyphens should be preserved. [CSSTEXT]
+    //    FIXME: The CSS 'white-space' processing rules are slightly modified: collapsible spaces at the end of lines are
+    //    always collapsed, but they are only removed if the line is the last line of the block, or it ends with a br
+    //    element. Soft hyphens should be preserved. [CSSTEXT]
 
-    if (is<DOM::Text>(node)) {
-        auto const* layout_text_node = as<Layout::TextNode>(layout_node);
-        items.append(layout_text_node->text_for_rendering());
+    if (auto const* layout_text_node = as_if<Layout::TextNode>(layout_node)) {
+        Layout::TextNode::ChunkIterator iterator { *layout_text_node, false, false };
+        while (true) {
+            auto chunk = iterator.next();
+            if (!chunk.has_value())
+                break;
+            items.append(Utf16String::from_utf16(chunk.release_value().view));
+        }
         return items;
     }
 
     // 5. If node is a br element, then append a string containing a single U+000A LF code point to items.
     if (is<HTML::HTMLBRElement>(node)) {
-        items.append("\n"_string);
+        items.append("\n"_utf16);
         return items;
     }
 
@@ -362,11 +378,11 @@ static Vector<Variant<String, RequiredLineBreakCount>> rendered_text_collection_
 
     // 6. If node's computed value of 'display' is 'table-cell', and node's CSS box is not the last 'table-cell' box of its enclosing 'table-row' box, then append a string containing a single U+0009 TAB code point to items.
     if (display.is_table_cell() && node.next_sibling())
-        items.append("\t"_string);
+        items.append("\t"_utf16);
 
     // 7. If node's computed value of 'display' is 'table-row', and node's CSS box is not the last 'table-row' box of the nearest ancestor 'table' box, then append a string containing a single U+000A LF code point to items.
     if (display.is_table_row() && node.next_sibling())
-        items.append("\n"_string);
+        items.append("\n"_utf16);
 
     // 8. If node is a p element, then append 2 (a required line break count) at the beginning and end of items.
     if (is<HTML::HTMLParagraphElement>(node)) {
@@ -385,7 +401,7 @@ static Vector<Variant<String, RequiredLineBreakCount>> rendered_text_collection_
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#get-the-text-steps
-String HTMLElement::get_the_text_steps()
+Utf16String HTMLElement::get_the_text_steps()
 {
     // 1. If element is not being rendered or if the user agent is a non-CSS user agent, then return element's descendant text content.
     document().update_layout(DOM::UpdateLayoutReason::HTMLElementGetTheTextSteps);
@@ -393,7 +409,7 @@ String HTMLElement::get_the_text_steps()
         return descendant_text_content();
 
     // 2. Let results be a new empty list.
-    Vector<Variant<String, RequiredLineBreakCount>> results;
+    Vector<Variant<Utf16String, RequiredLineBreakCount>> results;
 
     // 3. For each child node node of element:
     for_each_child([&](Node const& node) {
@@ -409,7 +425,7 @@ String HTMLElement::get_the_text_steps()
     // 4. Remove any items from results that are the empty string.
     results.remove_all_matching([](auto& item) {
         return item.visit(
-            [](String const& string) { return string.is_empty(); },
+            [](Utf16String const& string) { return string.is_empty(); },
             [](RequiredLineBreakCount const&) { return false; });
     });
 
@@ -419,13 +435,12 @@ String HTMLElement::get_the_text_steps()
     while (!results.is_empty() && results.last().has<RequiredLineBreakCount>())
         results.take_last();
 
-    // 6. Replace each remaining run of consecutive required line break count items
-    //    with a string consisting of as many U+000A LF code points as the maximum of the values
-    //    in the required line break count items.
-    StringBuilder builder;
+    // 6. Replace each remaining run of consecutive required line break count items with a string consisting of as many
+    //    U+000A LF code points as the maximum of the values in the required line break count items.
+    StringBuilder builder(StringBuilder::Mode::UTF16);
     for (size_t i = 0; i < results.size(); ++i) {
         results[i].visit(
-            [&](String const& string) {
+            [&](Utf16String const& string) {
                 builder.append(string);
             },
             [&](RequiredLineBreakCount const& line_break_count) {
@@ -444,18 +459,18 @@ String HTMLElement::get_the_text_steps()
     }
 
     // 7. Return the concatenation of the string items in results.
-    return builder.to_string_without_validation();
+    return builder.to_utf16_string();
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#dom-innertext
-String HTMLElement::inner_text()
+Utf16String HTMLElement::inner_text()
 {
     // The innerText and outerText getter steps are to return the result of running get the text steps with this.
     return get_the_text_steps();
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#dom-outertext
-String HTMLElement::outer_text()
+Utf16String HTMLElement::outer_text()
 {
     // The innerText and outerText getter steps are to return the result of running get the text steps with this.
     return get_the_text_steps();
@@ -833,20 +848,23 @@ GC::Ptr<DOM::NodeList> HTMLElement::labels()
 
     if (!m_labels) {
         m_labels = DOM::LiveNodeList::create(realm(), root(), DOM::LiveNodeList::Scope::Descendants, [&](auto& node) {
-            return is<HTMLLabelElement>(node) && as<HTMLLabelElement>(node).control() == this;
+            auto* label_element = as_if<HTMLLabelElement>(node);
+            return label_element && label_element->control() == this;
         });
     }
 
     return m_labels;
 }
 
+// https://html.spec.whatwg.org/multipage/interaction.html#dom-hidden
 Variant<bool, double, String> HTMLElement::hidden() const
 {
     // 1. If the hidden attribute is in the hidden until found state, then return "until-found".
-    if (get_attribute(HTML::AttributeNames::hidden) == "until-found")
+    auto const& hidden = get_attribute(HTML::AttributeNames::hidden);
+    if (hidden.has_value() && hidden->equals_ignoring_ascii_case("until-found"sv))
         return "until-found"_string;
     // 2. If the hidden attribute is set, then return true.
-    if (has_attribute(HTML::AttributeNames::hidden))
+    if (hidden.has_value())
         return true;
     // 3. Return false.
     return false;
@@ -896,7 +914,7 @@ void HTMLElement::set_hidden(Variant<bool, double, String> const& given_value)
 void HTMLElement::click()
 {
     // 1. If this element is a form control that is disabled, then return.
-    if (auto* form_control = dynamic_cast<FormAssociatedElement*>(this)) {
+    if (auto* form_control = as_if<FormAssociatedElement>(this)) {
         if (!form_control->enabled())
             return;
     }
@@ -1114,26 +1132,26 @@ WebIDL::ExceptionOr<GC::Ref<ElementInternals>> HTMLElement::attach_internals()
 {
     // 1. If this's is value is not null, then throw a "NotSupportedError" DOMException.
     if (is_value().has_value())
-        return WebIDL::NotSupportedError::create(realm(), "ElementInternals cannot be attached to a customized built-in element"_string);
+        return WebIDL::NotSupportedError::create(realm(), "ElementInternals cannot be attached to a customized built-in element"_utf16);
 
     // 2. Let definition be the result of looking up a custom element definition given this's node document, its namespace, its local name, and null as the is value.
     auto definition = document().lookup_custom_element_definition(namespace_uri(), local_name(), is_value());
 
     // 3. If definition is null, then throw an "NotSupportedError" DOMException.
     if (!definition)
-        return WebIDL::NotSupportedError::create(realm(), "ElementInternals cannot be attached to an element that is not a custom element"_string);
+        return WebIDL::NotSupportedError::create(realm(), "ElementInternals cannot be attached to an element that is not a custom element"_utf16);
 
     // 4. If definition's disable internals is true, then throw a "NotSupportedError" DOMException.
     if (definition->disable_internals())
-        return WebIDL::NotSupportedError::create(realm(), "ElementInternals are disabled for this custom element"_string);
+        return WebIDL::NotSupportedError::create(realm(), "ElementInternals are disabled for this custom element"_utf16);
 
     // 5. If this's attached internals is non-null, then throw an "NotSupportedError" DOMException.
     if (m_attached_internals)
-        return WebIDL::NotSupportedError::create(realm(), "ElementInternals already attached"_string);
+        return WebIDL::NotSupportedError::create(realm(), "ElementInternals already attached"_utf16);
 
     // 6. If this's custom element state is not "precustomized" or "custom", then throw a "NotSupportedError" DOMException.
     if (!first_is_one_of(custom_element_state(), DOM::CustomElementState::Precustomized, DOM::CustomElementState::Custom))
-        return WebIDL::NotSupportedError::create(realm(), "Custom element is in an invalid state to attach ElementInternals"_string);
+        return WebIDL::NotSupportedError::create(realm(), "Custom element is in an invalid state to attach ElementInternals"_utf16);
 
     // 7. Set this's attached internals to a new ElementInternals instance whose target element is this.
     auto internals = ElementInternals::create(realm(), *this);
@@ -1196,7 +1214,7 @@ WebIDL::ExceptionOr<bool> HTMLElement::check_popover_validity(ExpectedToBeShowin
     if (ignore_dom_state == IgnoreDomState::No && !popover().has_value()) {
         // 1.1. If throwExceptions is true, then throw a "NotSupportedError" DOMException.
         if (throw_exceptions == ThrowExceptions::Yes)
-            return WebIDL::NotSupportedError::create(realm(), "Element is not a popover"_string);
+            return WebIDL::NotSupportedError::create(realm(), "Element is not a popover"_utf16);
         // 1.2. Return false.
         return false;
     }
@@ -1224,7 +1242,7 @@ WebIDL::ExceptionOr<bool> HTMLElement::check_popover_validity(ExpectedToBeShowin
         || (ignore_dom_state == IgnoreDomState::No && expected_document && &document() != expected_document)
         || (is<HTMLDialogElement>(*this) && as<HTMLDialogElement>(*this).is_modal())) {
         if (throw_exceptions == ThrowExceptions::Yes)
-            return WebIDL::InvalidStateError::create(realm(), "Element is not in a valid state to show a popover"_string);
+            return WebIDL::InvalidStateError::create(realm(), "Element is not in a valid state to show a popover"_utf16);
         return false;
     }
 
@@ -1371,7 +1389,7 @@ WebIDL::ExceptionOr<void> HTMLElement::show_popover(ThrowExceptions throw_except
         if (original_type != popover()) {
             // 1. If throwExceptions is true, then throw an "InvalidStateError" DOMException.
             if (throw_exceptions == ThrowExceptions::Yes)
-                return WebIDL::InvalidStateError::create(realm(), "Element is not in a valid state to show a popover"_string);
+                return WebIDL::InvalidStateError::create(realm(), "Element is not in a valid state to show a popover"_utf16);
 
             // 2. Return.
             return {};
@@ -1424,7 +1442,7 @@ WebIDL::ExceptionOr<void> HTMLElement::show_popover(ThrowExceptions throw_except
 
                 return JS::js_undefined();
             },
-            0, FlyString {}, &realm());
+            0, Utf16FlyString {}, &realm());
         auto close_callback = realm().heap().allocate<WebIDL::CallbackType>(*close_callback_function, realm());
         m_popover_close_watcher->add_event_listener_without_options(HTML::EventNames::close, DOM::IDLEventListener::create(realm(), close_callback));
         // - getEnabledState being to return true.
@@ -2033,6 +2051,12 @@ void HTMLElement::did_receive_focus()
     auto editing_host = document().editing_host_manager();
     editing_host->set_active_contenteditable_element(this);
 
+    // Don't update the selection if we're already part of the active range.
+    if (auto range = document().get_selection()->range()) {
+        if (is_inclusive_ancestor_of(range->start_container()) || is_inclusive_ancestor_of(range->end_container()))
+            return;
+    }
+
     DOM::Text* text = nullptr;
     for_each_in_inclusive_subtree_of_type<DOM::Text>([&](auto& node) {
         text = &node;
@@ -2077,6 +2101,295 @@ String HTMLElement::access_key_label() const
 {
     dbgln("FIXME: Implement HTMLElement::access_key_label()");
     return String {};
+}
+
+// https://html.spec.whatwg.org/multipage/dnd.html#dom-draggable
+bool HTMLElement::draggable() const
+{
+    auto attribute = get_attribute(HTML::AttributeNames::draggable);
+
+    // If an element's draggable content attribute has the state True, the draggable IDL attribute must return true.
+    if (attribute.has_value() && attribute->equals_ignoring_ascii_case("true"sv)) {
+        return true;
+    }
+
+    // If an element's draggable content attribute has the state False, the draggable IDL attribute must return false.
+    if (attribute.has_value() && attribute->equals_ignoring_ascii_case("false"sv)) {
+        return false;
+    }
+
+    // Otherwise, the element's draggable content attribute has the state Auto.
+
+    // If the element is an img element, the draggable IDL attribute must return true.
+    if (is<HTML::HTMLImageElement>(*this)) {
+        return true;
+    }
+
+    // If the element is an object element that represents an image, the draggable IDL attribute must return true.
+    if (is<HTML::HTMLObjectElement>(*this)) {
+        if (auto type_attribute = get_attribute(HTML::AttributeNames::type); type_attribute.has_value() && type_attribute->equals_ignoring_ascii_case("image"sv))
+            return true;
+    }
+
+    // If the element is an a element with an href content attribute, the draggable IDL attribute must return true.
+    if (is<HTML::HTMLAnchorElement>(*this) && has_attribute(HTML::AttributeNames::href)) {
+        return true;
+    }
+
+    // Otherwise, the draggable IDL attribute must return false.
+    return false;
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#dom-spellcheck
+bool HTMLElement::spellcheck() const
+{
+    // The spellcheck attribute is an enumerated attribute with the following keywords and states:
+    // Keyword            | State | Brief description
+    // true               | True  | Spelling and grammar will be checked.
+    // (the empty string) |       |
+    // false              | False | and grammar will not be checked.
+
+    // The attribute's missing value default and invalid value default are both the Default state. The default state
+    // indicates that the element is to act according to a default behavior, possibly based on the parent element's
+    // own spellcheck state, as defined below.
+
+    // For each element, user agents must establish a default behavior, either through defaults or through preferences
+    // expressed by the user. There are three possible default behaviors for each element:
+
+    // true-by-default
+    //     The element will be checked for spelling and grammar if its contents are editable and spellchecking is not
+    //     explicitly disabled through the spellcheck attribute.
+    // false-by-default
+    //     The element will never be checked for spelling and grammar unless spellchecking is explicitly enabled
+    //     through the spellcheck attribute.
+    // inherit-by-default
+    //     The element's default behavior is the same as its parent element's. Elements that have no parent element
+    //     cannot have this as their default behavior.
+
+    // NOTE: We use "true-by-default" for elements which are editable, editing hosts, or form associated text control
+    //       elements "false-by-default" for root elements, and "inherit-by-default" for other elements.
+
+    auto maybe_spellcheck_attribute = attribute(HTML::AttributeNames::spellcheck);
+
+    // The spellcheck IDL attribute, on getting, must return true if the element's spellcheck content attribute is in the True state,
+    if (maybe_spellcheck_attribute.has_value() && (maybe_spellcheck_attribute.value().equals_ignoring_ascii_case("true"sv) || maybe_spellcheck_attribute.value().is_empty()))
+        return true;
+
+    if (!maybe_spellcheck_attribute.has_value() || !maybe_spellcheck_attribute.value().equals_ignoring_ascii_case("false"sv)) {
+        // or if the element's spellcheck content attribute is in the Default state and the element's default behavior is true-by-default,
+        if (is_editable_or_editing_host() || is<FormAssociatedTextControlElement>(this))
+            return true;
+
+        // or if the element's spellcheck content attribute is in the Default state and the element's default behavior is inherit-by-default
+        if (auto* parent_html_element = first_ancestor_of_type<HTMLElement>()) {
+            // and the element's parent element's spellcheck IDL attribute would return true;
+            if (parent_html_element->spellcheck())
+                return true;
+        }
+    }
+
+    // if none of those conditions applies, then the attribute must instead return false.
+    return false;
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#dom-spellcheck
+void HTMLElement::set_spellcheck(bool spellcheck)
+{
+    // On setting, if the new value is true, then the element's spellcheck content attribute must be set to "true", otherwise it must be set to "false".
+    if (spellcheck)
+        MUST(set_attribute(HTML::AttributeNames::spellcheck, "true"_string));
+    else
+        MUST(set_attribute(HTML::AttributeNames::spellcheck, "false"_string));
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#dom-writingsuggestions
+String HTMLElement::writing_suggestions() const
+{
+    // The writingsuggestions content attribute is an enumerated attribute with the following keywords and states:
+    // Keyword            | State | Brief description
+    // true               | True  | Writing suggestions should be offered on this element.
+    // (the empty string) |       |
+    // false              | False | Writing suggestions should not be offered on this element.
+
+    // The attribute's missing value default is the Default state. The default state indicates that the element is to
+    // act according to a default behavior, possibly based on the parent element's own writingsuggestions state, as
+    // defined below.
+
+    // The attribute's invalid value default is the True state.
+
+    // 1. If element's writingsuggestions content attribute is in the False state, return "false".
+    auto maybe_writing_suggestions_attribute = attribute(HTML::AttributeNames::writingsuggestions);
+
+    if (maybe_writing_suggestions_attribute.has_value() && maybe_writing_suggestions_attribute.value().equals_ignoring_ascii_case("false"sv))
+        return "false"_string;
+
+    // 2. If element's writingsuggestions content attribute is in the Default state, element has a parent element, and the computed writing suggestions value of element's parent element is "false", then return "false".
+    if (!maybe_writing_suggestions_attribute.has_value() && first_ancestor_of_type<HTMLElement>() && first_ancestor_of_type<HTMLElement>()->writing_suggestions() == "false"sv) {
+        return "false"_string;
+    }
+
+    // 3. Return "true".
+    return "true"_string;
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#dom-writingsuggestions
+void HTMLElement::set_writing_suggestions(String const& given_value)
+{
+    // 1. Set this's writingsuggestions content attribute to the given value.
+    MUST(set_attribute(HTML::AttributeNames::writingsuggestions, given_value));
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#own-autocapitalization-hint
+HTMLElement::AutocapitalizationHint HTMLElement::own_autocapitalization_hint() const
+{
+    // The autocapitalization processing model is based on selecting among five autocapitalization hints, defined as follows:
+    //
+    // default
+    //     The user agent and input method should make their own determination of whether or not to enable autocapitalization.
+    // none
+    //     No autocapitalization should be applied (all letters should default to lowercase).
+    // sentences
+    //     The first letter of each sentence should default to a capital letter; all other letters should default to lowercase.
+    // words
+    //     The first letter of each word should default to a capital letter; all other letters should default to lowercase.
+    // characters
+    //     All letters should default to uppercase.
+
+    // The autocapitalize attribute is an enumerated attribute whose states are the possible autocapitalization hints.
+    // The autocapitalization hint specified by the attribute's state combines with other considerations to form the
+    // used autocapitalization hint, which informs the behavior of the user agent. The keywords for this attribute and
+    // their state mappings are as follows:
+
+    // Keyword    | State
+    // off        | none
+    // none       |
+    // on         | sentences
+    // sentences  |
+    // words      | words
+    // characters | characters
+
+    // The attribute's missing value default is the default state, and its invalid value default is the sentences state.
+
+    // To compute the own autocapitalization hint of an element element, run the following steps:
+    // 1. If the autocapitalize content attribute is present on element, and its value is not the empty string, return the
+    //    state of the attribute.
+    auto maybe_autocapitalize_attribute = attribute(HTML::AttributeNames::autocapitalize);
+
+    if (maybe_autocapitalize_attribute.has_value() && !maybe_autocapitalize_attribute.value().is_empty()) {
+        auto autocapitalize_attribute_string_view = maybe_autocapitalize_attribute.value().bytes_as_string_view();
+
+        if (autocapitalize_attribute_string_view.is_one_of_ignoring_ascii_case("off"sv, "none"sv))
+            return AutocapitalizationHint::None;
+
+        if (autocapitalize_attribute_string_view.equals_ignoring_ascii_case("words"sv))
+            return AutocapitalizationHint::Words;
+
+        if (autocapitalize_attribute_string_view.equals_ignoring_ascii_case("characters"sv))
+            return AutocapitalizationHint::Characters;
+
+        return AutocapitalizationHint::Sentences;
+    }
+
+    // If element is an autocapitalize-and-autocorrect inheriting element and has a non-null form owner, return the own autocapitalization hint of element's form owner.
+    auto const* form_associated_element = as_if<FormAssociatedElement>(this);
+    if (form_associated_element && form_associated_element->is_autocapitalize_and_autocorrect_inheriting() && form_associated_element->form())
+        return form_associated_element->form()->own_autocapitalization_hint();
+
+    // 3. Return default.
+    return AutocapitalizationHint::Default;
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#attr-autocapitalize
+String HTMLElement::autocapitalize() const
+{
+    // The autocapitalize getter steps are to:
+    // 1. Let state be the own autocapitalization hint of this.
+    auto state = own_autocapitalization_hint();
+
+    // 2. If state is default, then return the empty string.
+    // 3. If state is none, then return "none".
+    // 4. If state is sentences, then return "sentences".
+    // 5. Return the keyword value corresponding to state.
+    switch (state) {
+    case AutocapitalizationHint::Default:
+        return String {};
+    case AutocapitalizationHint::None:
+        return "none"_string;
+    case AutocapitalizationHint::Sentences:
+        return "sentences"_string;
+    case AutocapitalizationHint::Words:
+        return "words"_string;
+    case AutocapitalizationHint::Characters:
+        return "characters"_string;
+    }
+
+    VERIFY_NOT_REACHED();
+}
+
+void HTMLElement::set_autocapitalize(String const& given_value)
+{
+    // The autocapitalize setter steps are to set the autocapitalize content attribute to the given value.
+    MUST(set_attribute(HTML::AttributeNames::autocapitalize, given_value));
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#used-autocorrection-state
+HTMLElement::AutocorrectionState HTMLElement::used_autocorrection_state() const
+{
+    // The autocorrect attribute is an enumerated attribute with the following keywords and states:
+    // Keyword            | State | Brief description
+    // on                 | on    | The user agent is permitted to automatically correct spelling errors while the user
+    // (the empty string) |       | types. Whether spelling is automatically corrected while typing left is for the user
+    //                    |       | agent to decide, and may depend on the element as well as the user's preferences.
+    // off                | off   | The user agent is not allowed to automatically correct spelling while the user types.
+
+    // The attribute's invalid value default and missing value default are both the on state.
+
+    auto autocorrect_attribute_state = [](Optional<String> attribute) {
+        if (attribute.has_value() && attribute.value().equals_ignoring_ascii_case("off"sv))
+            return AutocorrectionState::Off;
+
+        return AutocorrectionState::On;
+    };
+
+    // To compute the used autocorrection state of an element element, run these steps:
+    // 1. If element is an input element whose type attribute is in one of the URL, E-mail, or Password states, then return off.
+    if (auto const* input_element = as_if<HTMLInputElement>(this)) {
+        if (first_is_one_of(input_element->type_state(), HTMLInputElement::TypeAttributeState::URL, HTMLInputElement::TypeAttributeState::Email, HTMLInputElement::TypeAttributeState::Password))
+            return AutocorrectionState::Off;
+    }
+
+    // 2. If the autocorrect content attribute is present on element, then return the state of the attribute.
+    auto maybe_autocorrect_attribute = attribute(HTML::AttributeNames::autocorrect);
+
+    if (maybe_autocorrect_attribute.has_value())
+        return autocorrect_attribute_state(maybe_autocorrect_attribute);
+
+    // 3. If element is an autocapitalize-and-autocorrect inheriting element and has a non-null form owner, then return
+    //    the state of element's form owner's autocorrect attribute.
+    if (auto const* form_associated_element = as_if<FormAssociatedElement>(this)) {
+        if (form_associated_element->is_autocapitalize_and_autocorrect_inheriting() && form_associated_element->form())
+            return autocorrect_attribute_state(form_associated_element->form()->attribute(HTML::AttributeNames::autocorrect));
+    }
+
+    // 4. Return on.
+    return AutocorrectionState::On;
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#dom-autocorrect
+bool HTMLElement::autocorrect() const
+{
+    // The autocorrect getter steps are: return true if the element's used autocorrection state is on and false if the element's used autocorrection state is off.
+    return used_autocorrection_state() == AutocorrectionState::On;
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#dom-autocorrect
+void HTMLElement::set_autocorrect(bool given_value)
+{
+    // The setter steps are: if the given value is true, then the element's autocorrect attribute must be set to "on"; otherwise it must be set to "off".
+    if (given_value)
+        MUST(set_attribute(HTML::AttributeNames::autocorrect, "on"_string));
+    else
+        MUST(set_attribute(HTML::AttributeNames::autocorrect, "off"_string));
 }
 
 }

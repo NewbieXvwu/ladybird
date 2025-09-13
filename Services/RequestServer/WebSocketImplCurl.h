@@ -9,7 +9,10 @@
 #include <AK/MemoryStream.h>
 #include <LibCore/Forward.h>
 #include <LibWebSocket/Impl/WebSocketImpl.h>
-#include <curl/curl.h>
+
+typedef void CURL;
+typedef void CURLM;
+struct curl_slist;
 
 namespace RequestServer {
 
@@ -33,6 +36,8 @@ public:
 
 private:
     explicit WebSocketImplCurl(CURLM*);
+
+    void read_from_socket();
 
     CURLM* m_multi_handle { nullptr };
     CURL* m_easy_handle { nullptr };

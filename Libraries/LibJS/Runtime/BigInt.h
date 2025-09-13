@@ -11,6 +11,7 @@
 #include <AK/StringView.h>
 #include <LibCrypto/BigInt/SignedBigInteger.h>
 #include <LibGC/CellAllocator.h>
+#include <LibJS/Export.h>
 #include <LibJS/Heap/Cell.h>
 
 namespace JS {
@@ -27,7 +28,7 @@ public:
     Crypto::SignedBigInteger const& big_integer() const { return m_big_integer; }
 
     ErrorOr<String> to_string() const;
-    ByteString to_byte_string() const { return ByteString::formatted("{}n", MUST(m_big_integer.to_base(10))); }
+    Utf16String to_utf16_string() const;
 
 private:
     explicit BigInt(Crypto::SignedBigInteger);
@@ -35,6 +36,6 @@ private:
     Crypto::SignedBigInteger m_big_integer;
 };
 
-JS_API ThrowCompletionOr<GC::Ref<BigInt>> number_to_bigint(VM&, Value);
+ThrowCompletionOr<GC::Ref<BigInt>> number_to_bigint(VM&, Value);
 
 }

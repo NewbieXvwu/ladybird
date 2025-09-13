@@ -20,7 +20,9 @@ using ImageBitmapSource = FlattenVariant<CanvasImageSource, Variant<GC::Root<Fil
 
 // https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#imagebitmapoptions
 struct ImageBitmapOptions {
-    // FIXME: Implement these fields
+    // FIXME: Implement the rest of the fields
+    Optional<WebIDL::UnsignedLong> resize_width;
+    Optional<WebIDL::UnsignedLong> resize_height;
 };
 
 class ImageBitmap final : public Bindings::PlatformObject
@@ -34,13 +36,13 @@ public:
     virtual ~ImageBitmap() override = default;
 
     // ^Web::Bindings::Serializable
-    virtual StringView interface_name() const override { return "ImageBitmap"sv; }
-    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::SerializationRecord&, bool for_storage, HTML::SerializationMemory&) override;
-    virtual WebIDL::ExceptionOr<void> deserialization_steps(ReadonlySpan<u32> const&, size_t& position, HTML::DeserializationMemory&) override;
+    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::ImageBitmap; }
+    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
 
     // ^Web::Bindings::Transferable
-    virtual WebIDL::ExceptionOr<void> transfer_steps(HTML::TransferDataHolder&) override;
-    virtual WebIDL::ExceptionOr<void> transfer_receiving_steps(HTML::TransferDataHolder&) override;
+    virtual WebIDL::ExceptionOr<void> transfer_steps(HTML::TransferDataEncoder&) override;
+    virtual WebIDL::ExceptionOr<void> transfer_receiving_steps(HTML::TransferDataDecoder&) override;
     virtual HTML::TransferType primary_interface() const override;
 
     WebIDL::UnsignedLong width() const;

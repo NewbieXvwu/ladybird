@@ -47,7 +47,7 @@ String RadialGradientStyleValue::to_string(SerializationMode mode) const
             builder.append(circle_size.radius.to_string());
         },
         [&](EllipseSize const& ellipse_size) {
-            builder.appendff("{} {}", ellipse_size.radius_a.to_string(), ellipse_size.radius_b.to_string());
+            builder.appendff("{} {}", ellipse_size.radius_a.to_string(mode), ellipse_size.radius_b.to_string(mode));
         });
 
     if (has_position) {
@@ -238,7 +238,7 @@ void RadialGradientStyleValue::resolve_for_size(Layout::NodeWithStyle const& nod
     }
 }
 
-bool RadialGradientStyleValue::equals(CSSStyleValue const& other) const
+bool RadialGradientStyleValue::equals(StyleValue const& other) const
 {
     if (type() != other.type())
         return false;
@@ -246,7 +246,7 @@ bool RadialGradientStyleValue::equals(CSSStyleValue const& other) const
     return m_properties == other_gradient.m_properties;
 }
 
-void RadialGradientStyleValue::paint(PaintContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
+void RadialGradientStyleValue::paint(DisplayListRecordingContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
 {
     VERIFY(m_resolved.has_value());
     auto center = context.rounded_device_point(m_resolved->center).to_type<int>();

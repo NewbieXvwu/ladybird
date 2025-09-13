@@ -23,7 +23,7 @@ namespace Web::DOM {
 
 GC_DEFINE_ALLOCATOR(ParentNode);
 
-static bool contains_named_namespace(const CSS::SelectorList& selectors)
+static bool contains_named_namespace(CSS::SelectorList const& selectors)
 {
     for (auto const& selector : selectors) {
         for (auto const& compound_selector : selector->compound_selectors()) {
@@ -56,13 +56,13 @@ static WebIDL::ExceptionOr<Variant<GC::Ptr<Element>, GC::Ref<NodeList>>> scope_m
 
     // 2. If s is failure, then throw a "SyntaxError" DOMException.
     if (!maybe_selectors.has_value())
-        return WebIDL::SyntaxError::create(node.realm(), "Failed to parse selector"_string);
+        return WebIDL::SyntaxError::create(node.realm(), "Failed to parse selector"_utf16);
 
     auto selectors = maybe_selectors.value();
 
     // "Note: Support for namespaces within selectors is not planned and will not be added."
     if (contains_named_namespace(selectors))
-        return WebIDL::SyntaxError::create(node.realm(), "Failed to parse selector"_string);
+        return WebIDL::SyntaxError::create(node.realm(), "Failed to parse selector"_utf16);
 
     // 3. Return the result of match a selector against a tree with s and node’s root using scoping root node.
     GC::Ptr<Element> single_result;
@@ -209,7 +209,7 @@ GC::Ref<HTMLCollection> ParentNode::get_elements_by_tag_name_ns(Optional<FlyStri
 }
 
 // https://dom.spec.whatwg.org/#dom-parentnode-prepend
-WebIDL::ExceptionOr<void> ParentNode::prepend(Vector<Variant<GC::Root<Node>, String>> const& nodes)
+WebIDL::ExceptionOr<void> ParentNode::prepend(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes)
 {
     // 1. Let node be the result of converting nodes into a node given nodes and this’s node document.
     auto node = TRY(convert_nodes_to_single_node(nodes, document()));
@@ -220,7 +220,7 @@ WebIDL::ExceptionOr<void> ParentNode::prepend(Vector<Variant<GC::Root<Node>, Str
     return {};
 }
 
-WebIDL::ExceptionOr<void> ParentNode::append(Vector<Variant<GC::Root<Node>, String>> const& nodes)
+WebIDL::ExceptionOr<void> ParentNode::append(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes)
 {
     // 1. Let node be the result of converting nodes into a node given nodes and this’s node document.
     auto node = TRY(convert_nodes_to_single_node(nodes, document()));
@@ -231,13 +231,13 @@ WebIDL::ExceptionOr<void> ParentNode::append(Vector<Variant<GC::Root<Node>, Stri
     return {};
 }
 
-WebIDL::ExceptionOr<void> ParentNode::replace_children(Vector<Variant<GC::Root<Node>, String>> const& nodes)
+WebIDL::ExceptionOr<void> ParentNode::replace_children(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes)
 {
     // 1. Let node be the result of converting nodes into a node given nodes and this’s node document.
     auto node = TRY(convert_nodes_to_single_node(nodes, document()));
 
     // 2. Ensure pre-insertion validity of node into this before null.
-    TRY(ensure_pre_insertion_validity(node, nullptr));
+    TRY(ensure_pre_insertion_validity(realm(), node, nullptr));
 
     // 3. Replace all with node within this.
     replace_all(*node);

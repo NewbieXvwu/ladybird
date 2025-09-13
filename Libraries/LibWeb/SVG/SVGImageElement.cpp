@@ -23,7 +23,7 @@ namespace Web::SVG {
 SVGImageElement::SVGImageElement(DOM::Document& document, DOM::QualifiedName qualified_name)
     : SVGGraphicsElement(document, move(qualified_name))
 {
-    m_animation_timer = Core::Timer::try_create().release_value_but_fixme_should_propagate_errors();
+    m_animation_timer = Core::Timer::create();
     m_animation_timer->on_timeout = [this] { animate(); };
 }
 
@@ -36,6 +36,7 @@ void SVGImageElement::initialize(JS::Realm& realm)
 void SVGImageElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
+    image_provider_visit_edges(visitor);
     SVGURIReferenceMixin::visit_edges(visitor);
     visitor.visit(m_x);
     visitor.visit(m_y);
@@ -80,10 +81,8 @@ void SVGImageElement::attribute_changed(FlyString const& name, Optional<String> 
 // https://svgwg.org/svg2-draft/embedded.html#__svg__SVGImageElement__x
 GC::Ref<SVG::SVGAnimatedLength> SVGImageElement::x()
 {
-    if (!m_x) {
-        auto& realm = this->realm();
-        m_x = SVGAnimatedLength::create(realm, SVGLength::create(realm, 0, 0), SVGLength::create(realm, 0, 0));
-    }
+    if (!m_x)
+        m_x = fake_animated_length_fixme();
 
     return *m_x;
 }
@@ -91,10 +90,8 @@ GC::Ref<SVG::SVGAnimatedLength> SVGImageElement::x()
 // https://svgwg.org/svg2-draft/embedded.html#__svg__SVGImageElement__y
 GC::Ref<SVG::SVGAnimatedLength> SVGImageElement::y()
 {
-    if (!m_y) {
-        auto& realm = this->realm();
-        m_y = SVGAnimatedLength::create(realm, SVGLength::create(realm, 0, 0), SVGLength::create(realm, 0, 0));
-    }
+    if (!m_y)
+        m_y = fake_animated_length_fixme();
 
     return *m_y;
 }
@@ -104,7 +101,10 @@ GC::Ref<SVG::SVGAnimatedLength> SVGImageElement::width()
 {
     if (!m_width) {
         auto& realm = this->realm();
-        m_width = SVGAnimatedLength::create(realm, SVGLength::create(realm, 0, intrinsic_width().value_or(0).to_double()), SVGLength::create(realm, 0, 0));
+        m_width = SVGAnimatedLength::create(
+            realm,
+            SVGLength::create(realm, 0, intrinsic_width().value_or(0).to_double(), SVGLength::ReadOnly::No),
+            SVGLength::create(realm, 0, 0, SVGLength::ReadOnly::Yes));
     }
 
     return *m_width;
@@ -115,39 +115,42 @@ GC::Ref<SVG::SVGAnimatedLength> SVGImageElement::height()
 {
     if (!m_height) {
         auto& realm = this->realm();
-        m_height = SVGAnimatedLength::create(realm, SVGLength::create(realm, 0, intrinsic_height().value_or(0).to_double()), SVGLength::create(realm, 0, 0));
+        m_height = SVGAnimatedLength::create(
+            realm,
+            SVGLength::create(realm, 0, intrinsic_height().value_or(0).to_double(), SVGLength::ReadOnly::No),
+            SVGLength::create(realm, 0, 0, SVGLength::ReadOnly::Yes));
     }
 
     return *m_height;
 }
 
-Gfx::Rect<CSSPixels> SVGImageElement::bounding_box() const
+Gfx::FloatRect SVGImageElement::bounding_box() const
 {
-    Optional<CSSPixels> width;
+    Optional<float> width;
     if (attribute(HTML::AttributeNames::width).has_value())
-        width = CSSPixels { m_width->base_val()->value() };
+        width = m_width->base_val()->value();
 
-    Optional<CSSPixels> height;
+    Optional<float> height;
     if (attribute(HTML::AttributeNames::height).has_value())
-        height = CSSPixels { m_height->base_val()->value() };
+        height = m_height->base_val()->value();
 
     if (!height.has_value() && width.has_value() && intrinsic_aspect_ratio().has_value())
-        height = width.value() / intrinsic_aspect_ratio().value();
+        height = width.value() / intrinsic_aspect_ratio().value().to_float();
 
     if (!width.has_value() && height.has_value() && intrinsic_aspect_ratio().has_value())
-        width = height.value() * intrinsic_aspect_ratio().value();
+        width = height.value() * intrinsic_aspect_ratio().value().to_float();
 
     if (!width.has_value() && intrinsic_width().has_value())
-        width = intrinsic_width();
+        width = intrinsic_width()->to_float();
 
     if (!height.has_value() && intrinsic_height().has_value())
-        height = intrinsic_height();
+        height = intrinsic_height()->to_float();
 
     return {
-        CSSPixels { m_x ? m_x->base_val()->value() : 0 },
-        CSSPixels { m_y ? m_y->base_val()->value() : 0 },
-        width.value_or(0),
-        height.value_or(0),
+        m_x ? m_x->base_val()->value() : 0.0f,
+        m_y ? m_y->base_val()->value() : 0.0f,
+        width.value_or(0.0f),
+        height.value_or(0.0f),
     };
 }
 
@@ -236,7 +239,16 @@ Optional<CSSPixelFraction> SVGImageElement::intrinsic_aspect_ratio() const
     return {};
 }
 
-RefPtr<Gfx::ImmutableBitmap> SVGImageElement::current_image_bitmap(Gfx::IntSize size) const
+RefPtr<Gfx::ImmutableBitmap> SVGImageElement::default_image_bitmap_sized(Gfx::IntSize size) const
+{
+    if (!m_resource_request)
+        return {};
+    if (auto data = m_resource_request->image_data())
+        return data->bitmap(0, size);
+    return {};
+}
+
+RefPtr<Gfx::ImmutableBitmap> SVGImageElement::current_image_bitmap_sized(Gfx::IntSize size) const
 {
     if (!m_resource_request)
         return {};

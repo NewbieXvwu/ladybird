@@ -40,7 +40,7 @@ public:
         auto byte_count = builder.length();
         VERIFY(byte_count > MAX_SHORT_STRING_BYTE_COUNT);
 
-        auto buffer = builder.leak_buffer_for_string_construction({});
+        auto buffer = builder.leak_buffer_for_string_construction(Badge<StringData> {});
         VERIFY(buffer.has_value()); // We should only arrive here if the buffer is outlined.
 
         return adopt_ref(*new (buffer->buffer.data()) StringData(byte_count));
@@ -83,7 +83,7 @@ public:
     }
 
     // NOTE: There is no guarantee about null-termination.
-    ReadonlyBytes bytes() const
+    ReadonlyBytes bytes() const LIFETIME_BOUND
     {
         if (m_substring) {
             auto const& data = substring_data();
@@ -92,7 +92,7 @@ public:
         return { &m_bytes_or_substring_data[0], m_byte_count };
     }
 
-    StringView bytes_as_string_view() const { return { bytes() }; }
+    StringView bytes_as_string_view() const LIFETIME_BOUND { return { bytes() }; }
 
     bool operator==(StringData const& other) const
     {

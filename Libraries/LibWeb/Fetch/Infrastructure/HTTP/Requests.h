@@ -19,15 +19,15 @@
 #include <LibJS/Heap/Cell.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
+#include <LibWeb/Export.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Headers.h>
-#include <LibWeb/HTML/PolicyContainers.h>
-#include <LibWeb/HTML/Scripting/Environments.h>
 
 namespace Web::Fetch::Infrastructure {
 
 // https://fetch.spec.whatwg.org/#concept-request
-class Request final : public JS::Cell {
+class WEB_API Request final : public JS::Cell {
     GC_CELL(Request, JS::Cell);
     GC_DECLARE_ALLOCATOR(Request);
 
@@ -148,8 +148,8 @@ public:
         None,
     };
 
-    enum class Window {
-        NoWindow,
+    enum class TraversableForUserPrompts {
+        NoTraversable,
         Client,
     };
 
@@ -174,11 +174,11 @@ public:
     using PolicyContainerType = Variant<PolicyContainer, GC::Ref<HTML::PolicyContainer>>;
     using ReferrerType = Variant<Referrer, URL::URL>;
     using ReservedClientType = GC::Ptr<HTML::Environment>;
-    using WindowType = Variant<Window, GC::Ptr<HTML::EnvironmentSettingsObject>>;
+    using TraversableForUserPromptsType = Variant<TraversableForUserPrompts, GC::Ptr<HTML::EnvironmentSettingsObject>, GC::Ptr<HTML::TraversableNavigable>>;
 
     [[nodiscard]] static GC::Ref<Request> create(JS::VM&);
 
-    [[nodiscard]] ReadonlyBytes method() const { return m_method; }
+    [[nodiscard]] ReadonlyBytes method() const LIFETIME_BOUND { return m_method; }
     void set_method(ByteBuffer method) { m_method = move(method); }
 
     [[nodiscard]] bool local_urls_only() const { return m_local_urls_only; }
@@ -205,8 +205,8 @@ public:
     [[nodiscard]] String const& replaces_client_id() const { return m_replaces_client_id; }
     void set_replaces_client_id(String replaces_client_id) { m_replaces_client_id = move(replaces_client_id); }
 
-    [[nodiscard]] WindowType const& window() const { return m_window; }
-    void set_window(WindowType window) { m_window = move(window); }
+    [[nodiscard]] TraversableForUserPromptsType const& traversable_for_user_prompts() const { return m_traversable_for_user_prompts; }
+    void set_traversable_for_user_prompts(TraversableForUserPromptsType traversable_for_user_prompts) { m_traversable_for_user_prompts = move(traversable_for_user_prompts); }
 
     [[nodiscard]] bool keepalive() const { return m_keepalive; }
     void set_keepalive(bool keepalive) { m_keepalive = keepalive; }
@@ -228,6 +228,9 @@ public:
 
     [[nodiscard]] OriginType const& origin() const { return m_origin; }
     void set_origin(OriginType origin) { m_origin = move(origin); }
+
+    [[nodiscard]] Optional<URL::Origin> const& top_level_navigation_initiator_origin() const { return m_top_level_navigation_initiator_origin; }
+    void set_top_level_navigation_initiator_origin(Optional<URL::Origin> top_level_navigation_initiator_origin) { m_top_level_navigation_initiator_origin = move(top_level_navigation_initiator_origin); }
 
     [[nodiscard]] PolicyContainerType const& policy_container() const { return m_policy_container; }
     void set_policy_container(PolicyContainerType policy_container) { m_policy_container = move(policy_container); }
@@ -308,7 +311,7 @@ public:
     [[nodiscard]] bool is_non_subresource_request() const;
     [[nodiscard]] bool is_navigation_request() const;
 
-    [[nodiscard]] bool has_redirect_tainted_origin() const;
+    [[nodiscard]] RedirectTaint redirect_taint() const;
 
     [[nodiscard]] String serialize_origin() const;
     [[nodiscard]] ByteBuffer byte_serialize_origin() const;
@@ -374,9 +377,9 @@ private:
     String m_replaces_client_id;
 
     // https://fetch.spec.whatwg.org/#concept-request-window
-    // A request has an associated window ("no-window", "client", or an environment settings object whose global object
-    // is a Window object). Unless stated otherwise it is "client".
-    WindowType m_window { Window::Client };
+    // A request has an associated traversable for user prompts, that is "no-traversable", "client", or a traversable
+    // navigable. Unless stated otherwise it is "client".
+    TraversableForUserPromptsType m_traversable_for_user_prompts { TraversableForUserPrompts::Client };
 
     // https://fetch.spec.whatwg.org/#request-keepalive-flag
     // A request has an associated boolean keepalive. Unless stated otherwise it is false.
@@ -417,6 +420,10 @@ private:
     // https://fetch.spec.whatwg.org/#concept-request-origin
     // A request has an associated origin, which is "client" or an origin. Unless stated otherwise it is "client".
     OriginType m_origin { Origin::Client };
+
+    // https://fetch.spec.whatwg.org/#request-top-level-navigation-initiator-origin
+    // A request has an associated top-level navigation initiator origin, which is an origin or null. Unless stated otherwise it is null.
+    Optional<URL::Origin> m_top_level_navigation_initiator_origin;
 
     // https://fetch.spec.whatwg.org/#concept-request-policy-container
     // A request has an associated policy container, which is "client" or a policy container. Unless stated otherwise
@@ -529,9 +536,9 @@ private:
     BufferPolicy m_buffer_policy { BufferPolicy::BufferResponse };
 };
 
-StringView request_destination_to_string(Request::Destination);
-StringView request_mode_to_string(Request::Mode);
-FlyString initiator_type_to_string(Request::InitiatorType);
+WEB_API StringView request_destination_to_string(Request::Destination);
+WEB_API StringView request_mode_to_string(Request::Mode);
+WEB_API FlyString initiator_type_to_string(Request::InitiatorType);
 
 Optional<Request::Priority> request_priority_from_string(StringView);
 

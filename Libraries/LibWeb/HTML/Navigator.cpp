@@ -41,6 +41,7 @@ void Navigator::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(Navigator);
     Base::initialize(realm);
+    NavigatorGamepadPartial::check_for_connected_gamepads();
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-navigator-pdfviewerenabled
@@ -65,10 +66,12 @@ bool Navigator::webdriver() const
 void Navigator::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
+    NavigatorGamepadPartial::visit_edges(visitor);
     visitor.visit(m_mime_type_array);
     visitor.visit(m_plugin_array);
     visitor.visit(m_clipboard);
     visitor.visit(m_geolocation);
+    visitor.visit(m_serial);
     visitor.visit(m_user_activation);
     visitor.visit(m_service_worker_container);
     visitor.visit(m_media_capabilities);
@@ -101,6 +104,13 @@ GC::Ref<Geolocation::Geolocation> Navigator::geolocation()
     if (!m_geolocation)
         m_geolocation = realm().create<Geolocation::Geolocation>(realm());
     return *m_geolocation;
+}
+
+GC::Ref<Serial::Serial> Navigator::serial()
+{
+    if (!m_serial)
+        m_serial = realm().create<Serial::Serial>(realm());
+    return *m_serial;
 }
 
 GC::Ref<UserActivation> Navigator::user_activation()

@@ -13,7 +13,9 @@
 #include <LibGfx/Forward.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibUnicode/Forward.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/Gamepad/SDLGamepadForward.h>
 #include <LibWeb/Page/EventResult.h>
 #include <LibWeb/Page/InputEvent.h>
 #include <LibWeb/PixelUnits.h>
@@ -21,7 +23,7 @@
 
 namespace Web {
 
-class EventHandler {
+class WEB_API EventHandler {
 public:
     explicit EventHandler(Badge<HTML::Navigable>, HTML::Navigable&);
     ~EventHandler();
@@ -29,6 +31,7 @@ public:
     EventResult handle_mouseup(CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers);
     EventResult handle_mousedown(CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers);
     EventResult handle_mousemove(CSSPixelPoint, CSSPixelPoint screen_position, unsigned buttons, unsigned modifiers);
+    EventResult handle_mouseleave();
     EventResult handle_mousewheel(CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, int wheel_delta_x, int wheel_delta_y);
     EventResult handle_doubleclick(CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers);
 
@@ -37,9 +40,11 @@ public:
     EventResult handle_keydown(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
     EventResult handle_keyup(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
 
-    void set_mouse_event_tracking_paintable(Painting::Paintable*);
+    void set_mouse_event_tracking_paintable(GC::Ptr<Painting::Paintable>);
 
-    void handle_paste(String const& text);
+    EventResult handle_paste(String const& text);
+
+    void handle_sdl_input_events();
 
     void visit_edges(JS::Cell::Visitor& visitor) const;
 
@@ -50,7 +55,7 @@ private:
     EventResult focus_previous_element();
 
     EventResult fire_keyboard_event(FlyString const& event_name, HTML::Navigable&, UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
-    [[nodiscard]] EventResult input_event(FlyString const& event_name, FlyString const& input_type, HTML::Navigable&, u32 code_point);
+    [[nodiscard]] EventResult input_event(FlyString const& event_name, FlyString const& input_type, HTML::Navigable&, Variant<u32, Utf16String> code_point_or_string);
     CSSPixelPoint compute_mouse_event_client_offset(CSSPixelPoint event_page_position) const;
     CSSPixelPoint compute_mouse_event_page_offset(CSSPixelPoint event_client_offset) const;
     CSSPixelPoint compute_mouse_event_movement(CSSPixelPoint event_client_offset) const;
@@ -61,10 +66,14 @@ private:
     };
     Optional<Target> target_for_mouse_position(CSSPixelPoint position);
 
-    Painting::PaintableBox* paint_root();
-    Painting::PaintableBox const* paint_root() const;
+    GC::Ptr<Painting::PaintableBox> paint_root();
+    GC::Ptr<Painting::PaintableBox const> paint_root() const;
 
     bool should_ignore_device_input_event() const;
+
+    void handle_gamepad_connected(SDL_JoystickID);
+    void handle_gamepad_updated(SDL_JoystickID);
+    void handle_gamepad_disconnected(SDL_JoystickID);
 
     GC::Ref<HTML::Navigable> m_navigable;
 

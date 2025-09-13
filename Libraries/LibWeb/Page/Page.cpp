@@ -116,7 +116,12 @@ CSSPixelRect Page::web_exposed_screen_area() const
 
 CSS::PreferredColorScheme Page::preferred_color_scheme() const
 {
-    return m_client->preferred_color_scheme();
+    auto preferred_color_scheme = m_client->preferred_color_scheme();
+
+    if (preferred_color_scheme == CSS::PreferredColorScheme::Auto)
+        preferred_color_scheme = palette().is_dark() ? CSS::PreferredColorScheme::Dark : CSS::PreferredColorScheme::Light;
+
+    return preferred_color_scheme;
 }
 
 CSS::PreferredContrast Page::preferred_contrast() const
@@ -209,6 +214,11 @@ EventResult Page::handle_mousemove(DevicePixelPoint position, DevicePixelPoint s
     return top_level_traversable()->event_handler().handle_mousemove(device_to_css_point(position), device_to_css_point(screen_position), buttons, modifiers);
 }
 
+EventResult Page::handle_mouseleave()
+{
+    return top_level_traversable()->event_handler().handle_mouseleave();
+}
+
 EventResult Page::handle_mousewheel(DevicePixelPoint position, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, DevicePixels wheel_delta_x, DevicePixels wheel_delta_y)
 {
     return top_level_traversable()->event_handler().handle_mousewheel(device_to_css_point(position), device_to_css_point(screen_position), button, buttons, modifiers, wheel_delta_x.value(), wheel_delta_y.value());
@@ -232,6 +242,11 @@ EventResult Page::handle_keydown(UIEvents::KeyCode key, unsigned modifiers, u32 
 EventResult Page::handle_keyup(UIEvents::KeyCode key, unsigned modifiers, u32 code_point, bool repeat)
 {
     return focused_navigable().event_handler().handle_keyup(key, modifiers, code_point, repeat);
+}
+
+void Page::handle_sdl_input_events()
+{
+    top_level_traversable()->event_handler().handle_sdl_input_events();
 }
 
 void Page::set_top_level_traversable(GC::Ref<HTML::TraversableNavigable> navigable)
@@ -529,7 +544,7 @@ WebIDL::ExceptionOr<void> Page::toggle_media_loop_state()
     if (media_element->has_attribute(HTML::AttributeNames::loop))
         media_element->remove_attribute(HTML::AttributeNames::loop);
     else
-        TRY(media_element->set_attribute(HTML::AttributeNames::loop, {}));
+        TRY(media_element->set_attribute(HTML::AttributeNames::loop, String {}));
 
     return {};
 }
@@ -545,7 +560,7 @@ WebIDL::ExceptionOr<void> Page::toggle_media_controls_state()
     if (media_element->has_attribute(HTML::AttributeNames::controls))
         media_element->remove_attribute(HTML::AttributeNames::controls);
     else
-        TRY(media_element->set_attribute(HTML::AttributeNames::controls, {}));
+        TRY(media_element->set_attribute(HTML::AttributeNames::controls, String {}));
 
     return {};
 }

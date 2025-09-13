@@ -7,9 +7,8 @@
 #pragma once
 
 #include <AK/DistinctNumeric.h>
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 #include <AK/Vector.h>
-#include <LibJS/Forward.h>
 
 namespace JS::Bytecode {
 
@@ -19,20 +18,20 @@ struct IdentifierTableIndex {
     u32 value { 0 };
 };
 
-class JS_API IdentifierTable {
+class IdentifierTable {
     AK_MAKE_NONMOVABLE(IdentifierTable);
     AK_MAKE_NONCOPYABLE(IdentifierTable);
 
 public:
     IdentifierTable() = default;
 
-    IdentifierTableIndex insert(FlyString);
-    FlyString const& get(IdentifierTableIndex) const;
+    IdentifierTableIndex insert(Utf16FlyString);
+    Utf16FlyString const& get(IdentifierTableIndex) const;
     void dump() const;
     bool is_empty() const { return m_identifiers.is_empty(); }
 
 private:
-    Vector<FlyString> m_identifiers;
+    Vector<Utf16FlyString> m_identifiers;
 };
 
 }

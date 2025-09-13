@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/CSS/Parser/ErrorReporter.h>
 #include <LibWeb/CSS/Parser/Parser.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
 #include <LibWeb/CSS/StyleValues/FontSourceStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StringStyleValue.h>
@@ -16,10 +17,13 @@
 
 namespace Web::CSS::Parser {
 
-Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_descriptor_value(AtRuleID at_rule_id, DescriptorID descriptor_id, TokenStream<ComponentValue>& unprocessed_tokens)
+Parser::ParseErrorOr<NonnullRefPtr<StyleValue const>> Parser::parse_descriptor_value(AtRuleID at_rule_id, DescriptorID descriptor_id, TokenStream<ComponentValue>& unprocessed_tokens)
 {
     if (!at_rule_supports_descriptor(at_rule_id, descriptor_id)) {
-        dbgln_if(CSS_PARSER_DEBUG, "Unsupported descriptor '{}' in '{}'", to_string(descriptor_id), to_string(at_rule_id));
+        ErrorReporter::the().report(UnknownPropertyError {
+            .rule_name = to_string(at_rule_id),
+            .property_name = to_string(descriptor_id),
+        });
         return ParseError::SyntaxError;
     }
 
@@ -42,20 +46,19 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_descripto
             [&](Keyword keyword) {
                 return parse_all_as_single_keyword_value(tokens, keyword);
             },
-            [&](PropertyID property_id) -> RefPtr<CSSStyleValue const> {
+            [&](PropertyID property_id) -> RefPtr<StyleValue const> {
                 auto value_or_error = parse_css_value(property_id, tokens);
                 if (value_or_error.is_error())
                     return nullptr;
                 auto value_for_property = value_or_error.release_value();
                 // Descriptors don't accept the following, which properties do:
                 // - CSS-wide keywords
-                // - Shorthands
                 // - Arbitrary substitution functions (so, UnresolvedStyleValue)
-                if (value_for_property->is_css_wide_keyword() || value_for_property->is_shorthand() || value_for_property->is_unresolved())
+                if (value_for_property->is_css_wide_keyword() || value_for_property->is_unresolved())
                     return nullptr;
                 return value_for_property;
             },
-            [&](DescriptorMetadata::ValueType value_type) -> RefPtr<CSSStyleValue const> {
+            [&](DescriptorMetadata::ValueType value_type) -> RefPtr<StyleValue const> {
                 switch (value_type) {
                 case DescriptorMetadata::ValueType::CropOrCross: {
                     // crop || cross
@@ -66,8 +69,8 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_descripto
                     if (!first)
                         return nullptr;
 
-                    RefPtr<CSSStyleValue const> crop;
-                    RefPtr<CSSStyleValue const> cross;
+                    RefPtr<StyleValue const> crop;
+                    RefPtr<StyleValue const> cross;
 
                     if (first->to_keyword() == Keyword::Crop)
                         crop = first;
@@ -117,7 +120,7 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_descripto
                     // `component_values` already has what we want. Just skip through its tokens so code below knows we consumed them.
                     while (tokens.has_next_token())
                         tokens.discard_a_token();
-                    return UnresolvedStyleValue::create(move(component_values), false, {});
+                    return UnresolvedStyleValue::create(move(component_values));
                 }
                 case DescriptorMetadata::ValueType::PageSize: {
                     // https://drafts.csswg.org/css-page-3/#page-size-prop
@@ -129,13 +132,13 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_descripto
 
                     // <length [0,∞]>{1,2}
                     if (auto first_length = parse_length_value(tokens)) {
-                        if (first_length->is_length() && first_length->as_length().length().raw_value() < 0)
+                        if (first_length->is_length() && first_length->as_length().raw_value() < 0)
                             return nullptr;
 
                         tokens.discard_whitespace();
 
                         if (auto second_length = parse_length_value(tokens)) {
-                            if (second_length->is_length() && second_length->as_length().length().raw_value() < 0)
+                            if (second_length->is_length() && second_length->as_length().raw_value() < 0)
                                 return nullptr;
 
                             return StyleValueList::create(StyleValueVector { first_length.release_nonnull(), second_length.release_nonnull() }, StyleValueList::Separator::Space);
@@ -145,8 +148,8 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_descripto
                     }
 
                     // [ <page-size> || [ portrait | landscape ] ]
-                    RefPtr<CSSStyleValue const> page_size;
-                    RefPtr<CSSStyleValue const> orientation;
+                    RefPtr<StyleValue const> page_size;
+                    RefPtr<StyleValue const> orientation;
                     if (auto first_keyword = parse_keyword_value(tokens)) {
                         if (first_is_one_of(first_keyword->to_keyword(), Keyword::Landscape, Keyword::Portrait)) {
                             orientation = first_keyword.release_nonnull();
@@ -182,13 +185,13 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_descripto
                 case DescriptorMetadata::ValueType::PositivePercentage: {
                     if (auto percentage_value = parse_percentage_value(tokens)) {
                         if (percentage_value->is_percentage()) {
-                            if (percentage_value->as_percentage().value() < 0)
+                            if (percentage_value->as_percentage().raw_value() < 0)
                                 return nullptr;
                             return percentage_value.release_nonnull();
                         }
                         // All calculations in descriptors must be resolvable at parse-time.
                         if (percentage_value->is_calculated()) {
-                            auto percentage = percentage_value->as_calculated().resolve_percentage({});
+                            auto percentage = percentage_value->as_calculated().resolve_percentage_deprecated({});
                             if (percentage.has_value() && percentage->value() >= 0)
                                 return PercentageStyleValue::create(percentage.release_value());
                             return nullptr;
@@ -199,7 +202,7 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_descripto
                 case DescriptorMetadata::ValueType::String:
                     return parse_string_value(tokens);
                 case DescriptorMetadata::ValueType::UnicodeRangeTokens: {
-                    return parse_comma_separated_value_list(tokens, [this](auto& tokens) -> RefPtr<CSSStyleValue const> {
+                    return parse_comma_separated_value_list(tokens, [this](auto& tokens) -> RefPtr<StyleValue const> {
                         return parse_unicode_range_value(tokens);
                     });
                 }
@@ -212,10 +215,12 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_descripto
         return parsed_style_value.release_nonnull();
     }
 
-    if constexpr (CSS_PARSER_DEBUG) {
-        dbgln("Failed to parse descriptor '{}' in '{}'", to_string(descriptor_id), to_string(at_rule_id));
-        tokens.dump_all_tokens();
-    }
+    ErrorReporter::the().report(InvalidPropertyError {
+        .rule_name = to_string(at_rule_id),
+        .property_name = to_string(descriptor_id),
+        .value_string = tokens.dump_string(),
+        .description = "Failed to parse."_string,
+    });
 
     return ParseError::SyntaxError;
 }
@@ -228,15 +233,8 @@ Optional<Descriptor> Parser::convert_to_descriptor(AtRuleID at_rule_id, Declarat
 
     auto value_token_stream = TokenStream(declaration.value);
     auto value = parse_descriptor_value(at_rule_id, descriptor_id.value(), value_token_stream);
-    if (value.is_error()) {
-        if (value.error() == ParseError::SyntaxError) {
-            if constexpr (CSS_PARSER_DEBUG) {
-                dbgln("Unable to parse value for CSS @{} descriptor '{}'.", to_string(at_rule_id), declaration.name);
-                value_token_stream.dump_all_tokens();
-            }
-        }
+    if (value.is_error())
         return {};
-    }
 
     return Descriptor { *descriptor_id, value.release_value() };
 }

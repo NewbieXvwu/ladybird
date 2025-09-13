@@ -50,15 +50,17 @@ void Instance::initialize(JS::Realm& realm)
 
     // https://webassembly.github.io/spec/js-api/#create-an-exports-object
     for (auto& export_ : m_module_instance->exports()) {
+        auto name = Utf16FlyString::from_utf8(export_.name());
+
         export_.value().visit(
             [&](Wasm::FunctionAddress const& address) {
                 Optional<GC::Ptr<JS::FunctionObject>> object = m_function_instances.get(address);
                 if (!object.has_value()) {
-                    object = Detail::create_native_function(vm, address, MUST(String::from_byte_string(export_.name())), this);
+                    object = Detail::create_native_function(vm, address, name, this);
                     m_function_instances.set(address, *object);
                 }
 
-                m_exports->define_direct_property(MUST(String::from_byte_string(export_.name())), *object, JS::default_attributes);
+                m_exports->define_direct_property(name, *object, JS::default_attributes);
             },
             [&](Wasm::GlobalAddress const& address) {
                 Optional<GC::Ptr<Global>> object = cache.get_global_instance(address);
@@ -66,16 +68,17 @@ void Instance::initialize(JS::Realm& realm)
                     object = realm.create<Global>(realm, address);
                 }
 
-                m_exports->define_direct_property(MUST(String::from_byte_string(export_.name())), *object, JS::default_attributes);
+                m_exports->define_direct_property(name, *object, JS::default_attributes);
             },
             [&](Wasm::MemoryAddress const& address) {
-                Optional<GC::Ptr<Memory>> object = m_memory_instances.get(address);
+                Optional<GC::Ptr<Memory>> object = cache.get_memory_instance(address);
                 if (!object.has_value()) {
+                    // FIXME: Once LibWasm implements the threads/atomics proposal, the shared-ness should be
+                    //        obtained from the Wasm::MemoryInstance's type.
                     object = realm.create<Memory>(realm, address, Memory::Shared::No);
-                    m_memory_instances.set(address, *object);
                 }
 
-                m_exports->define_direct_property(MUST(String::from_byte_string(export_.name())), *object, JS::default_attributes);
+                m_exports->define_direct_property(name, *object, JS::default_attributes);
             },
             [&](Wasm::TableAddress const& address) {
                 Optional<GC::Ptr<Table>> object = m_table_instances.get(address);
@@ -84,7 +87,7 @@ void Instance::initialize(JS::Realm& realm)
                     m_table_instances.set(address, *object);
                 }
 
-                m_exports->define_direct_property(MUST(String::from_byte_string(export_.name())), *object, JS::default_attributes);
+                m_exports->define_direct_property(name, *object, JS::default_attributes);
             });
     }
 
@@ -96,7 +99,6 @@ void Instance::visit_edges(Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_exports);
     visitor.visit(m_function_instances);
-    visitor.visit(m_memory_instances);
     visitor.visit(m_table_instances);
 }
 

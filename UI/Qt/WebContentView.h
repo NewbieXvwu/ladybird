@@ -14,9 +14,6 @@
 #include <LibGfx/Forward.h>
 #include <LibGfx/Rect.h>
 #include <LibURL/URL.h>
-#include <LibWeb/CSS/PreferredColorScheme.h>
-#include <LibWeb/CSS/PreferredContrast.h>
-#include <LibWeb/CSS/Selector.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
 #include <LibWebView/ViewImplementation.h>
@@ -27,34 +24,27 @@
 #include <QWidget>
 
 class QKeyEvent;
-class QLineEdit;
 class QSinglePointEvent;
-class QTextEdit;
-
-namespace WebView {
-
-class WebContentClient;
-
-}
-
-using WebView::WebContentClient;
 
 namespace Ladybird {
 
-class Tab;
+struct WebContentViewInitialState {
+    double maximum_frames_per_second { 60.0 };
+};
 
 class WebContentView final
     : public QWidget
     , public WebView::ViewImplementation {
     Q_OBJECT
 public:
-    WebContentView(QWidget* window, RefPtr<WebView::WebContentClient> parent_client = nullptr, size_t page_index = 0);
+    WebContentView(QWidget* window, RefPtr<WebView::WebContentClient> parent_client = nullptr, size_t page_index = 0, WebContentViewInitialState initial_state = {});
     virtual ~WebContentView() override;
 
-    Function<String(const URL::URL&, Web::HTML::ActivateTab)> on_tab_open_request;
+    Function<String(URL::URL const&, Web::HTML::ActivateTab)> on_tab_open_request;
 
     virtual void paintEvent(QPaintEvent*) override;
     virtual void resizeEvent(QResizeEvent*) override;
+    virtual void leaveEvent(QEvent* event) override;
     virtual void mouseMoveEvent(QMouseEvent*) override;
     virtual void mousePressEvent(QMouseEvent*) override;
     virtual void mouseReleaseEvent(QMouseEvent*) override;
@@ -76,6 +66,7 @@ public:
 
     void set_viewport_rect(Gfx::IntRect);
     void set_device_pixel_ratio(double);
+    void set_maximum_frames_per_second(double);
 
     enum class PaletteMode {
         Default,
@@ -117,8 +108,6 @@ private:
     bool m_tooltip_override { false };
     Optional<ByteString> m_tooltip_text;
     QTimer m_tooltip_hover_timer;
-
-    bool m_should_show_line_box_borders { false };
 
     Gfx::IntSize m_viewport_size;
 

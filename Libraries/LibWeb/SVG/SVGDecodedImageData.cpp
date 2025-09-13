@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2023-2025, Andreas Kling <andreas@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -18,17 +18,19 @@
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/DisplayListPlayerSkia.h>
-#include <LibWeb/Painting/PaintContext.h>
+#include <LibWeb/Painting/DisplayListRecordingContext.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/SVG/SVGDecodedImageData.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
+#include <LibWeb/XML/XMLDocumentBuilder.h>
+#include <LibXML/Parser/Parser.h>
 
 namespace Web::SVG {
 
 GC_DEFINE_ALLOCATOR(SVGDecodedImageData);
 GC_DEFINE_ALLOCATOR(SVGDecodedImageData::SVGPageClient);
 
-ErrorOr<GC::Ref<SVGDecodedImageData>> SVGDecodedImageData::create(JS::Realm& realm, GC::Ref<Page> host_page, URL::URL const& url, ByteBuffer data)
+ErrorOr<GC::Ref<SVGDecodedImageData>> SVGDecodedImageData::create(JS::Realm& realm, GC::Ref<Page> host_page, URL::URL const& url, ReadonlyBytes data)
 {
     auto page_client = SVGPageClient::create(Bindings::main_thread_vm(), host_page);
     auto page = Page::create(Bindings::main_thread_vm(), *page_client);
@@ -54,26 +56,21 @@ ErrorOr<GC::Ref<SVGDecodedImageData>> SVGDecodedImageData::create(JS::Realm& rea
         HTML::UserNavigationInvolvement::None);
 
     // FIXME: Use Navigable::navigate() instead of manually replacing the navigable's document.
-    auto document = MUST(DOM::Document::create_and_initialize(DOM::Document::Type::HTML, "text/html"_string, navigation_params));
+    auto document = MUST(DOM::Document::create_and_initialize(DOM::Document::Type::XML, "image/svg+xml"_string, navigation_params));
     navigable->set_ongoing_navigation({});
     navigable->active_document()->destroy();
     navigable->active_session_history_entry()->document_state()->set_document(document);
     auto& window = as<HTML::Window>(HTML::relevant_global_object(document));
     document->browsing_context()->window_proxy()->set_window(window);
 
-    auto parser = HTML::HTMLParser::create_with_uncertain_encoding(document, data);
-    parser->run(document->url());
+    XML::Parser parser(data, { .resolve_external_resource = resolve_xml_resource });
+    XMLDocumentBuilder builder { document };
+    auto result = parser.parse_with_listener(builder);
+    (void)result;
 
-    // Perform some DOM surgery to make the SVG root element be the first child of the Document.
-    // FIXME: This is a huge hack until we figure out how to actually parse separate SVG files.
-    auto* svg_root = document->body()->first_child_of_type<SVG::SVGSVGElement>();
+    auto* svg_root = document->first_child_of_type<SVG::SVGSVGElement>();
     if (!svg_root)
         return Error::from_string_literal("SVGDecodedImageData: Invalid SVG input");
-
-    svg_root->remove();
-    document->remove_all_children();
-
-    MUST(document->append_child(*svg_root));
 
     return realm.create<SVGDecodedImageData>(page, page_client, document, *svg_root);
 }
@@ -114,8 +111,7 @@ RefPtr<Gfx::Bitmap> SVGDecodedImageData::render(Gfx::IntSize size) const
     case DisplayListPlayerType::SkiaCPU: {
         auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(*bitmap);
         Painting::DisplayListPlayerSkia display_list_player;
-        Painting::ScrollStateSnapshot scroll_state_snapshot;
-        display_list_player.execute(*display_list, scroll_state_snapshot, painting_surface);
+        display_list_player.execute(*display_list, {}, painting_surface);
         break;
     }
     default:
@@ -172,10 +168,7 @@ Optional<CSSPixelFraction> SVGDecodedImageData::intrinsic_aspect_ratio() const
     // https://www.w3.org/TR/SVG2/coords.html#SizingSVGInCSS
     auto width = intrinsic_width();
     auto height = intrinsic_height();
-    if (height.has_value() && *height == 0)
-        return {};
-
-    if (width.has_value() && height.has_value())
+    if (width.has_value() && height.has_value() && *width > 0 && *height > 0)
         return *width / *height;
 
     if (auto const& viewbox = m_root_element->view_box(); viewbox.has_value()) {

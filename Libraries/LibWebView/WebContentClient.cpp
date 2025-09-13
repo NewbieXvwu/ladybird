@@ -132,12 +132,18 @@ void WebContentClient::did_set_test_timeout(u64 page_id, double milliseconds)
     }
 }
 
-void WebContentClient::did_set_browser_zoom(u64 page_id, double factor)
+void WebContentClient::did_receive_reference_test_metadata(u64 page_id, JsonValue metadata)
 {
     if (auto view = view_for_page_id(page_id); view.has_value()) {
-        if (view->on_set_browser_zoom)
-            view->on_set_browser_zoom(factor);
+        if (view->on_reference_test_metadata)
+            view->on_reference_test_metadata(metadata);
     }
+}
+
+void WebContentClient::did_set_browser_zoom(u64 page_id, double factor)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value())
+        view->set_zoom(factor);
 }
 
 void WebContentClient::did_find_in_page(u64 page_id, size_t current_match_index, Optional<size_t> total_match_count)
@@ -162,17 +168,19 @@ void WebContentClient::did_request_cursor_change(u64 page_id, Gfx::Cursor cursor
     }
 }
 
-void WebContentClient::did_change_title(u64 page_id, ByteString title)
+void WebContentClient::did_change_title(u64 page_id, Utf16String title)
 {
     if (auto process = WebView::Application::the().find_process(m_process_handle.pid); process.has_value())
-        process->set_title(MUST(String::from_byte_string(title)));
+        process->set_title(title);
 
     if (auto view = view_for_page_id(page_id); view.has_value()) {
-        auto title_or_url = title.is_empty() ? view->url().to_byte_string() : title;
-        view->set_title({}, title_or_url);
+        if (title.is_empty())
+            title = Utf16String::from_utf8(view->url().serialize());
+
+        view->set_title({}, title);
 
         if (view->on_title_change)
-            view->on_title_change(title_or_url);
+            view->on_title_change(title);
     }
 }
 
@@ -252,34 +260,26 @@ void WebContentClient::did_middle_click_link(u64 page_id, URL::URL url, ByteStri
 
 void WebContentClient::did_request_context_menu(u64 page_id, Gfx::IntPoint content_position)
 {
-    if (auto view = view_for_page_id(page_id); view.has_value()) {
-        if (view->on_context_menu_request)
-            view->on_context_menu_request(view->to_widget_position(content_position));
-    }
+    if (auto view = view_for_page_id(page_id); view.has_value())
+        view->did_request_page_context_menu({}, content_position);
 }
 
 void WebContentClient::did_request_link_context_menu(u64 page_id, Gfx::IntPoint content_position, URL::URL url, ByteString, unsigned)
 {
-    if (auto view = view_for_page_id(page_id); view.has_value()) {
-        if (view->on_link_context_menu_request)
-            view->on_link_context_menu_request(url, view->to_widget_position(content_position));
-    }
+    if (auto view = view_for_page_id(page_id); view.has_value())
+        view->did_request_link_context_menu({}, content_position, move(url));
 }
 
 void WebContentClient::did_request_image_context_menu(u64 page_id, Gfx::IntPoint content_position, URL::URL url, ByteString, unsigned, Optional<Gfx::ShareableBitmap> bitmap)
 {
-    if (auto view = view_for_page_id(page_id); view.has_value()) {
-        if (view->on_image_context_menu_request)
-            view->on_image_context_menu_request(url, view->to_widget_position(content_position), bitmap);
-    }
+    if (auto view = view_for_page_id(page_id); view.has_value())
+        view->did_request_image_context_menu({}, content_position, move(url), move(bitmap));
 }
 
 void WebContentClient::did_request_media_context_menu(u64 page_id, Gfx::IntPoint content_position, ByteString, unsigned, Web::Page::MediaContextMenu menu)
 {
-    if (auto view = view_for_page_id(page_id); view.has_value()) {
-        if (view->on_media_context_menu_request)
-            view->on_media_context_menu_request(view->to_widget_position(content_position), menu);
-    }
+    if (auto view = view_for_page_id(page_id); view.has_value())
+        view->did_request_media_context_menu({}, content_position, move(menu));
 }
 
 void WebContentClient::did_get_source(u64 page_id, URL::URL url, URL::URL base_url, String source)
@@ -475,9 +475,14 @@ void WebContentClient::did_change_favicon(u64 page_id, Gfx::ShareableBitmap favi
     }
 }
 
-Messages::WebContentClient::DidRequestAllCookiesResponse WebContentClient::did_request_all_cookies(URL::URL url)
+Messages::WebContentClient::DidRequestAllCookiesWebdriverResponse WebContentClient::did_request_all_cookies_webdriver(URL::URL url)
 {
-    return Application::cookie_jar().get_all_cookies(url);
+    return Application::cookie_jar().get_all_cookies_webdriver(url);
+}
+
+Messages::WebContentClient::DidRequestAllCookiesCookiestoreResponse WebContentClient::did_request_all_cookies_cookiestore(URL::URL url)
+{
+    return Application::cookie_jar().get_all_cookies_cookiestore(url);
 }
 
 Messages::WebContentClient::DidRequestNamedCookieResponse WebContentClient::did_request_named_cookie(URL::URL url, String name)

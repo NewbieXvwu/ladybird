@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibWeb/Export.h>
 #include <LibWeb/MimeSniff/MimeType.h>
 
 namespace Web::MimeSniff {
@@ -30,7 +31,7 @@ struct SniffingConfiguration {
 };
 
 // https://mimesniff.spec.whatwg.org/#resource
-class Resource {
+class WEB_API Resource {
 public:
     static Resource create(ReadonlyBytes data, SniffingConfiguration configuration = {});
     static MimeType sniff(ReadonlyBytes data, SniffingConfiguration configuration = {});
@@ -38,7 +39,7 @@ public:
     ~Resource();
 
     MimeType const& computed_mime_type() const { return m_computed_mime_type; }
-    ReadonlyBytes resource_header() const { return m_resource_header; }
+    ReadonlyBytes resource_header() const LIFETIME_BOUND { return m_resource_header; }
 
 private:
     Resource(ReadonlyBytes data, bool no_sniff, MimeType&& default_computed_mime_type);

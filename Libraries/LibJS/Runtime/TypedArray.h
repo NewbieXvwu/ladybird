@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <LibJS/Export.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/ByteLength.h>
@@ -49,7 +50,7 @@ public:
     [[nodiscard]] Kind kind() const { return m_kind; }
 
     u32 element_size() const { return m_element_size; }
-    virtual FlyString const& element_name() const = 0;
+    virtual Utf16FlyString const& element_name() const = 0;
 
     // 25.1.3.11 IsUnclampedIntegerElementType ( type ), https://tc39.es/ecma262/#sec-isunclampedintegerelementtype
     virtual bool is_unclamped_integer_element_type() const = 0;
@@ -95,8 +96,8 @@ JS_API TypedArrayWithBufferWitness make_typed_array_with_buffer_witness_record(T
 JS_API u32 typed_array_byte_length(TypedArrayWithBufferWitness const&);
 JS_API u32 typed_array_length(TypedArrayWithBufferWitness const&);
 JS_API bool is_typed_array_out_of_bounds(TypedArrayWithBufferWitness const&);
-JS_API bool is_typed_array_fixed_length(TypedArrayBase const&);
-JS_API bool is_valid_integer_index_slow_case(TypedArrayBase const&, CanonicalIndex property_index);
+bool is_typed_array_fixed_length(TypedArrayBase const&);
+bool is_valid_integer_index_slow_case(TypedArrayBase const&, CanonicalIndex property_index);
 
 // 10.4.5.16 IsValidIntegerIndex ( O, index ), https://tc39.es/ecma262/#sec-isvalidintegerindex
 inline bool is_valid_integer_index(TypedArrayBase const& typed_array, CanonicalIndex property_index)
@@ -508,10 +509,10 @@ protected:
 };
 
 JS_API ThrowCompletionOr<TypedArrayBase*> typed_array_from(VM&, Value);
-JS_API ThrowCompletionOr<TypedArrayBase*> typed_array_create(VM&, FunctionObject& constructor, GC::RootVector<Value> arguments);
-JS_API ThrowCompletionOr<TypedArrayBase*> typed_array_create_same_type(VM&, TypedArrayBase const& exemplar, GC::RootVector<Value> arguments);
-JS_API ThrowCompletionOr<TypedArrayWithBufferWitness> validate_typed_array(VM&, Object const&, ArrayBuffer::Order);
-JS_API ThrowCompletionOr<double> compare_typed_array_elements(VM&, Value x, Value y, FunctionObject* comparefn);
+ThrowCompletionOr<TypedArrayBase*> typed_array_create(VM&, FunctionObject& constructor, GC::RootVector<Value> arguments);
+ThrowCompletionOr<TypedArrayBase*> typed_array_create_same_type(VM&, TypedArrayBase const& exemplar, GC::RootVector<Value> arguments);
+ThrowCompletionOr<TypedArrayWithBufferWitness> validate_typed_array(VM&, Object const&, ArrayBuffer::Order);
+ThrowCompletionOr<double> compare_typed_array_elements(VM&, Value x, Value y, FunctionObject* comparefn);
 
 #define JS_DECLARE_TYPED_ARRAY(ClassName, snake_name, PrototypeName, ConstructorName, Type)                  \
     class JS_API ClassName : public TypedArray<Type> {                                                       \
@@ -523,7 +524,7 @@ JS_API ThrowCompletionOr<double> compare_typed_array_elements(VM&, Value x, Valu
         static ThrowCompletionOr<GC::Ref<ClassName>> create(Realm&, u32 length, FunctionObject& new_target); \
         static ThrowCompletionOr<GC::Ref<ClassName>> create(Realm&, u32 length);                             \
         static GC::Ref<ClassName> create(Realm&, u32 length, ArrayBuffer& buffer);                           \
-        virtual FlyString const& element_name() const override;                                              \
+        virtual Utf16FlyString const& element_name() const override;                                         \
         virtual GC::Ref<NativeFunction> intrinsic_constructor(Realm&) const override;                        \
                                                                                                              \
     protected:                                                                                               \

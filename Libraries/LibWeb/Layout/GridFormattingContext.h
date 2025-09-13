@@ -94,12 +94,12 @@ struct GridItem {
         return dimension == GridDimension::Column ? computed_values().width() : computed_values().height();
     }
 
-    CSS::LengthPercentage const& margin_start(GridDimension dimension) const
+    CSS::LengthPercentageOrAuto const& margin_start(GridDimension dimension) const
     {
         return dimension == GridDimension::Column ? computed_values().margin().left() : computed_values().margin().top();
     }
 
-    CSS::LengthPercentage const& margin_end(GridDimension dimension) const
+    CSS::LengthPercentageOrAuto const& margin_end(GridDimension dimension) const
     {
         return dimension == GridDimension::Column ? computed_values().margin().right() : computed_values().margin().bottom();
     }
@@ -306,6 +306,14 @@ private:
 
     size_t m_explicit_rows_line_count { 0 };
     size_t m_explicit_columns_line_count { 0 };
+
+    bool m_has_flexible_row_tracks { false };
+    bool m_has_flexible_column_tracks { false };
+
+    bool has_flexible_tracks(GridDimension dimension) const
+    {
+        return dimension == GridDimension::Column ? m_has_flexible_column_tracks : m_has_flexible_row_tracks;
+    }
 
     OccupationGrid m_occupation_grid;
     Vector<GridItem> m_grid_items;

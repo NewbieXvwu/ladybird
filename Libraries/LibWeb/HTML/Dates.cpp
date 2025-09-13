@@ -33,44 +33,41 @@ u32 week_number_of_the_last_day(u64 year)
 }
 
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#valid-week-string
-bool is_valid_week_string(StringView value)
+bool is_valid_week_string(Utf16View const& value)
 {
     // A string is a valid week string representing a week-year year and week week if it consists of the following components in the given order:
 
     // 1. Four or more ASCII digits, representing year, where year > 0
     // 2. A U+002D HYPHEN-MINUS character (-)
     // 3. A U+0057 LATIN CAPITAL LETTER W character (W)
-    // 4. Two ASCII digits, representing the week week, in the range 1 ≤ week ≤ maxweek, where maxweek is the week number of the last day of week-year year
+    // 4. Two ASCII digits, representing the week week, in the range 1 ≤ week ≤ maxweek, where maxweek is the week number
+    //    of the last day of week-year year
     auto parts = value.split_view('-', SplitBehavior::KeepEmpty);
     if (parts.size() != 2)
         return false;
-    if (parts[0].length() < 4)
+
+    if (parts[0].length_in_code_units() < 4)
         return false;
-    for (auto digit : parts[0])
-        if (!is_ascii_digit(digit))
-            return false;
-    if (parts[1].length() != 3)
+    if (parts[1].length_in_code_units() != 3)
+        return false;
+
+    auto year = parts[0].to_number<u64>();
+    if (!year.has_value() || *year == 0)
         return false;
 
     if (!parts[1].starts_with('W'))
         return false;
-    if (!is_ascii_digit(parts[1][1]))
+    if (!is_ascii_digit(parts[1].code_unit_at(1)))
         return false;
-    if (!is_ascii_digit(parts[1][2]))
+    if (!is_ascii_digit(parts[1].code_unit_at(2)))
         return false;
 
-    u64 year = 0;
-    for (auto d : parts[0]) {
-        year *= 10;
-        year += parse_ascii_digit(d);
-    }
-    auto week = (parse_ascii_digit(parts[1][1]) * 10) + parse_ascii_digit(parts[1][2]);
-
-    return week >= 1 && week <= week_number_of_the_last_day(year);
+    auto week = (parse_ascii_digit(parts[1].code_unit_at(1)) * 10) + parse_ascii_digit(parts[1].code_unit_at(2));
+    return week >= 1 && week <= week_number_of_the_last_day(*year);
 }
 
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#valid-month-string
-bool is_valid_month_string(StringView value)
+bool is_valid_month_string(Utf16View const& value)
 {
     // A string is a valid month string representing a year year and month month if it consists of the following components in the given order:
 
@@ -82,40 +79,42 @@ bool is_valid_month_string(StringView value)
     if (parts.size() != 2)
         return false;
 
-    if (parts[0].length() < 4)
+    if (parts[0].length_in_code_units() < 4)
         return false;
-    for (auto digit : parts[0])
-        if (!is_ascii_digit(digit))
-            return false;
-
-    if (parts[1].length() != 2)
+    if (parts[1].length_in_code_units() != 2)
         return false;
 
-    if (!is_ascii_digit(parts[1][0]))
-        return false;
-    if (!is_ascii_digit(parts[1][1]))
+    auto year = parts[0].to_number<u64>();
+    if (!year.has_value() || *year == 0)
         return false;
 
-    auto month = (parse_ascii_digit(parts[1][0]) * 10) + parse_ascii_digit(parts[1][1]);
+    if (!is_ascii_digit(parts[1].code_unit_at(0)))
+        return false;
+    if (!is_ascii_digit(parts[1].code_unit_at(1)))
+        return false;
+
+    auto month = (parse_ascii_digit(parts[1].code_unit_at(0)) * 10) + parse_ascii_digit(parts[1].code_unit_at(1));
     return month >= 1 && month <= 12;
 }
 
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#valid-date-string
-bool is_valid_date_string(StringView value)
+bool is_valid_date_string(Utf16View const& value)
 {
     // A string is a valid date string representing a year year, month month, and day day if it consists of the following components in the given order:
 
     // 1. A valid month string, representing year and month
     // 2. A U+002D HYPHEN-MINUS character (-)
-    // 3. Two ASCII digits, representing day, in the range 1 ≤ day ≤ maxday where maxday is the number of days in the month month and year year
+    // 3. Two ASCII digits, representing day, in the range 1 ≤ day ≤ maxday where maxday is the number of days in the
+    //    month month and year year
     auto parts = value.split_view('-', SplitBehavior::KeepEmpty);
     if (parts.size() != 3)
         return false;
 
-    if (!is_valid_month_string(ByteString::formatted("{}-{}", parts[0], parts[1])))
+    auto month_string = value.substring_view(0, parts[0].length_in_code_units() + 1 + parts[1].length_in_code_units());
+    if (!is_valid_month_string(month_string))
         return false;
 
-    if (parts[2].length() != 2)
+    if (parts[2].length_in_code_units() != 2)
         return false;
 
     i64 year = 0;
@@ -123,18 +122,20 @@ bool is_valid_date_string(StringView value)
         year *= 10;
         year += parse_ascii_digit(d);
     }
-    auto month = (parse_ascii_digit(parts[1][0]) * 10) + parse_ascii_digit(parts[1][1]);
-    i64 day = (parse_ascii_digit(parts[2][0]) * 10) + parse_ascii_digit(parts[2][1]);
+
+    auto month = (parse_ascii_digit(parts[1].code_unit_at(0)) * 10) + parse_ascii_digit(parts[1].code_unit_at(1));
+    i64 day = (parse_ascii_digit(parts[2].code_unit_at(0)) * 10) + parse_ascii_digit(parts[2].code_unit_at(1));
 
     return day >= 1 && day <= AK::days_in_month(year, month);
 }
 
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#valid-local-date-and-time-string
-bool is_valid_local_date_and_time_string(StringView value)
+bool is_valid_local_date_and_time_string(Utf16View const& value)
 {
     auto parts_split_by_T = value.split_view('T', SplitBehavior::KeepEmpty);
     if (parts_split_by_T.size() == 2)
         return is_valid_date_string(parts_split_by_T[0]) && is_valid_time_string(parts_split_by_T[1]);
+
     auto parts_split_by_space = value.split_view(' ', SplitBehavior::KeepEmpty);
     if (parts_split_by_space.size() == 2)
         return is_valid_date_string(parts_split_by_space[0]) && is_valid_time_string(parts_split_by_space[1]);
@@ -143,19 +144,41 @@ bool is_valid_local_date_and_time_string(StringView value)
 }
 
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#valid-normalised-local-date-and-time-string
-String normalize_local_date_and_time_string(String const& value)
+Utf16String normalize_local_date_and_time_string(Utf16String const& value)
 {
+    // A string is a valid normalized local date and time string representing a date and time if it consists of the following components in the given order:
+
+    // 1. A valid date string representing the date
+    // 2. A U+0054 LATIN CAPITAL LETTER T character (T)
+    // 3. A valid time string representing the time, expressed as the shortest possible string for the given time (e.g. omitting the seconds component entirely if the given time is zero seconds past the minute)
+
+    auto value_with_normalized_t = value;
     if (auto spaces = value.count(" "sv); spaces > 0) {
         VERIFY(spaces == 1);
-        return MUST(value.replace(" "sv, "T"sv, ReplaceMode::FirstOnly));
+        value_with_normalized_t = value.replace(" "sv, "T"sv, ReplaceMode::FirstOnly);
     }
 
-    VERIFY(value.count("T"sv) == 1);
-    return value;
+    auto parts = value_with_normalized_t.split_view('T', SplitBehavior::KeepEmpty);
+    VERIFY(parts.size() == 2);
+
+    auto normalized_length = parts[1].length_in_code_points();
+    while (normalized_length > 9) {
+        if (parts[1].code_point_at(normalized_length - 1) != '0') {
+            return Utf16String::formatted("{}T{}", parts[0], parts[1].unicode_substring_view(0, normalized_length));
+        }
+        normalized_length--;
+    }
+
+    if (normalized_length > 5) {
+        auto time_without_milliseconds = parts[1].unicode_substring_view(0, 8);
+        return Utf16String::formatted("{}T{}", parts[0], parts[1].unicode_substring_view(0, time_without_milliseconds.ends_with(":00"sv) ? 5 : 8));
+    }
+
+    return value_with_normalized_t;
 }
 
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#valid-time-string
-bool is_valid_time_string(StringView value)
+bool is_valid_time_string(Utf16View const& value)
 {
     // A string is a valid time string representing an hour hour, a minute minute, and a second second if it consists of the following components in the given order:
 
@@ -163,48 +186,58 @@ bool is_valid_time_string(StringView value)
     // 2. A U+003A COLON character (:)
     // 3. Two ASCII digits, representing minute, in the range 0 ≤ minute ≤ 59
     // 4. If second is nonzero, or optionally if second is zero:
-    // 1. A U+003A COLON character (:)
-    // 2. Two ASCII digits, representing the integer part of second, in the range 0 ≤ s ≤ 59
-    // 3. If second is not an integer, or optionally if second is an integer:
-    // 1. A U+002E FULL STOP character (.)
-    // 2. One, two, or three ASCII digits, representing the fractional part of second
+    //     1. A U+003A COLON character (:)
+    //     2. Two ASCII digits, representing the integer part of second, in the range 0 ≤ s ≤ 59
+    //     3. If second is not an integer, or optionally if second is an integer:
+    //         1. A U+002E FULL STOP character (.)
+    //         2. One, two, or three ASCII digits, representing the fractional part of second
     auto parts = value.split_view(':', SplitBehavior::KeepEmpty);
     if (parts.size() != 2 && parts.size() != 3)
         return false;
-    if (parts[0].length() != 2)
+
+    if (parts[0].length_in_code_units() != 2)
         return false;
-    if (!(is_ascii_digit(parts[0][0]) && is_ascii_digit(parts[0][1])))
+    if (parts[1].length_in_code_units() != 2)
         return false;
-    auto hour = (parse_ascii_digit(parts[0][0]) * 10) + parse_ascii_digit(parts[0][1]);
+
+    if (!is_ascii_digit(parts[0].code_unit_at(0)) || !is_ascii_digit(parts[0].code_unit_at(1)))
+        return false;
+
+    auto hour = (parse_ascii_digit(parts[0].code_unit_at(0)) * 10) + parse_ascii_digit(parts[0].code_unit_at(1));
     if (hour > 23)
         return false;
-    if (parts[1].length() != 2)
+
+    if (!is_ascii_digit(parts[1].code_unit_at(0)) || !is_ascii_digit(parts[1].code_unit_at(1)))
         return false;
-    if (!(is_ascii_digit(parts[1][0]) && is_ascii_digit(parts[1][1])))
-        return false;
-    auto minute = (parse_ascii_digit(parts[1][0]) * 10) + parse_ascii_digit(parts[1][1]);
+
+    auto minute = (parse_ascii_digit(parts[1].code_unit_at(0)) * 10) + parse_ascii_digit(parts[1].code_unit_at(1));
     if (minute > 59)
         return false;
-    if (parts.size() == 2)
-        return true;
 
-    if (parts[2].length() < 2)
-        return false;
-    if (!(is_ascii_digit(parts[2][0]) && is_ascii_digit(parts[2][1])))
-        return false;
-    auto second = (parse_ascii_digit(parts[2][0]) * 10) + parse_ascii_digit(parts[2][1]);
-    if (second > 59)
-        return false;
-    if (parts[2].length() == 2)
-        return true;
-    auto second_parts = parts[2].split_view('.', SplitBehavior::KeepEmpty);
-    if (second_parts.size() != 2)
-        return false;
-    if (second_parts[1].length() < 1 || second_parts[1].length() > 3)
-        return false;
-    for (auto digit : second_parts[1])
-        if (!is_ascii_digit(digit))
+    if (parts.size() == 3) {
+        if (parts[2].length_in_code_units() < 2)
             return false;
+
+        if (!is_ascii_digit(parts[2].code_unit_at(0)) || !is_ascii_digit(parts[2].code_unit_at(1)))
+            return false;
+
+        auto second = (parse_ascii_digit(parts[2].code_unit_at(0)) * 10) + parse_ascii_digit(parts[2].code_unit_at(1));
+        if (second > 59)
+            return false;
+
+        if (parts[2].length_in_code_units() > 2) {
+            auto fractional = parts[2].split_view('.', SplitBehavior::KeepEmpty);
+            if (fractional.size() != 2)
+                return false;
+
+            if (fractional[1].length_in_code_units() < 1 || fractional[1].length_in_code_units() > 3)
+                return false;
+
+            for (auto digit : fractional[1])
+                if (!is_ascii_digit(digit))
+                    return false;
+        }
+    }
 
     return true;
 }
@@ -491,7 +524,7 @@ Optional<DateAndTime> parse_a_local_date_and_time_string(StringView input_view)
         return {};
     // 4. If position is beyond the end of input or if the character at position is neither a U+0054 LATIN CAPITAL
     //    LETTER T character (T) nor a U+0020 SPACE character, then fail. Otherwise, move position forwards one character.
-    if (!input.consume_specific("T") && !input.consume_specific(" "))
+    if (!input.consume_specific('T') && !input.consume_specific(' '))
         return {};
     // 5. Parse a time component to obtain hour, minute, and second. If this returns nothing, then fail.
     auto hour_minute_second = parse_a_time_component(input);

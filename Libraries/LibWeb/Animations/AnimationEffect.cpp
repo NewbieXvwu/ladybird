@@ -4,13 +4,18 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Bitmap.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibWeb/Animations/Animation.h>
 #include <LibWeb/Animations/AnimationEffect.h>
 #include <LibWeb/Animations/AnimationTimeline.h>
 #include <LibWeb/Bindings/AnimationEffectPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/StyleInvalidation.h>
+#include <LibWeb/DOM/Element.h>
+#include <LibWeb/Layout/Node.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::Animations {
@@ -153,7 +158,7 @@ WebIDL::ExceptionOr<void> AnimationEffect::update_timing(OptionalEffectTiming ti
 
     // 4. If the easing member of input exists but cannot be parsed using the <easing-function> production
     //    [CSS-EASING-1], throw a TypeError and abort this procedure.
-    RefPtr<CSS::CSSStyleValue const> easing_value;
+    RefPtr<CSS::StyleValue const> easing_value;
     if (timing.easing.has_value()) {
         easing_value = parse_easing_string(timing.easing.value());
         if (!easing_value)
@@ -599,7 +604,7 @@ Optional<double> AnimationEffect::transformed_progress() const
     return m_timing_function.evaluate_at(directed_progress.value(), before_flag);
 }
 
-RefPtr<CSS::CSSStyleValue const> AnimationEffect::parse_easing_string(StringView value)
+RefPtr<CSS::StyleValue const> AnimationEffect::parse_easing_string(StringView value)
 {
     if (auto style_value = parse_css_value(CSS::Parser::ParsingParams(), value, CSS::PropertyID::AnimationTimingFunction)) {
         if (style_value->is_easing())
@@ -624,6 +629,77 @@ void AnimationEffect::visit_edges(JS::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_associated_animation);
+}
+
+static CSS::RequiredInvalidationAfterStyleChange compute_required_invalidation_for_animated_properties(HashMap<CSS::PropertyID, NonnullRefPtr<CSS::StyleValue const>> const& old_properties, HashMap<CSS::PropertyID, NonnullRefPtr<CSS::StyleValue const>> const& new_properties)
+{
+    CSS::RequiredInvalidationAfterStyleChange invalidation;
+    auto old_and_new_properties = MUST(Bitmap::create(CSS::number_of_longhand_properties, 0));
+    for (auto const& [property_id, _] : old_properties)
+        old_and_new_properties.set(to_underlying(property_id) - to_underlying(CSS::first_longhand_property_id), 1);
+    for (auto const& [property_id, _] : new_properties)
+        old_and_new_properties.set(to_underlying(property_id) - to_underlying(CSS::first_longhand_property_id), 1);
+    for (auto i = to_underlying(CSS::first_longhand_property_id); i <= to_underlying(CSS::last_longhand_property_id); ++i) {
+        if (!old_and_new_properties.get(i - to_underlying(CSS::first_longhand_property_id)))
+            continue;
+        auto property_id = static_cast<CSS::PropertyID>(i);
+        auto const* old_value = old_properties.get(property_id).value_or({});
+        auto const* new_value = new_properties.get(property_id).value_or({});
+        if (!old_value && !new_value)
+            continue;
+        invalidation |= compute_property_invalidation(property_id, old_value, new_value);
+    }
+    return invalidation;
+}
+
+AnimationUpdateContext::~AnimationUpdateContext()
+{
+    for (auto& it : elements) {
+        auto style = it.value->target_style;
+        if (!style)
+            continue;
+        auto& element = it.key;
+        GC::Ref<DOM::Element> target = element.element();
+        auto invalidation = compute_required_invalidation_for_animated_properties(it.value->animated_properties_before_update, style->animated_property_values());
+
+        if (invalidation.is_none())
+            continue;
+
+        // Traversal of the subtree is necessary to update the animated properties inherited from the target element.
+        target->for_each_in_subtree_of_type<DOM::Element>([&](auto& element) {
+            auto element_invalidation = element.recompute_inherited_style();
+            if (element_invalidation.is_none())
+                return TraversalDecision::SkipChildrenAndContinue;
+            invalidation |= element_invalidation;
+            return TraversalDecision::Continue;
+        });
+
+        if (!element.pseudo_element().has_value()) {
+            if (target->layout_node())
+                target->layout_node()->apply_style(*style);
+        } else {
+            if (auto pseudo_element_node = target->get_pseudo_element_node(element.pseudo_element().value()))
+                pseudo_element_node->apply_style(*style);
+        }
+
+        if (invalidation.relayout && target->layout_node())
+            target->layout_node()->set_needs_layout_update(DOM::SetNeedsLayoutReason::KeyframeEffect);
+        if (invalidation.rebuild_layout_tree) {
+            // We mark layout tree for rebuild starting from parent element to correctly invalidate
+            // "display" property change to/from "contents" value.
+            if (auto parent_element = target->parent_element()) {
+                parent_element->set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::KeyframeEffect);
+            } else {
+                target->set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::KeyframeEffect);
+            }
+        }
+        if (invalidation.repaint) {
+            element.document().set_needs_display();
+            element.document().set_needs_to_resolve_paint_only_properties();
+        }
+        if (invalidation.rebuild_stacking_context_tree)
+            element.document().invalidate_stacking_context_tree();
+    }
 }
 
 }

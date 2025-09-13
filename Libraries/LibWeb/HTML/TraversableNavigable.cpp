@@ -17,6 +17,7 @@
 #include <LibWeb/HTML/NavigationParams.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
+#include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Layout/Viewport.h>
@@ -1368,17 +1369,17 @@ GC::Ptr<DOM::Node> TraversableNavigable::currently_focused_area()
 
     // 3. While candidate's focused area is a navigable container with a non-null content navigable:
     //    set candidate to the active document of that navigable container's content navigable.
-    while (candidate->focused_element()
-        && is<HTML::NavigableContainer>(candidate->focused_element())
-        && static_cast<HTML::NavigableContainer&>(*candidate->focused_element()).content_navigable()) {
-        candidate = static_cast<HTML::NavigableContainer&>(*candidate->focused_element()).content_navigable()->active_document();
+    while (candidate->focused_area()
+        && is<NavigableContainer>(candidate->focused_area().ptr())
+        && as<NavigableContainer>(*candidate->focused_area()).content_navigable()) {
+        candidate = as<NavigableContainer>(*candidate->focused_area()).content_navigable()->active_document();
     }
 
     // 4. If candidate's focused area is non-null, set candidate to candidate's focused area.
-    if (candidate->focused_element()) {
+    if (candidate->focused_area()) {
         // NOTE: We return right away here instead of assigning to candidate,
         //       since that would require compromising type safety.
-        return candidate->focused_element();
+        return candidate->focused_area();
     }
 
     // 5. Return candidate.

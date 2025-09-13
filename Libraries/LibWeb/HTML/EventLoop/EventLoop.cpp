@@ -279,6 +279,8 @@ void EventLoop::process_input_events() const
                         return page.handle_mouseup(mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers);
                     case MouseEvent::Type::MouseMove:
                         return page.handle_mousemove(mouse_event.position, mouse_event.screen_position, mouse_event.buttons, mouse_event.modifiers);
+                    case MouseEvent::Type::MouseLeave:
+                        return page.handle_mouseleave();
                     case MouseEvent::Type::MouseWheel:
                         return page.handle_mousewheel(mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers, mouse_event.wheel_delta_x, mouse_event.wheel_delta_y);
                     case MouseEvent::Type::DoubleClick:
@@ -294,6 +296,8 @@ void EventLoop::process_input_events() const
                 page_client.report_finished_handling_input_event(event.page_id, EventResult::Dropped);
             page_client.report_finished_handling_input_event(event.page_id, result);
         }
+
+        page.handle_sdl_input_events();
     };
 
     auto documents_of_traversable_navigables = documents_in_this_event_loop_matching([&](auto const& document) {
@@ -340,7 +344,9 @@ void EventLoop::update_the_rendering()
         if (document.hidden())
             return false;
 
-        // FIXME: doc's rendering is suppressed for view transitions; or
+        // doc's rendering is suppressed for view transitions; or
+        if (document.rendering_suppression_for_view_transitions())
+            return false;
 
         auto navigable = document.navigable();
         if (!navigable)
@@ -454,7 +460,10 @@ void EventLoop::update_the_rendering()
 
     // FIXME: 17. For each doc of docs, if the focused area of doc is not a focusable area, then run the focusing steps for doc's viewport, and set doc's relevant global object's navigation API's focus changed during ongoing navigation to false.
 
-    // FIXME: 18. For each doc of docs, perform pending transition operations for doc. [CSSVIEWTRANSITIONS]
+    // 18. For each doc of docs, perform pending transition operations for doc. [CSSVIEWTRANSITIONS]
+    for (auto& document : docs) {
+        document->perform_pending_transition_operations();
+    }
 
     // 19. For each doc of docs, run the update intersection observations steps for doc, passing in the relative high resolution time given now and doc's relevant global object as the timestamp. [INTERSECTIONOBSERVER]
     for (auto& document : docs) {
@@ -524,10 +533,8 @@ TaskID queue_global_task(HTML::Task::Source source, JS::Object& global_object, G
 
     // 2. Let document be global's associated Document, if global is a Window object; otherwise null.
     DOM::Document* document { nullptr };
-    if (is<HTML::Window>(global_object)) {
-        auto& window_object = as<HTML::Window>(global_object);
-        document = &window_object.associated_document();
-    }
+    if (auto* window_object = as_if<HTML::Window>(global_object))
+        document = &window_object->associated_document();
 
     // 3. Queue a task given source, event loop, document, and steps.
     return queue_a_task(source, *event_loop, document, steps);
@@ -594,9 +601,8 @@ void EventLoop::perform_a_microtask_checkpoint()
     // 4. For each environment settings object settingsObject whose responsible event loop is this event loop, notify about rejected promises given settingsObject's global object.
     auto environments = GC::RootVector { heap(), m_related_environment_settings_objects };
     for (auto& environment_settings_object : environments) {
-        auto* global = dynamic_cast<HTML::UniversalGlobalScopeMixin*>(&environment_settings_object->global_object());
-        VERIFY(global);
-        global->notify_about_rejected_promises({});
+        auto& global = as<HTML::UniversalGlobalScopeMixin>(environment_settings_object->global_object());
+        global.notify_about_rejected_promises({});
     }
 
     // 5. Cleanup Indexed Database transactions.

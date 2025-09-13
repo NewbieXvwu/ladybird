@@ -13,7 +13,7 @@ String EdgeStyleValue::to_string(SerializationMode mode) const
     if (mode == SerializationMode::ResolvedValue) {
         // FIXME: Figure out how to get the proper calculation context here
         CalculationContext context {};
-        return resolved_value(context)->offset().to_string();
+        return resolved_value(context)->offset().to_string(mode);
     }
 
     StringBuilder builder;
@@ -25,7 +25,7 @@ String EdgeStyleValue::to_string(SerializationMode mode) const
         builder.append(' ');
 
     if (m_properties.offset.has_value())
-        builder.append(m_properties.offset->to_string());
+        builder.append(m_properties.offset->to_string(mode));
 
     return builder.to_string_without_validation();
 }
@@ -46,7 +46,7 @@ ValueComparingNonnullRefPtr<EdgeStyleValue const> EdgeStyleValue::resolved_value
             // FIXME: Flip calculated offsets (convert CalculatedStyleValue to CalculationNode, then negate and append)
             return *this;
         }
-        auto flipped_absolute = CalculatedStyleValue::create(SumCalculationNode::create(move(sum_parts)), CSSNumericType(CSSNumericType::BaseType::Length, 1), context);
+        auto flipped_absolute = CalculatedStyleValue::create(SumCalculationNode::create(move(sum_parts)), NumericType(NumericType::BaseType::Length, 1), context);
         return create({}, flipped_absolute);
     }
 

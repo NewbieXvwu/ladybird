@@ -10,57 +10,40 @@
 #include <AK/FlyString.h>
 #include <AK/Vector.h>
 #include <LibWeb/CSS/PercentageOr.h>
+#include <LibWeb/CSS/Size.h>
 #include <LibWeb/Layout/AvailableSpace.h>
 
 namespace Web::CSS {
 
 class GridSize {
 public:
-    enum class Type {
-        LengthPercentage,
-        FlexibleLength,
-        FitContent,
-        MaxContent,
-        MinContent,
-    };
-
-    GridSize(Type, LengthPercentage);
-    GridSize(LengthPercentage);
+    GridSize(Size);
     GridSize(Flex);
-    GridSize(Type);
     ~GridSize();
 
     static GridSize make_auto();
 
-    Type type() const { return m_type; }
-
     bool is_auto(Layout::AvailableSize const&) const;
     bool is_fixed(Layout::AvailableSize const&) const;
-    bool is_flexible_length() const { return m_type == Type::FlexibleLength; }
-    bool is_fit_content() const { return m_type == Type::FitContent; }
-    bool is_max_content() const { return m_type == Type::MaxContent; }
-    bool is_min_content() const { return m_type == Type::MinContent; }
+    bool is_flexible_length() const;
+    bool is_fit_content() const;
+    bool is_max_content() const;
+    bool is_min_content() const;
 
-    LengthPercentage const& length_percentage() const { return m_value.get<LengthPercentage>(); }
+    Size css_size() const { return m_value.get<Size>(); }
     double flex_factor() const { return m_value.get<Flex>().to_fr(); }
 
     // https://www.w3.org/TR/css-grid-2/#layout-algorithm
     // An intrinsic sizing function (min-content, max-content, auto, fit-content()).
     bool is_intrinsic(Layout::AvailableSize const&) const;
 
-    bool is_definite() const
-    {
-        return type() == Type::LengthPercentage && !length_percentage().is_auto();
-    }
+    bool is_definite() const;
 
-    Size css_size() const;
-
-    String to_string() const;
+    String to_string(SerializationMode) const;
     bool operator==(GridSize const& other) const = default;
 
 private:
-    Type m_type;
-    Variant<Empty, LengthPercentage, Flex> m_value;
+    Variant<Size, Flex> m_value;
 };
 
 class GridMinMax {
@@ -70,7 +53,7 @@ public:
     GridSize const& min_grid_size() const& { return m_min_grid_size; }
     GridSize const& max_grid_size() const& { return m_max_grid_size; }
 
-    String to_string() const;
+    String to_string(SerializationMode) const;
     bool operator==(GridMinMax const& other) const = default;
 
 private:
@@ -106,7 +89,7 @@ public:
     Vector<CSS::ExplicitGridTrack> track_list() const;
     auto const& list() const { return m_list; }
 
-    String to_string() const;
+    String to_string(SerializationMode) const;
     bool operator==(GridTrackSizeList const& other) const;
 
     bool is_empty() const { return m_list.is_empty(); }
@@ -144,7 +127,7 @@ public:
     GridTrackSizeList const& grid_track_size_list() const& { return m_grid_track_size_list; }
     GridRepeatType type() const& { return m_type; }
 
-    String to_string() const;
+    String to_string(SerializationMode) const;
     bool operator==(GridRepeat const& other) const = default;
 
 private:
@@ -166,7 +149,7 @@ public:
     bool is_default() const { return m_value.has<GridSize>(); }
     GridSize const& grid_size() const { return m_value.get<GridSize>(); }
 
-    String to_string() const;
+    String to_string(SerializationMode) const;
     bool operator==(ExplicitGridTrack const& other) const = default;
 
 private:

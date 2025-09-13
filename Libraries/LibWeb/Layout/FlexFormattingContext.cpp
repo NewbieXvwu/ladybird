@@ -5,11 +5,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include "InlineFormattingContext.h"
 #include <AK/QuickSort.h>
 #include <AK/StdLibExtras.h>
-#include <LibWeb/Layout/BlockContainer.h>
-#include <LibWeb/Layout/BlockFormattingContext.h>
 #include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/FlexFormattingContext.h>
 #include <LibWeb/Layout/ReplacedBox.h>
@@ -246,10 +243,10 @@ void FlexFormattingContext::populate_specified_margins(FlexItem& item, CSS::Flex
 {
     auto width_of_containing_block = m_flex_container_state.content_width();
 
-    item.used_values.padding_left = item.box->computed_values().padding().left().to_px(item.box, width_of_containing_block);
-    item.used_values.padding_right = item.box->computed_values().padding().right().to_px(item.box, width_of_containing_block);
-    item.used_values.padding_top = item.box->computed_values().padding().top().to_px(item.box, width_of_containing_block);
-    item.used_values.padding_bottom = item.box->computed_values().padding().bottom().to_px(item.box, width_of_containing_block);
+    item.used_values.padding_left = item.box->computed_values().padding().left().to_px_or_zero(item.box, width_of_containing_block);
+    item.used_values.padding_right = item.box->computed_values().padding().right().to_px_or_zero(item.box, width_of_containing_block);
+    item.used_values.padding_top = item.box->computed_values().padding().top().to_px_or_zero(item.box, width_of_containing_block);
+    item.used_values.padding_bottom = item.box->computed_values().padding().bottom().to_px_or_zero(item.box, width_of_containing_block);
 
     // FIXME: This should also take reverse-ness into account
     if (flex_direction == CSS::FlexDirection::Row || flex_direction == CSS::FlexDirection::RowReverse) {
@@ -258,15 +255,15 @@ void FlexFormattingContext::populate_specified_margins(FlexItem& item, CSS::Flex
         item.borders.cross_before = item.box->computed_values().border_top().width;
         item.borders.cross_after = item.box->computed_values().border_bottom().width;
 
-        item.padding.main_before = item.box->computed_values().padding().left().to_px(item.box, width_of_containing_block);
-        item.padding.main_after = item.box->computed_values().padding().right().to_px(item.box, width_of_containing_block);
-        item.padding.cross_before = item.box->computed_values().padding().top().to_px(item.box, width_of_containing_block);
-        item.padding.cross_after = item.box->computed_values().padding().bottom().to_px(item.box, width_of_containing_block);
+        item.padding.main_before = item.box->computed_values().padding().left().to_px_or_zero(item.box, width_of_containing_block);
+        item.padding.main_after = item.box->computed_values().padding().right().to_px_or_zero(item.box, width_of_containing_block);
+        item.padding.cross_before = item.box->computed_values().padding().top().to_px_or_zero(item.box, width_of_containing_block);
+        item.padding.cross_after = item.box->computed_values().padding().bottom().to_px_or_zero(item.box, width_of_containing_block);
 
-        item.margins.main_before = item.box->computed_values().margin().left().to_px(item.box, width_of_containing_block);
-        item.margins.main_after = item.box->computed_values().margin().right().to_px(item.box, width_of_containing_block);
-        item.margins.cross_before = item.box->computed_values().margin().top().to_px(item.box, width_of_containing_block);
-        item.margins.cross_after = item.box->computed_values().margin().bottom().to_px(item.box, width_of_containing_block);
+        item.margins.main_before = item.box->computed_values().margin().left().to_px_or_zero(item.box, width_of_containing_block);
+        item.margins.main_after = item.box->computed_values().margin().right().to_px_or_zero(item.box, width_of_containing_block);
+        item.margins.cross_before = item.box->computed_values().margin().top().to_px_or_zero(item.box, width_of_containing_block);
+        item.margins.cross_after = item.box->computed_values().margin().bottom().to_px_or_zero(item.box, width_of_containing_block);
 
         item.margins.main_before_is_auto = item.box->computed_values().margin().left().is_auto();
         item.margins.main_after_is_auto = item.box->computed_values().margin().right().is_auto();
@@ -283,10 +280,10 @@ void FlexFormattingContext::populate_specified_margins(FlexItem& item, CSS::Flex
         item.padding.cross_before = item.used_values.padding_left;
         item.padding.cross_after = item.used_values.padding_right;
 
-        item.margins.main_before = item.box->computed_values().margin().top().to_px(item.box, width_of_containing_block);
-        item.margins.main_after = item.box->computed_values().margin().bottom().to_px(item.box, width_of_containing_block);
-        item.margins.cross_before = item.box->computed_values().margin().left().to_px(item.box, width_of_containing_block);
-        item.margins.cross_after = item.box->computed_values().margin().right().to_px(item.box, width_of_containing_block);
+        item.margins.main_before = item.box->computed_values().margin().top().to_px_or_zero(item.box, width_of_containing_block);
+        item.margins.main_after = item.box->computed_values().margin().bottom().to_px_or_zero(item.box, width_of_containing_block);
+        item.margins.cross_before = item.box->computed_values().margin().left().to_px_or_zero(item.box, width_of_containing_block);
+        item.margins.cross_after = item.box->computed_values().margin().right().to_px_or_zero(item.box, width_of_containing_block);
 
         item.margins.main_before_is_auto = item.box->computed_values().margin().top().is_auto();
         item.margins.main_after_is_auto = item.box->computed_values().margin().bottom().is_auto();
@@ -632,8 +629,10 @@ void FlexFormattingContext::determine_flex_base_size(FlexItem& item)
         }
 
         // AD-HOC: If we're sizing the flex container under a min-content constraint in the main axis,
-        //         flex items resolve percentages in the main axis to 0.
-        if (m_available_space_for_items->main.is_min_content()
+        //         non-replaced flex items resolve percentages in the main axis to 0.
+        // https://drafts.csswg.org/css-sizing-3/#cyclic-percentage-contribution
+        if (item.box->is_replaced_box()
+            && m_available_space_for_items->main.is_min_content()
             && computed_main_size(item.box).contains_percentage()) {
             return CSSPixels(0);
         }
@@ -1137,7 +1136,7 @@ void FlexFormattingContext::determine_hypothetical_cross_size_of_item(FlexItem& 
     }
 
     if (item.box->has_preferred_aspect_ratio()) {
-        if (item.used_flex_basis_is_definite) {
+        if (item.used_flex_basis_is_definite || (item.box->has_natural_width() && item.box->has_natural_height())) {
             item.hypothetical_cross_size = calculate_cross_size_from_main_size_and_aspect_ratio(item.main_size.value(), item.box->preferred_aspect_ratio().value());
             return;
         }
@@ -1694,10 +1693,10 @@ void FlexFormattingContext::copy_dimensions_from_flex_items_to_boxes()
     for (auto& item : m_flex_items) {
         auto const& box = item.box;
 
-        item.used_values.margin_left = box->computed_values().margin().left().to_px(box, m_flex_container_state.content_width());
-        item.used_values.margin_right = box->computed_values().margin().right().to_px(box, m_flex_container_state.content_width());
-        item.used_values.margin_top = box->computed_values().margin().top().to_px(box, m_flex_container_state.content_width());
-        item.used_values.margin_bottom = box->computed_values().margin().bottom().to_px(box, m_flex_container_state.content_width());
+        item.used_values.margin_left = box->computed_values().margin().left().to_px_or_zero(box, m_flex_container_state.content_width());
+        item.used_values.margin_right = box->computed_values().margin().right().to_px_or_zero(box, m_flex_container_state.content_width());
+        item.used_values.margin_top = box->computed_values().margin().top().to_px_or_zero(box, m_flex_container_state.content_width());
+        item.used_values.margin_bottom = box->computed_values().margin().bottom().to_px_or_zero(box, m_flex_container_state.content_width());
 
         item.used_values.border_left = box->computed_values().border_left().width;
         item.used_values.border_right = box->computed_values().border_right().width;

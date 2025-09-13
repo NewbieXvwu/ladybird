@@ -243,7 +243,7 @@ static CSS::BorderData css_border_data_from_device_border_data(DeviceBorderData 
     };
 }
 
-static void paint_collected_edges(PaintContext& context, Vector<BorderEdgePaintingInfo>& border_edge_painting_info_list)
+static void paint_collected_edges(DisplayListRecordingContext& context, Vector<BorderEdgePaintingInfo>& border_edge_painting_info_list)
 {
     // This sorting step isn't part of the specification, but it matches the behavior of other browsers at border intersections, which aren't
     // part of border conflict resolution in the specification but it's still desirable to handle them in a way which is consistent with it.
@@ -297,7 +297,7 @@ static void paint_collected_edges(PaintContext& context, Vector<BorderEdgePainti
     }
 }
 
-static HashMap<CellCoordinates, DevicePixelRect> snap_cells_to_device_coordinates(HashMap<CellCoordinates, PaintableBox const*> const& cell_coordinates_to_box, size_t row_count, size_t column_count, PaintContext const& context)
+static HashMap<CellCoordinates, DevicePixelRect> snap_cells_to_device_coordinates(HashMap<CellCoordinates, PaintableBox const*> const& cell_coordinates_to_box, size_t row_count, size_t column_count, DisplayListRecordingContext const& context)
 {
     Vector<DevicePixels> y_line_start_coordinates;
     Vector<DevicePixels> y_line_end_coordinates;
@@ -333,7 +333,7 @@ static HashMap<CellCoordinates, DevicePixelRect> snap_cells_to_device_coordinate
     return cell_coordinates_to_device_rect;
 }
 
-static DeviceBorderDataWithElementKind device_border_data_from_css_border_data(Painting::PaintableBox::BorderDataWithElementKind const& border_data_with_element_kind, PaintContext const& context)
+static DeviceBorderDataWithElementKind device_border_data_from_css_border_data(Painting::PaintableBox::BorderDataWithElementKind const& border_data_with_element_kind, DisplayListRecordingContext const& context)
 {
     return DeviceBorderDataWithElementKind {
         .border_data = {
@@ -345,7 +345,7 @@ static DeviceBorderDataWithElementKind device_border_data_from_css_border_data(P
     };
 }
 
-static void paint_separate_cell_borders(PaintableBox const& cell_box, HashMap<CellCoordinates, DevicePixelRect> const& cell_coordinates_to_device_rect, PaintContext& context)
+static void paint_separate_cell_borders(PaintableBox const& cell_box, HashMap<CellCoordinates, DevicePixelRect> const& cell_coordinates_to_device_rect, DisplayListRecordingContext& context)
 {
     auto borders_data = cell_box.override_borders_data().has_value() ? PaintableBox::remove_element_kind_from_borders_data(cell_box.override_borders_data().value()) : BordersData {
         .top = cell_box.box_model().border.top == 0 ? CSS::BorderData() : cell_box.computed_values().border_top(),
@@ -354,10 +354,10 @@ static void paint_separate_cell_borders(PaintableBox const& cell_box, HashMap<Ce
         .left = cell_box.box_model().border.left == 0 ? CSS::BorderData() : cell_box.computed_values().border_left(),
     };
     auto cell_rect = cell_coordinates_to_device_rect.get({ cell_box.table_cell_coordinates()->row_index, cell_box.table_cell_coordinates()->column_index }).value();
-    paint_all_borders(context.display_list_recorder(), cell_rect, cell_box.normalized_border_radii_data().as_corners(context), borders_data.to_device_pixels(context));
+    paint_all_borders(context.display_list_recorder(), cell_rect, cell_box.normalized_border_radii_data().as_corners(context.device_pixel_converter()), borders_data.to_device_pixels(context));
 }
 
-void paint_table_borders(PaintContext& context, PaintableBox const& table_paintable)
+void paint_table_borders(DisplayListRecordingContext& context, PaintableBox const& table_paintable)
 {
     // Partial implementation of painting according to the collapsing border model:
     // https://www.w3.org/TR/CSS22/tables.html#collapsing-borders
@@ -428,10 +428,10 @@ void paint_table_borders(PaintContext& context, PaintableBox const& table_painta
 
     for (auto const& cell_box : cell_boxes) {
         auto const& border_radii_data = cell_box.normalized_border_radii_data();
-        auto top_left = border_radii_data.top_left.as_corner(context);
-        auto top_right = border_radii_data.top_right.as_corner(context);
-        auto bottom_right = border_radii_data.bottom_right.as_corner(context);
-        auto bottom_left = border_radii_data.bottom_left.as_corner(context);
+        auto top_left = border_radii_data.top_left.as_corner(context.device_pixel_converter());
+        auto top_right = border_radii_data.top_right.as_corner(context.device_pixel_converter());
+        auto bottom_right = border_radii_data.bottom_right.as_corner(context.device_pixel_converter());
+        auto bottom_left = border_radii_data.bottom_left.as_corner(context.device_pixel_converter());
         if (!top_left && !top_right && !bottom_left && !bottom_right) {
             continue;
         } else {
@@ -441,7 +441,7 @@ void paint_table_borders(PaintContext& context, PaintableBox const& table_painta
                 .bottom = cell_box.box_model().border.bottom == 0 ? CSS::BorderData() : cell_box.computed_values().border_bottom(),
                 .left = cell_box.box_model().border.left == 0 ? CSS::BorderData() : cell_box.computed_values().border_left(),
             };
-            paint_all_borders(context.display_list_recorder(), context.rounded_device_rect(cell_box.absolute_border_box_rect()), cell_box.normalized_border_radii_data().as_corners(context), borders_data.to_device_pixels(context));
+            paint_all_borders(context.display_list_recorder(), context.rounded_device_rect(cell_box.absolute_border_box_rect()), cell_box.normalized_border_radii_data().as_corners(context.device_pixel_converter()), borders_data.to_device_pixels(context));
         }
     }
 }

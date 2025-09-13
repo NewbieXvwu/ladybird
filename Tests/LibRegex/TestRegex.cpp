@@ -818,12 +818,24 @@ TEST_CASE(ECMA262_unicode_match)
         { "[\\ufb06]"sv, "\ufb05"sv, false, ECMAScriptFlags::Unicode },
         { "[\\ufb05]"sv, "\ufb06"sv, true, combine_flags(ECMAScriptFlags::Unicode, ECMAScriptFlags::Insensitive) },
         { "[\\ufb06]"sv, "\ufb05"sv, true, combine_flags(ECMAScriptFlags::Unicode, ECMAScriptFlags::Insensitive) },
+
+        // https://github.com/LadybirdBrowser/ladybird/issues/5549
+        { "[\\ud800-\\udbff][\\udc00-\\udfff]"sv, "😀"sv, true },
+        { "[\\ud800-\\udbff][\\udc00-\\udfff]"sv, "😀"sv, false, ECMAScriptFlags::Unicode },
+        { "[\\ud800-\\udbff][\\udc00-\\udfff]"sv, "a"sv, false },
+        { "[\\ud800-\\udbff][\\udc00-\\udfff]"sv, "a"sv, false, ECMAScriptFlags::Unicode },
+        {
+            "\\ud83c[\\udffb-\\udfff](?=\\ud83c[\\udffb-\\udfff])|(?:[^\\ud800-\\udfff][\\u0300-\\u036f\\ufe20-\\ufe2f\\u20d0-\\u20ff]?|[\\u0300-\\u036f\\ufe20-\\ufe2f\\u20d0-\\u20ff]|(?:\\ud83c[\\udde6-\\uddff]){2}|[\\ud800-\\udbff][\\udc00-\\udfff]|[\\ud800-\\udfff])[\\ufe0e\\ufe0f]?(?:[\\u0300-\\u036f\\ufe20-\\ufe2f\\u20d0-\\u20ff]|\\ud83c[\\udffb-\\udfff])?(?:\\u200d(?:[^\\ud800-\\udfff]|(?:\\ud83c[\\udde6-\\uddff]){2}|[\\ud800-\\udbff][\\udc00-\\udfff])[\\ufe0e\\ufe0f]?(?:[\\u0300-\\u036f\\ufe20-\\ufe2f\\u20d0-\\u20ff]|\\ud83c[\\udffb-\\udfff])?)*"sv,
+            "😀"sv,
+            true,
+        },
+        { "(?<before>\\w*)\\s*(?<emoji>\\p{Emoji}+)\\s*(?<after>\\w*)"sv, "Hey 🎉 there! I love 🍕 pizza"sv, true, ECMAScriptFlags::Unicode },
     };
 
     for (auto& test : tests) {
         Regex<ECMA262> re(test.pattern, (ECMAScriptFlags)regex::AllFlags::Global | test.options);
 
-        auto subject = MUST(AK::utf8_to_utf16(test.subject));
+        auto subject = Utf16String::from_utf8(test.subject);
         Utf16View view { subject };
 
         if constexpr (REGEX_DEBUG) {
@@ -956,7 +968,7 @@ TEST_CASE(ECMA262_property_match)
     for (auto& test : tests) {
         Regex<ECMA262> re(test.pattern, (ECMAScriptFlags)regex::AllFlags::Global | regex::ECMAScriptFlags::BrowserExtended | test.options);
 
-        auto subject = MUST(AK::utf8_to_utf16(test.subject));
+        auto subject = Utf16String::from_utf8(test.subject);
         Utf16View view { subject };
 
         if constexpr (REGEX_DEBUG) {
@@ -1319,6 +1331,29 @@ TEST_CASE(optimizer_repeat_offset)
     }
 }
 
+TEST_CASE(quantified_alternation_capture_groups)
+{
+    {
+        // Ensure that (a|a?)+ captures the last meaningful match, not empty string
+        Regex<ECMA262> re("^(a|a?)+$");
+        auto result = re.match("a"sv);
+
+        EXPECT_EQ(result.success, true);
+        EXPECT_EQ(result.matches.size(), 1u);
+        EXPECT_EQ(result.matches.first().view.to_byte_string(), "a"sv);
+        EXPECT_EQ(result.capture_group_matches.first()[0].view.to_byte_string(), "a"sv);
+    }
+    {
+        Regex<ECMA262> re("^(a|a?)+$");
+        auto result = re.match("aa"sv);
+
+        EXPECT_EQ(result.success, true);
+        EXPECT_EQ(result.matches.size(), 1u);
+        EXPECT_EQ(result.matches.first().view.to_byte_string(), "aa"sv);
+        EXPECT_EQ(result.capture_group_matches.first()[0].view.to_byte_string(), "a"sv);
+    }
+}
+
 TEST_CASE(zero_width_backreference)
 {
     {
@@ -1330,5 +1365,17 @@ TEST_CASE(zero_width_backreference)
         EXPECT_EQ(result.matches.size(), 1u);
         EXPECT_EQ(result.matches.first().view.to_byte_string(), "b"sv);
         EXPECT_EQ(result.capture_group_matches.first()[0].view.to_byte_string(), ""sv);
+    }
+}
+
+TEST_CASE(account_for_opcode_size_calculating_incoming_jump_edges)
+{
+    {
+        // The optimizer should not optimize the initial ForkStay for these alternatives as they are jumped to from different locations.
+        Regex<ECMA262> re(".*a|.*b", ECMAScriptFlags::Global);
+        auto result = re.match("aa"sv);
+        EXPECT_EQ(result.success, true);
+        EXPECT_EQ(result.matches.size(), 1u);
+        EXPECT_EQ(result.matches.first().view.to_byte_string(), "aa"sv);
     }
 }

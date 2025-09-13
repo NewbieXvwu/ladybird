@@ -8,6 +8,7 @@
 
 #include <AK/HashMap.h>
 #include <LibGC/WeakContainer.h>
+#include <LibJS/Export.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/Object.h>
 

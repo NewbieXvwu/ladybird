@@ -72,7 +72,7 @@ String LinearGradientStyleValue::to_string(SerializationMode mode) const
     return MUST(builder.to_string());
 }
 
-bool LinearGradientStyleValue::equals(CSSStyleValue const& other_) const
+bool LinearGradientStyleValue::equals(StyleValue const& other_) const
 {
     if (type() != other_.type())
         return false;
@@ -131,7 +131,7 @@ void LinearGradientStyleValue::resolve_for_size(Layout::NodeWithStyle const& nod
     }
 }
 
-void LinearGradientStyleValue::paint(PaintContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
+void LinearGradientStyleValue::paint(DisplayListRecordingContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
 {
     VERIFY(m_resolved.has_value());
     context.display_list_recorder().fill_rect_with_linear_gradient(dest_rect.to_type<int>(), m_resolved.value());

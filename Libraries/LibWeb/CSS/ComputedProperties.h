@@ -21,16 +21,16 @@
 #include <LibWeb/CSS/PseudoClass.h>
 #include <LibWeb/CSS/PseudoClassBitmap.h>
 #include <LibWeb/CSS/StyleProperty.h>
+#include <LibWeb/Export.h>
 
 namespace Web::CSS {
 
-class ComputedProperties final : public JS::Cell {
+class WEB_API ComputedProperties final : public JS::Cell {
     GC_CELL(ComputedProperties, JS::Cell);
     GC_DECLARE_ALLOCATOR(ComputedProperties);
 
 public:
     static constexpr double normal_line_height_scale = 1.15;
-    static constexpr size_t number_of_properties = to_underlying(last_property_id) + 1;
 
     virtual ~ComputedProperties() override;
 
@@ -39,7 +39,7 @@ public:
     {
         for (size_t i = 0; i < m_property_values.size(); ++i) {
             if (m_property_values[i])
-                callback((PropertyID)i, *m_property_values[i]);
+                callback(static_cast<PropertyID>(i + to_underlying(first_longhand_property_id)), *m_property_values[i]);
         }
     }
 
@@ -48,22 +48,24 @@ public:
         Yes
     };
 
-    HashMap<PropertyID, NonnullRefPtr<CSSStyleValue const>> const& animated_property_values() const { return m_animated_property_values; }
+    HashMap<PropertyID, NonnullRefPtr<StyleValue const>> const& animated_property_values() const { return m_animated_property_values; }
     void reset_animated_properties(Badge<Animations::KeyframeEffect>);
 
     bool is_property_important(PropertyID property_id) const;
     bool is_property_inherited(PropertyID property_id) const;
+    bool is_animated_property_inherited(PropertyID property_id) const;
     void set_property_important(PropertyID, Important);
     void set_property_inherited(PropertyID, Inherited);
+    void set_animated_property_inherited(PropertyID, Inherited);
 
-    void set_property(PropertyID, NonnullRefPtr<CSSStyleValue const> value, Inherited = Inherited::No, Important = Important::No);
-    void set_animated_property(PropertyID, NonnullRefPtr<CSSStyleValue const> value);
+    void set_property(PropertyID, NonnullRefPtr<StyleValue const> value, Inherited = Inherited::No, Important = Important::No);
+    void set_animated_property(PropertyID, NonnullRefPtr<StyleValue const> value, Inherited = Inherited::No);
+    void remove_animated_property(PropertyID);
     enum class WithAnimationsApplied {
         No,
         Yes,
     };
-    CSSStyleValue const& property(PropertyID, WithAnimationsApplied = WithAnimationsApplied::Yes) const;
-    CSSStyleValue const* maybe_null_property(PropertyID) const;
+    StyleValue const& property(PropertyID, WithAnimationsApplied = WithAnimationsApplied::Yes) const;
     void revert_property(PropertyID, ComputedProperties const& style_for_revert);
 
     GC::Ptr<CSSStyleDeclaration const> animation_name_source() const { return m_animation_name_source; }
@@ -74,16 +76,22 @@ public:
 
     Size size_value(PropertyID) const;
     [[nodiscard]] Variant<LengthPercentage, NormalGap> gap_value(PropertyID) const;
-    LengthPercentage length_percentage_or_fallback(PropertyID, LengthPercentage const& fallback) const;
-    Optional<LengthPercentage> length_percentage(PropertyID) const;
-    LengthBox length_box(PropertyID left_id, PropertyID top_id, PropertyID right_id, PropertyID bottom_id, Length const& default_value) const;
-    Color color_or_fallback(PropertyID, Layout::NodeWithStyle const&, Color fallback) const;
+    Length length(PropertyID) const;
+    enum class ClampNegativeLengths {
+        No,
+        Yes,
+    };
+    Optional<LengthPercentage> length_percentage(PropertyID, Layout::NodeWithStyle const&, ClampNegativeLengths) const;
+    LengthBox length_box(PropertyID left_id, PropertyID top_id, PropertyID right_id, PropertyID bottom_id, Layout::NodeWithStyle const&, ClampNegativeLengths, LengthPercentageOrAuto const& default_value) const;
+    Color color_or_fallback(PropertyID, ColorResolutionContext, Color fallback) const;
+    ColorInterpolation color_interpolation() const;
     PreferredColorScheme color_scheme(PreferredColorScheme, Optional<Vector<String> const&> document_supported_schemes) const;
     TextAnchor text_anchor() const;
     TextAlign text_align() const;
     TextJustify text_justify() const;
     TextOverflow text_overflow() const;
     TextRendering text_rendering() const;
+    CSSPixels text_underline_offset() const;
     Length border_spacing_horizontal(Layout::Node const&) const;
     Length border_spacing_vertical(Layout::Node const&) const;
     CaptionSide caption_side() const;
@@ -104,12 +112,13 @@ public:
     WhiteSpaceCollapse white_space_collapse() const;
     WhiteSpaceTrimData white_space_trim() const;
     WordBreak word_break() const;
-    Optional<LengthOrCalculated> word_spacing() const;
-    Optional<LengthOrCalculated> letter_spacing() const;
+    CSSPixels word_spacing() const;
+    CSSPixels letter_spacing() const;
     LineStyle line_style(PropertyID) const;
     OutlineStyle outline_style() const;
     Vector<TextDecorationLine> text_decoration_line() const;
     TextDecorationStyle text_decoration_style() const;
+    TextDecorationThickness text_decoration_thickness() const;
     TextTransform text_transform() const;
     Vector<ShadowData> text_shadow(Layout::Node const&) const;
     TextWrapMode text_wrap_mode() const;
@@ -176,7 +185,7 @@ public:
     MixBlendMode mix_blend_mode() const;
     Optional<FlyString> view_transition_name() const;
 
-    static Vector<Transformation> transformations_for_style_value(CSSStyleValue const& value);
+    static Vector<Transformation> transformations_for_style_value(StyleValue const& value);
     Vector<Transformation> transformations() const;
     TransformBox transform_box() const;
     TransformOrigin transform_origin() const;
@@ -185,7 +194,6 @@ public:
     Optional<Transformation> scale() const;
 
     MaskType mask_type() const;
-    Color stop_color() const;
     float stop_opacity() const;
     float fill_opacity() const;
     StrokeLinecap stroke_linecap() const;
@@ -194,8 +202,11 @@ public:
     float stroke_opacity() const;
     FillRule fill_rule() const;
     ClipRule clip_rule() const;
-    Color flood_color(Layout::NodeWithStyle const&) const;
     float flood_opacity() const;
+    CSS::ShapeRendering shape_rendering() const;
+    PaintOrderList paint_order() const;
+
+    WillChange will_change() const;
 
     Gfx::FontCascadeList const& computed_font_list() const
     {
@@ -221,8 +232,7 @@ public:
 
     [[nodiscard]] CSSPixels line_height() const { return *m_line_height; }
     void set_line_height(Badge<StyleComputer> const&, CSSPixels line_height) { m_line_height = line_height; }
-    [[nodiscard]] CSSPixels font_size() const { return *m_font_size; }
-    void set_font_size(Badge<StyleComputer> const&, CSSPixels font_size) { m_font_size = font_size; }
+    [[nodiscard]] CSSPixels font_size() const;
 
     bool operator==(ComputedProperties const&) const;
 
@@ -240,8 +250,6 @@ public:
 
     static NonnullRefPtr<Gfx::Font const> font_fallback(bool monospace, bool bold, float point_size);
 
-    static float resolve_opacity_value(CSSStyleValue const& value);
-
     bool has_attempted_match_against_pseudo_class(PseudoClass pseudo_class) const
     {
         return m_attempted_pseudo_class_matches.get(pseudo_class);
@@ -253,8 +261,6 @@ public:
     }
 
 private:
-    friend class StyleComputer;
-
     ComputedProperties();
 
     virtual void visit_edges(Visitor&) override;
@@ -265,18 +271,18 @@ private:
     GC::Ptr<CSSStyleDeclaration const> m_animation_name_source;
     GC::Ptr<CSSStyleDeclaration const> m_transition_property_source;
 
-    Array<RefPtr<CSSStyleValue const>, number_of_properties> m_property_values;
-    Array<u8, ceil_div(number_of_properties, 8uz)> m_property_important {};
-    Array<u8, ceil_div(number_of_properties, 8uz)> m_property_inherited {};
+    Array<RefPtr<StyleValue const>, number_of_longhand_properties> m_property_values;
+    Array<u8, ceil_div(number_of_longhand_properties, 8uz)> m_property_important {};
+    Array<u8, ceil_div(number_of_longhand_properties, 8uz)> m_property_inherited {};
+    Array<u8, ceil_div(number_of_longhand_properties, 8uz)> m_animated_property_inherited {};
 
-    HashMap<PropertyID, NonnullRefPtr<CSSStyleValue const>> m_animated_property_values;
+    HashMap<PropertyID, NonnullRefPtr<StyleValue const>> m_animated_property_values;
 
     int m_math_depth { InitialValues::math_depth() };
     RefPtr<Gfx::FontCascadeList const> m_font_list;
     RefPtr<Gfx::Font const> m_first_available_computed_font;
 
     Optional<CSSPixels> m_line_height;
-    Optional<CSSPixels> m_font_size;
 
     PseudoClassBitmap m_attempted_pseudo_class_matches;
 };

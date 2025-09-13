@@ -97,7 +97,7 @@ static void add_message_event_listener(JS::Realm& realm, HTML::MessagePort& port
         return JS::js_undefined();
     };
 
-    auto function = JS::NativeFunction::create(realm, move(behavior), 1, FlyString {}, &realm);
+    auto function = JS::NativeFunction::create(realm, move(behavior), 1, Utf16FlyString {}, &realm);
     auto callback = realm.heap().allocate<WebIDL::CallbackType>(function, realm);
     auto listener = DOM::IDLEventListener::create(realm, callback);
 
@@ -207,7 +207,7 @@ void set_up_cross_realm_transform_readable(JS::Realm& realm, ReadableStream& str
     add_message_event_listener(realm, port, HTML::EventNames::messageerror,
         [&realm, &port, controller](JS::VM&, HTML::MessageEvent const&) {
             // 1. Let error be a new "DataCloneError" DOMException.
-            auto error = WebIDL::DataCloneError::create(realm, "Unable to transfer stream"_string);
+            auto error = WebIDL::DataCloneError::create(realm, "Unable to transfer stream"_utf16);
 
             // 2. Perform ! CrossRealmTransformSendError(port, error).
             cross_realm_transform_send_error(realm, port, error);
@@ -322,7 +322,7 @@ void set_up_cross_realm_transform_writable(JS::Realm& realm, WritableStream& str
     add_message_event_listener(realm, port, HTML::EventNames::messageerror,
         [&realm, &port, controller](JS::VM&, HTML::MessageEvent const&) {
             // 1. Let error be a new "DataCloneError" DOMException
-            auto error = WebIDL::DataCloneError::create(realm, "Unable to transfer stream"_string);
+            auto error = WebIDL::DataCloneError::create(realm, "Unable to transfer stream"_utf16);
 
             // 2. Perform ! CrossRealmTransformSendError(port, error).
             cross_realm_transform_send_error(realm, port, error);

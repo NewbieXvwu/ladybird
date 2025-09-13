@@ -26,7 +26,7 @@ namespace WebView {
 
 class ViewImplementation;
 
-class WebContentClient final
+class WEBVIEW_API WebContentClient final
     : public IPC::ConnectionToServer<WebContentClientEndpoint, WebContentServerEndpoint>
     , public WebContentClientEndpoint {
     C_OBJECT_ABSTRACT(WebContentClient);
@@ -64,7 +64,7 @@ private:
     virtual void did_finish_loading(u64 page_id, URL::URL) override;
     virtual void did_request_refresh(u64 page_id) override;
     virtual void did_request_cursor_change(u64 page_id, Gfx::Cursor) override;
-    virtual void did_change_title(u64 page_id, ByteString) override;
+    virtual void did_change_title(u64 page_id, Utf16String) override;
     virtual void did_change_url(u64 page_id, URL::URL) override;
     virtual void did_request_tooltip_override(u64 page_id, Gfx::IntPoint, ByteString) override;
     virtual void did_stop_tooltip_override(u64 page_id) override;
@@ -101,7 +101,8 @@ private:
     virtual void did_request_set_prompt_text(u64 page_id, String message) override;
     virtual void did_request_accept_dialog(u64 page_id) override;
     virtual void did_request_dismiss_dialog(u64 page_id) override;
-    virtual Messages::WebContentClient::DidRequestAllCookiesResponse did_request_all_cookies(URL::URL) override;
+    virtual Messages::WebContentClient::DidRequestAllCookiesWebdriverResponse did_request_all_cookies_webdriver(URL::URL) override;
+    virtual Messages::WebContentClient::DidRequestAllCookiesCookiestoreResponse did_request_all_cookies_cookiestore(URL::URL) override;
     virtual Messages::WebContentClient::DidRequestNamedCookieResponse did_request_named_cookie(URL::URL, String) override;
     virtual Messages::WebContentClient::DidRequestCookieResponse did_request_cookie(URL::URL, Web::Cookie::Source) override;
     virtual void did_set_cookie(URL::URL, Web::Cookie::ParsedCookie, Web::Cookie::Source) override;
@@ -129,6 +130,7 @@ private:
     virtual void did_finish_handling_input_event(u64 page_id, Web::EventResult event_result) override;
     virtual void did_finish_test(u64 page_id, String text) override;
     virtual void did_set_test_timeout(u64 page_id, double milliseconds) override;
+    virtual void did_receive_reference_test_metadata(u64 page_id, JsonValue) override;
     virtual void did_set_browser_zoom(u64 page_id, double factor) override;
     virtual void did_find_in_page(u64 page_id, size_t current_match_index, Optional<size_t> total_match_count) override;
     virtual void did_change_theme_color(u64 page_id, Gfx::Color color) override;

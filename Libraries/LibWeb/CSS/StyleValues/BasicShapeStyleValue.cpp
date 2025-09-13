@@ -1,11 +1,14 @@
 /*
  * Copyright (c) 2024, MacDue <macdue@dueutil.tech>
+ * Copyright (c) 2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "BasicShapeStyleValue.h"
 #include <LibGfx/Path.h>
+#include <LibWeb/CSS/Serialize.h>
+#include <LibWeb/SVG/Path.h>
 
 namespace Web::CSS {
 
@@ -26,10 +29,10 @@ Gfx::Path Inset::to_path(CSSPixelRect reference_box, Layout::Node const& node) c
     // (such as left and right insets of 75% apiece) use the CSS Backgrounds 3 § 4.5 Overlapping Curves rules
     // to proportionally reduce the inset effect to 100%.
 
-    auto top = inset_box.top().to_px(node, reference_box.height()).to_float();
-    auto right = reference_box.width().to_float() - inset_box.right().to_px(node, reference_box.width()).to_float();
-    auto bottom = reference_box.height().to_float() - inset_box.bottom().to_px(node, reference_box.height()).to_float();
-    auto left = inset_box.left().to_px(node, reference_box.width()).to_float();
+    auto top = inset_box.top().to_px_or_zero(node, reference_box.height()).to_float();
+    auto right = reference_box.width().to_float() - inset_box.right().to_px_or_zero(node, reference_box.width()).to_float();
+    auto bottom = reference_box.height().to_float() - inset_box.bottom().to_px_or_zero(node, reference_box.height()).to_float();
+    auto left = inset_box.left().to_px_or_zero(node, reference_box.width()).to_float();
 
     return path_from_resolved_rect(top, right, bottom, left);
 }
@@ -59,10 +62,10 @@ Gfx::Path Rect::to_path(CSSPixelRect reference_box, Layout::Node const& node) co
     // An auto value makes the edge of the box coincide with the corresponding edge of the reference box:
     // it’s equivalent to 0% as the first (top) or fourth (left) value, and equivalent to 100% as the second (right) or third (bottom) value.
 
-    auto top = box.top().is_auto() ? 0 : box.top().to_px(node, reference_box.height()).to_float();
-    auto right = box.right().is_auto() ? reference_box.width().to_float() : box.right().to_px(node, reference_box.width()).to_float();
-    auto bottom = box.bottom().is_auto() ? reference_box.height().to_float() : box.bottom().to_px(node, reference_box.height()).to_float();
-    auto left = box.left().is_auto() ? 0 : box.left().to_px(node, reference_box.width()).to_float();
+    auto top = box.top().is_auto() ? 0 : box.top().to_px_or_zero(node, reference_box.height()).to_float();
+    auto right = box.right().is_auto() ? reference_box.width().to_float() : box.right().to_px_or_zero(node, reference_box.width()).to_float();
+    auto bottom = box.bottom().is_auto() ? reference_box.height().to_float() : box.bottom().to_px_or_zero(node, reference_box.height()).to_float();
+    auto left = box.left().is_auto() ? 0 : box.left().to_px_or_zero(node, reference_box.width()).to_float();
 
     // The second (right) and third (bottom) values are floored by the fourth (left) and second (top) values, respectively.
     return path_from_resolved_rect(top, max(right, left), max(bottom, top), left);
@@ -73,10 +76,10 @@ String Rect::to_string(SerializationMode) const
     return MUST(String::formatted("rect({} {} {} {})", box.top(), box.right(), box.bottom(), box.left()));
 }
 
-static String radius_to_string(ShapeRadius radius)
+static String radius_to_string(ShapeRadius radius, SerializationMode mode)
 {
     return radius.visit(
-        [](LengthPercentage const& length_percentage) { return length_percentage.to_string(); },
+        [&mode](LengthPercentage const& length_percentage) { return length_percentage.to_string(mode); },
         [](FitSide const& side) {
             switch (side) {
             case FitSide::ClosestSide:
@@ -125,7 +128,7 @@ Gfx::Path Circle::to_path(CSSPixelRect reference_box, Layout::Node const& node) 
 
 String Circle::to_string(SerializationMode mode) const
 {
-    return MUST(String::formatted("circle({} at {})", radius_to_string(radius), position->to_string(mode)));
+    return MUST(String::formatted("circle({} at {})", radius_to_string(radius, mode), position->to_string(mode)));
 }
 
 Gfx::Path Ellipse::to_path(CSSPixelRect reference_box, Layout::Node const& node) const
@@ -170,7 +173,7 @@ Gfx::Path Ellipse::to_path(CSSPixelRect reference_box, Layout::Node const& node)
 
 String Ellipse::to_string(SerializationMode mode) const
 {
-    return MUST(String::formatted("ellipse({} {} at {})", radius_to_string(radius_x), radius_to_string(radius_y), position->to_string(mode)));
+    return MUST(String::formatted("ellipse({} {} at {})", radius_to_string(radius_x, mode), radius_to_string(radius_y, mode), position->to_string(mode)));
 }
 
 Gfx::Path Polygon::to_path(CSSPixelRect reference_box, Layout::Node const& node) const
@@ -209,6 +212,43 @@ String Polygon::to_string(SerializationMode) const
     }
     builder.append(')');
     return MUST(builder.to_string());
+}
+
+Gfx::Path Path::to_path(CSSPixelRect, Layout::Node const&) const
+{
+    auto result = path_instructions.to_gfx_path();
+    // The UA must close a path with an implicit closepath command ("z" or "Z") if it is not present in the string for
+    // properties that require a closed loop (such as shape-outside and clip-path).
+    // https://drafts.csswg.org/css-shapes/#funcdef-basic-shape-path
+    // FIXME: For now, all users want a closed path, so we'll always close it.
+    result.close_all_subpaths();
+    result.set_fill_type(fill_rule);
+    return result;
+}
+
+// https://drafts.csswg.org/css-shapes/#basic-shape-serialization
+String Path::to_string(SerializationMode mode) const
+{
+    StringBuilder builder;
+    builder.append("path("sv);
+
+    // For serializing computed values, component values are computed, and omitted when possible without changing the meaning.
+    // NB: So, we don't include `nonzero` in that case.
+    if (!(mode == SerializationMode::ResolvedValue && fill_rule == Gfx::WindingRule::Nonzero)) {
+        switch (fill_rule) {
+        case Gfx::WindingRule::Nonzero:
+            builder.append("nonzero, "sv);
+            break;
+        case Gfx::WindingRule::EvenOdd:
+            builder.append("evenodd, "sv);
+        }
+    }
+
+    serialize_a_string(builder, path_instructions.serialize());
+
+    builder.append(')');
+
+    return builder.to_string_without_validation();
 }
 
 BasicShapeStyleValue::~BasicShapeStyleValue() = default;

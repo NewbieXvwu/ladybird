@@ -149,7 +149,7 @@ WebIDL::ExceptionOr<void> NavigableContainer::create_new_child_navigable(GC::Ptr
 }
 
 // https://html.spec.whatwg.org/multipage/browsers.html#concept-bcc-content-document
-const DOM::Document* NavigableContainer::content_document() const
+DOM::Document const* NavigableContainer::content_document() const
 {
     // 1. If container's content navigable is null, then return null.
     if (m_content_navigable == nullptr)
@@ -175,7 +175,7 @@ DOM::Document const* NavigableContainer::content_document_without_origin_check()
 }
 
 // https://html.spec.whatwg.org/multipage/embedded-content-other.html#dom-media-getsvgdocument
-const DOM::Document* NavigableContainer::get_svg_document() const
+DOM::Document const* NavigableContainer::get_svg_document() const
 {
     // 1. Let document be this element's content document.
     auto const* document = content_document();
@@ -197,6 +197,9 @@ HTML::WindowProxy* NavigableContainer::content_window()
 // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#shared-attribute-processing-steps-for-iframe-and-frame-elements
 Optional<URL::URL> NavigableContainer::shared_attribute_processing_steps_for_iframe_and_frame(InitialInsertion initial_insertion)
 {
+    if (!navigable())
+        return OptionalNone {};
+
     // AD-HOC: If the element was added and immediately removed, the content navigable will be null. Don't process the
     //         src attribute any further.
     if (!m_content_navigable)

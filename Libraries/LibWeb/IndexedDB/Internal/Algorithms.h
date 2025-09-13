@@ -8,6 +8,7 @@
 
 #include <AK/Variant.h>
 #include <LibJS/Runtime/Realm.h>
+#include <LibWeb/Bindings/IDBCursorPrototype.h>
 #include <LibWeb/HTML/DOMStringList.h>
 #include <LibWeb/IndexedDB/IDBKeyRange.h>
 #include <LibWeb/IndexedDB/IDBRequest.h>
@@ -17,6 +18,12 @@
 
 namespace Web::IndexedDB {
 
+enum class RecordKind {
+    Key,
+    Value,
+    Record
+};
+
 using KeyPath = Variant<String, Vector<String>>;
 using RecordSource = Variant<GC::Ref<ObjectStore>, GC::Ref<Index>>;
 
@@ -24,7 +31,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBDatabase>> open_a_database_connection(JS::Realm&,
 bool fire_a_version_change_event(JS::Realm&, FlyString const&, GC::Ref<DOM::EventTarget>, u64, Optional<u64>);
 WebIDL::ExceptionOr<GC::Ref<Key>> convert_a_value_to_a_key(JS::Realm&, JS::Value, Vector<JS::Value> = {});
 void close_a_database_connection(GC::Ref<IDBDatabase>, bool forced = false);
-GC::Ref<IDBTransaction> upgrade_a_database(JS::Realm&, GC::Ref<IDBDatabase>, u64, GC::Ref<IDBRequest>);
+void upgrade_a_database(JS::Realm&, GC::Ref<IDBDatabase>, u64, GC::Ref<IDBRequest>);
 WebIDL::ExceptionOr<u64> delete_a_database(JS::Realm&, StorageAPI::StorageKey, String, GC::Ref<IDBRequest>);
 void abort_a_transaction(GC::Ref<IDBTransaction>, GC::Ptr<WebIDL::DOMException>);
 JS::Value convert_a_key_to_a_value(JS::Realm&, GC::Ref<Key>);
@@ -58,5 +65,9 @@ GC::Ref<JS::Array> retrieve_multiple_referenced_values_from_an_index(JS::Realm&,
 GC::Ref<JS::Array> retrieve_multiple_values_from_an_index(JS::Realm&, GC::Ref<Index>, GC::Ref<IDBKeyRange>, Optional<WebIDL::UnsignedLong>);
 void queue_a_database_task(GC::Ref<GC::Function<void()>>);
 bool cleanup_indexed_database_transactions(GC::Ref<HTML::EventLoop>);
+bool is_a_potentially_valid_key_range(JS::Realm&, JS::Value);
+GC::Ref<JS::Array> retrieve_multiple_items_from_an_object_store(JS::Realm&, GC::Ref<ObjectStore>, GC::Ref<IDBKeyRange>, RecordKind, Bindings::IDBCursorDirection, Optional<WebIDL::UnsignedLong>);
+GC::Ref<JS::Array> retrieve_multiple_items_from_an_index(JS::Realm&, GC::Ref<Index>, GC::Ref<IDBKeyRange>, RecordKind, Bindings::IDBCursorDirection, Optional<WebIDL::UnsignedLong>);
+WebIDL::ExceptionOr<GC::Ref<IDBRequest>> create_a_request_to_retrieve_multiple_items(JS::Realm&, IDBRequestSource, RecordKind, JS::Value, Optional<WebIDL::UnsignedLong>);
 
 }

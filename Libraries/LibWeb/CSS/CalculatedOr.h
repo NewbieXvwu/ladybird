@@ -11,6 +11,7 @@
 #include <LibWeb/CSS/Flex.h>
 #include <LibWeb/CSS/Frequency.h>
 #include <LibWeb/CSS/Length.h>
+#include <LibWeb/CSS/Number.h>
 #include <LibWeb/CSS/Percentage.h>
 #include <LibWeb/CSS/Resolution.h>
 #include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
@@ -39,7 +40,7 @@ public:
         return m_value.template get<T>();
     }
 
-    NonnullRefPtr<CSSStyleValue const> as_style_value() const
+    NonnullRefPtr<StyleValue const> as_style_value() const
     {
         if (is_calculated())
             return calculated();
@@ -63,7 +64,7 @@ public:
             });
     }
 
-    String to_string() const
+    String to_string(SerializationMode mode) const
     {
         return m_value.visit(
             [](T const& t) {
@@ -73,8 +74,22 @@ public:
                     return t.to_string();
                 }
             },
-            [](NonnullRefPtr<CalculatedStyleValue const> const& calculated) {
-                return calculated->to_string(SerializationMode::Normal);
+            [&mode](NonnullRefPtr<CalculatedStyleValue const> const& calculated) {
+                return calculated->to_string(mode);
+            });
+    }
+
+    Self absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const
+    {
+        return m_value.visit(
+            [&](T const& value) {
+                if constexpr (IsSame<T, Length>)
+                    return Self { value.absolutized(viewport_rect, font_metrics, root_font_metrics) };
+                else
+                    return *static_cast<Self const*>(this);
+            },
+            [&](NonnullRefPtr<CalculatedStyleValue const> const& value) {
+                return Self { value->absolutized(viewport_rect, font_metrics, root_font_metrics)->as_calculated() };
             });
     }
 
@@ -90,7 +105,7 @@ protected:
     {
         return static_cast<Self const*>(this)->resolve_calculated(calculated, context);
     }
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const
+    NonnullRefPtr<StyleValue const> create_style_value() const
     {
         return static_cast<Self const*>(this)->create_style_value();
     }
@@ -104,7 +119,7 @@ public:
     using CalculatedOr::CalculatedOr;
 
     Optional<Angle> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
 };
 
 class FlexOrCalculated : public CalculatedOr<FlexOrCalculated, Flex> {
@@ -112,7 +127,7 @@ public:
     using CalculatedOr::CalculatedOr;
 
     Optional<Flex> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
 };
 
 class FrequencyOrCalculated : public CalculatedOr<FrequencyOrCalculated, Frequency> {
@@ -120,7 +135,7 @@ public:
     using CalculatedOr::CalculatedOr;
 
     Optional<Frequency> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
 };
 
 class IntegerOrCalculated : public CalculatedOr<IntegerOrCalculated, i64> {
@@ -128,7 +143,7 @@ public:
     using CalculatedOr::CalculatedOr;
 
     Optional<i64> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
 };
 
 class LengthOrCalculated : public CalculatedOr<LengthOrCalculated, Length> {
@@ -136,7 +151,17 @@ public:
     using CalculatedOr::CalculatedOr;
 
     Optional<Length> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
+};
+
+class LengthOrAutoOrCalculated : public CalculatedOr<LengthOrAutoOrCalculated, LengthOrAuto> {
+public:
+    using CalculatedOr::CalculatedOr;
+
+    Optional<LengthOrAuto> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
+    bool is_auto() const;
+    LengthOrCalculated without_auto() const;
 };
 
 class NumberOrCalculated : public CalculatedOr<NumberOrCalculated, double> {
@@ -144,7 +169,7 @@ public:
     using CalculatedOr::CalculatedOr;
 
     Optional<double> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
 };
 
 class PercentageOrCalculated : public CalculatedOr<PercentageOrCalculated, Percentage> {
@@ -152,7 +177,7 @@ public:
     using CalculatedOr::CalculatedOr;
 
     Optional<Percentage> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
 };
 
 class ResolutionOrCalculated : public CalculatedOr<ResolutionOrCalculated, Resolution> {
@@ -160,7 +185,7 @@ public:
     using CalculatedOr::CalculatedOr;
 
     Optional<Resolution> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
 };
 
 class TimeOrCalculated : public CalculatedOr<TimeOrCalculated, Time> {
@@ -168,7 +193,7 @@ public:
     using CalculatedOr::CalculatedOr;
 
     Optional<Time> resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, CalculationResolutionContext const&) const;
-    NonnullRefPtr<CSSStyleValue const> create_style_value() const;
+    NonnullRefPtr<StyleValue const> create_style_value() const;
 };
 
 }
@@ -177,7 +202,7 @@ template<>
 struct AK::Formatter<Web::CSS::AngleOrCalculated> : Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Web::CSS::AngleOrCalculated const& calculated_or)
     {
-        return Formatter<StringView>::format(builder, calculated_or.to_string());
+        return Formatter<StringView>::format(builder, calculated_or.to_string(Web::CSS::SerializationMode::Normal));
     }
 };
 
@@ -185,7 +210,7 @@ template<>
 struct AK::Formatter<Web::CSS::FrequencyOrCalculated> : Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Web::CSS::FrequencyOrCalculated const& calculated_or)
     {
-        return Formatter<StringView>::format(builder, calculated_or.to_string());
+        return Formatter<StringView>::format(builder, calculated_or.to_string(Web::CSS::SerializationMode::Normal));
     }
 };
 
@@ -193,7 +218,7 @@ template<>
 struct AK::Formatter<Web::CSS::LengthOrCalculated> : Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Web::CSS::LengthOrCalculated const& calculated_or)
     {
-        return Formatter<StringView>::format(builder, calculated_or.to_string());
+        return Formatter<StringView>::format(builder, calculated_or.to_string(Web::CSS::SerializationMode::Normal));
     }
 };
 
@@ -201,7 +226,7 @@ template<>
 struct AK::Formatter<Web::CSS::PercentageOrCalculated> : Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Web::CSS::PercentageOrCalculated const& calculated_or)
     {
-        return Formatter<StringView>::format(builder, calculated_or.to_string());
+        return Formatter<StringView>::format(builder, calculated_or.to_string(Web::CSS::SerializationMode::Normal));
     }
 };
 
@@ -209,6 +234,6 @@ template<>
 struct AK::Formatter<Web::CSS::TimeOrCalculated> : Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Web::CSS::TimeOrCalculated const& calculated_or)
     {
-        return Formatter<StringView>::format(builder, calculated_or.to_string());
+        return Formatter<StringView>::format(builder, calculated_or.to_string(Web::CSS::SerializationMode::Normal));
     }
 };

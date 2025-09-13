@@ -13,15 +13,16 @@
 #include <LibJS/Forward.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibJS/Runtime/VM.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Fetch/Infrastructure/FetchTimingInfo.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/EventLoop/Task.h>
-#include <LibWeb/HTML/StructuredSerialize.h>
+#include <LibWeb/HTML/StructuredSerializeTypes.h>
 
 namespace Web::Fetch::Infrastructure {
 
 // https://fetch.spec.whatwg.org/#fetch-controller
-class FetchController : public JS::Cell {
+class WEB_API FetchController : public JS::Cell {
     GC_CELL(FetchController, JS::Cell);
     GC_DECLARE_ALLOCATOR(FetchController);
 

@@ -10,12 +10,13 @@
 #include <AK/Vector.h>
 #include <LibGC/Ptr.h>
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/FileAPI/File.h>
 #include <LibWeb/WebIDL/Types.h>
 
 namespace Web::FileAPI {
 
-class FileList
+class WEB_API FileList
     : public Bindings::PlatformObject
     , public Bindings::Serializable {
     WEB_PLATFORM_OBJECT(FileList, Bindings::PlatformObject);
@@ -45,9 +46,9 @@ public:
 
     virtual Optional<JS::Value> item_value(size_t index) const override;
 
-    virtual StringView interface_name() const override { return "FileList"sv; }
-    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::SerializationRecord& serialized, bool for_storage, HTML::SerializationMemory&) override;
-    virtual WebIDL::ExceptionOr<void> deserialization_steps(ReadonlySpan<u32> const& serialized, size_t& position, HTML::DeserializationMemory&) override;
+    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::FileList; }
+    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
 
 private:
     explicit FileList(JS::Realm&);

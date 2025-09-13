@@ -36,6 +36,7 @@
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOM/StaticNodeList.h>
+#include <LibWeb/DOM/StyleInvalidator.h>
 #include <LibWeb/DOM/XMLDocument.h>
 #include <LibWeb/HTML/CustomElements/CustomElementReactionNames.h>
 #include <LibWeb/HTML/HTMLAnchorElement.h>
@@ -132,28 +133,28 @@ String Node::base_uri() const
     return document().base_url().to_string();
 }
 
-const HTML::HTMLAnchorElement* Node::enclosing_link_element() const
+HTML::HTMLAnchorElement const* Node::enclosing_link_element() const
 {
     for (auto* node = this; node; node = node->parent()) {
-        if (!is<HTML::HTMLAnchorElement>(*node))
+        auto const* anchor_element = as_if<HTML::HTMLAnchorElement>(*node);
+        if (!anchor_element)
             continue;
-        auto const& anchor_element = static_cast<HTML::HTMLAnchorElement const&>(*node);
-        if (anchor_element.has_attribute(HTML::AttributeNames::href))
-            return &anchor_element;
+        if (anchor_element->has_attribute(HTML::AttributeNames::href))
+            return anchor_element;
     }
     return nullptr;
 }
 
-const HTML::HTMLElement* Node::enclosing_html_element() const
+HTML::HTMLElement const* Node::enclosing_html_element() const
 {
     return first_ancestor_of_type<HTML::HTMLElement>();
 }
 
-const HTML::HTMLElement* Node::enclosing_html_element_with_attribute(FlyString const& attribute) const
+HTML::HTMLElement const* Node::enclosing_html_element_with_attribute(FlyString const& attribute) const
 {
     for (auto* node = this; node; node = node->parent()) {
-        if (is<HTML::HTMLElement>(*node) && as<HTML::HTMLElement>(*node).has_attribute(attribute))
-            return as<HTML::HTMLElement>(node);
+        if (auto* html_element = as_if<HTML::HTMLElement>(*node); html_element && html_element->has_attribute(attribute))
+            return html_element;
     }
     return nullptr;
 }
@@ -164,18 +165,20 @@ Optional<String> Node::alternative_text() const
 }
 
 // https://dom.spec.whatwg.org/#concept-descendant-text-content
-String Node::descendant_text_content() const
+Utf16String Node::descendant_text_content() const
 {
-    StringBuilder builder;
+    StringBuilder builder(StringBuilder::Mode::UTF16);
+
     for_each_in_subtree_of_type<Text>([&](auto& text_node) {
         builder.append(text_node.data());
         return TraversalDecision::Continue;
     });
-    return builder.to_string_without_validation();
+
+    return builder.to_utf16_string();
 }
 
 // https://dom.spec.whatwg.org/#dom-node-textcontent
-Optional<String> Node::text_content() const
+Optional<Utf16String> Node::text_content() const
 {
     // The textContent getter steps are to return the following, switching on the interface this implements:
 
@@ -184,23 +187,23 @@ Optional<String> Node::text_content() const
         return descendant_text_content();
 
     // If CharacterData, return this’s data.
-    if (is<CharacterData>(this))
-        return static_cast<CharacterData const&>(*this).data();
+    if (auto const* character_data = as_if<CharacterData>(*this))
+        return character_data->data();
 
     // If Attr node, return this's value.
-    if (is<Attr>(*this))
-        return static_cast<Attr const&>(*this).value();
+    if (auto const* attribute = as_if<Attr>(*this))
+        return Utf16String::from_utf8(attribute->value());
 
     // Otherwise, return null
     return {};
 }
 
 // https://dom.spec.whatwg.org/#ref-for-dom-node-textcontent%E2%91%A0
-void Node::set_text_content(Optional<String> const& maybe_content)
+void Node::set_text_content(Optional<Utf16String> const& maybe_content)
 {
     // The textContent setter steps are to, if the given value is null, act as if it was the empty string instead,
     // and then do as described below, switching on the interface this implements:
-    auto content = maybe_content.value_or(String {});
+    auto content = maybe_content.value_or({});
 
     // If DocumentFragment or Element, string replace all with the given value within this.
     if (is<DocumentFragment>(this) || is<Element>(this)) {
@@ -212,18 +215,13 @@ void Node::set_text_content(Optional<String> const& maybe_content)
     }
 
     // If CharacterData, replace data with node this, offset 0, count this’s length, and data the given value.
-    else if (is<CharacterData>(this)) {
-
-        auto* character_data_node = as<CharacterData>(this);
-        character_data_node->set_data(content);
-
-        // FIXME: CharacterData::set_data is not spec compliant. Make this match the spec when set_data becomes spec compliant.
-        //        Do note that this will make this function able to throw an exception.
+    else if (auto* character_data = as_if<CharacterData>(*this)) {
+        MUST(character_data->replace_data(0, character_data->length_in_utf16_code_units(), content));
     }
 
     // If Attr, set an existing attribute value with this and the given value.
-    if (is<Attr>(*this)) {
-        static_cast<Attr&>(*this).set_value(content);
+    else if (auto* attribute = as_if<Attr>(*this)) {
+        attribute->set_value(content.to_utf8_but_should_be_ported_to_utf16());
     }
 
     // Otherwise, do nothing.
@@ -287,12 +285,12 @@ WebIDL::ExceptionOr<void> Node::normalize()
         }
 
         // 3. Let data be the concatenation of the data of node’s contiguous exclusive Text nodes (excluding itself), in tree order.
-        StringBuilder data;
+        StringBuilder data(StringBuilder::Mode::UTF16);
         for (auto const& text_node : contiguous_exclusive_text_nodes_excluding_self(node))
             data.append(text_node->data());
 
         // 4. Replace data with node node, offset length, count 0, and data data.
-        TRY(character_data.replace_data(length, 0, MUST(data.to_string())));
+        TRY(character_data.replace_data(length, 0, data.to_utf16_string()));
 
         // 5. Let currentNode be node’s next sibling.
         auto* current_node = node.next_sibling();
@@ -356,13 +354,13 @@ Optional<String> Node::node_value() const
     // The nodeValue getter steps are to return the following, switching on the interface this implements:
 
     // If Attr, return this’s value.
-    if (is<Attr>(this)) {
-        return as<Attr>(this)->value();
+    if (auto* attr = as_if<Attr>(this)) {
+        return attr->value();
     }
 
     // If CharacterData, return this’s data.
-    if (is<CharacterData>(this)) {
-        return as<CharacterData>(this)->data();
+    if (auto* character_data = as_if<CharacterData>(this)) {
+        return character_data->data().to_utf8_but_should_be_ported_to_utf16();
     }
 
     // Otherwise, return null.
@@ -377,11 +375,11 @@ void Node::set_node_value(Optional<String> const& maybe_value)
     auto value = maybe_value.value_or(String {});
 
     // If Attr, set an existing attribute value with this and the given value.
-    if (is<Attr>(this)) {
-        as<Attr>(this)->set_value(move(value));
-    } else if (is<CharacterData>(this)) {
+    if (auto* attr = as_if<Attr>(this)) {
+        attr->set_value(move(value));
+    } else if (auto* character_data = as_if<CharacterData>(this)) {
         // If CharacterData, replace data with node this, offset 0, count this’s length, and data the given value.
-        as<CharacterData>(this)->set_data(value);
+        character_data->set_data(Utf16String::from_utf8(value));
     }
 
     // Otherwise, do nothing.
@@ -442,7 +440,6 @@ void Node::invalidate_style(StyleInvalidationReason reason)
     if (is_document()) {
         auto& document = static_cast<DOM::Document&>(*this);
         document.set_needs_full_style_update(true);
-        document.schedule_style_update();
         return;
     }
 
@@ -493,8 +490,6 @@ void Node::invalidate_style(StyleInvalidationReason reason)
 
     for (auto* ancestor = parent_or_shadow_host(); ancestor; ancestor = ancestor->parent_or_shadow_host())
         ancestor->m_child_needs_style_update = true;
-
-    document().schedule_style_update();
 }
 
 void Node::invalidate_style(StyleInvalidationReason reason, Vector<CSS::InvalidationSet::Property> const& properties, StyleInvalidationOptions options)
@@ -511,68 +506,37 @@ void Node::invalidate_style(StyleInvalidationReason reason, Vector<CSS::Invalida
     }
 
     auto invalidation_set = document().style_computer().invalidation_set_for_properties(properties);
-    if (options.invalidate_self)
-        invalidation_set.set_needs_invalidate_self();
-    if (invalidation_set.is_empty())
-        return;
-
     if (invalidation_set.needs_invalidate_whole_subtree()) {
         invalidate_style(reason);
         return;
     }
 
-    if (invalidation_set.needs_invalidate_self()) {
+    if (options.invalidate_self || invalidation_set.needs_invalidate_self()) {
         set_needs_style_update(true);
     }
 
-    auto invalidate_entire_subtree = [&](Node& subtree_root) {
-        subtree_root.for_each_shadow_including_inclusive_descendant([&](Node& node) {
-            if (!node.is_element())
-                return TraversalDecision::Continue;
-            auto& element = static_cast<Element&>(node);
-            bool needs_style_recalculation = false;
-            if (invalidation_set.needs_invalidate_whole_subtree()) {
-                VERIFY_NOT_REACHED();
-            }
-
-            if (element.includes_properties_from_invalidation_set(invalidation_set)) {
-                needs_style_recalculation = true;
-            } else if (options.invalidate_elements_that_use_css_custom_properties && element.style_uses_css_custom_properties()) {
-                needs_style_recalculation = true;
-            }
-            if (needs_style_recalculation)
-                element.set_needs_style_update(true);
-            return TraversalDecision::Continue;
-        });
-    };
-
-    invalidate_entire_subtree(*this);
-
-    if (invalidation_set.needs_invalidate_whole_subtree()) {
-        for (auto* sibling = next_sibling(); sibling; sibling = sibling->next_sibling()) {
-            if (sibling->is_element())
-                invalidate_entire_subtree(*sibling);
-        }
+    if (!invalidation_set.has_properties()) {
+        return;
     }
 
-    document().schedule_style_update();
+    document().style_invalidator().add_pending_invalidation(*this, move(invalidation_set));
 }
 
-String Node::child_text_content() const
+Utf16String Node::child_text_content() const
 {
-    if (!is<ParentNode>(*this))
-        return String {};
+    auto const* parent_node = as_if<ParentNode>(*this);
+    if (!parent_node)
+        return {};
 
-    StringBuilder builder;
-    as<ParentNode>(*this).for_each_child([&](auto& child) {
-        if (is<Text>(child)) {
-            auto maybe_content = as<Text>(child).text_content();
-            if (maybe_content.has_value())
-                builder.append(maybe_content.value());
-        }
+    StringBuilder builder(StringBuilder::Mode::UTF16);
+
+    parent_node->for_each_child_of_type<Text>([&](auto const& child) {
+        if (auto content = child.text_content(); content.has_value())
+            builder.append(*content);
         return IterationDecision::Continue;
     });
-    return MUST(builder.to_string());
+
+    return builder.to_utf16_string();
 }
 
 // https://dom.spec.whatwg.org/#concept-shadow-including-root
@@ -581,8 +545,8 @@ Node& Node::shadow_including_root()
     // The shadow-including root of an object is its root’s host’s shadow-including root,
     // if the object’s root is a shadow root; otherwise its root.
     auto& node_root = root();
-    if (is<ShadowRoot>(node_root)) {
-        if (auto* host = static_cast<ShadowRoot&>(node_root).host(); host)
+    if (auto* shadow_root = as_if<ShadowRoot>(node_root)) {
+        if (auto* host = shadow_root->host(); host)
             return host->shadow_including_root();
     }
     return node_root;
@@ -626,28 +590,28 @@ bool Node::is_browsing_context_connected() const
 }
 
 // https://dom.spec.whatwg.org/#concept-node-ensure-pre-insertion-validity
-WebIDL::ExceptionOr<void> Node::ensure_pre_insertion_validity(GC::Ref<Node> node, GC::Ptr<Node> child) const
+WebIDL::ExceptionOr<void> Node::ensure_pre_insertion_validity(JS::Realm& realm, GC::Ref<Node> node, GC::Ptr<Node> child) const
 {
     // 1. If parent is not a Document, DocumentFragment, or Element node, then throw a "HierarchyRequestError" DOMException.
     if (!is<Document>(this) && !is<DocumentFragment>(this) && !is<Element>(this))
-        return WebIDL::HierarchyRequestError::create(realm(), "Can only insert into a document, document fragment or element"_string);
+        return WebIDL::HierarchyRequestError::create(realm, "Can only insert into a document, document fragment or element"_utf16);
 
     // 2. If node is a host-including inclusive ancestor of parent, then throw a "HierarchyRequestError" DOMException.
     if (node->is_host_including_inclusive_ancestor_of(*this))
-        return WebIDL::HierarchyRequestError::create(realm(), "New node is an ancestor of this node"_string);
+        return WebIDL::HierarchyRequestError::create(realm, "New node is an ancestor of this node"_utf16);
 
     // 3. If child is non-null and its parent is not parent, then throw a "NotFoundError" DOMException.
     if (child && child->parent() != this)
-        return WebIDL::NotFoundError::create(realm(), "This node is not the parent of the given child"_string);
+        return WebIDL::NotFoundError::create(realm, "This node is not the parent of the given child"_utf16);
 
     // FIXME: All the following "Invalid node type for insertion" messages could be more descriptive.
     // 4. If node is not a DocumentFragment, DocumentType, Element, or CharacterData node, then throw a "HierarchyRequestError" DOMException.
     if (!is<DocumentFragment>(*node) && !is<DocumentType>(*node) && !is<Element>(*node) && !is<Text>(*node) && !is<Comment>(*node) && !is<ProcessingInstruction>(*node) && !is<CDATASection>(*node))
-        return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+        return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_utf16);
 
     // 5. If either node is a Text node and parent is a document, or node is a doctype and parent is not a document, then throw a "HierarchyRequestError" DOMException.
     if ((is<Text>(*node) && is<Document>(this)) || (is<DocumentType>(*node) && !is<Document>(this)))
-        return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+        return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_utf16);
 
     // 6. If parent is a document, and any of the statements below, switched on the interface node implements, are true, then throw a "HierarchyRequestError" DOMException.
     if (is<Document>(this)) {
@@ -658,18 +622,18 @@ WebIDL::ExceptionOr<void> Node::ensure_pre_insertion_validity(GC::Ref<Node> node
             auto node_element_child_count = as<DocumentFragment>(*node).child_element_count();
             if ((node_element_child_count > 1 || node->has_child_of_type<Text>())
                 || (node_element_child_count == 1 && (has_child_of_type<Element>() || is<DocumentType>(child.ptr()) || (child && child->has_following_node_of_type_in_tree_order<DocumentType>())))) {
-                return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+                return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_utf16);
             }
         } else if (is<Element>(*node)) {
             // Element
             // If parent has an element child, child is a doctype, or child is non-null and a doctype is following child.
             if (has_child_of_type<Element>() || is<DocumentType>(child.ptr()) || (child && child->has_following_node_of_type_in_tree_order<DocumentType>()))
-                return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+                return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_utf16);
         } else if (is<DocumentType>(*node)) {
             // DocumentType
             // parent has a doctype child, child is non-null and an element is preceding child, or child is null and parent has an element child.
             if (has_child_of_type<DocumentType>() || (child && child->has_preceding_node_of_type_in_tree_order<Element>()) || (!child && has_child_of_type<Element>()))
-                return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+                return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_utf16);
         }
     }
 
@@ -845,7 +809,7 @@ void Node::insert_before(GC::Ref<Node> node, GC::Ptr<Node> child, bool suppress_
 WebIDL::ExceptionOr<GC::Ref<Node>> Node::pre_insert(GC::Ref<Node> node, GC::Ptr<Node> child)
 {
     // 1. Ensure pre-insertion validity of node into parent before child.
-    TRY(ensure_pre_insertion_validity(node, child));
+    TRY(ensure_pre_insertion_validity(realm(), node, child));
 
     // 2. Let referenceChild be child.
     auto reference_child = child;
@@ -873,7 +837,7 @@ WebIDL::ExceptionOr<GC::Ref<Node>> Node::pre_remove(GC::Ref<Node> child)
 {
     // 1. If child’s parent is not parent, then throw a "NotFoundError" DOMException.
     if (child->parent() != this)
-        return WebIDL::NotFoundError::create(realm(), "Child does not belong to this node"_string);
+        return WebIDL::NotFoundError::create(realm(), "Child does not belong to this node"_utf16);
 
     // 2. Remove child.
     child->remove();
@@ -1068,25 +1032,25 @@ WebIDL::ExceptionOr<GC::Ref<Node>> Node::replace_child(GC::Ref<Node> node, GC::R
 {
     // If parent is not a Document, DocumentFragment, or Element node, then throw a "HierarchyRequestError" DOMException.
     if (!is<Document>(this) && !is<DocumentFragment>(this) && !is<Element>(this))
-        return WebIDL::HierarchyRequestError::create(realm(), "Can only insert into a document, document fragment or element"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "Can only insert into a document, document fragment or element"_utf16);
 
     // 2. If node is a host-including inclusive ancestor of parent, then throw a "HierarchyRequestError" DOMException.
     if (node->is_host_including_inclusive_ancestor_of(*this))
-        return WebIDL::HierarchyRequestError::create(realm(), "New node is an ancestor of this node"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "New node is an ancestor of this node"_utf16);
 
     // 3. If child’s parent is not parent, then throw a "NotFoundError" DOMException.
     if (child->parent() != this)
-        return WebIDL::NotFoundError::create(realm(), "This node is not the parent of the given child"_string);
+        return WebIDL::NotFoundError::create(realm(), "This node is not the parent of the given child"_utf16);
 
     // FIXME: All the following "Invalid node type for insertion" messages could be more descriptive.
 
     // 4. If node is not a DocumentFragment, DocumentType, Element, or CharacterData node, then throw a "HierarchyRequestError" DOMException.
     if (!is<DocumentFragment>(*node) && !is<DocumentType>(*node) && !is<Element>(*node) && !is<Text>(*node) && !is<Comment>(*node) && !is<ProcessingInstruction>(*node))
-        return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_utf16);
 
     // 5. If either node is a Text node and parent is a document, or node is a doctype and parent is not a document, then throw a "HierarchyRequestError" DOMException.
     if ((is<Text>(*node) && is<Document>(this)) || (is<DocumentType>(*node) && !is<Document>(this)))
-        return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_utf16);
 
     // If parent is a document, and any of the statements below, switched on the interface node implements, are true, then throw a "HierarchyRequestError" DOMException.
     if (is<Document>(this)) {
@@ -1097,18 +1061,18 @@ WebIDL::ExceptionOr<GC::Ref<Node>> Node::replace_child(GC::Ref<Node> node, GC::R
             auto node_element_child_count = as<DocumentFragment>(*node).child_element_count();
             if ((node_element_child_count > 1 || node->has_child_of_type<Text>())
                 || (node_element_child_count == 1 && (first_child_of_type<Element>() != child || child->has_following_node_of_type_in_tree_order<DocumentType>()))) {
-                return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+                return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_utf16);
             }
         } else if (is<Element>(*node)) {
             // Element
             // parent has an element child that is not child or a doctype is following child.
             if (first_child_of_type<Element>() != child || child->has_following_node_of_type_in_tree_order<DocumentType>())
-                return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+                return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_utf16);
         } else if (is<DocumentType>(*node)) {
             // DocumentType
             // parent has a doctype child that is not child, or an element is preceding child.
             if (first_child_of_type<DocumentType>() != child || child->has_preceding_node_of_type_in_tree_order<Element>())
-                return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_string);
+                return WebIDL::HierarchyRequestError::create(realm(), "Invalid node type for insertion"_utf16);
         }
     }
 
@@ -1219,31 +1183,31 @@ WebIDL::ExceptionOr<void> Node::move_node(Node& new_parent, Node* child)
 
     // 1. If newParent’s shadow-including root is not the same as node’s shadow-including root, then throw a "HierarchyRequestError" DOMException.
     if (&new_parent.shadow_including_root() != &shadow_including_root())
-        return WebIDL::HierarchyRequestError::create(realm, "New parent is not in the same shadow tree"_string);
+        return WebIDL::HierarchyRequestError::create(realm, "New parent is not in the same shadow tree"_utf16);
 
     // NOTE: This has the side effect of ensuring that a move is only performed if newParent’s connected is node’s connected.
 
     // 2. If node is a host-including inclusive ancestor of newParent, then throw a "HierarchyRequestError" DOMException.
     if (is_host_including_inclusive_ancestor_of(new_parent))
-        return WebIDL::HierarchyRequestError::create(realm, "New parent is an ancestor of this node"_string);
+        return WebIDL::HierarchyRequestError::create(realm, "New parent is an ancestor of this node"_utf16);
 
     // 3. If child is non-null and its parent is not newParent, then throw a "NotFoundError" DOMException.
     if (child && child->parent() != &new_parent)
-        return WebIDL::NotFoundError::create(realm, "Child does not belong to the new parent"_string);
+        return WebIDL::NotFoundError::create(realm, "Child does not belong to the new parent"_utf16);
 
     // 4. If node is not an Element or a CharacterData node, then throw a "HierarchyRequestError" DOMException.
     if (!is<Element>(*this) && !is<CharacterData>(*this))
-        return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_string);
+        return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_utf16);
 
     // 5. If node is a Text node and newParent is a document, then throw a "HierarchyRequestError" DOMException.
     if (is<Text>(*this) && is<Document>(new_parent))
-        return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_string);
+        return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_utf16);
 
     // 6. If newParent is a document, node is an Element node, and either newParent has an element child, child is a doctype,
     //    or child is non-null and a doctype is following child then throw a "HierarchyRequestError" DOMException.
     if (is<Document>(new_parent) && is<Element>(*this)) {
         if (new_parent.has_child_of_type<Element>() || is<DocumentType>(child) || (child && child->has_following_node_of_type_in_tree_order<DocumentType>()))
-            return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_string);
+            return WebIDL::HierarchyRequestError::create(realm, "Invalid node type for insertion"_utf16);
     }
 
     // 7. Let oldParent be node’s parent.
@@ -1533,7 +1497,7 @@ WebIDL::ExceptionOr<GC::Ref<Node>> Node::clone_node_binding(bool subtree)
 {
     // 1. If this is a shadow root, then throw a "NotSupportedError" DOMException.
     if (is<ShadowRoot>(*this))
-        return WebIDL::NotSupportedError::create(realm(), "Cannot clone shadow root"_string);
+        return WebIDL::NotSupportedError::create(realm(), "Cannot clone shadow root"_utf16);
 
     // 2. Return the result of cloning a node given this with subtree set to subtree.
     return clone_node(nullptr, subtree);
@@ -1573,7 +1537,8 @@ bool Node::is_editable() const
         return false;
 
     // it does not have a contenteditable attribute set to the false state;
-    if (is<HTML::HTMLElement>(this) && static_cast<HTML::HTMLElement const&>(*this).content_editable_state() == HTML::ContentEditableState::False)
+    auto const* html_element = as_if<HTML::HTMLElement>(*this);
+    if (html_element && html_element->content_editable_state() == HTML::ContentEditableState::False)
         return false;
 
     // its parent is an editing host or editable;
@@ -1587,7 +1552,7 @@ bool Node::is_editable() const
         return false;
 
     // and either it is an HTML element,
-    if (is<HTML::HTMLElement>(this))
+    if (html_element)
         return true;
 
     // or it is an svg or math element,
@@ -1602,17 +1567,48 @@ bool Node::is_editable() const
 bool Node::is_editing_host() const
 {
     // NOTE: Both conditions below require this to be an HTML element.
-    if (!is<HTML::HTMLElement>(this))
+    auto const* html_element = as_if<HTML::HTMLElement>(*this);
+    if (!html_element)
         return false;
 
     // An editing host is either an HTML element with its contenteditable attribute in the true state or
     // plaintext-only state,
-    auto state = static_cast<HTML::HTMLElement const&>(*this).content_editable_state();
-    if (state == HTML::ContentEditableState::True || state == HTML::ContentEditableState::PlaintextOnly)
+    // AD-HOC: Only return true here if this node is not the child of another editable node or an editing host,
+    //         effectively merging this potential editing host with its editing host ancestor. This causes a call to
+    //         `::editing_host()` to automatically traverse to the top-most editing host.
+    auto state = html_element->content_editable_state();
+    if ((state == HTML::ContentEditableState::True || state == HTML::ContentEditableState::PlaintextOnly)
+        && (!parent() || !parent()->is_editable_or_editing_host())) {
         return true;
+    }
 
     // or a child HTML element of a Document whose design mode enabled is true.
-    return is<Document>(parent()) && static_cast<Document const&>(*parent()).design_mode_enabled_state();
+    return is<Document>(parent()) && as<Document>(*parent()).design_mode_enabled_state();
+}
+
+// https://w3c.github.io/editing/docs/execCommand/#editing-host-of
+GC::Ptr<Node> Node::editing_host()
+{
+    // node itself, if node is an editing host;
+    if (is_editing_host())
+        return *this;
+
+    // or the nearest ancestor of node that is an editing host, if node is editable.
+    if (is_editable()) {
+        GC::Ptr<Node> result;
+        for_each_ancestor([&result](GC::Ref<Node> ancestor) {
+            if (ancestor->is_editing_host()) {
+                result = ancestor;
+                return IterationDecision::Break;
+            }
+            return IterationDecision::Continue;
+        });
+        VERIFY(result);
+        return result;
+    }
+
+    // The editing host of node is null if node is neither editable nor an editing host;
+    return {};
 }
 
 void Node::set_layout_node(Badge<Layout::Node>, GC::Ref<Layout::Node> layout_node)
@@ -1699,7 +1695,6 @@ void Node::set_needs_style_update(bool value)
                 break;
             ancestor->m_child_needs_style_update = true;
         }
-        document().schedule_style_update();
     }
 }
 
@@ -1904,7 +1899,7 @@ bool Node::is_uninteresting_whitespace_node() const
 {
     if (!is<Text>(*this))
         return false;
-    if (!static_cast<Text const&>(*this).data().bytes_as_string_view().is_whitespace())
+    if (!static_cast<Text const&>(*this).data().is_ascii_whitespace())
         return false;
     if (!layout_node())
         return true;
@@ -1970,10 +1965,10 @@ void Node::serialize_tree_as_json(JsonObjectSerializer<StringBuilder>& object) c
         MUST(object.add("type"sv, "text"));
 
         auto text_node = static_cast<DOM::Text const*>(this);
-        MUST(object.add("text"sv, text_node->data()));
+        MUST(object.add("text"sv, text_node->data().to_utf8()));
     } else if (is_comment()) {
         MUST(object.add("type"sv, "comment"sv));
-        MUST(object.add("data"sv, static_cast<DOM::Comment const&>(*this).data()));
+        MUST(object.add("data"sv, static_cast<DOM::Comment const&>(*this).data().to_utf8()));
     } else if (is_shadow_root()) {
         MUST(object.add("type"sv, "shadow-root"));
         MUST(object.add("mode"sv, static_cast<DOM::ShadowRoot const&>(*this).mode() == Bindings::ShadowRootMode::Open ? "open"sv : "closed"sv));
@@ -2080,14 +2075,14 @@ void Node::replace_all(GC::Ptr<Node> node)
 }
 
 // https://dom.spec.whatwg.org/#string-replace-all
-void Node::string_replace_all(String const& string)
+void Node::string_replace_all(Utf16String string)
 {
     // 1. Let node be null.
     GC::Ptr<Node> node;
 
     // 2. If string is not the empty string, then set node to a new Text node whose data is string and node document is parent’s node document.
     if (!string.is_empty())
-        node = realm().create<Text>(document(), string);
+        node = realm().create<Text>(document(), move(string));
 
     // 3. Replace all with node within parent.
     replace_all(node);
@@ -2897,7 +2892,7 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
             // If the current node has at least one direct child title element, select the appropriate title based on
             // the language rules for the SVG specification, and return the title text alternative as a flat string.
             element->for_each_child_of_type<SVG::SVGTitleElement>([&](SVG::SVGTitleElement const& title) mutable {
-                title_element_text = title.text_content();
+                title_element_text = title.text_content().map([](auto const& title) { return title.to_utf8_but_should_be_ported_to_utf16(); });
                 return IterationDecision::Break;
             });
             if (title_element_text.has_value())
@@ -2914,7 +2909,7 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
         //    then use the subtree of the first such element.
         if (is<HTML::HTMLTableElement>(*element))
             if (auto& table = (const_cast<HTML::HTMLTableElement&>(static_cast<HTML::HTMLTableElement const&>(*element))); table.caption())
-                return table.caption()->text_content().release_value();
+                return table.caption()->text_content()->to_utf8_but_should_be_ported_to_utf16();
 
         // https://w3c.github.io/html-aam/#fieldset-element-accessible-name-computation
         // 2. If the accessible name is still empty, then: if the fieldset element has a child that is a legend element,
@@ -2923,7 +2918,7 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
             Optional<String> legend;
             auto& fieldset = (const_cast<HTML::HTMLFieldSetElement&>(static_cast<HTML::HTMLFieldSetElement const&>(*element)));
             fieldset.for_each_child_of_type<HTML::HTMLLegendElement>([&](HTML::HTMLLegendElement const& element) mutable {
-                legend = element.text_content().release_value();
+                legend = element.text_content()->to_utf8_but_should_be_ported_to_utf16();
                 return IterationDecision::Break;
             });
             if (legend.has_value())
@@ -2963,10 +2958,14 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
             //    content of the current node. NOTE: The code for handling the ::after pseudo elements case is further below,
             //    following the “iii. For each child node of the current node” code.
             if (auto before = element->get_pseudo_element_node(CSS::PseudoElement::Before)) {
-                if (before->computed_values().content().alt_text.has_value())
+                if (before->computed_values().content().alt_text.has_value()) {
                     total_accumulated_text.append(before->computed_values().content().alt_text.release_value());
-                else
-                    total_accumulated_text.append(before->computed_values().content().data);
+                } else {
+                    for (auto& item : before->computed_values().content().data) {
+                        if (auto const* string = item.get_pointer<String>())
+                            total_accumulated_text.append(*string);
+                    }
+                }
             }
 
             // iii. Determine Child Nodes: Determine the rendered child nodes of the current node:
@@ -3019,10 +3018,14 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
 
             // NOTE: See step ii.b above.
             if (auto after = element->get_pseudo_element_node(CSS::PseudoElement::After)) {
-                if (after->computed_values().content().alt_text.has_value())
+                if (after->computed_values().content().alt_text.has_value()) {
                     total_accumulated_text.append(after->computed_values().content().alt_text.release_value());
-                else
-                    total_accumulated_text.append(after->computed_values().content().data);
+                } else {
+                    for (auto& item : after->computed_values().content().data) {
+                        if (auto const* string = item.get_pointer<String>())
+                            total_accumulated_text.append(*string);
+                    }
+                }
             }
 
             // v. Return the accumulated text if it is not the empty string ("").
@@ -3044,8 +3047,8 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
     // aria-labelledby or aria-describedby and/or un-hidden. See the comment for substep A above.
     if (is_text() && (!parent_element() || (parent_element()->is_referenced() || !parent_element()->is_hidden() || !parent_element()->has_hidden_ancestor() || parent_element()->has_referenced_and_hidden_ancestor()))) {
         if (layout_node() && layout_node()->is_text_node())
-            return as<Layout::TextNode>(layout_node())->text_for_rendering();
-        return text_content().release_value();
+            return as<Layout::TextNode>(layout_node())->text_for_rendering().to_utf8_but_should_be_ported_to_utf16();
+        return text_content()->to_utf8_but_should_be_ported_to_utf16();
     }
 
     // H. Otherwise, if the current node is a descendant of an element whose Accessible Name or Accessible Description

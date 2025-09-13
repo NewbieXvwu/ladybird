@@ -7,6 +7,8 @@
 #pragma once
 
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/EncryptedMediaExtensions/NavigatorEncryptedMediaExtensionsPartial.h>
+#include <LibWeb/Gamepad/NavigatorGamepad.h>
 #include <LibWeb/HTML/MimeTypeArray.h>
 #include <LibWeb/HTML/NavigatorBeacon.h>
 #include <LibWeb/HTML/NavigatorConcurrentHardware.h>
@@ -17,14 +19,17 @@
 #include <LibWeb/HTML/PluginArray.h>
 #include <LibWeb/HTML/UserActivation.h>
 #include <LibWeb/MediaCapabilitiesAPI/MediaCapabilities.h>
+#include <LibWeb/Serial/Serial.h>
 #include <LibWeb/StorageAPI/NavigatorStorage.h>
 
 namespace Web::HTML {
 
 class Navigator : public Bindings::PlatformObject
-    , public NavigatorBeaconMixin
+    , public NavigatorBeaconPartial
     , public NavigatorConcurrentHardwareMixin
     , public NavigatorDeviceMemoryMixin
+    , public Gamepad::NavigatorGamepadPartial
+    , public EncryptedMediaExtensions::NavigatorEncryptedMediaExtensionsPartial
     , public NavigatorIDMixin
     , public NavigatorLanguageMixin
     , public NavigatorOnLineMixin
@@ -54,6 +59,7 @@ public:
     [[nodiscard]] GC::Ref<PluginArray> plugins();
     [[nodiscard]] GC::Ref<Clipboard::Clipboard> clipboard();
     [[nodiscard]] GC::Ref<Geolocation::Geolocation> geolocation();
+    [[nodiscard]] GC::Ref<Serial::Serial> serial();
     [[nodiscard]] GC::Ref<UserActivation> user_activation();
     [[nodiscard]] GC::Ref<CredentialManagement::CredentialsContainer> credentials();
 
@@ -86,6 +92,9 @@ private:
 
     // https://w3c.github.io/geolocation/#navigator_interface
     GC::Ptr<Geolocation::Geolocation> m_geolocation;
+
+    // https://wicg.github.io/serial/#extensions-to-the-navigator-interface
+    GC::Ptr<Serial::Serial> m_serial;
 
     // https://html.spec.whatwg.org/multipage/interaction.html#dom-navigator-useractivation
     GC::Ptr<UserActivation> m_user_activation;

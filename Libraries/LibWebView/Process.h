@@ -6,16 +6,17 @@
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/Utf16String.h>
 #include <AK/WeakPtr.h>
 #include <LibCore/Process.h>
 #include <LibIPC/Connection.h>
 #include <LibIPC/Transport.h>
+#include <LibWebView/Forward.h>
 #include <LibWebView/ProcessType.h>
 
 namespace WebView {
 
-class Process {
+class WEBVIEW_API Process {
     AK_MAKE_NONCOPYABLE(Process);
     AK_MAKE_DEFAULT_MOVABLE(Process);
 
@@ -30,8 +31,9 @@ public:
     static ErrorOr<ProcessAndClient<ClientType>> spawn(ProcessType type, Core::ProcessSpawnOptions const& options, ClientArguments&&... client_arguments);
 
     ProcessType type() const { return m_type; }
-    Optional<String> const& title() const { return m_title; }
-    void set_title(Optional<String> title) { m_title = move(title); }
+
+    Optional<Utf16String> const& title() const { return m_title; }
+    void set_title(Optional<Utf16String> title) { m_title = move(title); }
 
     template<typename ConnectionFromClient>
     Optional<ConnectionFromClient&> client()
@@ -60,7 +62,7 @@ private:
 
     Core::Process m_process;
     ProcessType m_type;
-    Optional<String> m_title;
+    Optional<Utf16String> m_title;
     WeakPtr<IPC::ConnectionBase> m_connection;
 };
 

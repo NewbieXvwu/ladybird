@@ -104,6 +104,7 @@ void Range::update_associated_selection()
         return;
 
     auto& document = m_start_container->document();
+    document.reset_cursor_blink_cycle();
     if (auto* viewport = document.paintable()) {
         viewport->recompute_selection_states(*this);
         viewport->set_needs_display();
@@ -181,11 +182,11 @@ WebIDL::ExceptionOr<void> Range::set_start_or_end(GC::Ref<Node> node, u32 offset
 
     // 1. If node is a doctype, then throw an "InvalidNodeTypeError" DOMException.
     if (is<DocumentType>(*node))
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Node cannot be a DocumentType."_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Node cannot be a DocumentType."_utf16);
 
     // 2. If offset is greater than node’s length, then throw an "IndexSizeError" DOMException.
     if (offset > node->length())
-        return WebIDL::IndexSizeError::create(realm(), MUST(String::formatted("Node does not contain a child at offset {}", offset)));
+        return WebIDL::IndexSizeError::create(realm(), Utf16String::formatted("Node does not contain a child at offset {}", offset));
 
     // 3. Let bp be the boundary point (node, offset).
 
@@ -242,7 +243,7 @@ WebIDL::ExceptionOr<void> Range::set_start_before(GC::Ref<Node> node)
 
     // 2. If parent is null, then throw an "InvalidNodeTypeError" DOMException.
     if (!parent)
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_utf16);
 
     // 3. Set the start of this to boundary point (parent, node’s index).
     return set_start_or_end(*parent, node->index(), StartOrEnd::Start);
@@ -256,7 +257,7 @@ WebIDL::ExceptionOr<void> Range::set_start_after(GC::Ref<Node> node)
 
     // 2. If parent is null, then throw an "InvalidNodeTypeError" DOMException.
     if (!parent)
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_utf16);
 
     // 3. Set the start of this to boundary point (parent, node’s index plus 1).
     return set_start_or_end(*parent, node->index() + 1, StartOrEnd::Start);
@@ -270,7 +271,7 @@ WebIDL::ExceptionOr<void> Range::set_end_before(GC::Ref<Node> node)
 
     // 2. If parent is null, then throw an "InvalidNodeTypeError" DOMException.
     if (!parent)
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_utf16);
 
     // 3. Set the end of this to boundary point (parent, node’s index).
     return set_start_or_end(*parent, node->index(), StartOrEnd::End);
@@ -284,7 +285,7 @@ WebIDL::ExceptionOr<void> Range::set_end_after(GC::Ref<Node> node)
 
     // 2. If parent is null, then throw an "InvalidNodeTypeError" DOMException.
     if (!parent)
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_utf16);
 
     // 3. Set the end of this to boundary point (parent, node’s index plus 1).
     return set_start_or_end(*parent, node->index() + 1, StartOrEnd::End);
@@ -300,11 +301,11 @@ WebIDL::ExceptionOr<WebIDL::Short> Range::compare_boundary_points(WebIDL::Unsign
     //      - END_TO_START,
     //    then throw a "NotSupportedError" DOMException.
     if (how != HowToCompareBoundaryPoints::START_TO_START && how != HowToCompareBoundaryPoints::START_TO_END && how != HowToCompareBoundaryPoints::END_TO_END && how != HowToCompareBoundaryPoints::END_TO_START)
-        return WebIDL::NotSupportedError::create(realm(), MUST(String::formatted("Expected 'how' to be one of START_TO_START (0), START_TO_END (1), END_TO_END (2) or END_TO_START (3), got {}", how)));
+        return WebIDL::NotSupportedError::create(realm(), Utf16String::formatted("Expected 'how' to be one of START_TO_START (0), START_TO_END (1), END_TO_END (2) or END_TO_START (3), got {}", how));
 
     // 2. If this’s root is not the same as sourceRange’s root, then throw a "WrongDocumentError" DOMException.
     if (root() != source_range.root())
-        return WebIDL::WrongDocumentError::create(realm(), "This range is not in the same tree as the source range."_string);
+        return WebIDL::WrongDocumentError::create(realm(), "This range is not in the same tree as the source range."_utf16);
 
     GC::Ptr<Node> this_point_node;
     u32 this_point_offset = 0;
@@ -385,7 +386,7 @@ WebIDL::ExceptionOr<void> Range::select(GC::Ref<Node> node)
 
     // 2. If parent is null, then throw an "InvalidNodeTypeError" DOMException.
     if (!parent)
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Given node has no parent."_utf16);
 
     // 3. Let index be node’s index.
     auto index = node->index();
@@ -428,7 +429,7 @@ WebIDL::ExceptionOr<void> Range::select_node_contents(GC::Ref<Node> node)
 {
     // 1. If node is a doctype, throw an "InvalidNodeTypeError" DOMException.
     if (is<DocumentType>(*node))
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Node cannot be a DocumentType."_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Node cannot be a DocumentType."_utf16);
 
     // 2. Let length be the length of node.
     auto length = node->length();
@@ -502,11 +503,11 @@ WebIDL::ExceptionOr<bool> Range::is_point_in_range(GC::Ref<Node> node, WebIDL::U
 
     // 2. If node is a doctype, then throw an "InvalidNodeTypeError" DOMException.
     if (is<DocumentType>(*node))
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Node cannot be a DocumentType."_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Node cannot be a DocumentType."_utf16);
 
     // 3. If offset is greater than node’s length, then throw an "IndexSizeError" DOMException.
     if (offset > node->length())
-        return WebIDL::IndexSizeError::create(realm(), MUST(String::formatted("Node does not contain a child at offset {}", offset)));
+        return WebIDL::IndexSizeError::create(realm(), Utf16String::formatted("Node does not contain a child at offset {}", offset));
 
     // 4. If (node, offset) is before start or after end, return false.
     auto relative_position_to_start = position_of_boundary_point_relative_to_other_boundary_point({ node, offset }, start());
@@ -523,15 +524,15 @@ WebIDL::ExceptionOr<WebIDL::Short> Range::compare_point(GC::Ref<Node> node, WebI
 {
     // 1. If node’s root is different from this’s root, then throw a "WrongDocumentError" DOMException.
     if (&node->root() != root().ptr())
-        return WebIDL::WrongDocumentError::create(realm(), "Given node is not in the same document as the range."_string);
+        return WebIDL::WrongDocumentError::create(realm(), "Given node is not in the same document as the range."_utf16);
 
     // 2. If node is a doctype, then throw an "InvalidNodeTypeError" DOMException.
     if (is<DocumentType>(*node))
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Node cannot be a DocumentType."_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Node cannot be a DocumentType."_utf16);
 
     // 3. If offset is greater than node’s length, then throw an "IndexSizeError" DOMException.
     if (offset > node->length())
-        return WebIDL::IndexSizeError::create(realm(), MUST(String::formatted("Node does not contain a child at offset {}", offset)));
+        return WebIDL::IndexSizeError::create(realm(), Utf16String::formatted("Node does not contain a child at offset {}", offset));
 
     // 4. If (node, offset) is before start, return −1.
     auto relative_position_to_start = position_of_boundary_point_relative_to_other_boundary_point({ node, offset }, start());
@@ -548,39 +549,34 @@ WebIDL::ExceptionOr<WebIDL::Short> Range::compare_point(GC::Ref<Node> node, WebI
 }
 
 // https://dom.spec.whatwg.org/#dom-range-stringifier
-String Range::to_string() const
+Utf16String Range::to_string() const
 {
     // 1. Let s be the empty string.
-    StringBuilder builder;
+    StringBuilder builder(StringBuilder::Mode::UTF16);
 
     // 2. If this’s start node is this’s end node and it is a Text node,
     //    then return the substring of that Text node’s data beginning at this’s start offset and ending at this’s end offset.
-    if (start_container() == end_container() && is<Text>(*start_container())) {
-        auto const& text = static_cast<Text const&>(*start_container());
-        return MUST(text.substring_data(start_offset(), end_offset() - start_offset()));
-    }
+    auto* start_text = as_if<Text>(*start_container());
+    if (start_text && start_container() == end_container())
+        return MUST(start_text->substring_data(start_offset(), end_offset() - start_offset()));
 
     // 3. If this’s start node is a Text node, then append the substring of that node’s data from this’s start offset until the end to s.
-    if (is<Text>(*start_container())) {
-        auto const& text = static_cast<Text const&>(*start_container());
-        builder.append(MUST(text.substring_data(start_offset(), text.length_in_utf16_code_units() - start_offset())));
-    }
+    if (start_text)
+        builder.append(MUST(start_text->substring_data(start_offset(), start_text->length_in_utf16_code_units() - start_offset())));
 
     // 4. Append the concatenation of the data of all Text nodes that are contained in this, in tree order, to s.
-    for_each_contained([&](GC::Ref<DOM::Node> node) {
-        if (is<Text>(*node))
-            builder.append(static_cast<Text const&>(*node).data());
+    for_each_contained([&](GC::Ref<Node> node) {
+        if (auto* text_node = as_if<Text>(*node))
+            builder.append(text_node->data());
         return IterationDecision::Continue;
     });
 
     // 5. If this’s end node is a Text node, then append the substring of that node’s data from its start until this’s end offset to s.
-    if (is<Text>(*end_container())) {
-        auto const& text = static_cast<Text const&>(*end_container());
-        builder.append(MUST(text.substring_data(0, end_offset())));
-    }
+    if (auto* end_text = as_if<Text>(*end_container()))
+        builder.append(MUST(end_text->substring_data(0, end_offset())));
 
     // 6. Return s.
-    return MUST(builder.to_string());
+    return builder.to_utf16_string();
 }
 
 // https://dom.spec.whatwg.org/#dom-range-extractcontents
@@ -620,7 +616,7 @@ WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> Range::extract()
         TRY(fragment->append_child(clone));
 
         // 4. Replace data with node original start node, offset original start offset, count original end offset minus original start offset, and data the empty string.
-        TRY(static_cast<CharacterData&>(*original_start_node).replace_data(original_start_offset, original_end_offset - original_start_offset, String {}));
+        TRY(static_cast<CharacterData&>(*original_start_node).replace_data(original_start_offset, original_end_offset - original_start_offset, {}));
 
         // 5. Return fragment.
         return fragment;
@@ -671,7 +667,7 @@ WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> Range::extract()
     // 12. If any member of contained children is a doctype, then throw a "HierarchyRequestError" DOMException.
     for (auto const& child : contained_children) {
         if (is<DocumentType>(*child))
-            return WebIDL::HierarchyRequestError::create(realm(), "Contained child is a DocumentType"_string);
+            return WebIDL::HierarchyRequestError::create(realm(), "Contained child is a DocumentType"_utf16);
     }
 
     GC::Ptr<Node> new_node;
@@ -710,7 +706,7 @@ WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> Range::extract()
         TRY(fragment->append_child(clone));
 
         // 4. Replace data with node original start node, offset original start offset, count original start node’s length minus original start offset, and data the empty string.
-        TRY(static_cast<CharacterData&>(*original_start_node).replace_data(original_start_offset, original_start_node->length() - original_start_offset, String {}));
+        TRY(static_cast<CharacterData&>(*original_start_node).replace_data(original_start_offset, original_start_node->length() - original_start_offset, {}));
     }
     // 16. Otherwise, if first partially contained child is not null:
     else if (first_partially_contained_child) {
@@ -748,7 +744,7 @@ WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> Range::extract()
         TRY(fragment->append_child(clone));
 
         // 4. Replace data with node original end node, offset 0, count original end offset, and data the empty string.
-        TRY(as<CharacterData>(*original_end_node).replace_data(0, original_end_offset, String {}));
+        TRY(as<CharacterData>(*original_end_node).replace_data(0, original_end_offset, {}));
     }
     // 19. Otherwise, if last partially contained child is not null:
     else if (last_partially_contained_child) {
@@ -815,7 +811,7 @@ WebIDL::ExceptionOr<void> Range::insert(GC::Ref<Node> node)
     if ((is<ProcessingInstruction>(*m_start_container) || is<Comment>(*m_start_container))
         || (is<Text>(*m_start_container) && !m_start_container->parent_node())
         || m_start_container.ptr() == node.ptr()) {
-        return WebIDL::HierarchyRequestError::create(realm(), "Range has inappropriate start node for insertion"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "Range has inappropriate start node for insertion"_utf16);
     }
 
     // 2. Let referenceNode be null.
@@ -838,7 +834,7 @@ WebIDL::ExceptionOr<void> Range::insert(GC::Ref<Node> node)
         parent = reference_node->parent();
 
     // 6. Ensure pre-insertion validity of node into parent before referenceNode.
-    TRY(parent->ensure_pre_insertion_validity(node, reference_node));
+    TRY(parent->ensure_pre_insertion_validity(node->realm(), node, reference_node));
 
     // 7. If range’s start node is a Text node, set referenceNode to the result of splitting it with offset range’s start offset.
     if (is<Text>(*m_start_container))
@@ -886,11 +882,11 @@ WebIDL::ExceptionOr<void> Range::surround_contents(GC::Ref<Node> new_parent)
     if (is<Text>(*end_non_text_node))
         end_non_text_node = end_non_text_node->parent_node();
     if (start_non_text_node != end_non_text_node)
-        return WebIDL::InvalidStateError::create(realm(), "Non-Text node is partially contained in range."_string);
+        return WebIDL::InvalidStateError::create(realm(), "Non-Text node is partially contained in range."_utf16);
 
     // 2. If newParent is a Document, DocumentType, or DocumentFragment node, then throw an "InvalidNodeTypeError" DOMException.
     if (is<Document>(*new_parent) || is<DocumentType>(*new_parent) || is<DocumentFragment>(*new_parent))
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Invalid parent node type"_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Invalid parent node type"_utf16);
 
     // 3. Let fragment be the result of extracting this.
     auto fragment = TRY(extract());
@@ -994,7 +990,7 @@ WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> Range::clone_the_contents()
     // 12. If any member of contained children is a doctype, then throw a "HierarchyRequestError" DOMException.
     for (auto const& child : contained_children) {
         if (is<DocumentType>(*child))
-            return WebIDL::HierarchyRequestError::create(realm(), "Contained child is a DocumentType"_string);
+            return WebIDL::HierarchyRequestError::create(realm(), "Contained child is a DocumentType"_utf16);
     }
 
     // 13. If first partially contained child is a CharacterData node, then:
@@ -1087,7 +1083,7 @@ WebIDL::ExceptionOr<void> Range::delete_contents()
     // 3. If original start node is original end node and it is a CharacterData node, then replace data with node original start node, offset original start offset,
     //    count original end offset minus original start offset, and data the empty string, and then return.
     if (original_start_node.ptr() == original_end_node.ptr() && is<CharacterData>(*original_start_node)) {
-        TRY(static_cast<CharacterData&>(*original_start_node).replace_data(original_start_offset, original_end_offset - original_start_offset, String {}));
+        TRY(static_cast<CharacterData&>(*original_start_node).replace_data(original_start_offset, original_end_offset - original_start_offset, {}));
         return {};
     }
 
@@ -1122,7 +1118,7 @@ WebIDL::ExceptionOr<void> Range::delete_contents()
 
     // 7. If original start node is a CharacterData node, then replace data with node original start node, offset original start offset, count original start node’s length minus original start offset, data the empty string.
     if (is<CharacterData>(*original_start_node))
-        TRY(static_cast<CharacterData&>(*original_start_node).replace_data(original_start_offset, original_start_node->length() - original_start_offset, String {}));
+        TRY(static_cast<CharacterData&>(*original_start_node).replace_data(original_start_offset, original_start_node->length() - original_start_offset, {}));
 
     // 8. For each node in nodes to remove, in tree order, remove node.
     for (auto& node : nodes_to_remove)
@@ -1130,7 +1126,7 @@ WebIDL::ExceptionOr<void> Range::delete_contents()
 
     // 9. If original end node is a CharacterData node, then replace data with node original end node, offset 0, count original end offset and data the empty string.
     if (is<CharacterData>(*original_end_node))
-        TRY(static_cast<CharacterData&>(*original_end_node).replace_data(0, original_end_offset, String {}));
+        TRY(static_cast<CharacterData&>(*original_end_node).replace_data(0, original_end_offset, {}));
 
     // 10. Set start and end to (new node, new offset).
     TRY(set_start(*new_node, new_offset));

@@ -18,7 +18,11 @@ namespace Detail {
 template<size_t inline_capacity>
 class ByteBuffer;
 
+template<typename CharType>
+class GenericLexer;
+
 class StringData;
+class Utf16StringData;
 
 }
 
@@ -35,7 +39,6 @@ class CountingStream;
 class Duration;
 class Error;
 class FlyString;
-class GenericLexer;
 class IPv4Address;
 class IPv6Address;
 class JsonArray;
@@ -52,6 +55,8 @@ class String;
 class StringBuilder;
 class StringView;
 class UnixDateTime;
+class Utf16FlyString;
+class Utf16String;
 class Utf16View;
 class Utf32CodePointIterator;
 class Utf32View;
@@ -59,6 +64,9 @@ class Utf8CodePointIterator;
 class Utf8View;
 
 using ByteBuffer = Detail::ByteBuffer<32>;
+
+using GenericLexer = Detail::GenericLexer<char>;
+using Utf16GenericLexer = Detail::GenericLexer<char16_t>;
 
 template<typename T>
 class Span;
@@ -81,7 +89,7 @@ class Atomic;
 template<typename T, typename TSizeCalculationPolicy = DefaultSizeCalculationPolicy>
 class SinglyLinkedList;
 
-template<typename T>
+template<typename T, size_t node_cache_size = 0>
 class DoublyLinkedList;
 
 template<typename T, size_t capacity>
@@ -141,7 +149,11 @@ class OwnPtr;
 template<typename T>
 class WeakPtr;
 
-template<typename T, size_t inline_capacity = 0>
+enum class FastLastAccess : u8 {
+    No,
+    Yes,
+};
+template<typename T, size_t inline_capacity = 0, FastLastAccess = FastLastAccess::No>
 requires(!IsRvalueReference<T>) class Vector;
 
 template<typename T, typename ErrorType = Error>
@@ -166,6 +178,7 @@ using AK::CountingStream;
 using AK::DoublyLinkedList;
 using AK::Error;
 using AK::ErrorOr;
+using AK::FastLastAccess;
 using AK::FixedArray;
 using AK::FlyString;
 using AK::Function;
@@ -198,6 +211,9 @@ using AK::StringView;
 using AK::TrailingCodePointTransformation;
 using AK::Traits;
 using AK::UnixDateTime;
+using AK::Utf16FlyString;
+using AK::Utf16GenericLexer;
+using AK::Utf16String;
 using AK::Utf16View;
 using AK::Utf32CodePointIterator;
 using AK::Utf32View;

@@ -58,7 +58,6 @@ public:
 
     float point_size() const;
     float pixel_size() const;
-    int pixel_size_rounded_up() const;
     FontPixelMetrics const& pixel_metrics() const { return m_pixel_metrics; }
     u8 slope() const { return m_typeface->slope(); }
     u16 weight() const { return m_typeface->weight(); }
@@ -70,6 +69,7 @@ public:
     u8 baseline() const { return m_point_height; }  // FIXME: Read from font
     float width(StringView) const;
     float width(Utf8View const&) const;
+    float width(Utf16View const&) const;
     FlyString const& family() const { return m_typeface->family(); }
 
     NonnullRefPtr<Font> scaled_with_size(float point_size) const;
@@ -94,7 +94,6 @@ private:
     FontPixelMetrics m_pixel_metrics;
 
     float m_pixel_size { 0.0f };
-    int m_pixel_size_rounded_up { 0 };
 };
 
 }

@@ -17,11 +17,11 @@
 namespace Web::DOM {
 
 // https://w3c.github.io/editing/docs/execCommand/#execcommand()
-WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[maybe_unused]] bool show_ui, String const& value)
+WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[maybe_unused]] bool show_ui, Utf16String const& value)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
-        return WebIDL::InvalidStateError::create(realm(), "execCommand is only supported on HTML documents"_string);
+        return WebIDL::InvalidStateError::create(realm(), "execCommand is only supported on HTML documents"_utf16);
 
     // AD-HOC: All major browsers refuse to recursively execute execCommand() (e.g. inside input event handlers).
     if (m_inside_exec_command)
@@ -59,11 +59,11 @@ WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[may
         //
         // NOTE: Because either the start or end node of the range could be inside an editing host that is part of the
         //       other node's editing host, we can probe both and see if either one is the other's ancestor.
-        // NOTE: We can reuse Editing::editing_host_of_node() here since query_command_enabled() above already checked
-        //       that both the start and end nodes are either editable or an editing host.
+        // NOTE: We can reuse ->editing_host() here since query_command_enabled() above already checked that both the
+        //       start and end nodes are either editable or an editing host.
         auto range = Editing::active_range(*this);
-        auto& start_node_editing_host = *Editing::editing_host_of_node(range->start_container());
-        auto& end_node_editing_host = *Editing::editing_host_of_node(range->end_container());
+        auto& start_node_editing_host = *range->start_container()->editing_host();
+        auto& end_node_editing_host = *range->end_container()->editing_host();
         affected_editing_host = start_node_editing_host.is_ancestor_of(end_node_editing_host)
             ? end_node_editing_host
             : start_node_editing_host;
@@ -127,7 +127,7 @@ WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[may
         if (command == Editing::CommandNames::insertText)
             event_init.data = value;
 
-        auto event = realm().create<UIEvents::InputEvent>(realm(), HTML::EventNames::input, event_init);
+        auto event = UIEvents::InputEvent::create_from_platform_event(realm(), HTML::EventNames::input, event_init);
         event->set_is_trusted(true);
         affected_editing_host->dispatch_event(event);
     }
@@ -141,7 +141,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_enabled(FlyString const& comma
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
-        return WebIDL::InvalidStateError::create(realm(), "queryCommandEnabled is only supported on HTML documents"_string);
+        return WebIDL::InvalidStateError::create(realm(), "queryCommandEnabled is only supported on HTML documents"_utf16);
 
     // 2. Return true if command is both supported and enabled, false otherwise.
     if (!MUST(query_command_supported(command)))
@@ -174,7 +174,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_enabled(FlyString const& comma
         return false;
 
     // FIXME: the editing host of its start node is not an EditContext editing host,
-    [[maybe_unused]] auto start_node_editing_host = Editing::editing_host_of_node(start_node);
+    [[maybe_unused]] auto start_node_editing_host = start_node->editing_host();
 
     // its end node is either editable or an editing host,
     auto& end_node = *active_range->end_container();
@@ -182,7 +182,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_enabled(FlyString const& comma
         return false;
 
     // FIXME: the editing host of its end node is not an EditContext editing host,
-    [[maybe_unused]] auto end_node_editing_host = Editing::editing_host_of_node(end_node);
+    [[maybe_unused]] auto end_node_editing_host = end_node.editing_host();
 
     // and there is some editing host that is an inclusive ancestor of both its start node and its end node.
     GC::Ptr<Node> inclusive_ancestor_editing_host;
@@ -236,7 +236,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_indeterm(FlyString const& comm
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
-        return WebIDL::InvalidStateError::create(realm(), "queryCommandIndeterm is only supported on HTML documents"_string);
+        return WebIDL::InvalidStateError::create(realm(), "queryCommandIndeterm is only supported on HTML documents"_utf16);
 
     // 1. If command is not supported or has no indeterminacy, return false.
     auto optional_command = Editing::find_command_definition(command);
@@ -249,7 +249,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_indeterm(FlyString const& comm
         // effectively contained in the active range, there are two that have distinct effective command values.
         if (command_definition.command.is_one_of(Editing::CommandNames::backColor, Editing::CommandNames::fontName,
                 Editing::CommandNames::foreColor, Editing::CommandNames::hiliteColor)) {
-            Optional<String> first_node_value;
+            Optional<Utf16String> first_node_value;
             auto range = Editing::active_range(*this);
             bool has_distinct_values = false;
             Editing::for_each_node_effectively_contained_in_range(range, [&](GC::Ref<Node> descendant) {
@@ -312,7 +312,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_state(FlyString const& command
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
-        return WebIDL::InvalidStateError::create(realm(), "queryCommandState is only supported on HTML documents"_string);
+        return WebIDL::InvalidStateError::create(realm(), "queryCommandState is only supported on HTML documents"_utf16);
 
     // 1. If command is not supported or has no state, return false.
     auto optional_command = Editing::find_command_definition(command);
@@ -361,7 +361,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_supported(FlyString const& com
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
-        return WebIDL::InvalidStateError::create(realm(), "queryCommandSupported is only supported on HTML documents"_string);
+        return WebIDL::InvalidStateError::create(realm(), "queryCommandSupported is only supported on HTML documents"_utf16);
 
     // When the queryCommandSupported(command) method on the Document interface is invoked, the user agent must return
     // true if command is supported and available within the current script on the current site, and false otherwise.
@@ -375,7 +375,7 @@ WebIDL::ExceptionOr<String> Document::query_command_value(FlyString const& comma
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
-        return WebIDL::InvalidStateError::create(realm(), "queryCommandValue is only supported on HTML documents"_string);
+        return WebIDL::InvalidStateError::create(realm(), "queryCommandValue is only supported on HTML documents"_utf16);
 
     // 1. If command is not supported or has no value, return the empty string.
     auto optional_command = Editing::find_command_definition(command);
@@ -390,19 +390,19 @@ WebIDL::ExceptionOr<String> Document::query_command_value(FlyString const& comma
     //    integer number of pixels and return the legacy font size for the result.
     if (command_definition.command == Editing::CommandNames::fontSize && value_override.has_value()) {
         auto pixel_size = Editing::font_size_to_pixel_size(value_override.release_value());
-        return Editing::legacy_font_size(pixel_size.to_int());
+        return Editing::legacy_font_size(pixel_size.to_int()).to_utf8_but_should_be_ported_to_utf16();
     }
 
     // 3. If the value override for command is set, return it.
     if (value_override.has_value())
-        return value_override.release_value();
+        return value_override.release_value().to_utf8_but_should_be_ported_to_utf16();
 
     // 4. Return command's value.
-    return command_definition.value(*this);
+    return command_definition.value(*this).to_utf8_but_should_be_ported_to_utf16();
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#value-override
-void Document::set_command_value_override(FlyString const& command, String const& value)
+void Document::set_command_value_override(FlyString const& command, Utf16String const& value)
 {
     m_command_value_override.set(command, value);
 

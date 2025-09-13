@@ -59,6 +59,7 @@ ErrorOr<void> generate_header_file(JsonObject& pseudo_elements_data, Core::File&
 #include <AK/Optional.h>
 #include <AK/StringView.h>
 #include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/Export.h>
 
 namespace Web::CSS {
 
@@ -83,7 +84,7 @@ enum class PseudoElement : @pseudo_element_underlying_type@ {
 
 Optional<PseudoElement> pseudo_element_from_string(StringView);
 Optional<PseudoElement> aliased_pseudo_element_from_string(StringView);
-StringView pseudo_element_name(PseudoElement);
+WEB_API StringView pseudo_element_name(PseudoElement);
 
 bool is_has_allowed_pseudo_element(PseudoElement);
 bool is_pseudo_element_root(PseudoElement);
@@ -92,6 +93,7 @@ bool pseudo_element_supports_property(PseudoElement, PropertyID);
 struct PseudoElementMetadata {
     enum class ParameterType {
         None,
+        CompoundSelector,
         PTNameSelector,
     } parameter_type;
     bool is_valid_as_function;
@@ -515,6 +517,8 @@ PseudoElementMetadata pseudo_element_metadata(PseudoElement pseudo_element)
             auto const& function_syntax = pseudo_element.get_string("function-syntax"sv).value();
             if (function_syntax == "<pt-name-selector>"sv) {
                 parameter_type = "PTNameSelector"_string;
+            } else if (function_syntax == "<compound-selector>"sv) {
+                parameter_type = "CompoundSelector"_string;
             } else {
                 warnln("Unrecognized pseudo-element parameter type: `{}`", function_syntax);
                 VERIFY_NOT_REACHED();

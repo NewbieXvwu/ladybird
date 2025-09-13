@@ -365,16 +365,16 @@ Optional<ARIA::Role> HTMLSelectElement::default_role() const
     return ARIA::Role::combobox;
 }
 
-String HTMLSelectElement::value() const
+Utf16String HTMLSelectElement::value() const
 {
     update_cached_list_of_options();
     for (auto const& option_element : m_cached_list_of_options)
         if (option_element->selected())
             return option_element->value();
-    return ""_string;
+    return {};
 }
 
-WebIDL::ExceptionOr<void> HTMLSelectElement::set_value(String const& value)
+WebIDL::ExceptionOr<void> HTMLSelectElement::set_value(Utf16String const& value)
 {
     update_cached_list_of_options();
     for (auto const& option_element : list_of_options())
@@ -417,23 +417,6 @@ bool HTMLSelectElement::has_activation_behavior() const
     return true;
 }
 
-static String strip_newlines(Optional<String> string)
-{
-    // FIXME: Move this to a more general function
-    if (!string.has_value())
-        return {};
-
-    StringBuilder builder;
-    for (auto c : string.value().bytes_as_string_view()) {
-        if (c == '\r' || c == '\n') {
-            builder.append(' ');
-        } else {
-            builder.append(c);
-        }
-    }
-    return MUST(Infra::strip_and_collapse_whitespace(MUST(builder.to_string())));
-}
-
 // https://html.spec.whatwg.org/multipage/input.html#show-the-picker,-if-applicable
 void HTMLSelectElement::show_the_picker_if_applicable()
 {
@@ -446,7 +429,7 @@ void HTMLSelectElement::show_the_picker_if_applicable()
         return;
 
     // 2. If element is not mutable, then return.
-    if (!enabled())
+    if (!is_mutable())
         return;
 
     // 3. Consume user activation given element's relevant global object.
@@ -478,7 +461,7 @@ void HTMLSelectElement::show_the_picker_if_applicable()
                 for (auto const& child : opt_group_element->children_as_vector()) {
                     if (auto const& option_element = as_if<HTMLOptionElement>(*child)) {
                         if (!option_element->has_attribute(Web::HTML::AttributeNames::hidden))
-                            option_group_items.append(SelectItemOption { id_counter++, option_element->selected(), option_element->disabled(), option_element, strip_newlines(option_element->label()), option_element->value() });
+                            option_group_items.append(SelectItemOption { id_counter++, option_element->selected(), option_element->disabled(), option_element, MUST(Infra::strip_and_collapse_whitespace(option_element->label())), option_element->value().to_utf8_but_should_be_ported_to_utf16() });
                     }
                 }
                 m_select_items.append(SelectItemOptionGroup { opt_group_element->get_attribute(AttributeNames::label).value_or(String {}), option_group_items });
@@ -487,7 +470,7 @@ void HTMLSelectElement::show_the_picker_if_applicable()
 
         if (auto const& option_element = as_if<HTMLOptionElement>(*child)) {
             if (!option_element->has_attribute(Web::HTML::AttributeNames::hidden))
-                m_select_items.append(SelectItemOption { id_counter++, option_element->selected(), option_element->disabled(), option_element, strip_newlines(option_element->label()), option_element->value() });
+                m_select_items.append(SelectItemOption { id_counter++, option_element->selected(), option_element->disabled(), option_element, MUST(Infra::strip_and_collapse_whitespace(option_element->label())), option_element->value().to_utf8_but_should_be_ported_to_utf16() });
         }
 
         if (auto const* hr_element = as_if<HTMLHRElement>(*child)) {
@@ -511,19 +494,19 @@ WebIDL::ExceptionOr<void> HTMLSelectElement::show_picker()
     // The showPicker() method steps are:
 
     // 1. If this is not mutable, then throw an "InvalidStateError" DOMException.
-    if (!enabled())
-        return WebIDL::InvalidStateError::create(realm(), "Element is not mutable"_string);
+    if (!is_mutable())
+        return WebIDL::InvalidStateError::create(realm(), "Element is not mutable"_utf16);
 
     // 2. If this's relevant settings object's origin is not same origin with this's relevant settings object's top-level origin,
     //    and this is a select element, then throw a "SecurityError" DOMException.
     if (!relevant_settings_object(*this).origin().is_same_origin(relevant_settings_object(*this).top_level_origin.value())) {
-        return WebIDL::SecurityError::create(realm(), "Cross origin pickers are not allowed"_string);
+        return WebIDL::SecurityError::create(realm(), "Cross origin pickers are not allowed"_utf16);
     }
 
     // 3. If this's relevant global object does not have transient activation, then throw a "NotAllowedError" DOMException.
     auto& global_object = relevant_global_object(*this);
     if (!as<HTML::Window>(global_object).has_transient_activation()) {
-        return WebIDL::NotAllowedError::create(realm(), "Too long since user activation to show picker"_string);
+        return WebIDL::NotAllowedError::create(realm(), "Too long since user activation to show picker"_utf16);
     }
 
     // FIXME: 4. If this is a select element, and this is not being rendered, then throw a "NotSupportedError" DOMException.
@@ -574,7 +557,7 @@ void HTMLSelectElement::form_associated_element_was_inserted()
     create_shadow_tree_if_needed();
 }
 
-void HTMLSelectElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const&)
+void HTMLSelectElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const& value, Optional<FlyString> const&)
 {
     if (name == HTML::AttributeNames::multiple) {
         // If the multiple attribute is absent then update the selectedness of the option elements.
@@ -649,7 +632,7 @@ void HTMLSelectElement::update_inner_text_element()
     // Update inner text element to the label of the selected option
     for (auto const& option_element : m_cached_list_of_options) {
         if (option_element->selected()) {
-            m_inner_text_element->set_text_content(strip_newlines(option_element->label()));
+            m_inner_text_element->set_text_content(Infra::strip_and_collapse_whitespace(Utf16String::from_utf8(option_element->label())));
             return;
         }
     }
@@ -708,25 +691,6 @@ void HTMLSelectElement::update_selectedness()
     update_inner_text_element();
 }
 
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-willvalidate
-bool HTMLSelectElement::will_validate()
-{
-    // The willValidate attribute's getter must return true, if this element is a candidate for constraint validation
-    return is_candidate_for_constraint_validation();
-}
-
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-checkvalidity
-bool HTMLSelectElement::check_validity()
-{
-    return check_validity_steps();
-}
-
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-reportvalidity
-bool HTMLSelectElement::report_validity()
-{
-    return report_validity_steps();
-}
-
 bool HTMLSelectElement::is_focusable() const
 {
     return enabled();
@@ -755,6 +719,13 @@ bool HTMLSelectElement::suffering_from_being_missing() const
     // missing.
     auto selected_options = this->selected_options();
     return has_attribute(HTML::AttributeNames::required) && (selected_options->length() == 0 || (selected_options->length() == 1 && selected_options->item(0) == placeholder_label_option()));
+}
+
+// https://html.spec.whatwg.org/multipage/form-elements.html#the-select-element:concept-fe-mutable
+bool HTMLSelectElement::is_mutable() const
+{
+    // A select element that is not disabled is mutable.
+    return enabled();
 }
 
 }

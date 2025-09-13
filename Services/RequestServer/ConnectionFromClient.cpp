@@ -6,7 +6,6 @@
 
 #include "WebSocketImplCurl.h"
 
-#include <AK/Badge.h>
 #include <AK/IDAllocator.h>
 #include <AK/NonnullOwnPtr.h>
 #include <LibCore/ElapsedTimer.h>
@@ -54,7 +53,7 @@ static NonnullRefPtr<Resolver> default_resolver()
                 return Error::from_string_literal("No DNS server configured");
 
             auto resolved = TRY(default_resolver()->dns.lookup(*g_dns_info.server_hostname)->await());
-            if (resolved->cached_addresses().is_empty())
+            if (!resolved->has_cached_addresses())
                 return Error::from_string_literal("Failed to resolve DNS server hostname");
             auto address = resolved->cached_addresses().first().visit([](auto& addr) -> Core::SocketAddress { return { addr, g_dns_info.port }; });
             g_dns_info.server_address = address;
@@ -72,10 +71,14 @@ static NonnullRefPtr<Resolver> default_resolver()
             };
         }
 
+#if !defined(AK_OS_WINDOWS)
         return DNS::Resolver::SocketResult {
             MaybeOwned<Core::Socket>(TRY(Core::BufferedUDPSocket::create(TRY(Core::UDPSocket::connect(*g_dns_info.server_address))))),
             DNS::Resolver::ConnectionMode::UDP,
         };
+#else
+        return Error::from_string_literal("Core::UDPSocket::connect() and Core::BufferedUDPSocket::create() are not implemented on Windows");
+#endif
     });
 
     s_resolver = resolver;
@@ -96,6 +99,8 @@ ByteString build_curl_resolve_list(DNS::LookupResult const& dns_result, StringVi
         first = false;
         resolve_opt_builder.append(formatted_address);
     }
+
+    dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: Resolve list: {}", resolve_opt_builder.string_view());
 
     return resolve_opt_builder.to_byte_string();
 }
@@ -270,8 +275,7 @@ int ConnectionFromClient::on_socket_callback(CURL*, int sockfd, int what, void* 
         client->m_read_notifiers.ensure(sockfd, [client, sockfd, multi = client->m_curl_multi] {
             auto notifier = Core::Notifier::construct(sockfd, Core::NotificationType::Read);
             notifier->on_activation = [client, sockfd, multi] {
-                int still_running = 0;
-                auto result = curl_multi_socket_action(multi, sockfd, CURL_CSELECT_IN, &still_running);
+                auto result = curl_multi_socket_action(multi, sockfd, CURL_CSELECT_IN, nullptr);
                 VERIFY(result == CURLM_OK);
                 client->check_active_requests();
             };
@@ -284,8 +288,7 @@ int ConnectionFromClient::on_socket_callback(CURL*, int sockfd, int what, void* 
         client->m_write_notifiers.ensure(sockfd, [client, sockfd, multi = client->m_curl_multi] {
             auto notifier = Core::Notifier::construct(sockfd, Core::NotificationType::Write);
             notifier->on_activation = [client, sockfd, multi] {
-                int still_running = 0;
-                auto result = curl_multi_socket_action(multi, sockfd, CURL_CSELECT_OUT, &still_running);
+                auto result = curl_multi_socket_action(multi, sockfd, CURL_CSELECT_OUT, nullptr);
                 VERIFY(result == CURLM_OK);
                 client->check_active_requests();
             };
@@ -330,8 +333,7 @@ ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transpo
     set_option(CURLMOPT_TIMERDATA, this);
 
     m_timer = Core::Timer::create_single_shot(0, [this] {
-        int still_running = 0;
-        auto result = curl_multi_socket_action(m_curl_multi, CURL_SOCKET_TIMEOUT, 0, &still_running);
+        auto result = curl_multi_socket_action(m_curl_multi, CURL_SOCKET_TIMEOUT, 0, nullptr);
         VERIFY(result == CURLM_OK);
         check_active_requests();
     });
@@ -358,7 +360,7 @@ void ConnectionFromClient::die()
 Messages::RequestServer::InitTransportResponse ConnectionFromClient::init_transport([[maybe_unused]] int peer_pid)
 {
 #ifdef AK_OS_WINDOWS
-    m_transport.set_peer_pid(peer_pid);
+    m_transport->set_peer_pid(peer_pid);
     return Core::System::getpid();
 #endif
     VERIFY_NOT_REACHED();
@@ -366,24 +368,49 @@ Messages::RequestServer::InitTransportResponse ConnectionFromClient::init_transp
 
 Messages::RequestServer::ConnectNewClientResponse ConnectionFromClient::connect_new_client()
 {
+    auto client_socket = create_client_socket();
+    if (client_socket.is_error()) {
+        dbgln("Failed to create client socket: {}", client_socket.error());
+        return IPC::File {};
+    }
+
+    return client_socket.release_value();
+}
+
+Messages::RequestServer::ConnectNewClientsResponse ConnectionFromClient::connect_new_clients(size_t count)
+{
+    Vector<IPC::File> files;
+    files.ensure_capacity(count);
+
+    for (size_t i = 0; i < count; ++i) {
+        auto client_socket = create_client_socket();
+        if (client_socket.is_error()) {
+            dbgln("Failed to create client socket: {}", client_socket.error());
+            return Vector<IPC::File> {};
+        }
+
+        files.unchecked_append(client_socket.release_value());
+    }
+
+    return files;
+}
+
+ErrorOr<IPC::File> ConnectionFromClient::create_client_socket()
+{
     // TODO: Mach IPC
 
     int socket_fds[2] {};
-    if (auto err = Core::System::socketpair(AF_LOCAL, SOCK_STREAM, 0, socket_fds); err.is_error()) {
-        dbgln("Failed to create client socketpair: {}", err.error());
-        return IPC::File {};
-    }
+    TRY(Core::System::socketpair(AF_LOCAL, SOCK_STREAM, 0, socket_fds));
 
-    auto client_socket_or_error = Core::LocalSocket::adopt_fd(socket_fds[0]);
-    if (client_socket_or_error.is_error()) {
+    auto client_socket = Core::LocalSocket::adopt_fd(socket_fds[0]);
+    if (client_socket.is_error()) {
         close(socket_fds[0]);
         close(socket_fds[1]);
-        dbgln("Failed to adopt client socket: {}", client_socket_or_error.error());
-        return IPC::File {};
+        return client_socket.release_error();
     }
-    auto client_socket = client_socket_or_error.release_value();
+
     // Note: A ref is stored in the static s_connections map
-    auto client = adopt_ref(*new ConnectionFromClient(make<IPC::Transport>(move(client_socket))));
+    auto client = adopt_ref(*new ConnectionFromClient(make<IPC::Transport>(client_socket.release_value())));
 
     return IPC::File::adopt_fd(socket_fds[1]);
 }
@@ -436,6 +463,7 @@ void ConnectionFromClient::start_request(i32, ByteString, URL::URL, HTTP::Header
 #else
 void ConnectionFromClient::start_request(i32 request_id, ByteString method, URL::URL url, HTTP::HeaderMap request_headers, ByteBuffer request_body, Core::ProxyData proxy_data)
 {
+    dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: start_request({}, {})", request_id, url);
     auto host = url.serialized_host().to_byte_string();
 
     m_resolver->dns.lookup(host, DNS::Messages::Class::IN, { DNS::Messages::ResourceType::A, DNS::Messages::ResourceType::AAAA }, { .validate_dnssec_locally = g_dns_info.validate_dnssec_locally })
@@ -445,12 +473,14 @@ void ConnectionFromClient::start_request(i32 request_id, ByteString method, URL:
             async_request_finished(request_id, 0, {}, Requests::NetworkError::UnableToResolveHost);
         })
         .when_resolved([this, request_id, host = move(host), url = move(url), method = move(method), request_body = move(request_body), request_headers = move(request_headers), proxy_data](auto const& dns_result) mutable {
-            if (dns_result->records().is_empty() || dns_result->cached_addresses().is_empty()) {
+            if (dns_result->is_empty() || !dns_result->has_cached_addresses()) {
                 dbgln("StartRequest: DNS lookup failed for '{}'", host);
                 // FIXME: Implement timing info for DNS lookup failure.
                 async_request_finished(request_id, 0, {}, Requests::NetworkError::UnableToResolveHost);
                 return;
             }
+
+            dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: DNS lookup successful");
 
             auto* easy = curl_easy_init();
             if (!easy) {
@@ -474,11 +504,8 @@ void ConnectionFromClient::start_request(i32 request_id, ByteString method, URL:
 
             auto set_option = [easy](auto option, auto value) {
                 auto result = curl_easy_setopt(easy, option, value);
-                if (result != CURLE_OK) {
+                if (result != CURLE_OK)
                     dbgln("StartRequest: Failed to set curl option: {}", curl_easy_strerror(result));
-                    return false;
-                }
-                return true;
             };
 
             set_option(CURLOPT_PRIVATE, request.ptr());
@@ -493,26 +520,23 @@ void ConnectionFromClient::start_request(i32 request_id, ByteString method, URL:
             set_option(CURLOPT_PIPEWAIT, 1L);
             set_option(CURLOPT_ALTSVC, m_alt_svc_cache_path.characters());
 
-            bool did_set_body = false;
+            set_option(CURLOPT_CUSTOMREQUEST, method.characters());
+            set_option(CURLOPT_FOLLOWLOCATION, 0);
 
-            if (method == "GET"sv) {
-                set_option(CURLOPT_HTTPGET, 1L);
-            } else if (method.is_one_of("POST"sv, "PUT"sv, "PATCH"sv, "DELETE"sv)) {
+            bool did_set_body = false;
+            if (method.is_one_of("POST"sv, "PUT"sv, "PATCH"sv, "DELETE"sv)) {
                 request->body = move(request_body);
                 set_option(CURLOPT_POSTFIELDSIZE, request->body.size());
                 set_option(CURLOPT_POSTFIELDS, request->body.data());
                 did_set_body = true;
-            } else if (method == "HEAD") {
+            } else if (method == "HEAD"sv) {
                 set_option(CURLOPT_NOBODY, 1L);
             }
-            set_option(CURLOPT_CUSTOMREQUEST, method.characters());
-
-            set_option(CURLOPT_FOLLOWLOCATION, 0);
 
             struct curl_slist* curl_headers = nullptr;
 
             // NOTE: CURLOPT_POSTFIELDS automatically sets the Content-Type header.
-            //       Set it to empty if the headers passed in don't contain a content type.
+            //       Tell curl to remove it by setting a blank value if the headers passed in don't contain a content type.
             if (did_set_body && !request_headers.contains("Content-Type"))
                 curl_headers = curl_slist_append(curl_headers, "Content-Type:");
 
@@ -530,6 +554,7 @@ void ConnectionFromClient::start_request(i32 request_id, ByteString method, URL:
                 }
 
                 auto header_string = ByteString::formatted("{}: {}", header.name, header.value);
+                dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: Request header: {}", header_string);
                 curl_headers = curl_slist_append(curl_headers, header_string.characters());
             }
 
@@ -797,7 +822,7 @@ void ConnectionFromClient::websocket_connect(i64 websocket_id, URL::URL url, Byt
             async_websocket_errored(websocket_id, static_cast<i32>(Requests::WebSocket::Error::CouldNotEstablishConnection));
         })
         .when_resolved([this, websocket_id, host = move(host), url = move(url), origin = move(origin), protocols = move(protocols), extensions = move(extensions), additional_request_headers = move(additional_request_headers)](auto const& dns_result) mutable {
-            if (dns_result->records().is_empty() || dns_result->cached_addresses().is_empty()) {
+            if (dns_result->is_empty() || !dns_result->has_cached_addresses()) {
                 dbgln("WebSocketConnect: DNS lookup failed for '{}'", host);
                 async_websocket_errored(websocket_id, static_cast<i32>(Requests::WebSocket::Error::CouldNotEstablishConnection));
                 return;

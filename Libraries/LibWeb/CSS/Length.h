@@ -11,67 +11,15 @@
 #include <LibGfx/Forward.h>
 #include <LibGfx/Rect.h>
 #include <LibWeb/CSS/SerializationMode.h>
+#include <LibWeb/CSS/Units.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/PixelUnits.h>
 
 namespace Web::CSS {
 
-class Length {
+class WEB_API Length {
 public:
-    enum class Type : u8 {
-        // Font-relative
-        Em,
-        Rem,
-        Ex,
-        Rex,
-        Cap,
-        Rcap,
-        Ch,
-        Rch,
-        Ic,
-        Ric,
-        Lh,
-        Rlh,
-
-        // Viewport-relative
-        Vw,
-        Svw,
-        Lvw,
-        Dvw,
-        Vh,
-        Svh,
-        Lvh,
-        Dvh,
-        Vi,
-        Svi,
-        Lvi,
-        Dvi,
-        Vb,
-        Svb,
-        Lvb,
-        Dvb,
-        Vmin,
-        Svmin,
-        Lvmin,
-        Dvmin,
-        Vmax,
-        Svmax,
-        Lvmax,
-        Dvmax,
-
-        // Absolute
-        Cm,
-        Mm,
-        Q,
-        In,
-        Pt,
-        Pc,
-        Px,
-
-        // FIXME: Remove auto somehow
-        Auto,
-    };
-
     struct FontMetrics {
         FontMetrics(CSSPixels font_size, Gfx::FontPixelMetrics const&);
 
@@ -84,84 +32,26 @@ public:
         bool operator==(FontMetrics const&) const = default;
     };
 
-    static Optional<Type> unit_from_name(StringView);
-
-    Length(double value, Type type);
+    Length(double value, LengthUnit unit);
     ~Length();
 
-    static Length make_auto();
     static Length make_px(double value);
     static Length make_px(CSSPixels value);
     Length percentage_of(Percentage const&) const;
 
-    bool is_auto() const { return m_type == Type::Auto; }
-    bool is_px() const { return m_type == Type::Px; }
+    bool is_px() const { return m_unit == LengthUnit::Px; }
 
-    bool is_absolute() const
-    {
-        return m_type == Type::Cm
-            || m_type == Type::Mm
-            || m_type == Type::Q
-            || m_type == Type::In
-            || m_type == Type::Pt
-            || m_type == Type::Pc
-            || m_type == Type::Px;
-    }
+    bool is_absolute() const { return CSS::is_absolute(m_unit); }
+    bool is_font_relative() const { return CSS::is_font_relative(m_unit); }
+    bool is_viewport_relative() const { return CSS::is_viewport_relative(m_unit); }
+    bool is_relative() const { return CSS::is_relative(m_unit); }
 
-    bool is_font_relative() const
-    {
-        return m_type == Type::Em
-            || m_type == Type::Rem
-            || m_type == Type::Ex
-            || m_type == Type::Rex
-            || m_type == Type::Cap
-            || m_type == Type::Rcap
-            || m_type == Type::Ch
-            || m_type == Type::Rch
-            || m_type == Type::Ic
-            || m_type == Type::Ric
-            || m_type == Type::Lh
-            || m_type == Type::Rlh;
-    }
-
-    bool is_viewport_relative() const
-    {
-        return m_type == Type::Vw
-            || m_type == Type::Svw
-            || m_type == Type::Lvw
-            || m_type == Type::Dvw
-            || m_type == Type::Vh
-            || m_type == Type::Svh
-            || m_type == Type::Lvh
-            || m_type == Type::Dvh
-            || m_type == Type::Vi
-            || m_type == Type::Svi
-            || m_type == Type::Lvi
-            || m_type == Type::Dvi
-            || m_type == Type::Vb
-            || m_type == Type::Svb
-            || m_type == Type::Lvb
-            || m_type == Type::Dvb
-            || m_type == Type::Vmin
-            || m_type == Type::Svmin
-            || m_type == Type::Lvmin
-            || m_type == Type::Dvmin
-            || m_type == Type::Vmax
-            || m_type == Type::Svmax
-            || m_type == Type::Lvmax
-            || m_type == Type::Dvmax;
-    }
-
-    bool is_relative() const
-    {
-        return is_font_relative() || is_viewport_relative();
-    }
-
-    Type type() const { return m_type; }
     double raw_value() const { return m_value; }
-    StringView unit_name() const;
+    LengthUnit unit() const { return m_unit; }
+    FlyString unit_name() const { return CSS::to_string(m_unit); }
 
     struct ResolutionContext {
+        [[nodiscard]] static ResolutionContext for_element(DOM::AbstractElement const&);
         [[nodiscard]] static ResolutionContext for_window(HTML::Window const&);
         [[nodiscard]] static ResolutionContext for_layout_node(Layout::Node const&);
 
@@ -183,8 +73,6 @@ public:
 
     ALWAYS_INLINE CSSPixels to_px(CSSPixelRect const& viewport_rect, FontMetrics const& font_metrics, FontMetrics const& root_font_metrics) const
     {
-        if (is_auto())
-            return 0;
         if (is_absolute())
             return absolute_length_to_px();
         if (is_font_relative())
@@ -197,33 +85,19 @@ public:
 
     ALWAYS_INLINE CSSPixels absolute_length_to_px() const
     {
-        constexpr double inch_pixels = 96.0;
-        constexpr double centimeter_pixels = (inch_pixels / 2.54);
-        switch (m_type) {
-        case Type::Cm:
-            return CSSPixels::nearest_value_for(m_value * centimeter_pixels); // 1cm = 96px/2.54
-        case Type::In:
-            return CSSPixels::nearest_value_for(m_value * inch_pixels); // 1in = 2.54 cm = 96px
-        case Type::Px:
-            return CSSPixels::nearest_value_for(m_value); // 1px = 1/96th of 1in
-        case Type::Pt:
-            return CSSPixels::nearest_value_for(m_value * ((1.0 / 72.0) * inch_pixels)); // 1pt = 1/72th of 1in
-        case Type::Pc:
-            return CSSPixels::nearest_value_for(m_value * ((1.0 / 6.0) * inch_pixels)); // 1pc = 1/6th of 1in
-        case Type::Mm:
-            return CSSPixels::nearest_value_for(m_value * ((1.0 / 10.0) * centimeter_pixels)); // 1mm = 1/10th of 1cm
-        case Type::Q:
-            return CSSPixels::nearest_value_for(m_value * ((1.0 / 40.0) * centimeter_pixels)); // 1Q = 1/40th of 1cm
-        default:
-            VERIFY_NOT_REACHED();
-        }
+        return CSSPixels::nearest_value_for(absolute_length_to_px_without_rounding());
+    }
+
+    ALWAYS_INLINE double absolute_length_to_px_without_rounding() const
+    {
+        return ratio_between_units(m_unit, LengthUnit::Px) * m_value;
     }
 
     String to_string(SerializationMode = SerializationMode::Normal) const;
 
     bool operator==(Length const& other) const
     {
-        return m_type == other.m_type && m_value == other.m_value;
+        return m_unit == other.m_unit && m_value == other.m_value;
     }
 
     CSSPixels font_relative_length_to_px(FontMetrics const& font_metrics, FontMetrics const& root_font_metrics) const;
@@ -239,8 +113,47 @@ public:
 private:
     [[nodiscard]] CSSPixels to_px_slow_case(Layout::Node const&) const;
 
-    Type m_type;
+    LengthUnit m_unit;
     double m_value { 0 };
+};
+
+class LengthOrAuto {
+public:
+    LengthOrAuto(Length length)
+        : m_length(move(length))
+    {
+    }
+
+    static LengthOrAuto make_auto() { return LengthOrAuto { OptionalNone {} }; }
+
+    bool is_length() const { return m_length.has_value(); }
+    bool is_auto() const { return !m_length.has_value(); }
+
+    Length const& length() const { return m_length.value(); }
+
+    String to_string(SerializationMode mode = SerializationMode::Normal) const
+    {
+        if (is_auto())
+            return "auto"_string;
+        return m_length->to_string(mode);
+    }
+
+    CSSPixels to_px_or_zero(Layout::Node const& node) const
+    {
+        if (is_auto())
+            return 0;
+        return m_length->to_px(node);
+    }
+
+    bool operator==(LengthOrAuto const&) const = default;
+
+private:
+    explicit LengthOrAuto(Optional<Length> maybe_length)
+        : m_length(move(maybe_length))
+    {
+    }
+
+    Optional<Length> m_length;
 };
 
 }
@@ -250,5 +163,13 @@ struct AK::Formatter<Web::CSS::Length> : Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Web::CSS::Length const& length)
     {
         return Formatter<StringView>::format(builder, length.to_string());
+    }
+};
+
+template<>
+struct AK::Formatter<Web::CSS::LengthOrAuto> : Formatter<StringView> {
+    ErrorOr<void> format(FormatBuilder& builder, Web::CSS::LengthOrAuto const& length_or_auto)
+    {
+        return Formatter<StringView>::format(builder, length_or_auto.to_string());
     }
 };

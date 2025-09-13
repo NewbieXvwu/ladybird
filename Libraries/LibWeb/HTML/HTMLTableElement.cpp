@@ -9,9 +9,9 @@
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
-#include <LibWeb/CSS/StyleValues/CSSColorValue.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
+#include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
@@ -85,8 +85,8 @@ void HTMLTableElement::apply_presentational_hints(GC::Ref<CSS::CascadedPropertie
         }
         if (name == HTML::AttributeNames::align) {
             if (value.equals_ignoring_ascii_case("center"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginLeft, CSS::CSSKeywordValue::create(CSS::Keyword::Auto));
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginRight, CSS::CSSKeywordValue::create(CSS::Keyword::Auto));
+                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginLeft, CSS::KeywordStyleValue::create(CSS::Keyword::Auto));
+                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginRight, CSS::KeywordStyleValue::create(CSS::Keyword::Auto));
             } else if (auto parsed_value = parse_css_value(CSS::Parser::ParsingParams { document() }, value, CSS::PropertyID::Float)) {
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Float, parsed_value.release_nonnull());
             }
@@ -102,7 +102,7 @@ void HTMLTableElement::apply_presentational_hints(GC::Ref<CSS::CascadedPropertie
             // https://html.spec.whatwg.org/multipage/rendering.html#tables-2:rules-for-parsing-a-legacy-colour-value
             auto color = parse_legacy_color_value(value);
             if (color.has_value())
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BackgroundColor, CSS::CSSColorValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy));
+                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BackgroundColor, CSS::ColorStyleValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy));
             return;
         }
         if (name == HTML::AttributeNames::cellspacing) {
@@ -115,10 +115,10 @@ void HTMLTableElement::apply_presentational_hints(GC::Ref<CSS::CascadedPropertie
             if (!border)
                 return;
             auto apply_border_style = [&](CSS::PropertyID style_property, CSS::PropertyID width_property, CSS::PropertyID color_property) {
-                auto legacy_line_style = CSS::CSSKeywordValue::create(CSS::Keyword::Outset);
+                auto legacy_line_style = CSS::KeywordStyleValue::create(CSS::Keyword::Outset);
                 cascaded_properties->set_property_from_presentational_hint(style_property, legacy_line_style);
                 cascaded_properties->set_property_from_presentational_hint(width_property, CSS::LengthStyleValue::create(CSS::Length::make_px(border)));
-                cascaded_properties->set_property_from_presentational_hint(color_property, CSS::CSSColorValue::create_from_color(Color(128, 128, 128), CSS::ColorSyntax::Legacy));
+                cascaded_properties->set_property_from_presentational_hint(color_property, CSS::ColorStyleValue::create_from_color(Color(128, 128, 128), CSS::ColorSyntax::Legacy));
             };
             apply_border_style(CSS::PropertyID::BorderLeftStyle, CSS::PropertyID::BorderLeftWidth, CSS::PropertyID::BorderLeftColor);
             apply_border_style(CSS::PropertyID::BorderTopStyle, CSS::PropertyID::BorderTopWidth, CSS::PropertyID::BorderTopColor);
@@ -131,7 +131,7 @@ void HTMLTableElement::apply_presentational_hints(GC::Ref<CSS::CascadedPropertie
             // and if that does not return failure, the user agent is expected to treat the attribute as a presentational hint setting the element's
             // 'border-top-color', 'border-right-color', 'border-bottom-color', and 'border-left-color' properties to the resulting color.
             if (auto parsed_color = parse_legacy_color_value(value); parsed_color.has_value()) {
-                auto color_value = CSS::CSSColorValue::create_from_color(parsed_color.value(), CSS::ColorSyntax::Legacy);
+                auto color_value = CSS::ColorStyleValue::create_from_color(parsed_color.value(), CSS::ColorSyntax::Legacy);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderTopColor, color_value);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderRightColor, color_value);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomColor, color_value);
@@ -213,8 +213,7 @@ GC::Ptr<HTMLTableSectionElement> HTMLTableElement::t_head()
     // The tHead IDL attribute must return, on getting, the first thead element child of the table element,
     // if any, or null otherwise.
     for (auto* child = first_child(); child; child = child->next_sibling()) {
-        if (is<HTMLTableSectionElement>(*child)) {
-            auto table_section_element = &as<HTMLTableSectionElement>(*child);
+        if (auto* table_section_element = as_if<HTMLTableSectionElement>(*child)) {
             if (table_section_element->local_name() == TagNames::thead)
                 return table_section_element;
         }
@@ -228,7 +227,7 @@ WebIDL::ExceptionOr<void> HTMLTableElement::set_t_head(HTMLTableSectionElement* 
 {
     // If the new value is neither null nor a thead element, then a "HierarchyRequestError" DOMException must be thrown instead.
     if (thead && thead->local_name() != TagNames::thead)
-        return WebIDL::HierarchyRequestError::create(realm(), "Element is not thead"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "Element is not thead"_utf16);
 
     // On setting, if the new value is null or a thead element, the first thead element child of the table element,
     // if any, must be removed,
@@ -248,8 +247,7 @@ WebIDL::ExceptionOr<void> HTMLTableElement::set_t_head(HTMLTableSectionElement* 
             continue;
         if (is<HTMLTableCaptionElement>(*child))
             continue;
-        if (is<HTMLTableColElement>(*child)) {
-            auto table_col_element = &as<HTMLTableColElement>(*child);
+        if (auto* table_col_element = as_if<HTMLTableColElement>(*child)) {
             if (table_col_element->local_name() == TagNames::colgroup)
                 continue;
         }
@@ -280,8 +278,7 @@ GC::Ref<HTMLTableSectionElement> HTMLTableElement::create_t_head()
             continue;
         if (is<HTMLTableCaptionElement>(*child))
             continue;
-        if (is<HTMLTableColElement>(*child)) {
-            auto table_col_element = &as<HTMLTableColElement>(*child);
+        if (auto* table_col_element = as_if<HTMLTableColElement>(*child)) {
             if (table_col_element->local_name() == TagNames::colgroup)
                 continue;
         }
@@ -311,8 +308,7 @@ GC::Ptr<HTMLTableSectionElement> HTMLTableElement::t_foot()
     // The tFoot IDL attribute must return, on getting, the first tfoot element child of the table element,
     // if any, or null otherwise.
     for (auto* child = first_child(); child; child = child->next_sibling()) {
-        if (is<HTMLTableSectionElement>(*child)) {
-            auto table_section_element = &as<HTMLTableSectionElement>(*child);
+        if (auto* table_section_element = as_if<HTMLTableSectionElement>(*child)) {
             if (table_section_element->local_name() == TagNames::tfoot)
                 return table_section_element;
         }
@@ -326,7 +322,7 @@ WebIDL::ExceptionOr<void> HTMLTableElement::set_t_foot(HTMLTableSectionElement* 
 {
     // If the new value is neither null nor a tfoot element, then a "HierarchyRequestError" DOMException must be thrown instead.
     if (tfoot && tfoot->local_name() != TagNames::tfoot)
-        return WebIDL::HierarchyRequestError::create(realm(), "Element is not tfoot"_string);
+        return WebIDL::HierarchyRequestError::create(realm(), "Element is not tfoot"_utf16);
 
     // On setting, if the new value is null or a tfoot element, the first tfoot element child of the table element,
     // if any, must be removed,
@@ -384,8 +380,7 @@ GC::Ref<HTMLTableSectionElement> HTMLTableElement::create_t_body()
     for (auto* child = last_child(); child; child = child->previous_sibling()) {
         if (!is<HTMLElement>(*child))
             continue;
-        if (is<HTMLTableSectionElement>(*child)) {
-            auto table_section_element = &as<HTMLTableSectionElement>(*child);
+        if (auto* table_section_element = as_if<HTMLTableSectionElement>(*child)) {
             if (table_section_element->local_name() == TagNames::tbody) {
                 // We have found an element which is a <tbody> we'll insert after this
                 child_to_insert_before = child->next_sibling();
@@ -438,7 +433,7 @@ WebIDL::ExceptionOr<GC::Ref<HTMLTableRowElement>> HTMLTableElement::insert_row(W
     auto rows_length = rows->length();
 
     if (index < -1 || index > (long)rows_length) {
-        return WebIDL::IndexSizeError::create(realm(), "Index is negative or greater than the number of rows"_string);
+        return WebIDL::IndexSizeError::create(realm(), "Index is negative or greater than the number of rows"_utf16);
     }
     auto& tr = static_cast<HTMLTableRowElement&>(*TRY(DOM::create_element(document(), TagNames::tr, Namespace::HTML)));
     if (rows_length == 0 && !has_child_of_type<HTMLTableRowElement>()) {
@@ -465,7 +460,7 @@ WebIDL::ExceptionOr<void> HTMLTableElement::delete_row(WebIDL::Long index)
 
     // 1. If index is less than −1 or greater than or equal to the number of elements in the rows collection, then throw an "IndexSizeError" DOMException.
     if (index < -1 || index >= (long)rows_length)
-        return WebIDL::IndexSizeError::create(realm(), "Index is negative or greater than or equal to the number of rows"_string);
+        return WebIDL::IndexSizeError::create(realm(), "Index is negative or greater than or equal to the number of rows"_utf16);
 
     // 2. If index is −1, then remove the last element in the rows collection from its parent, or do nothing if the rows collection is empty.
     if (index == -1) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2020-2025, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2023-2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -30,6 +30,7 @@
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BasicShapeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CursorStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShadowStyleValue.h>
 #include <LibWeb/CSS/Transformation.h>
 #include <LibWeb/CSS/URL.h>
@@ -86,9 +87,38 @@ struct ScrollbarColorData {
     Color track_color { Color::Transparent };
 };
 
+struct WillChange {
+    enum class Type : u8 {
+        Contents,
+        ScrollPosition,
+    };
+    using WillChangeEntry = Variant<Type, PropertyID>;
+
+    WillChange(Vector<WillChangeEntry> values)
+        : m_value(move(values))
+    {
+    }
+
+    static WillChange make_auto() { return WillChange(); }
+
+    bool is_auto() const { return m_value.is_empty(); }
+    bool has_contents() const { return m_value.contains_slow(Type::Contents); }
+    bool has_scroll_position() const { return m_value.contains_slow(Type::ScrollPosition); }
+    bool has_property(PropertyID property_id) const { return m_value.contains_slow(property_id); }
+
+private:
+    WillChange()
+    {
+    }
+
+    Vector<WillChangeEntry> m_value;
+};
+
 using CursorData = Variant<NonnullRefPtr<CursorStyleValue const>, CursorPredefined>;
 
 using ListStyleType = Variant<CounterStyleNameKeyword, String>;
+
+using PaintOrderList = Array<PaintOrder, 3>;
 
 class InitialValues {
 public:
@@ -103,30 +133,31 @@ public:
     static Color caret_color() { return Color::Black; }
     static CSS::Clear clear() { return CSS::Clear::None; }
     static CSS::Clip clip() { return CSS::Clip::make_auto(); }
+    static CSS::ColorInterpolation color_interpolation() { return CSS::ColorInterpolation::Auto; }
     static CSS::PreferredColorScheme color_scheme() { return CSS::PreferredColorScheme::Auto; }
     static CSS::ContentVisibility content_visibility() { return CSS::ContentVisibility::Visible; }
     static CursorData cursor() { return { CSS::CursorPredefined::Auto }; }
     static CSS::WhiteSpaceCollapse white_space_collapse() { return CSS::WhiteSpaceCollapse::Collapse; }
     static CSS::WordBreak word_break() { return CSS::WordBreak::Normal; }
-    static CSS::LengthOrCalculated word_spacing() { return CSS::Length::make_px(0); }
-    static LengthOrCalculated letter_spacing() { return CSS::Length::make_px(0); }
+    static CSSPixels word_spacing() { return 0; }
+    static CSSPixels letter_spacing() { return 0; }
     static Variant<LengthOrCalculated, NumberOrCalculated> tab_size() { return NumberOrCalculated(8.0f); }
     static CSS::TextAlign text_align() { return CSS::TextAlign::Start; }
     static CSS::TextJustify text_justify() { return CSS::TextJustify::Auto; }
     static CSS::Positioning position() { return CSS::Positioning::Static; }
     static CSS::TextDecorationLine text_decoration_line() { return CSS::TextDecorationLine::None; }
-    static CSS::Length text_decoration_thickness() { return Length::make_auto(); }
     static CSS::TextDecorationStyle text_decoration_style() { return CSS::TextDecorationStyle::Solid; }
     static CSS::TextTransform text_transform() { return CSS::TextTransform::None; }
     static CSS::TextOverflow text_overflow() { return CSS::TextOverflow::Clip; }
     static CSS::LengthPercentage text_indent() { return CSS::Length::make_px(0); }
     static CSS::TextWrapMode text_wrap_mode() { return CSS::TextWrapMode::Wrap; }
     static CSS::TextRendering text_rendering() { return CSS::TextRendering::Auto; }
+    static CSSPixels text_underline_offset() { return 2; }
     static CSS::Display display() { return CSS::Display { CSS::DisplayOutside::Inline, CSS::DisplayInside::Flow }; }
     static Color color() { return Color::Black; }
     static Color stop_color() { return Color::Black; }
-    static Optional<Gfx::Filter> backdrop_filter() { return {}; }
-    static Optional<Gfx::Filter> filter() { return {}; }
+    static CSS::Filter backdrop_filter() { return CSS::Filter::make_none(); }
+    static CSS::Filter filter() { return CSS::Filter::make_none(); }
     static Color background_color() { return Color::Transparent; }
     static CSS::ListStyleType list_style_type() { return CSS::CounterStyleNameKeyword::Disc; }
     static CSS::ListStylePosition list_style_position() { return CSS::ListStylePosition::Outside; }
@@ -164,7 +195,7 @@ public:
     static CSS::TextAnchor text_anchor() { return CSS::TextAnchor::Start; }
     static CSS::Length border_radius() { return Length::make_px(0); }
     static Variant<CSS::VerticalAlign, CSS::LengthPercentage> vertical_align() { return CSS::VerticalAlign::Baseline; }
-    static CSS::LengthBox inset() { return { CSS::Length::make_auto(), CSS::Length::make_auto(), CSS::Length::make_auto(), CSS::Length::make_auto() }; }
+    static CSS::LengthBox inset() { return {}; }
     static CSS::LengthBox margin() { return { CSS::Length::make_px(0), CSS::Length::make_px(0), CSS::Length::make_px(0), CSS::Length::make_px(0) }; }
     static CSS::LengthBox padding() { return { CSS::Length::make_px(0), CSS::Length::make_px(0), CSS::Length::make_px(0), CSS::Length::make_px(0) }; }
     static CSS::Size width() { return CSS::Size::make_auto(); }
@@ -184,6 +215,7 @@ public:
     static Variant<LengthPercentage, NormalGap> column_gap() { return NormalGap {}; }
     static CSS::ColumnSpan column_span() { return CSS::ColumnSpan::None; }
     static CSS::Size column_width() { return CSS::Size::make_auto(); }
+    static CSS::Size column_height() { return CSS::Size::make_auto(); }
     static Variant<LengthPercentage, NormalGap> row_gap() { return NormalGap {}; }
     static CSS::BorderCollapse border_collapse() { return CSS::BorderCollapse::Separate; }
     static CSS::EmptyCells empty_cells() { return CSS::EmptyCells::Show; }
@@ -194,7 +226,7 @@ public:
     static Color outline_color() { return Color::Black; }
     static CSS::Length outline_offset() { return CSS::Length::make_px(0); }
     static CSS::OutlineStyle outline_style() { return CSS::OutlineStyle::None; }
-    static CSS::Length outline_width() { return CSS::Length::make_px(3); }
+    static CSSPixels outline_width() { return 3; }
     static CSS::TableLayout table_layout() { return CSS::TableLayout::Auto; }
     static QuotesData quotes() { return QuotesData { .type = QuotesData::Type::Auto }; }
     static CSS::TransformBox transform_box() { return CSS::TransformBox::ViewBox; }
@@ -211,8 +243,8 @@ public:
     static LengthPercentage cx() { return CSS::Length::make_px(0); }
     static LengthPercentage cy() { return CSS::Length::make_px(0); }
     static LengthPercentage r() { return CSS::Length::make_px(0); }
-    static LengthPercentage rx() { return CSS::Length::make_auto(); }
-    static LengthPercentage ry() { return CSS::Length::make_auto(); }
+    static LengthPercentageOrAuto rx() { return CSS::LengthPercentageOrAuto::make_auto(); }
+    static LengthPercentageOrAuto ry() { return CSS::LengthPercentageOrAuto::make_auto(); }
     static LengthPercentage x() { return CSS::Length::make_px(0); }
     static LengthPercentage y() { return CSS::Length::make_px(0); }
 
@@ -229,6 +261,9 @@ public:
         };
     }
     static CSS::ScrollbarWidth scrollbar_width() { return CSS::ScrollbarWidth::Auto; }
+    static CSS::ShapeRendering shape_rendering() { return CSS::ShapeRendering::Auto; }
+    static PaintOrderList paint_order() { return { PaintOrder::Fill, PaintOrder::Stroke, PaintOrder::Markers }; }
+    static WillChange will_change() { return WillChange::make_auto(); }
 };
 
 enum class BackgroundSize {
@@ -311,10 +346,10 @@ struct BackgroundLayerData {
     CSS::PositionEdge position_edge_y { CSS::PositionEdge::Top };
     CSS::LengthPercentage position_offset_y { CSS::Length::make_px(0) };
     CSS::BackgroundSize size_type { CSS::BackgroundSize::LengthPercentage };
-    CSS::LengthPercentage size_x { CSS::Length::make_auto() };
-    CSS::LengthPercentage size_y { CSS::Length::make_auto() };
-    CSS::Repeat repeat_x { CSS::Repeat::Repeat };
-    CSS::Repeat repeat_y { CSS::Repeat::Repeat };
+    CSS::LengthPercentageOrAuto size_x { CSS::LengthPercentageOrAuto::make_auto() };
+    CSS::LengthPercentageOrAuto size_y { CSS::LengthPercentageOrAuto::make_auto() };
+    CSS::Repetition repeat_x { CSS::Repetition::Repeat };
+    CSS::Repetition repeat_y { CSS::Repetition::Repeat };
     CSS::MixBlendMode blend_mode { CSS::MixBlendMode::Normal };
 };
 
@@ -375,11 +410,10 @@ struct ContentData {
     enum class Type {
         Normal,
         None,
-        String,
+        List,
     } type { Type::Normal };
 
-    // FIXME: Data is a list of identifiers, strings and image values.
-    String data {};
+    Vector<Variant<String, NonnullRefPtr<ImageStyleValue>>> data;
     Optional<String> alt_text {};
 };
 
@@ -392,6 +426,12 @@ struct CounterData {
 struct BorderRadiusData {
     CSS::LengthPercentage horizontal_radius { InitialValues::border_radius() };
     CSS::LengthPercentage vertical_radius { InitialValues::border_radius() };
+};
+
+struct TextDecorationThickness {
+    struct Auto { };
+    struct FromFont { };
+    Variant<Auto, FromFont, LengthPercentage> value;
 };
 
 // FIXME: Find a better place for this helper.
@@ -428,6 +468,7 @@ public:
     Color caret_color() const { return m_inherited.caret_color; }
     CSS::Clear clear() const { return m_noninherited.clear; }
     CSS::Clip clip() const { return m_noninherited.clip; }
+    CSS::ColorInterpolation color_interpolation() const { return m_inherited.color_interpolation; }
     CSS::PreferredColorScheme color_scheme() const { return m_inherited.color_scheme; }
     CSS::ContentVisibility content_visibility() const { return m_inherited.content_visibility; }
     Vector<CursorData> const& cursor() const { return m_inherited.cursor; }
@@ -441,8 +482,9 @@ public:
     CSS::LengthPercentage const& text_indent() const { return m_inherited.text_indent; }
     CSS::TextWrapMode text_wrap_mode() const { return m_inherited.text_wrap_mode; }
     CSS::TextRendering text_rendering() const { return m_inherited.text_rendering; }
+    CSSPixels text_underline_offset() const { return m_inherited.text_underline_offset; }
     Vector<CSS::TextDecorationLine> const& text_decoration_line() const { return m_noninherited.text_decoration_line; }
-    CSS::LengthPercentage const& text_decoration_thickness() const { return m_noninherited.text_decoration_thickness; }
+    TextDecorationThickness const& text_decoration_thickness() const { return m_noninherited.text_decoration_thickness; }
     CSS::TextDecorationStyle text_decoration_style() const { return m_noninherited.text_decoration_style; }
     Color text_decoration_color() const { return m_noninherited.text_decoration_color; }
     CSS::TextTransform text_transform() const { return m_inherited.text_transform; }
@@ -451,8 +493,8 @@ public:
     CSS::Positioning position() const { return m_noninherited.position; }
     CSS::WhiteSpaceCollapse white_space_collapse() const { return m_inherited.white_space_collapse; }
     WhiteSpaceTrimData white_space_trim() const { return m_noninherited.white_space_trim; }
-    CSS::LengthOrCalculated word_spacing() const { return m_inherited.word_spacing; }
-    LengthOrCalculated letter_spacing() const { return m_inherited.letter_spacing; }
+    CSSPixels const& word_spacing() const { return m_inherited.word_spacing; }
+    CSSPixels letter_spacing() const { return m_inherited.letter_spacing; }
     CSS::FlexDirection flex_direction() const { return m_noninherited.flex_direction; }
     CSS::FlexWrap flex_wrap() const { return m_noninherited.flex_wrap; }
     FlexBasis const& flex_basis() const { return m_noninherited.flex_basis; }
@@ -470,8 +512,8 @@ public:
     CSS::JustifyContent justify_content() const { return m_noninherited.justify_content; }
     CSS::JustifySelf justify_self() const { return m_noninherited.justify_self; }
     CSS::JustifyItems justify_items() const { return m_noninherited.justify_items; }
-    Optional<Gfx::Filter> const& backdrop_filter() const { return m_noninherited.backdrop_filter; }
-    Optional<Gfx::Filter> const& filter() const { return m_noninherited.filter; }
+    CSS::Filter const& backdrop_filter() const { return m_noninherited.backdrop_filter; }
+    CSS::Filter const& filter() const { return m_noninherited.filter; }
     Vector<ShadowData> const& box_shadow() const { return m_noninherited.box_shadow; }
     CSS::BoxSizing box_sizing() const { return m_noninherited.box_sizing; }
     CSS::Size const& width() const { return m_noninherited.width; }
@@ -494,6 +536,7 @@ public:
     Variant<LengthPercentage, NormalGap> const& column_gap() const { return m_noninherited.column_gap; }
     CSS::ColumnSpan const& column_span() const { return m_noninherited.column_span; }
     CSS::Size const& column_width() const { return m_noninherited.column_width; }
+    CSS::Size const& column_height() const { return m_noninherited.column_height; }
     Variant<LengthPercentage, NormalGap> const& row_gap() const { return m_noninherited.row_gap; }
     CSS::BorderCollapse border_collapse() const { return m_inherited.border_collapse; }
     CSS::EmptyCells empty_cells() const { return m_inherited.empty_cells; }
@@ -509,10 +552,11 @@ public:
     CSS::MixBlendMode mix_blend_mode() const { return m_noninherited.mix_blend_mode; }
     Optional<FlyString> view_transition_name() const { return m_noninherited.view_transition_name; }
     TouchActionData touch_action() const { return m_noninherited.touch_action; }
+    CSS::ShapeRendering shape_rendering() const { return m_noninherited.shape_rendering; }
 
     CSS::LengthBox const& inset() const { return m_noninherited.inset; }
-    const CSS::LengthBox& margin() const { return m_noninherited.margin; }
-    const CSS::LengthBox& padding() const { return m_noninherited.padding; }
+    CSS::LengthBox const& margin() const { return m_noninherited.margin; }
+    CSS::LengthBox const& padding() const { return m_noninherited.padding; }
 
     BorderData const& border_left() const { return m_noninherited.border_left; }
     BorderData const& border_top() const { return m_noninherited.border_top; }
@@ -520,10 +564,10 @@ public:
     BorderData const& border_bottom() const { return m_noninherited.border_bottom; }
 
     bool has_noninitial_border_radii() const { return m_noninherited.has_noninitial_border_radii; }
-    const CSS::BorderRadiusData& border_bottom_left_radius() const { return m_noninherited.border_bottom_left_radius; }
-    const CSS::BorderRadiusData& border_bottom_right_radius() const { return m_noninherited.border_bottom_right_radius; }
-    const CSS::BorderRadiusData& border_top_left_radius() const { return m_noninherited.border_top_left_radius; }
-    const CSS::BorderRadiusData& border_top_right_radius() const { return m_noninherited.border_top_right_radius; }
+    CSS::BorderRadiusData const& border_bottom_left_radius() const { return m_noninherited.border_bottom_left_radius; }
+    CSS::BorderRadiusData const& border_bottom_right_radius() const { return m_noninherited.border_bottom_right_radius; }
+    CSS::BorderRadiusData const& border_top_left_radius() const { return m_noninherited.border_top_left_radius; }
+    CSS::BorderRadiusData const& border_top_right_radius() const { return m_noninherited.border_top_right_radius; }
 
     CSS::Overflow overflow_x() const { return m_noninherited.overflow_x; }
     CSS::Overflow overflow_y() const { return m_noninherited.overflow_y; }
@@ -558,12 +602,13 @@ public:
     CSS::ClipRule clip_rule() const { return m_inherited.clip_rule; }
     Color flood_color() const { return m_noninherited.flood_color; }
     float flood_opacity() const { return m_noninherited.flood_opacity; }
+    PaintOrderList paint_order() const { return m_inherited.paint_order; }
 
     LengthPercentage const& cx() const { return m_noninherited.cx; }
     LengthPercentage const& cy() const { return m_noninherited.cy; }
     LengthPercentage const& r() const { return m_noninherited.r; }
-    LengthPercentage const& rx() const { return m_noninherited.ry; }
-    LengthPercentage const& ry() const { return m_noninherited.ry; }
+    LengthPercentageOrAuto const& rx() const { return m_noninherited.ry; }
+    LengthPercentageOrAuto const& ry() const { return m_noninherited.ry; }
     LengthPercentage const& x() const { return m_noninherited.x; }
     LengthPercentage const& y() const { return m_noninherited.y; }
 
@@ -594,7 +639,7 @@ public:
     Color outline_color() const { return m_noninherited.outline_color; }
     CSS::Length outline_offset() const { return m_noninherited.outline_offset; }
     CSS::OutlineStyle outline_style() const { return m_noninherited.outline_style; }
-    CSS::Length outline_width() const { return m_noninherited.outline_width; }
+    CSSPixels outline_width() const { return m_noninherited.outline_width; }
 
     CSS::TableLayout table_layout() const { return m_noninherited.table_layout; }
 
@@ -606,6 +651,8 @@ public:
 
     ScrollbarColorData scrollbar_color() const { return m_inherited.scrollbar_color; }
     CSS::ScrollbarWidth scrollbar_width() const { return m_noninherited.scrollbar_width; }
+
+    WillChange will_change() const { return m_noninherited.will_change; }
 
     NonnullOwnPtr<ComputedValues> clone_inherited_values() const
     {
@@ -638,6 +685,7 @@ protected:
         CSS::Length border_spacing_vertical { InitialValues::border_spacing() };
         CSS::CaptionSide caption_side { InitialValues::caption_side() };
         Color color { InitialValues::color() };
+        CSS::ColorInterpolation color_interpolation { InitialValues::color_interpolation() };
         CSS::PreferredColorScheme color_scheme { InitialValues::color_scheme() };
         Optional<Color> accent_color {};
         Color webkit_text_fill_color { InitialValues::color() };
@@ -652,10 +700,11 @@ protected:
         CSS::LengthPercentage text_indent { InitialValues::text_indent() };
         CSS::TextWrapMode text_wrap_mode { InitialValues::text_wrap_mode() };
         CSS::TextRendering text_rendering { InitialValues::text_rendering() };
+        CSSPixels text_underline_offset { InitialValues::text_underline_offset() };
         CSS::WhiteSpaceCollapse white_space_collapse { InitialValues::white_space_collapse() };
         CSS::WordBreak word_break { InitialValues::word_break() };
-        CSS::LengthOrCalculated word_spacing { InitialValues::word_spacing() };
-        LengthOrCalculated letter_spacing { InitialValues::letter_spacing() };
+        CSSPixels word_spacing { InitialValues::word_spacing() };
+        CSSPixels letter_spacing { InitialValues::letter_spacing() };
         CSS::ListStyleType list_style_type { InitialValues::list_style_type() };
         CSS::ListStylePosition list_style_position { InitialValues::list_style_position() };
         CSS::Visibility visibility { InitialValues::visibility() };
@@ -667,6 +716,7 @@ protected:
         CSS::FillRule fill_rule { InitialValues::fill_rule() };
         Optional<SVGPaint> stroke;
         float fill_opacity { InitialValues::fill_opacity() };
+        PaintOrderList paint_order { InitialValues::paint_order() };
         Vector<Variant<LengthPercentage, NumberOrCalculated>> stroke_dasharray;
         LengthPercentage stroke_dashoffset { InitialValues::stroke_dashoffset() };
         CSS::StrokeLinecap stroke_linecap { InitialValues::stroke_linecap() };
@@ -695,7 +745,7 @@ protected:
         Optional<int> z_index;
         // FIXME: Store this as flags in a u8.
         Vector<CSS::TextDecorationLine> text_decoration_line { InitialValues::text_decoration_line() };
-        CSS::LengthPercentage text_decoration_thickness { InitialValues::text_decoration_thickness() };
+        TextDecorationThickness text_decoration_thickness { TextDecorationThickness::Auto {} };
         CSS::TextDecorationStyle text_decoration_style { InitialValues::text_decoration_style() };
         Color text_decoration_color { InitialValues::color() };
         CSS::TextOverflow text_overflow { InitialValues::text_overflow() };
@@ -709,8 +759,8 @@ protected:
         CSS::LengthBox inset { InitialValues::inset() };
         CSS::LengthBox margin { InitialValues::margin() };
         CSS::LengthBox padding { InitialValues::padding() };
-        Optional<Gfx::Filter> backdrop_filter { InitialValues::backdrop_filter() };
-        Optional<Gfx::Filter> filter { InitialValues::filter() };
+        CSS::Filter backdrop_filter { InitialValues::backdrop_filter() };
+        CSS::Filter filter { InitialValues::filter() };
         BorderData border_left;
         BorderData border_top;
         BorderData border_right;
@@ -758,6 +808,7 @@ protected:
         Variant<LengthPercentage, NormalGap> column_gap { InitialValues::column_gap() };
         CSS::ColumnSpan column_span { InitialValues::column_span() };
         CSS::Size column_width { InitialValues::column_width() };
+        CSS::Size column_height { InitialValues::column_height() };
         Variant<LengthPercentage, NormalGap> row_gap { InitialValues::row_gap() };
         Vector<Vector<String>> grid_template_areas { InitialValues::grid_template_areas() };
         Gfx::Color stop_color { InitialValues::stop_color() };
@@ -766,7 +817,7 @@ protected:
         Color outline_color { InitialValues::outline_color() };
         CSS::Length outline_offset { InitialValues::outline_offset() };
         CSS::OutlineStyle outline_style { InitialValues::outline_style() };
-        CSS::Length outline_width { InitialValues::outline_width() };
+        CSSPixels outline_width { InitialValues::outline_width() };
         CSS::TableLayout table_layout { InitialValues::table_layout() };
         CSS::ObjectFit object_fit { InitialValues::object_fit() };
         CSS::ObjectPosition object_position { InitialValues::object_position() };
@@ -791,8 +842,8 @@ protected:
         LengthPercentage cx { InitialValues::cx() };
         LengthPercentage cy { InitialValues::cy() };
         LengthPercentage r { InitialValues::r() };
-        LengthPercentage rx { InitialValues::rx() };
-        LengthPercentage ry { InitialValues::ry() };
+        LengthPercentageOrAuto rx { InitialValues::rx() };
+        LengthPercentageOrAuto ry { InitialValues::ry() };
         LengthPercentage x { InitialValues::x() };
         LengthPercentage y { InitialValues::x() };
 
@@ -801,8 +852,12 @@ protected:
         Vector<CounterData, 0> counter_reset;
         Vector<CounterData, 0> counter_set;
 
+        WillChange will_change { InitialValues::will_change() };
+
         Color flood_color { InitialValues::flood_color() };
         float flood_opacity { InitialValues::flood_opacity() };
+
+        CSS::ShapeRendering shape_rendering { InitialValues::shape_rendering() };
     } m_noninherited;
 };
 
@@ -837,6 +892,7 @@ public:
     void set_border_spacing_vertical(CSS::Length border_spacing_vertical) { m_inherited.border_spacing_vertical = border_spacing_vertical; }
     void set_caption_side(CSS::CaptionSide caption_side) { m_inherited.caption_side = caption_side; }
     void set_color(Color color) { m_inherited.color = color; }
+    void set_color_interpolation(CSS::ColorInterpolation color_interpolation) { m_inherited.color_interpolation = color_interpolation; }
     void set_color_scheme(CSS::PreferredColorScheme color_scheme) { m_inherited.color_scheme = color_scheme; }
     void set_clip(CSS::Clip const& clip) { m_noninherited.clip = clip; }
     void set_content(ContentData const& content) { m_noninherited.content = content; }
@@ -853,7 +909,7 @@ public:
     void set_text_align(CSS::TextAlign text_align) { m_inherited.text_align = text_align; }
     void set_text_justify(CSS::TextJustify text_justify) { m_inherited.text_justify = text_justify; }
     void set_text_decoration_line(Vector<CSS::TextDecorationLine> value) { m_noninherited.text_decoration_line = move(value); }
-    void set_text_decoration_thickness(CSS::LengthPercentage value) { m_noninherited.text_decoration_thickness = move(value); }
+    void set_text_decoration_thickness(TextDecorationThickness value) { m_noninherited.text_decoration_thickness = move(value); }
     void set_text_decoration_style(CSS::TextDecorationStyle value) { m_noninherited.text_decoration_style = value; }
     void set_text_decoration_color(Color value) { m_noninherited.text_decoration_color = value; }
     void set_text_transform(CSS::TextTransform value) { m_inherited.text_transform = value; }
@@ -862,13 +918,14 @@ public:
     void set_text_wrap_mode(CSS::TextWrapMode value) { m_inherited.text_wrap_mode = value; }
     void set_text_overflow(CSS::TextOverflow value) { m_noninherited.text_overflow = value; }
     void set_text_rendering(CSS::TextRendering value) { m_inherited.text_rendering = value; }
+    void set_text_underline_offset(CSSPixels value) { m_inherited.text_underline_offset = value; }
     void set_webkit_text_fill_color(Color value) { m_inherited.webkit_text_fill_color = value; }
     void set_position(CSS::Positioning position) { m_noninherited.position = position; }
     void set_white_space_collapse(CSS::WhiteSpaceCollapse value) { m_inherited.white_space_collapse = value; }
     void set_white_space_trim(WhiteSpaceTrimData value) { m_noninherited.white_space_trim = value; }
-    void set_word_spacing(CSS::LengthOrCalculated value) { m_inherited.word_spacing = move(value); }
+    void set_word_spacing(CSSPixels value) { m_inherited.word_spacing = value; }
     void set_word_break(CSS::WordBreak value) { m_inherited.word_break = value; }
-    void set_letter_spacing(CSS::LengthOrCalculated value) { m_inherited.letter_spacing = value; }
+    void set_letter_spacing(CSSPixels value) { m_inherited.letter_spacing = value; }
     void set_width(CSS::Size const& width) { m_noninherited.width = width; }
     void set_min_width(CSS::Size const& width) { m_noninherited.min_width = width; }
     void set_max_width(CSS::Size const& width) { m_noninherited.max_width = width; }
@@ -876,15 +933,15 @@ public:
     void set_min_height(CSS::Size const& height) { m_noninherited.min_height = height; }
     void set_max_height(CSS::Size const& height) { m_noninherited.max_height = height; }
     void set_inset(CSS::LengthBox const& inset) { m_noninherited.inset = inset; }
-    void set_margin(const CSS::LengthBox& margin) { m_noninherited.margin = margin; }
-    void set_padding(const CSS::LengthBox& padding) { m_noninherited.padding = padding; }
+    void set_margin(CSS::LengthBox const& margin) { m_noninherited.margin = margin; }
+    void set_padding(CSS::LengthBox const& padding) { m_noninherited.padding = padding; }
     void set_overflow_x(CSS::Overflow value) { m_noninherited.overflow_x = value; }
     void set_overflow_y(CSS::Overflow value) { m_noninherited.overflow_y = value; }
     void set_list_style_type(CSS::ListStyleType value) { m_inherited.list_style_type = value; }
     void set_list_style_position(CSS::ListStylePosition value) { m_inherited.list_style_position = value; }
     void set_display(CSS::Display value) { m_noninherited.display = value; }
-    void set_backdrop_filter(Optional<Gfx::Filter> backdrop_filter) { m_noninherited.backdrop_filter = move(backdrop_filter); }
-    void set_filter(Optional<Gfx::Filter> filter) { m_noninherited.filter = move(filter); }
+    void set_backdrop_filter(CSS::Filter const& backdrop_filter) { m_noninherited.backdrop_filter = backdrop_filter; }
+    void set_filter(CSS::Filter const& filter) { m_noninherited.filter = filter; }
     void set_border_bottom_left_radius(CSS::BorderRadiusData value)
     {
         m_noninherited.has_noninitial_border_radii = true;
@@ -946,6 +1003,7 @@ public:
     void set_column_gap(Variant<LengthPercentage, NormalGap> const& column_gap) { m_noninherited.column_gap = column_gap; }
     void set_column_span(CSS::ColumnSpan const column_span) { m_noninherited.column_span = column_span; }
     void set_column_width(CSS::Size const& column_width) { m_noninherited.column_width = column_width; }
+    void set_column_height(CSS::Size const& column_height) { m_noninherited.column_height = column_height; }
     void set_row_gap(Variant<LengthPercentage, NormalGap> const& row_gap) { m_noninherited.row_gap = row_gap; }
     void set_border_collapse(CSS::BorderCollapse const border_collapse) { m_inherited.border_collapse = border_collapse; }
     void set_empty_cells(CSS::EmptyCells const empty_cells) { m_inherited.empty_cells = empty_cells; }
@@ -983,7 +1041,7 @@ public:
     void set_outline_color(Color value) { m_noninherited.outline_color = value; }
     void set_outline_offset(CSS::Length value) { m_noninherited.outline_offset = value; }
     void set_outline_style(CSS::OutlineStyle value) { m_noninherited.outline_style = value; }
-    void set_outline_width(CSS::Length value) { m_noninherited.outline_width = value; }
+    void set_outline_width(CSSPixels value) { m_noninherited.outline_width = value; }
     void set_mask(MaskReference value) { m_noninherited.mask = value; }
     void set_mask_type(CSS::MaskType value) { m_noninherited.mask_type = value; }
     void set_mask_image(CSS::AbstractImageStyleValue const& value) { m_noninherited.mask_image = value; }
@@ -991,6 +1049,8 @@ public:
     void set_clip_rule(CSS::ClipRule value) { m_inherited.clip_rule = value; }
     void set_flood_color(Color value) { m_noninherited.flood_color = value; }
     void set_flood_opacity(float value) { m_noninherited.flood_opacity = value; }
+    void set_shape_rendering(CSS::ShapeRendering value) { m_noninherited.shape_rendering = value; }
+    void set_paint_order(PaintOrderList value) { m_inherited.paint_order = value; }
 
     void set_cx(LengthPercentage cx) { m_noninherited.cx = move(cx); }
     void set_cy(LengthPercentage cy) { m_noninherited.cy = move(cy); }
@@ -1010,6 +1070,8 @@ public:
     void set_counter_increment(Vector<CounterData> value) { m_noninherited.counter_increment = move(value); }
     void set_counter_reset(Vector<CounterData> value) { m_noninherited.counter_reset = move(value); }
     void set_counter_set(Vector<CounterData> value) { m_noninherited.counter_set = move(value); }
+
+    void set_will_change(WillChange value) { m_noninherited.will_change = move(value); }
 };
 
 }

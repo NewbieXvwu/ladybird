@@ -17,6 +17,7 @@
 #include <LibCore/Socket.h>
 #include <LibHTTP/Forward.h>
 #include <LibHTTP/HttpRequest.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/WebDriver/Error.h>
 #include <LibWeb/WebDriver/Response.h>
 
@@ -24,7 +25,7 @@ namespace Web::WebDriver {
 
 using Parameters = Vector<String>;
 
-class Client : public Core::EventReceiver {
+class WEB_API Client : public Core::EventReceiver {
     C_OBJECT_ABSTRACT(Client);
 
 public:
@@ -116,8 +117,10 @@ public:
     // 18. Print, https://w3c.github.io/webdriver/#print
     virtual Response print_page(Parameters parameters, JsonValue payload) = 0;
 
+    Function<void()> on_death;
+
 protected:
-    Client(NonnullOwnPtr<Core::BufferedTCPSocket>, Core::EventReceiver* parent);
+    explicit Client(NonnullOwnPtr<Core::BufferedTCPSocket>);
 
 private:
     using WrappedError = Variant<AK::Error, HTTP::HttpRequest::ParseError, WebDriver::Error>;

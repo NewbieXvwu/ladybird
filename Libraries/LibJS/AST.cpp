@@ -64,7 +64,7 @@ static void print_indent(int indent)
     out("{}", ByteString::repeated(' ', indent * 2));
 }
 
-static void update_function_name(Value value, FlyString const& name)
+static void update_function_name(Value value, Utf16FlyString const& name)
 {
     if (!value.is_function())
         return;
@@ -88,20 +88,23 @@ void LabelledStatement::dump(int indent) const
 }
 
 // 15.2.5 Runtime Semantics: InstantiateOrdinaryFunctionExpression, https://tc39.es/ecma262/#sec-runtime-semantics-instantiateordinaryfunctionexpression
-Value FunctionExpression::instantiate_ordinary_function_expression(VM& vm, FlyString given_name) const
+Value FunctionExpression::instantiate_ordinary_function_expression(VM& vm, Utf16FlyString given_name) const
 {
     auto& realm = *vm.current_realm();
 
     if (given_name.is_empty())
-        given_name = ""_fly_string;
-    auto has_own_name = !name().is_empty();
+        given_name = Utf16FlyString {};
 
-    auto const used_name = has_own_name ? name() : given_name;
+    auto own_name = name();
+    auto has_own_name = !own_name.is_empty();
+
+    auto const& used_name = has_own_name ? own_name : given_name;
+
     auto environment = GC::Ref { *vm.running_execution_context().lexical_environment };
     if (has_own_name) {
         VERIFY(environment);
         environment = new_declarative_environment(*environment);
-        MUST(environment->create_immutable_binding(vm, name(), false));
+        MUST(environment->create_immutable_binding(vm, own_name, false));
     }
 
     auto private_environment = vm.running_execution_context().private_environment;
@@ -112,15 +115,15 @@ Value FunctionExpression::instantiate_ordinary_function_expression(VM& vm, FlySt
     // FIXME: 7. Perform MakeConstructor(closure).
 
     if (has_own_name)
-        MUST(environment->initialize_binding(vm, name(), closure, Environment::InitializeBindingHint::Normal));
+        MUST(environment->initialize_binding(vm, own_name, closure, Environment::InitializeBindingHint::Normal));
 
     return closure;
 }
 
-Optional<String> CallExpression::expression_string() const
+Optional<Utf16String> CallExpression::expression_string() const
 {
     if (is<Identifier>(*m_callee))
-        return static_cast<Identifier const&>(*m_callee).string().to_string();
+        return static_cast<Identifier const&>(*m_callee).string().to_utf16_string();
 
     if (is<MemberExpression>(*m_callee))
         return static_cast<MemberExpression const&>(*m_callee).to_string_approximation();
@@ -161,22 +164,22 @@ ThrowCompletionOr<ClassElement::ClassValue> ClassMethod::class_element_evaluatio
     auto method_value = Value(&method_function);
     method_function.make_method(target);
 
-    auto set_function_name = [&](ByteString prefix = "") {
+    auto set_function_name = [&](StringView prefix = {}) {
         auto name = property_key_or_private_name.visit(
-            [&](PropertyKey const& property_key) -> String {
+            [&](PropertyKey const& property_key) {
                 if (property_key.is_symbol()) {
                     auto description = property_key.as_symbol()->description();
                     if (!description.has_value() || description->is_empty())
-                        return ""_string;
-                    return MUST(String::formatted("[{}]", *description));
+                        return Utf16String {};
+                    return Utf16String::formatted("[{}]", *description);
                 }
                 return property_key.to_string();
             },
-            [&](PrivateName const& private_name) -> String {
-                return private_name.description.to_string();
+            [&](PrivateName const& private_name) {
+                return private_name.description.to_utf16_string();
             });
 
-        update_function_name(method_value, MUST(String::formatted("{}{}{}", prefix, prefix.is_empty() ? "" : " ", name)));
+        update_function_name(method_value, Utf16String::formatted("{}{}{}", prefix, prefix.is_empty() ? "" : " ", name));
     };
 
     if (property_key_or_private_name.has<PropertyKey>()) {
@@ -187,12 +190,12 @@ ThrowCompletionOr<ClassElement::ClassValue> ClassMethod::class_element_evaluatio
             TRY(target.define_property_or_throw(property_key, { .value = method_value, .writable = true, .enumerable = false, .configurable = true }));
             break;
         case ClassMethod::Kind::Getter:
-            set_function_name("get");
-            TRY(target.define_property_or_throw(property_key, { .get = &method_function, .enumerable = true, .configurable = true }));
+            set_function_name("get"sv);
+            TRY(target.define_property_or_throw(property_key, { .get = &method_function, .enumerable = false, .configurable = true }));
             break;
         case ClassMethod::Kind::Setter:
-            set_function_name("set");
-            TRY(target.define_property_or_throw(property_key, { .set = &method_function, .enumerable = true, .configurable = true }));
+            set_function_name("set"sv);
+            TRY(target.define_property_or_throw(property_key, { .set = &method_function, .enumerable = false, .configurable = true }));
             break;
         default:
             VERIFY_NOT_REACHED();
@@ -206,10 +209,10 @@ ThrowCompletionOr<ClassElement::ClassValue> ClassMethod::class_element_evaluatio
             set_function_name();
             return ClassValue { PrivateElement { private_name, PrivateElement::Kind::Method, method_value } };
         case Kind::Getter:
-            set_function_name("get");
+            set_function_name("get"sv);
             return ClassValue { PrivateElement { private_name, PrivateElement::Kind::Accessor, Value(Accessor::create(vm, &method_function, nullptr)) } };
         case Kind::Setter:
-            set_function_name("set");
+            set_function_name("set"sv);
             return ClassValue { PrivateElement { private_name, PrivateElement::Kind::Accessor, Value(Accessor::create(vm, nullptr, &method_function)) } };
         default:
             VERIFY_NOT_REACHED();
@@ -242,19 +245,19 @@ ThrowCompletionOr<ClassElement::ClassValue> ClassField::class_element_evaluation
         } else {
             auto copy_initializer = m_initializer;
             auto name = property_key_or_private_name.visit(
-                [&](PropertyKey const& property_key) -> String {
+                [&](PropertyKey const& property_key) {
                     return property_key.to_string();
                 },
-                [&](PrivateName const& private_name) -> String {
-                    return private_name.description.to_string();
+                [&](PrivateName const& private_name) {
+                    return private_name.description.to_utf16_string();
                 });
 
             // FIXME: A potential optimization is not creating the functions here since these are never directly accessible.
-            auto function_code = create_ast_node<ClassFieldInitializerStatement>(m_initializer->source_range(), copy_initializer.release_nonnull(), name);
+            auto function_code = create_ast_node<ClassFieldInitializerStatement>(m_initializer->source_range(), copy_initializer.release_nonnull(), move(name));
             FunctionParsingInsights parsing_insights;
             parsing_insights.uses_this_from_environment = true;
             parsing_insights.uses_this = true;
-            auto function = ECMAScriptFunctionObject::create(realm, "field"_string, ByteString::empty(), *function_code, FunctionParameters::empty(), 0, {}, vm.lexical_environment(), vm.running_execution_context().private_environment, FunctionKind::Normal, true, parsing_insights, false, property_key_or_private_name);
+            auto function = ECMAScriptFunctionObject::create(realm, "field"_utf16_fly_string, ByteString::empty(), *function_code, FunctionParameters::empty(), 0, {}, vm.lexical_environment(), vm.running_execution_context().private_environment, FunctionKind::Normal, true, parsing_insights, false, property_key_or_private_name);
             function->make_method(target);
             initializer = function;
         }
@@ -268,19 +271,19 @@ ThrowCompletionOr<ClassElement::ClassValue> ClassField::class_element_evaluation
     };
 }
 
-static Optional<FlyString> nullopt_or_private_identifier_description(Expression const& expression)
+static Optional<Utf16FlyString> nullopt_or_private_identifier_description(Expression const& expression)
 {
     if (is<PrivateIdentifier>(expression))
         return static_cast<PrivateIdentifier const&>(expression).string();
     return {};
 }
 
-Optional<FlyString> ClassField::private_bound_identifier() const
+Optional<Utf16FlyString> ClassField::private_bound_identifier() const
 {
     return nullopt_or_private_identifier_description(*m_key);
 }
 
-Optional<FlyString> ClassMethod::private_bound_identifier() const
+Optional<Utf16FlyString> ClassMethod::private_bound_identifier() const
 {
     return nullopt_or_private_identifier_description(*m_key);
 }
@@ -303,7 +306,7 @@ ThrowCompletionOr<ClassElement::ClassValue> StaticInitializer::class_element_eva
     FunctionParsingInsights parsing_insights;
     parsing_insights.uses_this_from_environment = true;
     parsing_insights.uses_this = true;
-    auto body_function = ECMAScriptFunctionObject::create(realm, ""_string, ByteString::empty(), *m_function_body, FunctionParameters::empty(), 0, m_function_body->local_variables_names(), lexical_environment, private_environment, FunctionKind::Normal, true, parsing_insights, false);
+    auto body_function = ECMAScriptFunctionObject::create(realm, {}, ByteString::empty(), *m_function_body, FunctionParameters::empty(), 0, m_function_body->local_variables_names(), lexical_environment, private_environment, FunctionKind::Normal, true, parsing_insights, false);
 
     // 6. Perform MakeMethod(bodyFunction, homeObject).
     body_function->make_method(home_object);
@@ -312,7 +315,7 @@ ThrowCompletionOr<ClassElement::ClassValue> StaticInitializer::class_element_eva
     return ClassValue { normal_completion(body_function) };
 }
 
-ThrowCompletionOr<ECMAScriptFunctionObject*> ClassExpression::create_class_constructor(VM& vm, Environment* class_environment, Environment* environment, Value super_class, ReadonlySpan<Value> element_keys, Optional<FlyString> const& binding_name, FlyString const& class_name) const
+ThrowCompletionOr<ECMAScriptFunctionObject*> ClassExpression::create_class_constructor(VM& vm, Environment* class_environment, Environment* environment, Value super_class, ReadonlySpan<Value> element_keys, Optional<Utf16FlyString> const& binding_name, Utf16FlyString const& class_name) const
 {
     auto& realm = *vm.current_realm();
 
@@ -1241,16 +1244,17 @@ void MemberExpression::dump(int indent) const
     m_property->dump(indent + 1);
 }
 
-String MemberExpression::to_string_approximation() const
+Utf16String MemberExpression::to_string_approximation() const
 {
-    String object_string = "<object>"_string;
+    Utf16View object_string = "<object>"sv;
     if (is<Identifier>(*m_object))
-        object_string = static_cast<Identifier const&>(*m_object).string().to_string();
+        object_string = static_cast<Identifier const&>(*m_object).string().view();
+
     if (is_computed())
-        return MUST(String::formatted("{}[<computed>]", object_string));
+        return Utf16String::formatted("{}[<computed>]", object_string);
     if (is<PrivateIdentifier>(*m_property))
-        return MUST(String::formatted("{}.{}", object_string, as<PrivateIdentifier>(*m_property).string()));
-    return MUST(String::formatted("{}.{}", object_string, as<Identifier>(*m_property).string()));
+        return Utf16String::formatted("{}.{}", object_string, as<PrivateIdentifier>(*m_property).string());
+    return Utf16String::formatted("{}.{}", object_string, as<Identifier>(*m_property).string());
 }
 
 bool MemberExpression::ends_in_private_name() const
@@ -1528,7 +1532,7 @@ void ScopeNode::add_hoisted_function(NonnullRefPtr<FunctionDeclaration const> de
     m_functions_hoistable_with_annexB_extension.append(move(declaration));
 }
 
-FlyString ExportStatement::local_name_for_default = "*default*"_fly_string;
+Utf16FlyString ExportStatement::local_name_for_default = "*default*"_utf16_fly_string;
 
 static void dump_assert_clauses(ModuleRequest const& request)
 {
@@ -1546,7 +1550,7 @@ void ExportStatement::dump(int indent) const
     print_indent(indent + 1);
     outln("(ExportEntries)");
 
-    auto string_or_null = [](Optional<FlyString> const& string) -> ByteString {
+    auto string_or_null = []<typename T>(Optional<T> const& string) -> ByteString {
         if (!string.has_value()) {
             return "null";
         }
@@ -1594,7 +1598,7 @@ void ImportStatement::dump(int indent) const
     }
 }
 
-bool ExportStatement::has_export(FlyString const& export_name) const
+bool ExportStatement::has_export(Utf16FlyString const& export_name) const
 {
     return any_of(m_entries.begin(), m_entries.end(), [&](auto& entry) {
         // Make sure that empty exported names does not overlap with anything
@@ -1604,7 +1608,7 @@ bool ExportStatement::has_export(FlyString const& export_name) const
     });
 }
 
-bool ImportStatement::has_bound_name(FlyString const& name) const
+bool ImportStatement::has_bound_name(Utf16FlyString const& name) const
 {
     return any_of(m_entries.begin(), m_entries.end(), [&](auto& entry) {
         return entry.local_name == name;
@@ -1632,13 +1636,14 @@ void ScopeNode::block_declaration_instantiation(VM& vm, Environment* environment
         // NOTE: Due to the use of MUST with `create_immutable_binding` and `create_mutable_binding` below,
         //       an exception should not result from `for_each_bound_name`.
         // a. For each element dn of the BoundNames of d, do
-        MUST(declaration.for_each_bound_identifier([&](auto const& identifier) {
+        MUST(declaration.for_each_bound_identifier([&](Identifier const& identifier) {
             if (identifier.is_local()) {
                 // NOTE: No need to create bindings for local variables as their values are not stored in an environment.
                 return;
             }
 
             auto const& name = identifier.string();
+
             // i. If IsConstantDeclaration of d is true, then
             if (is_constant_declaration) {
                 // 1. Perform ! env.CreateImmutableBinding(dn, true).
@@ -1678,7 +1683,7 @@ void ScopeNode::block_declaration_instantiation(VM& vm, Environment* environment
                 }
             } else {
                 VERIFY(is<DeclarativeEnvironment>(*environment));
-                static_cast<DeclarativeEnvironment&>(*environment).initialize_or_set_mutable_binding({}, vm, function_declaration.name(), function);
+                static_cast<DeclarativeEnvironment&>(*environment).initialize_or_set_mutable_binding({}, vm, function->name(), function);
             }
         }
     }));
@@ -1713,7 +1718,7 @@ ThrowCompletionOr<void> Program::global_declaration_instantiation(VM& vm, Global
     }));
 
     // 4. For each element name of varNames, do
-    TRY(for_each_var_declared_identifier([&](auto const& identifier) -> ThrowCompletionOr<void> {
+    TRY(for_each_var_declared_identifier([&](Identifier const& identifier) -> ThrowCompletionOr<void> {
         // a. If env.HasLexicalDeclaration(name) is true, throw a SyntaxError exception.
         if (global_environment.has_lexical_declaration(identifier.string()))
             return vm.throw_completion<SyntaxError>(ErrorType::TopLevelVariableAlreadyDeclared, identifier.string());
@@ -1726,11 +1731,13 @@ ThrowCompletionOr<void> Program::global_declaration_instantiation(VM& vm, Global
     Vector<FunctionDeclaration const&> functions_to_initialize;
 
     // 7. Let declaredFunctionNames be a new empty List.
-    HashTable<FlyString> declared_function_names;
+    HashTable<Utf16FlyString> declared_function_names;
 
     // 8. For each element d of varDeclarations, in reverse List order, do
 
     TRY(for_each_var_function_declaration_in_reverse_order([&](FunctionDeclaration const& function) -> ThrowCompletionOr<void> {
+        auto function_name = function.name();
+
         // a. If d is neither a VariableDeclaration nor a ForBinding nor a BindingIdentifier, then
         // i. Assert: d is either a FunctionDeclaration, a GeneratorDeclaration, an AsyncFunctionDeclaration, or an AsyncGeneratorDeclaration.
         // Note: This is checked in for_each_var_function_declaration_in_reverse_order.
@@ -1740,15 +1747,15 @@ ThrowCompletionOr<void> Program::global_declaration_instantiation(VM& vm, Global
         // iii. Let fn be the sole element of the BoundNames of d.
 
         // iv. If fn is not an element of declaredFunctionNames, then
-        if (declared_function_names.set(function.name()) != AK::HashSetResult::InsertedNewEntry)
+        if (declared_function_names.set(function_name) != AK::HashSetResult::InsertedNewEntry)
             return {};
 
         // 1. Let fnDefinable be ? env.CanDeclareGlobalFunction(fn).
-        auto function_definable = TRY(global_environment.can_declare_global_function(function.name()));
+        auto function_definable = TRY(global_environment.can_declare_global_function(function_name));
 
         // 2. If fnDefinable is false, throw a TypeError exception.
         if (!function_definable)
-            return vm.throw_completion<TypeError>(ErrorType::CannotDeclareGlobalFunction, function.name());
+            return vm.throw_completion<TypeError>(ErrorType::CannotDeclareGlobalFunction, function_name);
 
         // 3. Append fn to declaredFunctionNames.
         // Note: Already done in step iv. above.
@@ -1761,7 +1768,7 @@ ThrowCompletionOr<void> Program::global_declaration_instantiation(VM& vm, Global
     }));
 
     // 9. Let declaredVarNames be a new empty List.
-    HashTable<FlyString> declared_var_names;
+    HashTable<Utf16FlyString> declared_var_names;
 
     // 10. For each element d of varDeclarations, do
     TRY(for_each_var_scoped_variable_declaration([&](Declaration const& declaration) {
@@ -1769,8 +1776,9 @@ ThrowCompletionOr<void> Program::global_declaration_instantiation(VM& vm, Global
         // Note: This is done in for_each_var_scoped_variable_declaration.
 
         // i. For each String vn of the BoundNames of d, do
-        return declaration.for_each_bound_identifier([&](auto const& identifier) -> ThrowCompletionOr<void> {
+        return declaration.for_each_bound_identifier([&](Identifier const& identifier) -> ThrowCompletionOr<void> {
             auto const& name = identifier.string();
+
             // 1. If vn is not an element of declaredFunctionNames, then
             if (declared_function_names.contains(name))
                 return {};
@@ -1850,8 +1858,9 @@ ThrowCompletionOr<void> Program::global_declaration_instantiation(VM& vm, Global
     TRY(for_each_lexically_scoped_declaration([&](Declaration const& declaration) {
         // a. NOTE: Lexically declared names are only instantiated here but not initialized.
         // b. For each element dn of the BoundNames of d, do
-        return declaration.for_each_bound_identifier([&](auto const& identifier) -> ThrowCompletionOr<void> {
+        return declaration.for_each_bound_identifier([&](Identifier const& identifier) -> ThrowCompletionOr<void> {
             auto const& name = identifier.string();
+
             // i. If IsConstantDeclaration of d is true, then
             if (declaration.is_constant_declaration()) {
                 // 1. Perform ? env.CreateImmutableBinding(dn, true).
@@ -1882,7 +1891,7 @@ ThrowCompletionOr<void> Program::global_declaration_instantiation(VM& vm, Global
             private_environment);
 
         // c. Perform ? env.CreateGlobalFunctionBinding(fn, fo, false).
-        TRY(global_environment.create_global_function_binding(declaration.name(), function, false));
+        TRY(global_environment.create_global_function_binding(function->name(), function, false));
     }
 
     // 17. For each String vn of declaredVarNames, do
@@ -1895,7 +1904,7 @@ ThrowCompletionOr<void> Program::global_declaration_instantiation(VM& vm, Global
     return {};
 }
 
-ModuleRequest::ModuleRequest(FlyString module_specifier_, Vector<ImportAttribute> attributes)
+ModuleRequest::ModuleRequest(Utf16FlyString module_specifier_, Vector<ImportAttribute> attributes)
     : module_specifier(move(module_specifier_))
     , attributes(move(attributes))
 {

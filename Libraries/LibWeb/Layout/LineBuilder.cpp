@@ -21,12 +21,6 @@ LineBuilder::LineBuilder(InlineFormattingContext& context, LayoutState& layout_s
     begin_new_line(false);
 }
 
-LineBuilder::~LineBuilder()
-{
-    if (m_last_line_needs_update)
-        update_last_line();
-}
-
 void LineBuilder::break_line(ForcedBreak forced_break, Optional<CSSPixels> next_item_width)
 {
     // FIXME: Respect inline direction.
@@ -35,7 +29,9 @@ void LineBuilder::break_line(ForcedBreak forced_break, Optional<CSSPixels> next_
     last_line_box.m_has_break = true;
     last_line_box.m_has_forced_break = forced_break == ForcedBreak::Yes;
 
+    m_last_line_needs_update = true;
     update_last_line();
+
     size_t break_count = 0;
     bool floats_intrude_at_current_y = false;
     do {
@@ -90,7 +86,8 @@ void LineBuilder::append_box(Box const& box, CSSPixels leading_size, CSSPixels t
 {
     auto& box_state = m_layout_state.get_mutable(box);
     auto& line_box = ensure_last_line_box();
-    line_box.add_fragment(box, 0, 0, leading_size, trailing_size, leading_margin, trailing_margin, box_state.content_width(), box_state.content_height(), box_state.border_box_top(), box_state.border_box_bottom());
+    line_box.add_fragment(box, 0, 0, leading_size, trailing_size, leading_margin, trailing_margin,
+        box_state.content_width(), box_state.content_height(), box_state.border_box_top(), box_state.border_box_bottom());
     m_max_height_on_current_line = max(m_max_height_on_current_line, box_state.margin_box_height());
 
     box_state.containing_line_box_fragment = LineBoxFragmentCoordinate {
@@ -102,7 +99,8 @@ void LineBuilder::append_box(Box const& box, CSSPixels leading_size, CSSPixels t
 void LineBuilder::append_text_chunk(TextNode const& text_node, size_t offset_in_node, size_t length_in_node, CSSPixels leading_size, CSSPixels trailing_size, CSSPixels leading_margin, CSSPixels trailing_margin, CSSPixels content_width, CSSPixels content_height, RefPtr<Gfx::GlyphRun> glyph_run)
 {
     auto& line_box = ensure_last_line_box();
-    line_box.add_fragment(text_node, offset_in_node, length_in_node, leading_size, trailing_size, leading_margin, trailing_margin, content_width, content_height, 0, 0, move(glyph_run));
+    line_box.add_fragment(text_node, offset_in_node, length_in_node, leading_size, trailing_size, leading_margin,
+        trailing_margin, content_width, content_height, 0, 0, move(glyph_run));
 
     m_max_height_on_current_line = max(m_max_height_on_current_line, line_box.block_length());
 }
@@ -192,9 +190,11 @@ bool LineBuilder::should_break(CSSPixels next_item_width)
 
 void LineBuilder::update_last_line()
 {
+    if (!m_last_line_needs_update)
+        return;
     m_last_line_needs_update = false;
-    auto& line_boxes = m_containing_block_used_values.line_boxes;
 
+    auto& line_boxes = m_containing_block_used_values.line_boxes;
     if (line_boxes.is_empty())
         return;
 
@@ -222,6 +222,7 @@ void LineBuilder::update_last_line()
         switch (text_align) {
         case CSS::TextAlign::Center:
         case CSS::TextAlign::LibwebCenter:
+        case CSS::TextAlign::LibwebInheritOrCenter:
             inline_offset += excess_inline_space / 2;
             break;
         case CSS::TextAlign::Start:
@@ -301,9 +302,7 @@ void LineBuilder::update_last_line()
     CSSPixels uppermost_box_top = strut_top;
     CSSPixels lowermost_box_bottom = strut_bottom;
 
-    for (size_t i = 0; i < line_box.fragments().size(); ++i) {
-        auto& fragment = line_box.fragments()[i];
-
+    for (auto& fragment : line_box.fragments()) {
         CSSPixels new_fragment_inline_offset = inline_offset + fragment.inline_offset();
         CSSPixels new_fragment_block_offset = 0;
 

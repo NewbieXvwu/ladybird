@@ -59,13 +59,27 @@ enum class AnimationDirection {
 Bindings::FillMode css_fill_mode_to_bindings_fill_mode(CSS::AnimationFillMode mode);
 Bindings::PlaybackDirection css_animation_direction_to_bindings_playback_direction(CSS::AnimationDirection direction);
 
+// This object lives for the duration of an animation update, and is used to store per-element data about animated CSS properties.
+struct AnimationUpdateContext {
+    struct ElementData {
+        using PropertyMap = HashMap<CSS::PropertyID, NonnullRefPtr<CSS::StyleValue const>>;
+        PropertyMap animated_properties_before_update;
+        GC::Ptr<CSS::ComputedProperties> target_style;
+    };
+
+    ~AnimationUpdateContext();
+
+    // NOTE: This is lazily populated by KeyframeEffects as their respective animations are applied to an element.
+    HashMap<DOM::AbstractElement, NonnullOwnPtr<ElementData>> elements;
+};
+
 // https://www.w3.org/TR/web-animations-1/#the-animationeffect-interface
 class AnimationEffect : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(AnimationEffect, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(AnimationEffect);
 
 public:
-    static RefPtr<CSS::CSSStyleValue const> parse_easing_string(StringView value);
+    static RefPtr<CSS::StyleValue const> parse_easing_string(StringView value);
 
     EffectTiming get_timing() const;
     ComputedEffectTiming get_computed_timing() const;
@@ -144,7 +158,7 @@ public:
     virtual DOM::Element* target() const { return {}; }
     virtual bool is_keyframe_effect() const { return false; }
 
-    virtual void update_computed_properties() = 0;
+    virtual void update_computed_properties(AnimationUpdateContext&) = 0;
 
 protected:
     AnimationEffect(JS::Realm&);

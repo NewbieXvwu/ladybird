@@ -7,11 +7,12 @@
 #pragma once
 
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::Selection {
 
-class Selection final : public Bindings::PlatformObject {
+class WEB_API Selection final : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(Selection, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(Selection);
 
@@ -51,7 +52,7 @@ public:
     delete_from_document();
     bool contains_node(GC::Ref<DOM::Node>, bool allow_partial_containment) const;
 
-    String to_string() const;
+    Utf16String to_string() const;
 
     // Non-standard convenience accessor for the selection's range.
     GC::Ptr<DOM::Range> range() const;

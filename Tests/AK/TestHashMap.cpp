@@ -100,6 +100,46 @@ TEST_CASE(remove_all_matching)
     EXPECT_EQ(map.remove_all_matching([&](int, ByteString const&) { return true; }), false);
 }
 
+TEST_CASE(take_all_matching)
+{
+    HashMap<int, ByteString> map;
+
+    map.set(1, "One");
+    map.set(2, "Two");
+    map.set(3, "Three");
+    map.set(4, "Four");
+
+    EXPECT_EQ(map.size(), 4u);
+
+    auto first_entries = map.take_all_matching([&](int key, ByteString const& value) { return key == 1 || value == "Two"; });
+    EXPECT_EQ(first_entries.size(), 2u);
+    auto first_low_index = first_entries[0].key > first_entries[1].key ? 1 : 0;
+    EXPECT_EQ(first_entries[first_low_index].key, 1);
+    EXPECT_EQ(first_entries[first_low_index].value, "One");
+    EXPECT_EQ(first_entries[1 - first_low_index].key, 2);
+    EXPECT_EQ(first_entries[1 - first_low_index].value, "Two");
+    EXPECT_EQ(map.size(), 2u);
+
+    EXPECT(map.take_all_matching([&](int, ByteString const&) { return false; }).is_empty());
+    EXPECT_EQ(map.size(), 2u);
+
+    EXPECT(map.contains(3));
+    EXPECT(map.contains(4));
+
+    auto second_entries = map.take_all_matching([&](int, ByteString const&) { return true; });
+    EXPECT_EQ(second_entries.size(), 2u);
+    auto second_low_index = second_entries[0].key > second_entries[1].key ? 1 : 0;
+    EXPECT_EQ(second_entries[second_low_index].key, 3);
+    EXPECT_EQ(second_entries[second_low_index].value, "Three");
+    EXPECT_EQ(second_entries[1 - second_low_index].key, 4);
+    EXPECT_EQ(second_entries[1 - second_low_index].value, "Four");
+    EXPECT(map.take_all_matching([&](int, ByteString const&) { return false; }).is_empty());
+
+    EXPECT(map.is_empty());
+
+    EXPECT(map.take_all_matching([&](int, ByteString const&) { return true; }).is_empty());
+}
+
 TEST_CASE(case_insensitive)
 {
     HashMap<ByteString, int, CaseInsensitiveStringTraits> casemap;
@@ -326,4 +366,45 @@ TEST_CASE(move_assign)
     EXPECT_EQ(orig.get(2), Optional<int>());
     EXPECT_EQ(second.size(), static_cast<size_t>(3));
     EXPECT_EQ(second.get(2), Optional<int>(20));
+}
+
+TEST_CASE(update)
+{
+    HashMap<int, int> first;
+    HashMap<int, int> second;
+
+    first.set(1, 10);
+    first.set(2, 20);
+
+    second.set(1, 9);
+    second.set(3, 30);
+    second.set(4, 40);
+
+    first.update(second);
+
+    EXPECT_EQ(4u, first.size());
+    EXPECT_EQ(3u, second.size());
+
+    EXPECT_EQ(9, first.get(1));
+    EXPECT_EQ(20, first.get(2));
+    EXPECT_EQ(30, first.get(3));
+    EXPECT_EQ(40, first.get(4));
+
+    second.update(first);
+    EXPECT_EQ(4u, second.size());
+}
+
+TEST_CASE(compare)
+{
+    HashMap<int, int> first;
+    HashMap<int, int> second;
+
+    EXPECT_EQ(first, second);
+
+    first.set(1, 10);
+    second.set(1, 10);
+    EXPECT_EQ(first, second);
+
+    first.set(2, 20);
+    EXPECT_NE(second, first);
 }

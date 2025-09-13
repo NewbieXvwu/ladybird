@@ -53,9 +53,9 @@ void HTMLTextAreaElement::adjust_computed_style(CSS::ComputedProperties& style)
         style.set_property(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::InlineBlock)));
 
     if (style.property(CSS::PropertyID::Width).has_auto())
-        style.set_property(CSS::PropertyID::Width, CSS::LengthStyleValue::create(CSS::Length(cols(), CSS::Length::Type::Ch)));
+        style.set_property(CSS::PropertyID::Width, CSS::LengthStyleValue::create(CSS::Length(cols(), CSS::LengthUnit::Ch)));
     if (style.property(CSS::PropertyID::Height).has_auto())
-        style.set_property(CSS::PropertyID::Height, CSS::LengthStyleValue::create(CSS::Length(rows(), CSS::Length::Type::Lh)));
+        style.set_property(CSS::PropertyID::Height, CSS::LengthStyleValue::create(CSS::Length(rows(), CSS::LengthUnit::Lh)));
 }
 
 void HTMLTextAreaElement::initialize(JS::Realm& realm)
@@ -155,28 +155,28 @@ void HTMLTextAreaElement::form_associated_element_was_inserted()
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-textarea-defaultvalue
-String HTMLTextAreaElement::default_value() const
+Utf16String HTMLTextAreaElement::default_value() const
 {
     // The defaultValue attribute's getter must return the element's child text content.
     return child_text_content();
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-textarea-defaultvalue
-void HTMLTextAreaElement::set_default_value(String const& default_value)
+void HTMLTextAreaElement::set_default_value(Utf16String const& default_value)
 {
     // The defaultValue attribute's setter must string replace all with the given value within this element.
     string_replace_all(default_value);
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-textarea-value
-String HTMLTextAreaElement::value() const
+Utf16String HTMLTextAreaElement::value() const
 {
     // The value IDL attribute must, on getting, return the element's API value.
     return api_value();
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-textarea-value
-void HTMLTextAreaElement::set_value(String const& value)
+void HTMLTextAreaElement::set_value(Utf16String const& value)
 {
     // 1. Let oldAPIValue be this element's API value.
     auto old_api_value = api_value();
@@ -199,7 +199,7 @@ void HTMLTextAreaElement::set_value(String const& value)
     }
 }
 
-void HTMLTextAreaElement::set_raw_value(String value)
+void HTMLTextAreaElement::set_raw_value(Utf16String value)
 {
     auto old_raw_value = move(m_raw_value);
     m_raw_value = move(value);
@@ -210,7 +210,7 @@ void HTMLTextAreaElement::set_raw_value(String value)
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element:concept-fe-api-value-3
-String HTMLTextAreaElement::api_value() const
+Utf16String HTMLTextAreaElement::api_value() const
 {
     // The algorithm for obtaining the element's API value is to return the element's raw value, with newlines normalized.
     if (!m_api_value.has_value())
@@ -219,7 +219,7 @@ String HTMLTextAreaElement::api_value() const
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-textarea/input-relevant-value
-WebIDL::ExceptionOr<void> HTMLTextAreaElement::set_relevant_value(String const& value)
+WebIDL::ExceptionOr<void> HTMLTextAreaElement::set_relevant_value(Utf16String const& value)
 {
     set_value(value);
     return {};
@@ -229,26 +229,7 @@ WebIDL::ExceptionOr<void> HTMLTextAreaElement::set_relevant_value(String const& 
 u32 HTMLTextAreaElement::text_length() const
 {
     // The textLength IDL attribute must return the length of the element's API value.
-    return AK::utf16_code_unit_length_from_utf8(api_value());
-}
-
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-willvalidate
-bool HTMLTextAreaElement::will_validate()
-{
-    // The willValidate attribute's getter must return true, if this element is a candidate for constraint validation
-    return is_candidate_for_constraint_validation();
-}
-
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-checkvalidity
-bool HTMLTextAreaElement::check_validity()
-{
-    return check_validity_steps();
-}
-
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-reportvalidity
-bool HTMLTextAreaElement::report_validity()
-{
-    return report_validity_steps();
+    return api_value().length_in_code_units();
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-textarea-maxlength
@@ -369,15 +350,13 @@ void HTMLTextAreaElement::create_shadow_tree_if_needed()
     m_placeholder_element->set_use_pseudo_element(CSS::PseudoElement::Placeholder);
     MUST(element->append_child(*m_placeholder_element));
 
-    m_placeholder_text_node = realm().create<DOM::Text>(document(), String {});
-    m_placeholder_text_node->set_data(get_attribute_value(HTML::AttributeNames::placeholder));
+    m_placeholder_text_node = realm().create<DOM::Text>(document(), Utf16String::from_utf8(get_attribute_value(HTML::AttributeNames::placeholder)));
     MUST(m_placeholder_element->append_child(*m_placeholder_text_node));
 
     m_inner_text_element = MUST(DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML));
     MUST(element->append_child(*m_inner_text_element));
 
-    m_text_node = realm().create<DOM::Text>(document(), String {});
-    handle_readonly_attribute(attribute(HTML::AttributeNames::readonly));
+    m_text_node = realm().create<DOM::Text>(document(), Utf16String {});
     // NOTE: If `children_changed()` was called before now, `m_raw_value` will hold the text content.
     //       Otherwise, it will get filled in whenever that does get called.
     m_text_node->set_text_content(m_raw_value);
@@ -385,13 +364,6 @@ void HTMLTextAreaElement::create_shadow_tree_if_needed()
     MUST(m_inner_text_element->append_child(*m_text_node));
 
     update_placeholder_visibility();
-}
-
-// https://html.spec.whatwg.org/multipage/input.html#attr-input-readonly
-void HTMLTextAreaElement::handle_readonly_attribute(Optional<String> const& maybe_value)
-{
-    // The readonly attribute is a boolean attribute that controls whether or not the user can edit the form control. When specified, the element is not mutable.
-    set_is_mutable(!maybe_value.has_value());
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-textarea-maxlength
@@ -438,13 +410,11 @@ void HTMLTextAreaElement::children_changed(ChildrenChangedMetadata const* metada
     }
 }
 
-void HTMLTextAreaElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const&)
+void HTMLTextAreaElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const& value, Optional<FlyString> const&)
 {
     if (name == HTML::AttributeNames::placeholder) {
         if (m_placeholder_text_node)
-            m_placeholder_text_node->set_data(value.value_or(String {}));
-    } else if (name == HTML::AttributeNames::readonly) {
-        handle_readonly_attribute(value);
+            m_placeholder_text_node->set_data(Utf16String::from_utf8(value.value_or(String {})));
     } else if (name == HTML::AttributeNames::maxlength) {
         handle_maxlength_attribute();
     }
@@ -488,6 +458,13 @@ bool HTMLTextAreaElement::suffering_from_being_missing() const
     // If the element has its required attribute specified, and the element is mutable, and the element's value is the empty string, then the element is suffering from
     // being missing.
     return has_attribute(HTML::AttributeNames::required) && is_mutable() && value().is_empty();
+}
+
+// https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element:concept-fe-mutable
+bool HTMLTextAreaElement::is_mutable() const
+{
+    // A textarea element is mutable if it is neither disabled nor has a readonly attribute specified.
+    return enabled() && !has_attribute(AttributeNames::readonly);
 }
 
 }

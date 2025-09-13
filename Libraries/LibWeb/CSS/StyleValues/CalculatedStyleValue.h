@@ -11,14 +11,15 @@
 
 #include <AK/Function.h>
 #include <LibWeb/CSS/Angle.h>
-#include <LibWeb/CSS/CSSNumericType.h>
-#include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/Flex.h>
 #include <LibWeb/CSS/Frequency.h>
 #include <LibWeb/CSS/Length.h>
+#include <LibWeb/CSS/Number.h>
+#include <LibWeb/CSS/NumericType.h>
 #include <LibWeb/CSS/Percentage.h>
 #include <LibWeb/CSS/Resolution.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/CSS/Time.h>
 
 namespace Web::CSS {
@@ -30,21 +31,17 @@ class CalculationNode;
 struct CalculationContext {
     Optional<ValueType> percentages_resolve_as {};
     bool resolve_numbers_as_integers = false;
-};
-// Contains the context for resolving the calculation.
-struct CalculationResolutionContext {
-    Variant<Empty, Angle, Frequency, Length, Time> percentage_basis {};
-    Optional<Length::ResolutionContext> length_resolution_context;
+    AcceptedTypeRangeMap accepted_type_ranges {};
 };
 
-class CalculatedStyleValue : public CSSStyleValue {
+class CalculatedStyleValue : public StyleValue {
 public:
     class CalculationResult {
     public:
         using Value = Variant<Number, Angle, Flex, Frequency, Length, Percentage, Resolution, Time>;
-        static CalculationResult from_value(Value const&, CalculationResolutionContext const&, Optional<CSSNumericType>);
+        static CalculationResult from_value(Value const&, CalculationResolutionContext const&, Optional<NumericType>);
 
-        CalculationResult(double value, Optional<CSSNumericType> type)
+        CalculationResult(double value, Optional<NumericType> type)
             : m_value(value)
             , m_type(move(type))
         {
@@ -58,50 +55,62 @@ public:
         void invert();
 
         double value() const { return m_value; }
-        Optional<CSSNumericType> const& type() const { return m_type; }
+        Optional<NumericType> const& type() const { return m_type; }
 
         [[nodiscard]] bool operator==(CalculationResult const&) const = default;
 
     private:
         double m_value;
-        Optional<CSSNumericType> m_type;
+        Optional<NumericType> m_type;
     };
 
-    static ValueComparingNonnullRefPtr<CalculatedStyleValue const> create(NonnullRefPtr<CalculationNode const> calculation, CSSNumericType resolved_type, CalculationContext context)
+    static ValueComparingNonnullRefPtr<CalculatedStyleValue const> create(NonnullRefPtr<CalculationNode const> calculation, NumericType resolved_type, CalculationContext context)
     {
         return adopt_ref(*new (nothrow) CalculatedStyleValue(move(calculation), move(resolved_type), move(context)));
     }
 
     virtual String to_string(SerializationMode) const override;
-    virtual bool equals(CSSStyleValue const& other) const override;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const override;
+    virtual bool equals(StyleValue const& other) const override;
+
+    NonnullRefPtr<CalculationNode const> calculation() const { return m_calculation; }
 
     bool resolves_to_angle() const { return m_resolved_type.matches_angle(m_context.percentages_resolve_as); }
     bool resolves_to_angle_percentage() const { return m_resolved_type.matches_angle_percentage(m_context.percentages_resolve_as); }
+    Optional<Angle> resolve_angle_deprecated(CalculationResolutionContext const&) const;
     Optional<Angle> resolve_angle(CalculationResolutionContext const&) const;
 
     bool resolves_to_flex() const { return m_resolved_type.matches_flex(m_context.percentages_resolve_as); }
+    Optional<Flex> resolve_flex_deprecated(CalculationResolutionContext const&) const;
     Optional<Flex> resolve_flex(CalculationResolutionContext const&) const;
 
     bool resolves_to_frequency() const { return m_resolved_type.matches_frequency(m_context.percentages_resolve_as); }
     bool resolves_to_frequency_percentage() const { return m_resolved_type.matches_frequency_percentage(m_context.percentages_resolve_as); }
+    Optional<Frequency> resolve_frequency_deprecated(CalculationResolutionContext const&) const;
     Optional<Frequency> resolve_frequency(CalculationResolutionContext const&) const;
 
     bool resolves_to_length() const { return m_resolved_type.matches_length(m_context.percentages_resolve_as); }
     bool resolves_to_length_percentage() const { return m_resolved_type.matches_length_percentage(m_context.percentages_resolve_as); }
+    Optional<Length> resolve_length_deprecated(CalculationResolutionContext const&) const;
     Optional<Length> resolve_length(CalculationResolutionContext const&) const;
 
     bool resolves_to_percentage() const { return m_resolved_type.matches_percentage(); }
+    Optional<Percentage> resolve_percentage_deprecated(CalculationResolutionContext const&) const;
     Optional<Percentage> resolve_percentage(CalculationResolutionContext const&) const;
 
     bool resolves_to_resolution() const { return m_resolved_type.matches_resolution(m_context.percentages_resolve_as); }
+    Optional<Resolution> resolve_resolution_deprecated(CalculationResolutionContext const&) const;
     Optional<Resolution> resolve_resolution(CalculationResolutionContext const&) const;
 
     bool resolves_to_time() const { return m_resolved_type.matches_time(m_context.percentages_resolve_as); }
     bool resolves_to_time_percentage() const { return m_resolved_type.matches_time_percentage(m_context.percentages_resolve_as); }
+    Optional<Time> resolve_time_deprecated(CalculationResolutionContext const&) const;
     Optional<Time> resolve_time(CalculationResolutionContext const&) const;
 
     bool resolves_to_number() const { return m_resolved_type.matches_number(m_context.percentages_resolve_as); }
+    Optional<double> resolve_number_deprecated(CalculationResolutionContext const&) const;
     Optional<double> resolve_number(CalculationResolutionContext const&) const;
+    Optional<i64> resolve_integer_deprecated(CalculationResolutionContext const&) const;
     Optional<i64> resolve_integer(CalculationResolutionContext const&) const;
 
     bool resolves_to_dimension() const { return m_resolved_type.matches_dimension(); }
@@ -110,18 +119,26 @@ public:
 
     String dump() const;
 
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, String const& associated_property) const override;
+
 private:
-    explicit CalculatedStyleValue(NonnullRefPtr<CalculationNode const> calculation, CSSNumericType resolved_type, CalculationContext context)
-        : CSSStyleValue(Type::Calculated)
+    explicit CalculatedStyleValue(NonnullRefPtr<CalculationNode const> calculation, NumericType resolved_type, CalculationContext context)
+        : StyleValue(Type::Calculated)
         , m_resolved_type(move(resolved_type))
         , m_calculation(move(calculation))
         , m_context(move(context))
     {
     }
 
+    struct ResolvedValue {
+        double value;
+        Optional<NumericType> type;
+    };
+    Optional<ResolvedValue> resolve_value(CalculationResolutionContext const&) const;
+
     Optional<ValueType> percentage_resolved_type() const;
 
-    CSSNumericType m_resolved_type;
+    NumericType m_resolved_type;
     NonnullRefPtr<CalculationNode const> m_calculation;
     CalculationContext m_context;
 };
@@ -227,7 +244,7 @@ public:
     StringView name() const;
     virtual Vector<NonnullRefPtr<CalculationNode const>> children() const = 0;
 
-    Optional<CSSNumericType> const& numeric_type() const { return m_numeric_type; }
+    Optional<NumericType> const& numeric_type() const { return m_numeric_type; }
     virtual bool contains_percentage() const = 0;
     virtual CalculatedStyleValue::CalculationResult resolve(CalculationResolutionContext const&) const = 0;
     virtual NonnullRefPtr<CalculationNode const> with_simplified_children(CalculationContext const&, CalculationResolutionContext const&) const = 0;
@@ -236,13 +253,14 @@ public:
 
     virtual void dump(StringBuilder&, int indent) const = 0;
     virtual bool equals(CalculationNode const&) const = 0;
+    virtual GC::Ptr<CSSNumericValue> reify(JS::Realm&) const { return nullptr; }
 
 protected:
-    CalculationNode(Type, Optional<CSSNumericType>);
+    CalculationNode(Type, Optional<NumericType>);
 
 private:
     Type m_type;
-    Optional<CSSNumericType> m_numeric_type;
+    Optional<NumericType> m_numeric_type;
 };
 
 enum class NonFiniteValue {
@@ -262,7 +280,7 @@ public:
     virtual CalculatedStyleValue::CalculationResult resolve(CalculationResolutionContext const&) const override;
     virtual NonnullRefPtr<CalculationNode const> with_simplified_children(CalculationContext const&, CalculationResolutionContext const&) const override { return *this; }
 
-    RefPtr<CSSStyleValue const> to_style_value(CalculationContext const&) const;
+    RefPtr<StyleValue const> to_style_value(CalculationContext const&) const;
 
     virtual Vector<NonnullRefPtr<CalculationNode const>> children() const override { return {}; }
     NumericValue const& value() const { return m_value; }
@@ -274,9 +292,10 @@ public:
 
     virtual void dump(StringBuilder&, int indent) const override;
     virtual bool equals(CalculationNode const&) const override;
+    virtual GC::Ptr<CSSNumericValue> reify(JS::Realm&) const override;
 
 private:
-    NumericCalculationNode(NumericValue, CSSNumericType);
+    NumericCalculationNode(NumericValue, NumericType);
     NumericValue m_value;
 };
 
@@ -293,9 +312,10 @@ public:
 
     virtual void dump(StringBuilder&, int indent) const override;
     virtual bool equals(CalculationNode const&) const override;
+    virtual GC::Ptr<CSSNumericValue> reify(JS::Realm&) const override;
 
 private:
-    SumCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<CSSNumericType>);
+    SumCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<NumericType>);
     Vector<NonnullRefPtr<CalculationNode const>> m_values;
 };
 
@@ -312,9 +332,10 @@ public:
 
     virtual void dump(StringBuilder&, int indent) const override;
     virtual bool equals(CalculationNode const&) const override;
+    virtual GC::Ptr<CSSNumericValue> reify(JS::Realm&) const override;
 
 private:
-    ProductCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<CSSNumericType>);
+    ProductCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<NumericType>);
     Vector<NonnullRefPtr<CalculationNode const>> m_values;
 };
 
@@ -332,6 +353,7 @@ public:
 
     virtual void dump(StringBuilder&, int indent) const override;
     virtual bool equals(CalculationNode const&) const override;
+    virtual GC::Ptr<CSSNumericValue> reify(JS::Realm&) const override;
 
 private:
     explicit NegateCalculationNode(NonnullRefPtr<CalculationNode const>);
@@ -352,9 +374,10 @@ public:
 
     virtual void dump(StringBuilder&, int indent) const override;
     virtual bool equals(CalculationNode const&) const override;
+    virtual GC::Ptr<CSSNumericValue> reify(JS::Realm&) const override;
 
 private:
-    InvertCalculationNode(NonnullRefPtr<CalculationNode const>, Optional<CSSNumericType>);
+    InvertCalculationNode(NonnullRefPtr<CalculationNode const>, Optional<NumericType>);
     NonnullRefPtr<CalculationNode const> m_value;
 };
 
@@ -372,9 +395,10 @@ public:
 
     virtual void dump(StringBuilder&, int indent) const override;
     virtual bool equals(CalculationNode const&) const override;
+    virtual GC::Ptr<CSSNumericValue> reify(JS::Realm&) const override;
 
 private:
-    MinCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<CSSNumericType>);
+    MinCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<NumericType>);
     Vector<NonnullRefPtr<CalculationNode const>> m_values;
 };
 
@@ -392,9 +416,10 @@ public:
 
     virtual void dump(StringBuilder&, int indent) const override;
     virtual bool equals(CalculationNode const&) const override;
+    virtual GC::Ptr<CSSNumericValue> reify(JS::Realm&) const override;
 
 private:
-    MaxCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<CSSNumericType>);
+    MaxCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<NumericType>);
     Vector<NonnullRefPtr<CalculationNode const>> m_values;
 };
 
@@ -412,9 +437,10 @@ public:
 
     virtual void dump(StringBuilder&, int indent) const override;
     virtual bool equals(CalculationNode const&) const override;
+    virtual GC::Ptr<CSSNumericValue> reify(JS::Realm&) const override;
 
 private:
-    ClampCalculationNode(NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, Optional<CSSNumericType>);
+    ClampCalculationNode(NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, Optional<NumericType>);
     NonnullRefPtr<CalculationNode const> m_min_value;
     NonnullRefPtr<CalculationNode const> m_center_value;
     NonnullRefPtr<CalculationNode const> m_max_value;
@@ -658,7 +684,7 @@ public:
     virtual bool equals(CalculationNode const&) const override;
 
 private:
-    HypotCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<CSSNumericType>);
+    HypotCalculationNode(Vector<NonnullRefPtr<CalculationNode const>>, Optional<NumericType>);
     Vector<NonnullRefPtr<CalculationNode const>> m_values;
 };
 
@@ -721,7 +747,7 @@ public:
     virtual bool equals(CalculationNode const&) const override;
 
 private:
-    RoundCalculationNode(RoundingStrategy, NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, Optional<CSSNumericType>);
+    RoundCalculationNode(RoundingStrategy, NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, Optional<NumericType>);
     RoundingStrategy m_strategy;
     NonnullRefPtr<CalculationNode const> m_x;
     NonnullRefPtr<CalculationNode const> m_y;
@@ -743,7 +769,7 @@ public:
     virtual bool equals(CalculationNode const&) const override;
 
 private:
-    ModCalculationNode(NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, Optional<CSSNumericType>);
+    ModCalculationNode(NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, Optional<NumericType>);
     NonnullRefPtr<CalculationNode const> m_x;
     NonnullRefPtr<CalculationNode const> m_y;
 };
@@ -764,7 +790,7 @@ public:
     virtual bool equals(CalculationNode const&) const override;
 
 private:
-    RemCalculationNode(NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, Optional<CSSNumericType>);
+    RemCalculationNode(NonnullRefPtr<CalculationNode const>, NonnullRefPtr<CalculationNode const>, Optional<NumericType>);
     NonnullRefPtr<CalculationNode const> m_x;
     NonnullRefPtr<CalculationNode const> m_y;
 };

@@ -8,12 +8,13 @@
 
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/HTMLOrSVGElement.h>
 #include <LibWeb/SVG/SVGAnimatedString.h>
 
 namespace Web::SVG {
 
-class SVGElement
+class WEB_API SVGElement
     : public DOM::Element
     , public HTML::GlobalEventHandlers
     , public HTML::HTMLOrSVGElement<SVGElement> {
@@ -29,6 +30,7 @@ public:
     bool should_include_in_accessibility_tree() const;
     virtual Optional<ARIA::Role> default_role() const override;
 
+    GC::Ref<SVGAnimatedLength> fake_animated_length_fixme() const;
     GC::Ref<SVGAnimatedLength> svg_animated_length_for_property(CSS::PropertyID) const;
 
     virtual bool is_presentational_hint(FlyString const&) const override;

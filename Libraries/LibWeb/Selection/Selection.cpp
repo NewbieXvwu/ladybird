@@ -144,7 +144,7 @@ WebIDL::ExceptionOr<GC::Ptr<DOM::Range>> Selection::get_range_at(unsigned index)
     auto is_anchor_in_document_tree = anchor && &anchor->document() == document();
 
     if (index != 0 || is_empty() || !is_focus_in_document_tree || !is_anchor_in_document_tree)
-        return WebIDL::IndexSizeError::create(realm(), "Selection.getRangeAt() on empty Selection or with invalid argument"_string);
+        return WebIDL::IndexSizeError::create(realm(), "Selection.getRangeAt() on empty Selection or with invalid argument"_utf16);
 
     // Otherwise, it must return a reference to (not a copy of) this's range.
     return m_range;
@@ -178,7 +178,7 @@ WebIDL::ExceptionOr<void> Selection::remove_range(GC::Ref<DOM::Range> range)
     }
 
     // Otherwise, it must throw a NotFoundError.
-    return WebIDL::NotFoundError::create(realm(), "Selection.removeRange() with invalid argument"_string);
+    return WebIDL::NotFoundError::create(realm(), "Selection.removeRange() with invalid argument"_utf16);
 }
 
 // https://w3c.github.io/selection-api/#dom-selection-removeallranges
@@ -206,11 +206,11 @@ WebIDL::ExceptionOr<void> Selection::collapse(GC::Ptr<DOM::Node> node, unsigned 
 
     // 2. If node is a DocumentType, throw an InvalidNodeTypeError exception and abort these steps.
     if (node->is_document_type())
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Selection.collapse() with DocumentType node"_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Selection.collapse() with DocumentType node"_utf16);
 
     // 3. The method must throw an IndexSizeError exception if offset is longer than node's length and abort these steps.
     if (offset > node->length())
-        return WebIDL::IndexSizeError::create(realm(), "Selection.collapse() with offset longer than node's length"_string);
+        return WebIDL::IndexSizeError::create(realm(), "Selection.collapse() with offset longer than node's length"_utf16);
 
     // 4. If document associated with this is not a shadow-including inclusive ancestor of node, abort these steps.
     if (!m_document->is_shadow_including_inclusive_ancestor_of(*node))
@@ -240,7 +240,7 @@ WebIDL::ExceptionOr<void> Selection::collapse_to_start()
 {
     // 1. The method must throw InvalidStateError exception if the this is empty.
     if (!m_range) {
-        return WebIDL::InvalidStateError::create(realm(), "Selection.collapse_to_start() on empty range"_string);
+        return WebIDL::InvalidStateError::create(realm(), "Selection.collapse_to_start() on empty range"_utf16);
     }
 
     // 2. Otherwise, it must create a new range
@@ -260,7 +260,7 @@ WebIDL::ExceptionOr<void> Selection::collapse_to_end()
 {
     // 1. The method must throw InvalidStateError exception if the this is empty.
     if (!m_range) {
-        return WebIDL::InvalidStateError::create(realm(), "Selection.collapse_to_end() on empty range"_string);
+        return WebIDL::InvalidStateError::create(realm(), "Selection.collapse_to_end() on empty range"_utf16);
     }
 
     // 2. Otherwise, it must create a new range
@@ -285,7 +285,7 @@ WebIDL::ExceptionOr<void> Selection::extend(GC::Ref<DOM::Node> node, unsigned of
 
     // 2. If this is empty, throw an InvalidStateError exception and abort these steps.
     if (!m_range) {
-        return WebIDL::InvalidStateError::create(realm(), "Selection.extend() on empty range"_string);
+        return WebIDL::InvalidStateError::create(realm(), "Selection.extend() on empty range"_utf16);
     }
 
     // 3. Let oldAnchor and oldFocus be the this's anchor and focus, and let newFocus be the boundary point (node, offset).
@@ -332,10 +332,10 @@ WebIDL::ExceptionOr<void> Selection::set_base_and_extent(GC::Ref<DOM::Node> anch
 {
     // 1. If anchorOffset is longer than anchorNode's length or if focusOffset is longer than focusNode's length, throw an IndexSizeError exception and abort these steps.
     if (anchor_offset > anchor_node->length())
-        return WebIDL::IndexSizeError::create(realm(), "Anchor offset points outside of the anchor node"_string);
+        return WebIDL::IndexSizeError::create(realm(), "Anchor offset points outside of the anchor node"_utf16);
 
     if (focus_offset > focus_node->length())
-        return WebIDL::IndexSizeError::create(realm(), "Focus offset points outside of the focus node"_string);
+        return WebIDL::IndexSizeError::create(realm(), "Focus offset points outside of the focus node"_utf16);
 
     // 2. If document associated with this is not a shadow-including inclusive ancestor of anchorNode or focusNode, abort these steps.
     if (!m_document->is_shadow_including_inclusive_ancestor_of(anchor_node) || !m_document->is_shadow_including_inclusive_ancestor_of(focus_node))
@@ -374,7 +374,7 @@ WebIDL::ExceptionOr<void> Selection::select_all_children(GC::Ref<DOM::Node> node
 {
     // 1. If node is a DocumentType, throw an InvalidNodeTypeError exception and abort these steps.
     if (node->is_document_type())
-        return WebIDL::InvalidNodeTypeError::create(realm(), "Selection.selectAllChildren() with DocumentType node"_string);
+        return WebIDL::InvalidNodeTypeError::create(realm(), "Selection.selectAllChildren() with DocumentType node"_utf16);
 
     // 2. If node's root is not the document associated with this, abort these steps.
     if (&node->root() != m_document.ptr())
@@ -504,12 +504,12 @@ bool Selection::contains_node(GC::Ref<DOM::Node> node, bool allow_partial_contai
         && (end_relative_position == DOM::RelativeBoundaryPointPosition::Equal || end_relative_position == DOM::RelativeBoundaryPointPosition::After);
 }
 
-String Selection::to_string() const
+Utf16String Selection::to_string() const
 {
     // FIXME: This needs more work to be compatible with other engines.
     //        See https://www.w3.org/Bugs/Public/show_bug.cgi?id=10583
     if (!m_range)
-        return String {};
+        return {};
     return m_range->to_string();
 }
 
@@ -525,25 +525,35 @@ GC::Ptr<DOM::Range> Selection::range() const
 
 void Selection::set_range(GC::Ptr<DOM::Range> range)
 {
-    if (m_range == range)
+    auto old_range = m_range;
+    if (old_range == range)
         return;
 
-    if (m_range)
-        m_range->set_associated_selection({}, nullptr);
+    if (old_range)
+        old_range->set_associated_selection({}, nullptr);
 
-    auto range_changed = ((m_range == nullptr) != (range == nullptr)) || (m_range && *m_range != *range);
     m_range = range;
 
-    if (m_range)
-        m_range->set_associated_selection({}, this);
+    if (range)
+        range->set_associated_selection({}, this);
 
     // https://w3c.github.io/editing/docs/execCommand/#state-override
     // Whenever the number of ranges in the selection changes to something different, and whenever a boundary point of
     // the range at a given index in the selection changes to something different, the state override and value override
     // must be unset for every command.
-    if (range_changed) {
+    if (((old_range == nullptr) != (range == nullptr)) || (old_range && *old_range != *range)) {
         m_document->reset_command_state_overrides();
         m_document->reset_command_value_overrides();
+    }
+
+    // https://developer.mozilla.org/en-US/docs/Web/API/Selection#behavior_of_selection_api_in_terms_of_editing_host_focus_changes
+    // AD-HOC: Focus editing host if the previous selection was outside of it. There seems to be no spec for this.
+    if (range && range->start_container()->is_editable_or_editing_host()) {
+        GC::Ref new_editing_host = *range->start_container()->editing_host();
+        if (document()->focused_area() != new_editing_host) {
+            // FIXME: Determine and propagate the right focus trigger.
+            HTML::run_focusing_steps(new_editing_host, nullptr, HTML::FocusTrigger::Other);
+        }
     }
 }
 
@@ -557,59 +567,54 @@ GC::Ptr<DOM::Position> Selection::cursor_position() const
 
 void Selection::move_offset_to_next_character(bool collapse_selection)
 {
-    auto anchor_node = this->anchor_node();
-    if (!anchor_node || !is<DOM::Text>(*anchor_node))
+    auto* text_node = as_if<DOM::Text>(anchor_node().ptr());
+    if (!text_node)
         return;
 
-    auto& text_node = static_cast<DOM::Text&>(*anchor_node);
-    if (auto offset = text_node.grapheme_segmenter().next_boundary(focus_offset()); offset.has_value()) {
+    if (auto offset = text_node->grapheme_segmenter().next_boundary(focus_offset()); offset.has_value()) {
         if (collapse_selection) {
-            MUST(collapse(*anchor_node, *offset));
+            MUST(collapse(text_node, *offset));
             m_document->reset_cursor_blink_cycle();
         } else {
-            MUST(set_base_and_extent(*anchor_node, anchor_offset(), *anchor_node, *offset));
+            MUST(set_base_and_extent(*text_node, anchor_offset(), *text_node, *offset));
         }
     }
 }
 
 void Selection::move_offset_to_previous_character(bool collapse_selection)
 {
-    auto anchor_node = this->anchor_node();
-    if (!anchor_node || !is<DOM::Text>(*anchor_node))
+    auto* text_node = as_if<DOM::Text>(anchor_node().ptr());
+    if (!text_node)
         return;
 
-    auto& text_node = static_cast<DOM::Text&>(*anchor_node);
-    if (auto offset = text_node.grapheme_segmenter().previous_boundary(focus_offset()); offset.has_value()) {
+    if (auto offset = text_node->grapheme_segmenter().previous_boundary(focus_offset()); offset.has_value()) {
         if (collapse_selection) {
-            MUST(collapse(*anchor_node, *offset));
+            MUST(collapse(text_node, *offset));
             m_document->reset_cursor_blink_cycle();
         } else {
-            MUST(set_base_and_extent(*anchor_node, anchor_offset(), *anchor_node, *offset));
+            MUST(set_base_and_extent(*text_node, anchor_offset(), *text_node, *offset));
         }
     }
 }
 
 void Selection::move_offset_to_next_word(bool collapse_selection)
 {
-    auto anchor_node = this->anchor_node();
-    if (!anchor_node || !is<DOM::Text>(*anchor_node)) {
+    auto* text_node = as_if<DOM::Text>(anchor_node().ptr());
+    if (!text_node)
         return;
-    }
 
-    auto& text_node = static_cast<DOM::Text&>(*anchor_node);
     while (true) {
         auto focus_offset = this->focus_offset();
-        if (focus_offset == text_node.data().bytes_as_string_view().length()) {
+        if (focus_offset == text_node->data().length_in_code_units())
             return;
-        }
 
-        if (auto offset = text_node.word_segmenter().next_boundary(focus_offset); offset.has_value()) {
-            auto word = text_node.data().code_points().substring_view(focus_offset, *offset - focus_offset);
+        if (auto offset = text_node->word_segmenter().next_boundary(focus_offset); offset.has_value()) {
+            auto word = text_node->data().substring_view(focus_offset, *offset - focus_offset);
             if (collapse_selection) {
-                MUST(collapse(anchor_node, *offset));
+                MUST(collapse(text_node, *offset));
                 m_document->reset_cursor_blink_cycle();
             } else {
-                MUST(set_base_and_extent(*anchor_node, this->anchor_offset(), *anchor_node, *offset));
+                MUST(set_base_and_extent(*text_node, anchor_offset(), *text_node, *offset));
             }
             if (Unicode::Segmenter::should_continue_beyond_word(word))
                 continue;
@@ -620,21 +625,19 @@ void Selection::move_offset_to_next_word(bool collapse_selection)
 
 void Selection::move_offset_to_previous_word(bool collapse_selection)
 {
-    auto anchor_node = this->anchor_node();
-    if (!anchor_node || !is<DOM::Text>(*anchor_node)) {
+    auto* text_node = as_if<DOM::Text>(anchor_node().ptr());
+    if (!text_node)
         return;
-    }
 
-    auto& text_node = static_cast<DOM::Text&>(*anchor_node);
     while (true) {
         auto focus_offset = this->focus_offset();
-        if (auto offset = text_node.word_segmenter().previous_boundary(focus_offset); offset.has_value()) {
-            auto word = text_node.data().code_points().unicode_substring_view(*offset, focus_offset - *offset);
+        if (auto offset = text_node->word_segmenter().previous_boundary(focus_offset); offset.has_value()) {
+            auto word = text_node->data().substring_view(*offset, focus_offset - *offset);
             if (collapse_selection) {
-                MUST(collapse(anchor_node, *offset));
+                MUST(collapse(text_node, *offset));
                 m_document->reset_cursor_blink_cycle();
             } else {
-                MUST(set_base_and_extent(*anchor_node, anchor_offset(), *anchor_node, *offset));
+                MUST(set_base_and_extent(*text_node, anchor_offset(), *text_node, *offset));
             }
             if (Unicode::Segmenter::should_continue_beyond_word(word))
                 continue;

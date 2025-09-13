@@ -6,7 +6,8 @@
 
 #pragma once
 
-#include <AK/Utf8View.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibGfx/TextLayout.h>
 #include <LibUnicode/Segmenter.h>
 #include <LibWeb/DOM/Text.h>
@@ -24,12 +25,12 @@ public:
     TextNode(DOM::Document&, DOM::Text&);
     virtual ~TextNode() override;
 
-    const DOM::Text& dom_node() const { return static_cast<const DOM::Text&>(*Node::dom_node()); }
+    DOM::Text const& dom_node() const { return static_cast<DOM::Text const&>(*Node::dom_node()); }
 
-    String const& text_for_rendering() const;
+    Utf16String const& text_for_rendering() const;
 
     struct Chunk {
-        Utf8View view;
+        Utf16View view;
         NonnullRefPtr<Gfx::Font const> font;
         size_t start { 0 };
         size_t length { 0 };
@@ -41,7 +42,12 @@ public:
 
     class ChunkIterator {
     public:
-        ChunkIterator(TextNode const&, bool wrap_lines, bool respect_linebreaks);
+        ChunkIterator(TextNode const&, bool should_wrap_lines, bool should_respect_linebreaks);
+        ChunkIterator(TextNode const&, Utf16View const&, Unicode::Segmenter&, bool should_wrap_lines, bool should_respect_linebreaks);
+
+        bool should_wrap_lines() const { return m_should_wrap_lines; }
+        bool should_respect_linebreaks() const { return m_should_respect_linebreaks; }
+        bool should_collapse_whitespace() const { return m_should_collapse_whitespace; }
 
         Optional<Chunk> next();
         Optional<Chunk> peek(size_t);
@@ -50,9 +56,10 @@ public:
         Optional<Chunk> next_without_peek();
         Optional<Chunk> try_commit_chunk(size_t start, size_t end, bool has_breaking_newline, bool has_breaking_tab, Gfx::Font const&, Gfx::GlyphRun::TextType) const;
 
-        bool const m_wrap_lines;
-        bool const m_respect_linebreaks;
-        Utf8View m_utf8_view;
+        bool const m_should_wrap_lines;
+        bool const m_should_respect_linebreaks;
+        bool m_should_collapse_whitespace;
+        Utf16View m_view;
         Gfx::FontCascadeList const& m_font_cascade_list;
 
         Unicode::Segmenter& m_grapheme_segmenter;
@@ -62,7 +69,6 @@ public:
     };
 
     void invalidate_text_for_rendering();
-    void compute_text_for_rendering();
 
     Unicode::Segmenter& grapheme_segmenter() const;
 
@@ -71,7 +77,9 @@ public:
 private:
     virtual bool is_text_node() const final { return true; }
 
-    Optional<String> m_text_for_rendering;
+    void compute_text_for_rendering();
+
+    Optional<Utf16String> m_text_for_rendering;
     mutable OwnPtr<Unicode::Segmenter> m_grapheme_segmenter;
 };
 

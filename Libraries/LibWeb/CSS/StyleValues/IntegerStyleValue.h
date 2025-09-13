@@ -1,16 +1,16 @@
 /*
- * Copyright (c) 2023-2024, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2023-2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <LibWeb/CSS/StyleValues/CSSUnitValue.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
 
-class IntegerStyleValue final : public CSSUnitValue {
+class IntegerStyleValue final : public StyleValue {
 public:
     static ValueComparingNonnullRefPtr<IntegerStyleValue const> create(i64 value)
     {
@@ -18,12 +18,12 @@ public:
     }
 
     i64 integer() const { return m_value; }
-    virtual double value() const override { return m_value; }
-    virtual StringView unit() const override { return "number"sv; }
 
     virtual String to_string(SerializationMode) const override;
+    virtual Vector<Parser::ComponentValue> tokenize() const override;
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, String const& associated_property) const override;
 
-    bool equals(CSSStyleValue const& other) const override
+    bool equals(StyleValue const& other) const override
     {
         if (type() != other.type())
             return false;
@@ -33,7 +33,7 @@ public:
 
 private:
     explicit IntegerStyleValue(i64 value)
-        : CSSUnitValue(Type::Integer)
+        : StyleValue(Type::Integer)
         , m_value(value)
     {
     }

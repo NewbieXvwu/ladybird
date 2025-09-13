@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2020, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2023, Tim Flynn <trflynn89@serenityos.org>
+ * Copyright (c) 2023-2025, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -89,6 +89,9 @@ template<>
 ErrorOr<String> decode(Decoder&);
 
 template<>
+ErrorOr<Utf16String> decode(Decoder&);
+
+template<>
 ErrorOr<ByteString> decode(Decoder&);
 
 template<>
@@ -126,6 +129,12 @@ ErrorOr<Core::DateTime> decode(Decoder&);
 
 template<>
 ErrorOr<Core::ProxyData> decode(Decoder&);
+
+template<>
+ErrorOr<URL::BlobURLEntry::Blob> decode(Decoder&);
+
+template<>
+ErrorOr<URL::BlobURLEntry::MediaSource> decode(Decoder&);
 
 template<Concepts::Array T>
 ErrorOr<T> decode(Decoder& decoder)

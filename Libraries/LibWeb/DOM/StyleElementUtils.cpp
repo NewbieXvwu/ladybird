@@ -6,6 +6,7 @@
 
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOM/StyleElementUtils.h>
@@ -50,7 +51,9 @@ void StyleElementUtils::update_a_style_block(DOM::Element& style_element)
     if (type_attribute.has_value() && !type_attribute->is_empty() && !type_attribute->bytes_as_string_view().equals_ignoring_ascii_case("text/css"sv))
         return;
 
-    // FIXME: 5. If the Should element's inline behavior be blocked by Content Security Policy? algorithm returns "Blocked" when executed upon the style element, "style", and the style element's child text content, then return. [CSP]
+    // 5. If the Should element's inline behavior be blocked by Content Security Policy? algorithm returns "Blocked" when executed upon the style element, "style", and the style element's child text content, then return. [CSP]
+    if (ContentSecurityPolicy::should_elements_inline_type_behavior_be_blocked_by_content_security_policy(style_element.realm(), style_element, ContentSecurityPolicy::Directives::Directive::InlineType::Style, style_element.child_text_content().to_utf8_but_should_be_ported_to_utf16()) == ContentSecurityPolicy::Directives::Directive::Result::Blocked)
+        return;
 
     // 6. Create a CSS style sheet with the following properties:
     //        type
@@ -75,7 +78,7 @@ void StyleElementUtils::update_a_style_block(DOM::Element& style_element)
     //          Left uninitialized.
     m_style_sheet_list = style_element.document_or_shadow_root_style_sheets();
     m_associated_css_style_sheet = m_style_sheet_list->create_a_css_style_sheet(
-        style_element.text_content().value_or(String {}),
+        style_element.text_content().value_or({}).to_utf8_but_should_be_ported_to_utf16(),
         "text/css"_string,
         &style_element,
         style_element.attribute(HTML::AttributeNames::media).value_or({}),

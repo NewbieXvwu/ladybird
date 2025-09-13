@@ -9,17 +9,18 @@
 #include <AK/String.h>
 #include <AK/Vector.h>
 #include <LibURL/URL.h>
+#include <LibWeb/Export.h>
 
 namespace Web {
 
-class ContentFilter {
+class WEB_API ContentFilter {
 public:
     static ContentFilter& the();
 
     bool filtering_enabled() const { return m_filtering_enabled; }
     void set_filtering_enabled(bool const enabled) { m_filtering_enabled = enabled; }
 
-    bool is_filtered(const URL::URL&) const;
+    bool is_filtered(URL::URL const&) const;
     ErrorOr<void> set_patterns(ReadonlySpan<String>);
 
 private:

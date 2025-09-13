@@ -18,7 +18,7 @@ public:
 
     virtual GC::Ref<JS::Cell> as_cell() = 0;
 
-    virtual void handle_insert(String const&) = 0;
+    virtual void handle_insert(Utf16String const&) = 0;
     virtual EventResult handle_return_key(FlyString const& ui_input_type) = 0;
 
     enum class DeleteDirection {
@@ -40,6 +40,8 @@ public:
     virtual void decrement_cursor_position_offset(CollapseSelection) = 0;
     virtual void increment_cursor_position_to_next_word(CollapseSelection) = 0;
     virtual void decrement_cursor_position_to_previous_word(CollapseSelection) = 0;
+    virtual void increment_cursor_position_to_next_line(CollapseSelection) = 0;
+    virtual void decrement_cursor_position_to_previous_line(CollapseSelection) = 0;
 };
 
 }

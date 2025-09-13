@@ -12,6 +12,7 @@
 #include <AK/Time.h>
 #include <LibCore/Forward.h>
 #include <LibCore/ThreadedPromise.h>
+#include <LibMedia/Export.h>
 
 namespace Audio {
 
@@ -25,7 +26,7 @@ enum class OutputState {
 //
 // The interface is designed to be simple and robust. All control functions can be called safely from any thread.
 // Timing information provided by the class should allow audio timestamps to be tracked with the best accuracy possible.
-class PlaybackStream : public AtomicRefCounted<PlaybackStream> {
+class MEDIA_API PlaybackStream : public AtomicRefCounted<PlaybackStream> {
 public:
     using AudioDataRequestCallback = Function<ReadonlyBytes(Bytes buffer, PcmSampleFormat format, size_t sample_count)>;
 
@@ -33,8 +34,9 @@ public:
     //
     // The initial_output_state parameter determines whether it will begin playback immediately.
     //
-    // The AudioDataRequestCallback will be called when the Output needs more audio data to fill
-    // its buffers and continue playback.
+    // The AudioDataRequestCallback will be called when the Output needs more audio data to fill its buffers and
+    // continue playback. This callback will only be allowed to run on one thread at a time, to prevent any data
+    // race on the resource used by the callback.
     static ErrorOr<NonnullRefPtr<PlaybackStream>> create(OutputState initial_output_state, u32 sample_rate, u8 channels, u32 target_latency_ms, AudioDataRequestCallback&&);
 
     virtual ~PlaybackStream() = default;

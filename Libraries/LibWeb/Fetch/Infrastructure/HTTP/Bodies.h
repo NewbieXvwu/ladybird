@@ -13,6 +13,7 @@
 #include <AK/Variant.h>
 #include <LibGC/Ptr.h>
 #include <LibGC/Root.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Fetch/Infrastructure/Task.h>
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/Streams/ReadableStream.h>
@@ -21,7 +22,7 @@
 namespace Web::Fetch::Infrastructure {
 
 // https://fetch.spec.whatwg.org/#concept-body
-class Body final : public JS::Cell {
+class WEB_API Body final : public JS::Cell {
     GC_CELL(Body, JS::Cell);
     GC_DECLARE_ALLOCATOR(Body);
 
@@ -46,9 +47,9 @@ public:
 
     [[nodiscard]] GC::Ref<Body> clone(JS::Realm&);
 
-    void fully_read(JS::Realm&, ProcessBodyCallback process_body, ProcessBodyErrorCallback process_body_error, TaskDestination task_destination) const;
-    void incrementally_read(ProcessBodyChunkCallback process_body_chunk, ProcessEndOfBodyCallback process_end_of_body, ProcessBodyErrorCallback process_body_error, TaskDestination task_destination);
-    void incrementally_read_loop(Streams::ReadableStreamDefaultReader& reader, GC::Ref<JS::Object> task_destination, ProcessBodyChunkCallback process_body_chunk, ProcessEndOfBodyCallback process_end_of_body, ProcessBodyErrorCallback process_body_error);
+    void fully_read(JS::Realm&, ProcessBodyCallback process_body, ProcessBodyErrorCallback process_body_error, TaskDestination) const;
+    void incrementally_read(ProcessBodyChunkCallback process_body_chunk, ProcessEndOfBodyCallback process_end_of_body, ProcessBodyErrorCallback process_body_error, TaskDestination);
+    void incrementally_read_loop(Streams::ReadableStreamDefaultReader& reader, TaskDestination, ProcessBodyChunkCallback process_body_chunk, ProcessEndOfBodyCallback process_end_of_body, ProcessBodyErrorCallback process_body_error);
 
     virtual void visit_edges(JS::Cell::Visitor&) override;
 
@@ -76,6 +77,6 @@ struct BodyWithType {
     Optional<ByteBuffer> type;
 };
 
-GC::Ref<Body> byte_sequence_as_body(JS::Realm&, ReadonlyBytes);
+WEB_API GC::Ref<Body> byte_sequence_as_body(JS::Realm&, ReadonlyBytes);
 
 }

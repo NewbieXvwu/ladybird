@@ -3,6 +3,7 @@
  * Copyright (c) 2021, the SerenityOS developers.
  * Copyright (c) 2021-2024, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2024, Matthew Olsson <mattco@serenityos.org>
+ * Copyright (c) 2025, Tim Ledbetter <tim.ledbetter@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -13,12 +14,13 @@
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BackgroundSizeStyleValue.h>
-#include <LibWeb/CSS/StyleValues/CSSColorValue.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
+#include <LibWeb/CSS/StyleValues/BorderImageSliceStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/FontStyleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/FrequencyStyleValue.h>
 #include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
@@ -35,20 +37,25 @@
 namespace Web::CSS {
 
 template<typename T>
-static T interpolate_raw(T from, T to, float delta)
+static T interpolate_raw(T from, T to, float delta, Optional<AcceptedTypeRange> accepted_type_range = {})
 {
     if constexpr (AK::Detail::IsSame<T, double>) {
+        if (accepted_type_range.has_value())
+            return clamp(from + (to - from) * static_cast<double>(delta), accepted_type_range->min, accepted_type_range->max);
         return from + (to - from) * static_cast<double>(delta);
     } else if constexpr (AK::Detail::IsIntegral<T>) {
         auto from_float = static_cast<float>(from);
         auto to_float = static_cast<float>(to);
-        auto unclamped_result = from_float + (to_float - from_float) * delta;
-        return static_cast<AK::Detail::RemoveCVReference<T>>(clamp(unclamped_result, NumericLimits<T>::min(), NumericLimits<T>::max()));
+        auto min = accepted_type_range.has_value() ? accepted_type_range->min : NumericLimits<T>::min();
+        auto max = accepted_type_range.has_value() ? accepted_type_range->max : NumericLimits<T>::max();
+        auto unclamped_result = roundf(from_float + (to_float - from_float) * delta);
+        return static_cast<AK::Detail::RemoveCVReference<T>>(clamp(unclamped_result, min, max));
     }
+    VERIFY(!accepted_type_range.has_value());
     return static_cast<AK::Detail::RemoveCVReference<T>>(from + (to - from) * delta);
 }
 
-static NonnullRefPtr<CSSStyleValue const> with_keyword_values_resolved(DOM::Element& element, PropertyID property_id, CSSStyleValue const& value)
+static NonnullRefPtr<StyleValue const> with_keyword_values_resolved(DOM::Element& element, PropertyID property_id, StyleValue const& value)
 {
     if (value.is_guaranteed_invalid()) {
         // At the moment, we're only dealing with "real" properties, so this behaves the same as `unset`.
@@ -63,14 +70,14 @@ static NonnullRefPtr<CSSStyleValue const> with_keyword_values_resolved(DOM::Elem
     case Keyword::Unset:
         return property_initial_value(property_id);
     case Keyword::Inherit:
-        return StyleComputer::get_inherit_value(property_id, &element);
+        return StyleComputer::get_inherit_value(property_id, { element });
     default:
         break;
     }
     return value;
 }
 
-static RefPtr<CSSStyleValue const> interpolate_discrete(CSSStyleValue const& from, CSSStyleValue const& to, float delta, AllowDiscrete allow_discrete)
+static RefPtr<StyleValue const> interpolate_discrete(StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete allow_discrete)
 {
     if (from.equals(to))
         return from;
@@ -79,7 +86,7 @@ static RefPtr<CSSStyleValue const> interpolate_discrete(CSSStyleValue const& fro
     return delta >= 0.5f ? to : from;
 }
 
-static RefPtr<CSSStyleValue const> interpolate_scale(DOM::Element& element, CalculationContext calculation_context, CSSStyleValue const& a_from, CSSStyleValue const& a_to, float delta, AllowDiscrete allow_discrete)
+static RefPtr<StyleValue const> interpolate_scale(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& a_from, StyleValue const& a_to, float delta, AllowDiscrete allow_discrete)
 {
     if (a_from.to_keyword() == Keyword::None && a_to.to_keyword() == Keyword::None)
         return a_from;
@@ -98,7 +105,7 @@ static RefPtr<CSSStyleValue const> interpolate_scale(DOM::Element& element, Calc
     auto interpolated_y = interpolate_value(element, calculation_context, from_transform.values()[1], to_transform.values()[1], delta, allow_discrete);
     if (!interpolated_y)
         return {};
-    RefPtr<CSSStyleValue const> interpolated_z;
+    RefPtr<StyleValue const> interpolated_z;
 
     if (from_transform.values().size() == 3 || to_transform.values().size() == 3) {
         static auto one_value = NumberStyleValue::create(1);
@@ -110,9 +117,8 @@ static RefPtr<CSSStyleValue const> interpolate_scale(DOM::Element& element, Calc
     }
 
     StyleValueVector new_values = { *interpolated_x, *interpolated_y };
-    if (interpolated_z && interpolated_z->is_number() && interpolated_z->as_number().number() != 1) {
+    if (interpolated_z)
         new_values.append(*interpolated_z);
-    }
 
     return TransformationStyleValue::create(
         PropertyID::Scale,
@@ -120,7 +126,195 @@ static RefPtr<CSSStyleValue const> interpolate_scale(DOM::Element& element, Calc
         move(new_values));
 }
 
-static RefPtr<CSSStyleValue const> interpolate_translate(DOM::Element& element, CalculationContext calculation_context, CSSStyleValue const& a_from, CSSStyleValue const& a_to, float delta, AllowDiscrete allow_discrete)
+// https://drafts.fxtf.org/filter-effects/#interpolation-of-filter-functions
+static Optional<FilterValue> interpolate_filter_function(DOM::Element& element, CalculationContext const& calculation_context, FilterValue const& from, FilterValue const& to, float delta, AllowDiscrete allow_discrete)
+{
+    VERIFY(!from.has<URL>());
+    VERIFY(!to.has<URL>());
+
+    if (from.index() != to.index()) {
+        return {};
+    }
+
+    auto result = from.visit(
+        [&](FilterOperation::Blur const& from_value) -> Optional<FilterValue> {
+            auto const& to_value = to.get<FilterOperation::Blur>();
+
+            if (auto interpolated_style_value = interpolate_value(element, calculation_context, from_value.radius.as_style_value(), to_value.radius.as_style_value(), delta, allow_discrete)) {
+                LengthOrCalculated interpolated_radius = interpolated_style_value->is_length() ? LengthOrCalculated { interpolated_style_value->as_length().length() } : LengthOrCalculated { interpolated_style_value->as_calculated() };
+                return FilterOperation::Blur {
+                    .radius = interpolated_radius
+                };
+            }
+            return {};
+        },
+        [&](FilterOperation::HueRotate const& from_value) -> Optional<FilterValue> {
+            auto const& to_value = to.get<FilterOperation::HueRotate>();
+            auto const& from_style_value = from_value.angle.has<FilterOperation::HueRotate::Zero>() ? AngleStyleValue::create(Angle::make_degrees(0)) : from_value.angle.get<AngleOrCalculated>().as_style_value();
+            auto const& to_style_value = to_value.angle.has<FilterOperation::HueRotate::Zero>() ? AngleStyleValue::create(Angle::make_degrees(0)) : to_value.angle.get<AngleOrCalculated>().as_style_value();
+            if (auto interpolated_style_value = interpolate_value(element, calculation_context, from_style_value, to_style_value, delta, allow_discrete)) {
+                AngleOrCalculated interpolated_angle = interpolated_style_value->is_angle() ? AngleOrCalculated { interpolated_style_value->as_angle().angle() } : AngleOrCalculated { interpolated_style_value->as_calculated() };
+                return FilterOperation::HueRotate {
+                    .angle = interpolated_angle,
+                };
+            }
+            return {};
+        },
+        [&](FilterOperation::Color const& from_value) -> Optional<FilterValue> {
+            auto resolve_number_percentage = [](NumberPercentage const& amount) -> ValueComparingNonnullRefPtr<StyleValue const> {
+                if (amount.is_number())
+                    return NumberStyleValue::create(amount.number().value());
+                if (amount.is_percentage())
+                    return NumberStyleValue::create(amount.percentage().as_fraction());
+                if (amount.is_calculated())
+                    return amount.calculated();
+                VERIFY_NOT_REACHED();
+            };
+            auto const& to_value = to.get<FilterOperation::Color>();
+            auto from_style_value = resolve_number_percentage(from_value.amount);
+            auto to_style_value = resolve_number_percentage(to_value.amount);
+            if (auto interpolated_style_value = interpolate_value(element, calculation_context, from_style_value, to_style_value, delta, allow_discrete)) {
+                auto to_number_percentage = [&](StyleValue const& style_value) -> NumberPercentage {
+                    if (style_value.is_number())
+                        return Number {
+                            Number::Type::Number,
+                            style_value.as_number().number(),
+                        };
+                    if (style_value.is_percentage())
+                        return Percentage { style_value.as_percentage().percentage() };
+                    if (style_value.is_calculated())
+                        return NumberPercentage { style_value.as_calculated() };
+                    VERIFY_NOT_REACHED();
+                };
+                return FilterOperation::Color {
+                    .operation = delta >= 0.5f ? to_value.operation : from_value.operation,
+                    .amount = to_number_percentage(*interpolated_style_value)
+                };
+            }
+            return {};
+        },
+        [](auto const&) -> Optional<FilterValue> {
+            // FIXME: Handle interpolating shadow list values
+            return {};
+        });
+
+    return result;
+}
+
+// https://drafts.fxtf.org/filter-effects/#interpolation-of-filters
+static RefPtr<StyleValue const> interpolate_filter_value_list(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& a_from, StyleValue const& a_to, float delta, AllowDiscrete allow_discrete)
+{
+    auto is_filter_value_list_without_url = [](StyleValue const& value) {
+        if (!value.is_filter_value_list())
+            return false;
+        auto const& filter_value_list = value.as_filter_value_list();
+        return !filter_value_list.contains_url();
+    };
+
+    auto initial_value_for = [&](FilterValue value) {
+        return value.visit([&](FilterOperation::Blur const&) -> FilterValue { return FilterOperation::Blur {}; },
+            [&](FilterOperation::DropShadow const&) -> FilterValue {
+                return FilterOperation::DropShadow {
+                    .offset_x = Length::make_px(0),
+                    .offset_y = Length::make_px(0),
+                    .radius = Length::make_px(0),
+                    .color = Color::Transparent
+                };
+            },
+            [&](FilterOperation::HueRotate const&) -> FilterValue {
+                return FilterOperation::HueRotate {};
+            },
+            [&](FilterOperation::Color const& color) -> FilterValue {
+                auto default_value_for_interpolation = [&]() {
+                    switch (color.operation) {
+                    case Gfx::ColorFilterType::Grayscale:
+                    case Gfx::ColorFilterType::Invert:
+                    case Gfx::ColorFilterType::Sepia:
+                        return 0.0;
+                    case Gfx::ColorFilterType::Brightness:
+                    case Gfx::ColorFilterType::Contrast:
+                    case Gfx::ColorFilterType::Opacity:
+                    case Gfx::ColorFilterType::Saturate:
+                        return 1.0;
+                    }
+                    VERIFY_NOT_REACHED();
+                }();
+                return FilterOperation::Color { .operation = color.operation, .amount = NumberPercentage { Number { Number::Type::Integer, default_value_for_interpolation } } };
+            },
+            [&](auto&) -> FilterValue {
+                VERIFY_NOT_REACHED();
+            });
+    };
+
+    auto interpolate_filter_values = [&](StyleValue const& from, StyleValue const& to) -> RefPtr<FilterValueListStyleValue const> {
+        auto const& from_filter_values = from.as_filter_value_list().filter_value_list();
+        auto const& to_filter_values = to.as_filter_value_list().filter_value_list();
+        Vector<FilterValue> interpolated_filter_values;
+        for (size_t i = 0; i < from.as_filter_value_list().size(); ++i) {
+            auto const& from_value = from_filter_values[i];
+            auto const& to_value = to_filter_values[i];
+
+            auto interpolated_value = interpolate_filter_function(element, calculation_context, from_value, to_value, delta, allow_discrete);
+            if (!interpolated_value.has_value())
+                return {};
+            interpolated_filter_values.append(interpolated_value.release_value());
+        }
+        return FilterValueListStyleValue::create(move(interpolated_filter_values));
+    };
+
+    if (is_filter_value_list_without_url(a_from) && is_filter_value_list_without_url(a_to)) {
+        auto const& from_list = a_from.as_filter_value_list();
+        auto const& to_list = a_to.as_filter_value_list();
+        // If both filters have a <filter-value-list> of same length without <url> and for each <filter-function> for which there is a corresponding item in each list
+        if (from_list.size() == to_list.size()) {
+            // Interpolate each <filter-function> pair following the rules in section Interpolation of Filter Functions.
+            return interpolate_filter_values(a_from, a_to);
+        }
+
+        // If both filters have a <filter-value-list> of different length without <url> and for each <filter-function> for which there is a corresponding item in each list
+
+        // 1. Append the missing equivalent <filter-function>s from the longer list to the end of the shorter list. The new added <filter-function>s must be initialized to their initial values for interpolation.
+        auto append_missing_values_to = [&](FilterValueListStyleValue const& short_list, FilterValueListStyleValue const& longer_list) -> ValueComparingNonnullRefPtr<FilterValueListStyleValue const> {
+            Vector<FilterValue> new_filter_list = short_list.filter_value_list();
+            for (size_t i = new_filter_list.size(); i < longer_list.size(); ++i) {
+                auto const& filter_value = longer_list.filter_value_list()[i];
+                new_filter_list.append(initial_value_for(filter_value));
+            }
+            return FilterValueListStyleValue::create(move(new_filter_list));
+        };
+        ValueComparingNonnullRefPtr<StyleValue const> from = from_list.size() < to_list.size() ? append_missing_values_to(from_list, to_list) : a_from;
+        ValueComparingNonnullRefPtr<StyleValue const> to = to_list.size() < from_list.size() ? append_missing_values_to(to_list, from_list) : a_to;
+
+        // 2. Interpolate each <filter-function> pair following the rules in section Interpolation of Filter Functions.
+        return interpolate_filter_values(from, to);
+    }
+
+    // If one filter is none and the other is a <filter-value-list> without <url>
+    if ((is_filter_value_list_without_url(a_from) && a_to.to_keyword() == Keyword::None)
+        || (is_filter_value_list_without_url(a_to) && a_from.to_keyword() == Keyword::None)) {
+
+        // 1. Replace none with the corresponding <filter-value-list> of the other filter. The new <filter-function>s must be initialized to their initial values for interpolation.
+        auto replace_none_with_initial_filter_list_values = [&](FilterValueListStyleValue const& filter_value_list) {
+            Vector<FilterValue> initial_values;
+            for (auto const& filter_value : filter_value_list.filter_value_list()) {
+                initial_values.append(initial_value_for(filter_value));
+            }
+            return FilterValueListStyleValue::create(move(initial_values));
+        };
+
+        ValueComparingNonnullRefPtr<StyleValue const> from = a_from.is_keyword() ? replace_none_with_initial_filter_list_values(a_to.as_filter_value_list()) : a_from;
+        ValueComparingNonnullRefPtr<StyleValue const> to = a_to.is_keyword() ? replace_none_with_initial_filter_list_values(a_from.as_filter_value_list()) : a_to;
+
+        // 2. Interpolate each <filter-function> pair following the rules in section Interpolation of Filter Functions.
+        return interpolate_filter_values(from, to);
+    }
+
+    // Otherwise:
+    // Use discrete interpolation
+    return {};
+}
+
+static RefPtr<StyleValue const> interpolate_translate(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& a_from, StyleValue const& a_to, float delta, AllowDiscrete allow_discrete)
 {
     if (a_from.to_keyword() == Keyword::None && a_to.to_keyword() == Keyword::None)
         return a_from;
@@ -141,7 +335,7 @@ static RefPtr<CSSStyleValue const> interpolate_translate(DOM::Element& element, 
     if (!interpolated_y)
         return {};
 
-    RefPtr<CSSStyleValue const> interpolated_z;
+    RefPtr<StyleValue const> interpolated_z;
 
     if (from_transform.values().size() == 3 || to_transform.values().size() == 3) {
         auto from_z = from_transform.values().size() == 3 ? from_transform.values()[2] : zero_px;
@@ -152,9 +346,8 @@ static RefPtr<CSSStyleValue const> interpolate_translate(DOM::Element& element, 
     }
 
     StyleValueVector new_values = { *interpolated_x, *interpolated_y };
-    if (interpolated_z && interpolated_z->is_length() && !interpolated_z->as_length().equals(zero_px)) {
+    if (interpolated_z)
         new_values.append(*interpolated_z);
-    }
 
     return TransformationStyleValue::create(
         PropertyID::Translate,
@@ -162,13 +355,119 @@ static RefPtr<CSSStyleValue const> interpolate_translate(DOM::Element& element, 
         move(new_values));
 }
 
-ValueComparingRefPtr<CSSStyleValue const> interpolate_property(DOM::Element& element, PropertyID property_id, CSSStyleValue const& a_from, CSSStyleValue const& a_to, float delta, AllowDiscrete allow_discrete)
+// https://drafts.csswg.org/css-transforms-2/#interpolation-of-decomposed-3d-matrix-values
+static FloatVector4 slerp(FloatVector4 const& from, FloatVector4 const& to, float delta)
+{
+    auto product = from.dot(to);
+
+    product = clamp(product, -1.0f, 1.0f);
+    if (fabsf(product) >= 1.0f)
+        return from;
+
+    auto theta = acosf(product);
+    auto w = sinf(delta * theta) / sqrtf(1 - (product * product));
+    auto from_multiplier = cosf(delta * theta) - (product * w);
+
+    if (abs(w) < AK::NumericLimits<float>::epsilon())
+        return from * from_multiplier;
+
+    if (abs(from_multiplier) < AK::NumericLimits<float>::epsilon())
+        return to * w;
+
+    return from * from_multiplier + to * w;
+}
+
+static RefPtr<StyleValue const> interpolate_rotate(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& a_from, StyleValue const& a_to, float delta, AllowDiscrete allow_discrete)
+{
+    if (a_from.to_keyword() == Keyword::None && a_to.to_keyword() == Keyword::None)
+        return a_from;
+
+    static auto zero_degrees_value = AngleStyleValue::create(Angle::make_degrees(0));
+    static auto zero = TransformationStyleValue::create(PropertyID::Rotate, TransformFunction::Rotate, { zero_degrees_value });
+
+    auto const& from = a_from.to_keyword() == Keyword::None ? *zero : a_from;
+    auto const& to = a_to.to_keyword() == Keyword::None ? *zero : a_to;
+
+    auto const& from_transform = from.as_transformation();
+    auto const& to_transform = to.as_transformation();
+
+    auto from_transform_type = from_transform.transform_function();
+    auto to_transform_type = to_transform.transform_function();
+
+    if (from_transform_type == to_transform_type && from_transform.values().size() == 1) {
+        auto interpolated_angle = interpolate_value(element, calculation_context, from_transform.values()[0], to_transform.values()[0], delta, allow_discrete);
+        if (!interpolated_angle)
+            return {};
+        return TransformationStyleValue::create(PropertyID::Rotate, from_transform_type, { *interpolated_angle.release_nonnull() });
+    }
+
+    FloatVector3 from_axis { 0, 0, 1 };
+    auto from_angle_value = from_transform.values()[0];
+    if (from_transform.values().size() == 4) {
+        from_axis.set_x(from_transform.values()[0]->as_number().number());
+        from_axis.set_y(from_transform.values()[1]->as_number().number());
+        from_axis.set_z(from_transform.values()[2]->as_number().number());
+        from_angle_value = from_transform.values()[3];
+    }
+    float from_angle = from_angle_value->as_angle().angle().to_radians();
+
+    FloatVector3 to_axis { 0, 0, 1 };
+    auto to_angle_value = to_transform.values()[0];
+    if (to_transform.values().size() == 4) {
+        to_axis.set_x(to_transform.values()[0]->as_number().number());
+        to_axis.set_y(to_transform.values()[1]->as_number().number());
+        to_axis.set_z(to_transform.values()[2]->as_number().number());
+        to_angle_value = to_transform.values()[3];
+    }
+    float to_angle = to_angle_value->as_angle().angle().to_radians();
+
+    auto from_axis_angle = [](FloatVector3 const& axis, float angle) -> FloatVector4 {
+        auto normalized = axis.normalized();
+        auto half_angle = angle / 2.0f;
+        auto sin_half_angle = sinf(half_angle);
+        FloatVector4 result { normalized.x() * sin_half_angle, normalized.y() * sin_half_angle, normalized.z() * sin_half_angle, cosf(half_angle) };
+        return result;
+    };
+
+    struct AxisAngle {
+        FloatVector3 axis;
+        float angle;
+    };
+    auto quaternion_to_axis_angle = [](FloatVector4 const& quaternion) {
+        FloatVector3 axis { quaternion[0], quaternion[1], quaternion[2] };
+        auto epsilon = 1e-5f;
+        auto sin_half_angle = sqrtf(max(0.0f, 1.0f - quaternion[3] * quaternion[3]));
+        if (sin_half_angle < epsilon)
+            return AxisAngle { axis, quaternion[3] };
+        auto angle = 2.0f * acosf(quaternion[3]);
+        axis = axis * (1.0f / sin_half_angle);
+        return AxisAngle { axis, angle };
+    };
+
+    auto from_quaternion = from_axis_angle(from_axis, from_angle);
+    auto to_quaternion = from_axis_angle(to_axis, to_angle);
+
+    auto interpolated_quaternion = slerp(from_quaternion, to_quaternion, delta);
+    auto interpolated_axis_angle = quaternion_to_axis_angle(interpolated_quaternion);
+    auto interpolated_x_axis = NumberStyleValue::create(interpolated_axis_angle.axis.x());
+    auto interpolated_y_axis = NumberStyleValue::create(interpolated_axis_angle.axis.y());
+    auto interpolated_z_axis = NumberStyleValue::create(interpolated_axis_angle.axis.z());
+    auto interpolated_angle = AngleStyleValue::create(Angle::make_degrees(AK::to_degrees(interpolated_axis_angle.angle)));
+
+    return TransformationStyleValue::create(
+        PropertyID::Rotate,
+        TransformFunction::Rotate3d,
+        { interpolated_x_axis, interpolated_y_axis, interpolated_z_axis, interpolated_angle });
+}
+
+ValueComparingRefPtr<StyleValue const> interpolate_property(DOM::Element& element, PropertyID property_id, StyleValue const& a_from, StyleValue const& a_to, float delta, AllowDiscrete allow_discrete)
 {
     auto from = with_keyword_values_resolved(element, property_id, a_from);
     auto to = with_keyword_values_resolved(element, property_id, a_to);
 
     CalculationContext calculation_context {
         .percentages_resolve_as = property_resolves_percentages_relative_to(property_id),
+        .accepted_type_ranges = property_accepted_type_ranges(property_id),
     };
 
     auto animation_type = animation_type_from_longhand_property(property_id);
@@ -190,7 +489,7 @@ ValueComparingRefPtr<CSSStyleValue const> interpolate_property(DOM::Element& ele
             // such a state, the transformed element is not rendered.
             return {};
         }
-        if (property_id == PropertyID::BoxShadow) {
+        if (property_id == PropertyID::BoxShadow || property_id == PropertyID::TextShadow) {
             if (auto interpolated_box_shadow = interpolate_box_shadow(element, calculation_context, from, to, delta, allow_discrete))
                 return *interpolated_box_shadow;
             return interpolate_discrete(from, to, delta, allow_discrete);
@@ -218,7 +517,7 @@ ValueComparingRefPtr<CSSStyleValue const> interpolate_property(DOM::Element& ele
                     return from;
                 if (delta >= 1)
                     return to;
-                return CSSKeywordValue::create(Keyword::Visible);
+                return KeywordStyleValue::create(Keyword::Visible);
             }
 
             return interpolate_discrete(from, to, delta, allow_discrete);
@@ -258,6 +557,18 @@ ValueComparingRefPtr<CSSStyleValue const> interpolate_property(DOM::Element& ele
             return interpolate_discrete(from, to, delta, allow_discrete);
         }
 
+        if (property_id == PropertyID::Rotate) {
+            if (auto result = interpolate_rotate(element, calculation_context, from, to, delta, allow_discrete))
+                return result;
+            return interpolate_discrete(from, to, delta, allow_discrete);
+        }
+
+        if (property_id == PropertyID::Filter || property_id == PropertyID::BackdropFilter) {
+            if (auto result = interpolate_filter_value_list(element, calculation_context, from, to, delta, allow_discrete))
+                return result;
+            return interpolate_discrete(from, to, delta, allow_discrete);
+        }
+
         // FIXME: Handle all custom animatable properties
         [[fallthrough]];
     }
@@ -268,7 +579,7 @@ ValueComparingRefPtr<CSSStyleValue const> interpolate_property(DOM::Element& ele
 }
 
 // https://drafts.csswg.org/css-transitions/#transitionable
-bool property_values_are_transitionable(PropertyID property_id, CSSStyleValue const& old_value, CSSStyleValue const& new_value, DOM::Element& element, TransitionBehavior transition_behavior)
+bool property_values_are_transitionable(PropertyID property_id, StyleValue const& old_value, StyleValue const& new_value, DOM::Element& element, TransitionBehavior transition_behavior)
 {
     // When comparing the before-change style and after-change style for a given property,
     // the property values are transitionable if they have an animation type that is neither not animatable nor discrete.
@@ -285,7 +596,7 @@ bool property_values_are_transitionable(PropertyID property_id, CSSStyleValue co
 }
 
 // A null return value means the interpolated matrix was not invertible or otherwise invalid
-RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyleValue const& from, CSSStyleValue const& to, float delta, AllowDiscrete)
+RefPtr<StyleValue const> interpolate_transform(DOM::Element& element, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete)
 {
     // Note that the spec uses column-major notation, so all the matrix indexing is reversed.
 
@@ -294,10 +605,10 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
 
         for (auto const& value : transformation.values()) {
             switch (value->type()) {
-            case CSSStyleValue::Type::Angle:
+            case StyleValue::Type::Angle:
                 values.append(AngleOrCalculated { value->as_angle().angle() });
                 break;
-            case CSSStyleValue::Type::Calculated: {
+            case StyleValue::Type::Calculated: {
                 auto& calculated = value->as_calculated();
                 if (calculated.resolves_to_angle()) {
                     values.append(AngleOrCalculated { calculated });
@@ -311,13 +622,13 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
                 }
                 break;
             }
-            case CSSStyleValue::Type::Length:
+            case StyleValue::Type::Length:
                 values.append(LengthPercentage { value->as_length().length() });
                 break;
-            case CSSStyleValue::Type::Percentage:
+            case StyleValue::Type::Percentage:
                 values.append(LengthPercentage { value->as_percentage().percentage() });
                 break;
-            case CSSStyleValue::Type::Number:
+            case StyleValue::Type::Number:
                 values.append(NumberPercentage { Number(Number::Type::Number, value->as_number().number()) });
                 break;
             default:
@@ -334,15 +645,15 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
             return {};
         Optional<Painting::PaintableBox const&> paintable_box;
         if (auto layout_node = element.layout_node()) {
-            if (auto paintable = layout_node->first_paintable(); paintable && is<Painting::PaintableBox>(paintable))
-                paintable_box = *static_cast<Painting::PaintableBox*>(paintable);
+            if (auto* paintable = as_if<Painting::PaintableBox>(layout_node->first_paintable()))
+                paintable_box = *paintable;
         }
         if (auto matrix = transformation->to_matrix(paintable_box); !matrix.is_error())
             return matrix.value();
         return {};
     };
 
-    static constexpr auto style_value_to_matrix = [](DOM::Element& element, CSSStyleValue const& value) -> FloatMatrix4x4 {
+    static constexpr auto style_value_to_matrix = [](DOM::Element& element, StyleValue const& value) -> FloatMatrix4x4 {
         if (value.is_transformation())
             return transformation_style_value_to_matrix(element, value.as_transformation()).value_or(FloatMatrix4x4::identity());
 
@@ -380,19 +691,19 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
         };
 
         // Normalize the matrix.
-        if (matrix(3, 3) == 0.f)
+        if (matrix[3, 3] == 0.f)
             return {};
 
         for (int i = 0; i < 4; i++)
             for (int j = 0; j < 4; j++)
-                matrix(i, j) /= matrix(3, 3);
+                matrix[i, j] /= matrix[3, 3];
 
         // perspectiveMatrix is used to solve for perspective, but it also provides
         // an easy way to test for singularity of the upper 3x3 component.
         auto perspective_matrix = matrix;
         for (int i = 0; i < 3; i++)
-            perspective_matrix(3, i) = 0.f;
-        perspective_matrix(3, 3) = 1.f;
+            perspective_matrix[3, i] = 0.f;
+        perspective_matrix[3, 3] = 1.f;
 
         if (!perspective_matrix.is_invertible())
             return {};
@@ -400,14 +711,14 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
         DecomposedValues values;
 
         // First, isolate perspective.
-        if (matrix(3, 0) != 0.f || matrix(3, 1) != 0.f || matrix(3, 2) != 0.f) {
+        if (matrix[3, 0] != 0.f || matrix[3, 1] != 0.f || matrix[3, 2] != 0.f) {
             // rightHandSide is the right hand side of the equation.
             // Note: It is the bottom side in a row-major matrix
             FloatVector4 bottom_side = {
-                matrix(3, 0),
-                matrix(3, 1),
-                matrix(3, 2),
-                matrix(3, 3),
+                matrix[3, 0],
+                matrix[3, 1],
+                matrix[3, 2],
+                matrix[3, 3],
             };
 
             // Solve the equation by inverting perspectiveMatrix and multiplying
@@ -422,12 +733,12 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
 
         // Next take care of translation
         for (int i = 0; i < 3; i++)
-            values.translation[i] = matrix(i, 3);
+            values.translation[i] = matrix[i, 3];
 
         // Now get scale and shear. 'row' is a 3 element array of 3 component vectors
         FloatVector3 row[3];
         for (int i = 0; i < 3; i++)
-            row[i] = { matrix(0, i), matrix(1, i), matrix(2, i) };
+            row[i] = { matrix[0, i], matrix[1, i], matrix[2, i] };
 
         // Compute X scale factor and normalize first row.
         values.scale[0] = row[0].length();
@@ -495,12 +806,12 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
 
         // apply perspective
         for (int i = 0; i < 4; i++)
-            matrix(3, i) = values.perspective[i];
+            matrix[3, i] = values.perspective[i];
 
         // apply translation
         for (int i = 0; i < 4; i++) {
             for (int j = 0; j < 3; j++)
-                matrix(i, 3) += values.translation[j] * matrix(i, j);
+                matrix[i, 3] += values.translation[j] * matrix[i, j];
         }
 
         // apply rotation
@@ -512,15 +823,15 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
         // Construct a composite rotation matrix from the quaternion values
         // rotationMatrix is a identity 4x4 matrix initially
         auto rotation_matrix = FloatMatrix4x4::identity();
-        rotation_matrix(0, 0) = 1.f - 2.f * (y * y + z * z);
-        rotation_matrix(1, 0) = 2.f * (x * y - z * w);
-        rotation_matrix(2, 0) = 2.f * (x * z + y * w);
-        rotation_matrix(0, 1) = 2.f * (x * y + z * w);
-        rotation_matrix(1, 1) = 1.f - 2.f * (x * x + z * z);
-        rotation_matrix(2, 1) = 2.f * (y * z - x * w);
-        rotation_matrix(0, 2) = 2.f * (x * z - y * w);
-        rotation_matrix(1, 2) = 2.f * (y * z + x * w);
-        rotation_matrix(2, 2) = 1.f - 2.f * (x * x + y * y);
+        rotation_matrix[0, 0] = 1.f - 2.f * (y * y + z * z);
+        rotation_matrix[1, 0] = 2.f * (x * y - z * w);
+        rotation_matrix[2, 0] = 2.f * (x * z + y * w);
+        rotation_matrix[0, 1] = 2.f * (x * y + z * w);
+        rotation_matrix[1, 1] = 1.f - 2.f * (x * x + z * z);
+        rotation_matrix[2, 1] = 2.f * (y * z - x * w);
+        rotation_matrix[0, 2] = 2.f * (x * z - y * w);
+        rotation_matrix[1, 2] = 2.f * (y * z + x * w);
+        rotation_matrix[2, 2] = 1.f - 2.f * (x * x + y * y);
 
         matrix = matrix * rotation_matrix;
 
@@ -528,26 +839,26 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
         // temp is a identity 4x4 matrix initially
         auto temp = FloatMatrix4x4::identity();
         if (values.skew[2] != 0.f) {
-            temp(1, 2) = values.skew[2];
+            temp[1, 2] = values.skew[2];
             matrix = matrix * temp;
         }
 
         if (values.skew[1] != 0.f) {
-            temp(1, 2) = 0.f;
-            temp(0, 2) = values.skew[1];
+            temp[1, 2] = 0.f;
+            temp[0, 2] = values.skew[1];
             matrix = matrix * temp;
         }
 
         if (values.skew[0] != 0.f) {
-            temp(0, 2) = 0.f;
-            temp(0, 1) = values.skew[0];
+            temp[0, 2] = 0.f;
+            temp[0, 1] = values.skew[0];
             matrix = matrix * temp;
         }
 
         // apply scale
         for (int i = 0; i < 3; i++) {
             for (int j = 0; j < 4; j++)
-                matrix(j, i) *= values.scale[i];
+                matrix[j, i] *= values.scale[i];
         }
 
         return matrix;
@@ -555,21 +866,7 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
 
     // https://drafts.csswg.org/css-transforms-2/#interpolation-of-decomposed-3d-matrix-values
     static constexpr auto interpolate = [](DecomposedValues& from, DecomposedValues& to, float delta) -> DecomposedValues {
-        auto product = clamp(from.rotation.dot(to.rotation), -1.0f, 1.0f);
-        FloatVector4 interpolated_rotation;
-        if (fabsf(product) == 1.0f) {
-            interpolated_rotation = from.rotation;
-        } else {
-            auto theta = acos(product);
-            auto w = sin(delta * theta) / sqrtf(1.0f - product * product);
-
-            for (int i = 0; i < 4; i++) {
-                from.rotation[i] *= cos(delta * theta) - product * w;
-                to.rotation[i] *= w;
-                interpolated_rotation[i] = from.rotation[i] + to.rotation[i];
-            }
-        }
-
+        auto interpolated_rotation = slerp(from.rotation, to.rotation, delta);
         return {
             interpolate_raw(from.translation, to.translation, delta),
             interpolate_raw(from.scale, to.scale, delta),
@@ -591,7 +888,7 @@ RefPtr<CSSStyleValue const> interpolate_transform(DOM::Element& element, CSSStyl
     StyleValueVector values;
     values.ensure_capacity(16);
     for (int i = 0; i < 16; i++)
-        values.append(NumberStyleValue::create(static_cast<double>(interpolated(i % 4, i / 4))));
+        values.append(NumberStyleValue::create(static_cast<double>(interpolated[i % 4, i / 4])));
     return StyleValueList::create({ TransformationStyleValue::create(PropertyID::Transform, TransformFunction::Matrix3d, move(values)) }, StyleValueList::Separator::Comma);
 }
 
@@ -600,6 +897,7 @@ Color interpolate_color(Color from, Color to, float delta, ColorSyntax syntax)
     // https://drafts.csswg.org/css-color/#interpolation
     // FIXME: Handle all interpolation methods.
     // FIXME: Handle "analogous", "missing", and "powerless" components, somehow.
+    // FIXME: Remove duplicated code with Color::mixed_with(Color other, float weight)
 
     // https://drafts.csswg.org/css-color/#interpolation-space
     // If the host syntax does not define what color space interpolation should take place in, it defaults to Oklab.
@@ -609,32 +907,41 @@ Color interpolate_color(Color from, Color to, float delta, ColorSyntax syntax)
 
     Color result;
     if (syntax == ColorSyntax::Modern) {
-        auto from_oklab = from.to_oklab();
-        auto to_oklab = to.to_oklab();
+        // 5. changing the color components to premultiplied form
+        auto from_oklab = from.to_premultiplied_oklab();
+        auto to_oklab = to.to_premultiplied_oklab();
+
+        // 6. linearly interpolating each component of the computed value of the color separately
+        // 7. undoing premultiplication
+        auto from_alpha = from.alpha() / 255.0f;
+        auto to_alpha = to.alpha() / 255.0f;
+        auto interpolated_alpha = interpolate_raw(from_alpha, to_alpha, delta);
 
         result = Color::from_oklab(
-            interpolate_raw(from_oklab.L, to_oklab.L, delta),
-            interpolate_raw(from_oklab.a, to_oklab.a, delta),
-            interpolate_raw(from_oklab.b, to_oklab.b, delta));
+            interpolate_raw(from_oklab.L, to_oklab.L, delta) / interpolated_alpha,
+            interpolate_raw(from_oklab.a, to_oklab.a, delta) / interpolated_alpha,
+            interpolate_raw(from_oklab.b, to_oklab.b, delta) / interpolated_alpha,
+            interpolated_alpha);
     } else {
         result = Color {
             interpolate_raw(from.red(), to.red(), delta),
             interpolate_raw(from.green(), to.green(), delta),
             interpolate_raw(from.blue(), to.blue(), delta),
+            interpolate_raw(from.alpha(), to.alpha(), delta)
         };
     }
-    result.set_alpha(interpolate_raw(from.alpha(), to.alpha(), delta));
+
     return result;
 }
 
-RefPtr<CSSStyleValue const> interpolate_box_shadow(DOM::Element& element, CalculationContext const& calculation_context, CSSStyleValue const& from, CSSStyleValue const& to, float delta, AllowDiscrete allow_discrete)
+RefPtr<StyleValue const> interpolate_box_shadow(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete allow_discrete)
 {
     // https://drafts.csswg.org/css-backgrounds/#box-shadow
     // Animation type: by computed value, treating none as a zero-item list and appending blank shadows
     //                 (transparent 0 0 0 0) with a corresponding inset keyword as needed to match the longer list if
     //                 the shorter list is otherwise compatible with the longer one
 
-    static constexpr auto process_list = [](CSSStyleValue const& value) {
+    static constexpr auto process_list = [](StyleValue const& value) {
         StyleValueVector shadows;
         if (value.is_value_list()) {
             for (auto const& element : value.as_value_list().values()) {
@@ -653,7 +960,7 @@ RefPtr<CSSStyleValue const> interpolate_box_shadow(DOM::Element& element, Calcul
         values.ensure_capacity(other.size());
         for (size_t i = values.size(); i < other.size(); i++) {
             values.unchecked_append(ShadowStyleValue::create(
-                CSSColorValue::create_from_color(Color::Transparent, ColorSyntax::Legacy),
+                ColorStyleValue::create_from_color(Color::Transparent, ColorSyntax::Legacy),
                 LengthStyleValue::create(Length::make_px(0)),
                 LengthStyleValue::create(Length::make_px(0)),
                 LengthStyleValue::create(Length::make_px(0)),
@@ -672,11 +979,9 @@ RefPtr<CSSStyleValue const> interpolate_box_shadow(DOM::Element& element, Calcul
     StyleValueVector result_shadows;
     result_shadows.ensure_capacity(from_shadows.size());
 
-    Optional<Layout::NodeWithStyle const&> layout_node;
-    CalculationResolutionContext resolution_context;
+    ColorResolutionContext color_resolution_context {};
     if (auto node = element.layout_node()) {
-        layout_node = *node;
-        resolution_context.length_resolution_context = Length::ResolutionContext::for_layout_node(*node);
+        color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*element.layout_node());
     }
 
     for (size_t i = 0; i < from_shadows.size(); i++) {
@@ -688,13 +993,25 @@ RefPtr<CSSStyleValue const> interpolate_box_shadow(DOM::Element& element, Calcul
         auto interpolated_spread_distance = interpolate_value(element, calculation_context, from_shadow.spread_distance(), to_shadow.spread_distance(), delta, allow_discrete);
         if (!interpolated_offset_x || !interpolated_offset_y || !interpolated_blur_radius || !interpolated_spread_distance)
             return {};
+
         auto color_syntax = ColorSyntax::Legacy;
         if ((!from_shadow.color()->is_keyword() && from_shadow.color()->as_color().color_syntax() == ColorSyntax::Modern)
             || (!to_shadow.color()->is_keyword() && to_shadow.color()->as_color().color_syntax() == ColorSyntax::Modern)) {
             color_syntax = ColorSyntax::Modern;
         }
+
+        // FIXME: If we aren't able to resolve the colors here, we should postpone interpolation until we can (perhaps
+        //        by creating something similar to a ColorMixStyleValue).
+        auto from_color = from_shadow.color()->to_color(color_resolution_context);
+        auto to_color = to_shadow.color()->to_color(color_resolution_context);
+
+        Color interpolated_color = Color::Black;
+
+        if (from_color.has_value() && to_color.has_value())
+            interpolated_color = interpolate_color(from_color.value(), to_color.value(), delta, color_syntax);
+
         auto result_shadow = ShadowStyleValue::create(
-            CSSColorValue::create_from_color(interpolate_color(from_shadow.color()->to_color(layout_node, resolution_context), to_shadow.color()->to_color(layout_node, resolution_context), delta, color_syntax), ColorSyntax::Modern),
+            ColorStyleValue::create_from_color(interpolated_color, ColorSyntax::Modern),
             *interpolated_offset_x,
             *interpolated_offset_y,
             *interpolated_blur_radius,
@@ -706,110 +1023,180 @@ RefPtr<CSSStyleValue const> interpolate_box_shadow(DOM::Element& element, Calcul
     return StyleValueList::create(move(result_shadows), StyleValueList::Separator::Comma);
 }
 
-static RefPtr<CSSStyleValue const> interpolate_value_impl(DOM::Element& element, CalculationContext const& calculation_context, CSSStyleValue const& from, CSSStyleValue const& to, float delta, AllowDiscrete allow_discrete)
+static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete allow_discrete)
 {
-    if (from.type() != to.type()) {
-        // Handle mixed percentage and dimension types
+    if (from.type() != to.type() || from.is_calculated() || to.is_calculated()) {
+        // Handle mixed percentage and dimension types, as well as CalculatedStyleValues
         // https://www.w3.org/TR/css-values-4/#mixed-percentages
-
-        struct NumericBaseTypeAndDefault {
-            CSSNumericType::BaseType base_type;
-            ValueComparingNonnullRefPtr<CSSStyleValue const> default_value;
-        };
-        static constexpr auto numeric_base_type_and_default = [](CSSStyleValue const& value) -> Optional<NumericBaseTypeAndDefault> {
+        auto get_value_type_of_numeric_style_value = [&calculation_context](StyleValue const& value) -> Optional<ValueType> {
             switch (value.type()) {
-            case CSSStyleValue::Type::Angle: {
-                static auto default_angle_value = AngleStyleValue::create(Angle::make_degrees(0));
-                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Angle, default_angle_value };
-            }
-            case CSSStyleValue::Type::Frequency: {
-                static auto default_frequency_value = FrequencyStyleValue::create(Frequency::make_hertz(0));
-                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Frequency, default_frequency_value };
-            }
-            case CSSStyleValue::Type::Length: {
-                static auto default_length_value = LengthStyleValue::create(Length::make_px(0));
-                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Length, default_length_value };
-            }
-            case CSSStyleValue::Type::Percentage: {
-                static auto default_percentage_value = PercentageStyleValue::create(Percentage { 0.0 });
-                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Percent, default_percentage_value };
-            }
-            case CSSStyleValue::Type::Time: {
-                static auto default_time_value = TimeStyleValue::create(Time::make_seconds(0));
-                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Time, default_time_value };
+            case StyleValue::Type::Angle:
+                return ValueType::Angle;
+            case StyleValue::Type::Frequency:
+                return ValueType::Frequency;
+            case StyleValue::Type::Integer:
+                return ValueType::Integer;
+            case StyleValue::Type::Length:
+                return ValueType::Length;
+            case StyleValue::Type::Number:
+                return ValueType::Number;
+            case StyleValue::Type::Percentage:
+                return calculation_context.percentages_resolve_as.value_or(ValueType::Percentage);
+            case StyleValue::Type::Resolution:
+                return ValueType::Resolution;
+            case StyleValue::Type::Time:
+                return ValueType::Time;
+            case StyleValue::Type::Calculated: {
+                auto const& calculated = value.as_calculated();
+                if (calculated.resolves_to_angle_percentage())
+                    return ValueType::Angle;
+                if (calculated.resolves_to_frequency_percentage())
+                    return ValueType::Frequency;
+                if (calculated.resolves_to_length_percentage())
+                    return ValueType::Length;
+                if (calculated.resolves_to_resolution())
+                    return ValueType::Resolution;
+                if (calculated.resolves_to_number())
+                    return calculation_context.resolve_numbers_as_integers ? ValueType::Integer : ValueType::Number;
+                if (calculated.resolves_to_percentage())
+                    return calculation_context.percentages_resolve_as.value_or(ValueType::Percentage);
+                if (calculated.resolves_to_time_percentage())
+                    return ValueType::Time;
+
+                return {};
             }
             default:
                 return {};
             }
         };
 
-        static auto to_calculation_node = [calculation_context](CSSStyleValue const& value) -> NonnullRefPtr<CalculationNode const> {
-            switch (value.type()) {
-            case CSSStyleValue::Type::Angle:
-                return NumericCalculationNode::create(value.as_angle().angle(), calculation_context);
-            case CSSStyleValue::Type::Frequency:
-                return NumericCalculationNode::create(value.as_frequency().frequency(), calculation_context);
-            case CSSStyleValue::Type::Length:
-                return NumericCalculationNode::create(value.as_length().length(), calculation_context);
-            case CSSStyleValue::Type::Percentage:
-                return NumericCalculationNode::create(value.as_percentage().percentage(), calculation_context);
-            case CSSStyleValue::Type::Time:
-                return NumericCalculationNode::create(value.as_time().time(), calculation_context);
-            default:
-                VERIFY_NOT_REACHED();
+        auto from_value_type = get_value_type_of_numeric_style_value(from);
+        auto to_value_type = get_value_type_of_numeric_style_value(to);
+
+        if (from_value_type.has_value() && from_value_type == to_value_type) {
+            auto to_calculation_node = [&calculation_context](StyleValue const& value) -> NonnullRefPtr<CalculationNode const> {
+                switch (value.type()) {
+                case StyleValue::Type::Angle:
+                    return NumericCalculationNode::create(value.as_angle().angle(), calculation_context);
+                case StyleValue::Type::Frequency:
+                    return NumericCalculationNode::create(value.as_frequency().frequency(), calculation_context);
+                case StyleValue::Type::Integer:
+                    // https://drafts.csswg.org/css-values-4/#combine-integers
+                    // Interpolation of <integer> is defined as Vresult = round((1 - p) × VA + p × VB); that is,
+                    // interpolation happens in the real number space as for <number>s, and the result is converted to an
+                    // <integer> by rounding to the nearest integer.
+                    return NumericCalculationNode::create(Number { Number::Type::Number, static_cast<double>(value.as_integer().integer()) }, calculation_context);
+                case StyleValue::Type::Length:
+                    return NumericCalculationNode::create(value.as_length().length(), calculation_context);
+                case StyleValue::Type::Number:
+                    return NumericCalculationNode::create(Number { Number::Type::Number, value.as_number().number() }, calculation_context);
+                case StyleValue::Type::Percentage:
+                    return NumericCalculationNode::create(value.as_percentage().percentage(), calculation_context);
+                case StyleValue::Type::Time:
+                    return NumericCalculationNode::create(value.as_time().time(), calculation_context);
+                case StyleValue::Type::Calculated:
+                    return value.as_calculated().calculation();
+                default:
+                    VERIFY_NOT_REACHED();
+                }
+            };
+
+            // https://drafts.csswg.org/css-values-4/#combine-mixed
+            // The computed value of a percentage-dimension mix is defined as
+            // FIXME: a computed dimension if the percentage component is zero or is defined specifically to compute to a dimension value
+            // a computed percentage if the dimension component is zero
+            // a computed calc() expression otherwise
+            if (auto const* from_dimension_value = as_if<DimensionStyleValue>(from); from_dimension_value && to.type() == StyleValue::Type::Percentage) {
+                auto dimension_component = from_dimension_value->raw_value() * (1.f - delta);
+                auto percentage_component = to.as_percentage().raw_value() * delta;
+                if (dimension_component == 0.f)
+                    return PercentageStyleValue::create(Percentage { percentage_component });
+            } else if (auto const* to_dimension_value = as_if<DimensionStyleValue>(to); to_dimension_value && from.type() == StyleValue::Type::Percentage) {
+                auto dimension_component = to_dimension_value->raw_value() * delta;
+                auto percentage_component = from.as_percentage().raw_value() * (1.f - delta);
+                if (dimension_component == 0)
+                    return PercentageStyleValue::create(Percentage { percentage_component });
             }
-        };
 
-        auto from_base_type_and_default = numeric_base_type_and_default(from);
-        auto to_base_type_and_default = numeric_base_type_and_default(to);
+            auto from_node = to_calculation_node(from);
+            auto to_node = to_calculation_node(to);
 
-        if (from_base_type_and_default.has_value() && to_base_type_and_default.has_value() && (from_base_type_and_default->base_type == CSSNumericType::BaseType::Percent || to_base_type_and_default->base_type == CSSNumericType::BaseType::Percent)) {
-            // This is an interpolation from a numeric unit to a percentage, or vice versa. The trick here is to
-            // interpolate two separate values. For example, consider an interpolation from 30px to 80%. It's quite
-            // hard to understand how this interpolation works, but if instead we rewrite the values as "30px + 0%" and
-            // "0px + 80%", then it is very simple to understand; we just interpolate each component separately.
+            // https://drafts.csswg.org/css-values-4/#combine-math
+            // Interpolation of math functions, with each other or with numeric values and other numeric-valued functions, is defined as Vresult = calc((1 - p) * VA + p * VB).
+            auto from_contribution = ProductCalculationNode::create({
+                from_node,
+                NumericCalculationNode::create(Number { Number::Type::Number, 1.f - delta }, calculation_context),
+            });
 
-            auto interpolated_from = interpolate_value(element, calculation_context, from, from_base_type_and_default->default_value, delta, allow_discrete);
-            auto interpolated_to = interpolate_value(element, calculation_context, to_base_type_and_default->default_value, to, delta, allow_discrete);
-            if (!interpolated_from || !interpolated_to)
-                return {};
+            auto to_contribution = ProductCalculationNode::create({
+                to_node,
+                NumericCalculationNode::create(Number { Number::Type::Number, delta }, calculation_context),
+            });
 
-            Vector<NonnullRefPtr<CalculationNode const>> values;
-            values.ensure_capacity(2);
-            values.unchecked_append(to_calculation_node(*interpolated_from));
-            values.unchecked_append(to_calculation_node(*interpolated_to));
-            auto calc_node = SumCalculationNode::create(move(values));
-            return CalculatedStyleValue::create(move(calc_node), CSSNumericType { to_base_type_and_default->base_type, 1 }, calculation_context);
+            return CalculatedStyleValue::create(
+                simplify_a_calculation_tree(SumCalculationNode::create({ from_contribution, to_contribution }), calculation_context, {}),
+                *from_node->numeric_type()->added_to(*to_node->numeric_type()),
+                calculation_context);
         }
 
         return {};
     }
 
-    static auto interpolate_length_percentage = [](LengthPercentage const& from, LengthPercentage const& to, float delta) -> Optional<LengthPercentage> {
+    static auto interpolate_length_percentage = [](CalculationContext const& calculation_context, LengthPercentage const& from, LengthPercentage const& to, float delta) -> Optional<LengthPercentage> {
         if (from.is_length() && to.is_length())
-            return Length::make_px(interpolate_raw(from.length().raw_value(), to.length().raw_value(), delta));
+            return Length::make_px(interpolate_raw(from.length().raw_value(), to.length().raw_value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Length)));
         if (from.is_percentage() && to.is_percentage())
-            return Percentage(interpolate_raw(from.percentage().value(), to.percentage().value(), delta));
+            return Percentage(interpolate_raw(from.percentage().value(), to.percentage().value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Percentage)));
+        // FIXME: Interpolate calculations
+        return {};
+    };
+
+    static auto interpolate_length_percentage_or_auto = [](CalculationContext const& calculation_context, LengthPercentageOrAuto const& from, LengthPercentageOrAuto const& to, float delta) -> Optional<LengthPercentageOrAuto> {
+        if (from.is_auto() && to.is_auto())
+            return LengthPercentageOrAuto::make_auto();
+        if (from.is_length() && to.is_length())
+            return Length::make_px(interpolate_raw(from.length().raw_value(), to.length().raw_value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Length)));
+        if (from.is_percentage() && to.is_percentage())
+            return Percentage(interpolate_raw(from.percentage().value(), to.percentage().value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Percentage)));
+        // FIXME: Interpolate calculations
         return {};
     };
 
     switch (from.type()) {
-    case CSSStyleValue::Type::Angle:
-        return AngleStyleValue::create(Angle::make_degrees(interpolate_raw(from.as_angle().angle().to_degrees(), to.as_angle().angle().to_degrees(), delta)));
-    case CSSStyleValue::Type::BackgroundSize: {
-        auto interpolated_x = interpolate_length_percentage(from.as_background_size().size_x(), to.as_background_size().size_x(), delta);
-        auto interpolated_y = interpolate_length_percentage(from.as_background_size().size_y(), to.as_background_size().size_y(), delta);
+    case StyleValue::Type::Angle: {
+        auto interpolated_value = interpolate_raw(from.as_angle().angle().to_degrees(), to.as_angle().angle().to_degrees(), delta, calculation_context.accepted_type_ranges.get(ValueType::Angle));
+        return AngleStyleValue::create(Angle::make_degrees(interpolated_value));
+    }
+    case StyleValue::Type::BackgroundSize: {
+        auto interpolated_x = interpolate_length_percentage_or_auto(calculation_context, from.as_background_size().size_x(), to.as_background_size().size_x(), delta);
+        auto interpolated_y = interpolate_length_percentage_or_auto(calculation_context, from.as_background_size().size_y(), to.as_background_size().size_y(), delta);
         if (!interpolated_x.has_value() || !interpolated_y.has_value())
             return {};
 
         return BackgroundSizeStyleValue::create(*interpolated_x, *interpolated_y);
     }
-    case CSSStyleValue::Type::Color: {
-        Optional<Layout::NodeWithStyle const&> layout_node;
-        CalculationResolutionContext resolution_context {};
+    case StyleValue::Type::BorderImageSlice: {
+        auto& from_border_image_slice = from.as_border_image_slice();
+        auto& to_border_image_slice = to.as_border_image_slice();
+        if (from_border_image_slice.fill() != to_border_image_slice.fill())
+            return {};
+        auto interpolated_top = interpolate_value(element, calculation_context, from_border_image_slice.top(), to_border_image_slice.top(), delta, allow_discrete);
+        auto interpolated_right = interpolate_value(element, calculation_context, from_border_image_slice.right(), to_border_image_slice.right(), delta, allow_discrete);
+        auto interpolated_bottom = interpolate_value(element, calculation_context, from_border_image_slice.bottom(), to_border_image_slice.bottom(), delta, allow_discrete);
+        auto interpolated_left = interpolate_value(element, calculation_context, from_border_image_slice.left(), to_border_image_slice.left(), delta, allow_discrete);
+        if (!interpolated_top || !interpolated_right || !interpolated_bottom || !interpolated_left)
+            return {};
+        return BorderImageSliceStyleValue::create(
+            interpolated_top.release_nonnull(),
+            interpolated_right.release_nonnull(),
+            interpolated_bottom.release_nonnull(),
+            interpolated_left.release_nonnull(),
+            from_border_image_slice.fill());
+    }
+    case StyleValue::Type::Color: {
+        ColorResolutionContext color_resolution_context {};
         if (auto node = element.layout_node()) {
-            layout_node = *node;
-            resolution_context.length_resolution_context = Length::ResolutionContext::for_layout_node(*node);
+            color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*element.layout_node());
         }
 
         auto color_syntax = ColorSyntax::Legacy;
@@ -817,23 +1204,34 @@ static RefPtr<CSSStyleValue const> interpolate_value_impl(DOM::Element& element,
             || (!to.is_keyword() && to.as_color().color_syntax() == ColorSyntax::Modern)) {
             color_syntax = ColorSyntax::Modern;
         }
-        return CSSColorValue::create_from_color(interpolate_color(from.to_color(layout_node, resolution_context), to.to_color(layout_node, resolution_context), delta, color_syntax), ColorSyntax::Modern);
+
+        // FIXME: If we aren't able to resolve the colors here, we should postpone interpolation until we can (perhaps
+        //        by creating something similar to a ColorMixStyleValue).
+        auto from_color = from.to_color(color_resolution_context);
+        auto to_color = to.to_color(color_resolution_context);
+
+        Color interpolated_color = Color::Black;
+
+        if (from_color.has_value() && to_color.has_value())
+            interpolated_color = interpolate_color(from_color.value(), to_color.value(), delta, color_syntax);
+
+        return ColorStyleValue::create_from_color(interpolated_color, ColorSyntax::Modern);
     }
-    case CSSStyleValue::Type::Edge: {
+    case StyleValue::Type::Edge: {
         auto resolved_from = from.as_edge().resolved_value(calculation_context);
         auto resolved_to = to.as_edge().resolved_value(calculation_context);
         auto const& edge = delta >= 0.5f ? resolved_to->edge() : resolved_from->edge();
         auto const& from_offset = resolved_from->offset();
         auto const& to_offset = resolved_to->offset();
-        if (auto interpolated_value = interpolate_length_percentage(from_offset, to_offset, delta); interpolated_value.has_value())
+        if (auto interpolated_value = interpolate_length_percentage(calculation_context, from_offset, to_offset, delta); interpolated_value.has_value())
             return EdgeStyleValue::create(edge, *interpolated_value);
 
         return {};
     }
-    case CSSStyleValue::Type::FontStyle: {
+    case StyleValue::Type::FontStyle: {
         auto const& from_font_style = from.as_font_style();
         auto const& to_font_style = to.as_font_style();
-        auto interpolated_font_style = interpolate_value(element, calculation_context, CSSKeywordValue::create(to_keyword(from_font_style.font_style())), CSSKeywordValue::create(to_keyword(to_font_style.font_style())), delta, allow_discrete);
+        auto interpolated_font_style = interpolate_value(element, calculation_context, KeywordStyleValue::create(to_keyword(from_font_style.font_style())), KeywordStyleValue::create(to_keyword(to_font_style.font_style())), delta, allow_discrete);
         if (!interpolated_font_style)
             return {};
         if (from_font_style.angle() && to_font_style.angle()) {
@@ -845,23 +1243,28 @@ static RefPtr<CSSStyleValue const> interpolate_value_impl(DOM::Element& element,
 
         return FontStyleStyleValue::create(*keyword_to_font_style(interpolated_font_style->to_keyword()));
     }
-    case CSSStyleValue::Type::Integer: {
+    case StyleValue::Type::Integer: {
         // https://drafts.csswg.org/css-values/#combine-integers
         // Interpolation of <integer> is defined as Vresult = round((1 - p) × VA + p × VB);
         // that is, interpolation happens in the real number space as for <number>s, and the result is converted to an <integer> by rounding to the nearest integer.
-        auto interpolated_value = interpolate_raw(from.as_integer().value(), to.as_integer().value(), delta);
-        return IntegerStyleValue::create(round_to<i64>(interpolated_value));
+        auto interpolated_value = interpolate_raw(from.as_integer().integer(), to.as_integer().integer(), delta, calculation_context.accepted_type_ranges.get(ValueType::Integer));
+        return IntegerStyleValue::create(interpolated_value);
     }
-    case CSSStyleValue::Type::Length: {
+    case StyleValue::Type::Length: {
         auto const& from_length = from.as_length().length();
         auto const& to_length = to.as_length().length();
-        return LengthStyleValue::create(Length(interpolate_raw(from_length.raw_value(), to_length.raw_value(), delta), from_length.type()));
+        auto interpolated_value = interpolate_raw(from_length.raw_value(), to_length.raw_value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Length));
+        return LengthStyleValue::create(Length(interpolated_value, from_length.unit()));
     }
-    case CSSStyleValue::Type::Number:
-        return NumberStyleValue::create(interpolate_raw(from.as_number().number(), to.as_number().number(), delta));
-    case CSSStyleValue::Type::Percentage:
-        return PercentageStyleValue::create(Percentage(interpolate_raw(from.as_percentage().percentage().value(), to.as_percentage().percentage().value(), delta)));
-    case CSSStyleValue::Type::Position: {
+    case StyleValue::Type::Number: {
+        auto interpolated_value = interpolate_raw(from.as_number().number(), to.as_number().number(), delta, calculation_context.accepted_type_ranges.get(ValueType::Number));
+        return NumberStyleValue::create(interpolated_value);
+    }
+    case StyleValue::Type::Percentage: {
+        auto interpolated_value = interpolate_raw(from.as_percentage().percentage().value(), to.as_percentage().percentage().value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Percentage));
+        return PercentageStyleValue::create(Percentage(interpolated_value));
+    }
+    case StyleValue::Type::Position: {
         // https://www.w3.org/TR/css-values-4/#combine-positions
         // FIXME: Interpolation of <position> is defined as the independent interpolation of each component (x, y) normalized as an offset from the top left corner as a <length-percentage>.
         auto const& from_position = from.as_position();
@@ -872,7 +1275,7 @@ static RefPtr<CSSStyleValue const> interpolate_value_impl(DOM::Element& element,
             return {};
         return PositionStyleValue::create(interpolated_edge_x->as_edge(), interpolated_edge_y->as_edge());
     }
-    case CSSStyleValue::Type::Ratio: {
+    case StyleValue::Type::Ratio: {
         auto from_ratio = from.as_ratio().ratio();
         auto to_ratio = to.as_ratio().ratio();
 
@@ -888,26 +1291,34 @@ static RefPtr<CSSStyleValue const> interpolate_value_impl(DOM::Element& element,
         // result as the first value and 1 as the second value.
         auto from_number = log(from_ratio.value());
         auto to_number = log(to_ratio.value());
-        auto interp_number = interpolate_raw(from_number, to_number, delta);
-        return RatioStyleValue::create(Ratio(pow(M_E, interp_number)));
+        auto interpolated_value = interpolate_raw(from_number, to_number, delta, calculation_context.accepted_type_ranges.get(ValueType::Ratio));
+        return RatioStyleValue::create(Ratio(pow(M_E, interpolated_value)));
     }
-    case CSSStyleValue::Type::Rect: {
+    case StyleValue::Type::Rect: {
         auto from_rect = from.as_rect().rect();
         auto to_rect = to.as_rect().rect();
 
         if (from_rect.top_edge.is_auto() != to_rect.top_edge.is_auto() || from_rect.right_edge.is_auto() != to_rect.right_edge.is_auto() || from_rect.bottom_edge.is_auto() != to_rect.bottom_edge.is_auto() || from_rect.left_edge.is_auto() != to_rect.left_edge.is_auto())
             return {};
 
+        auto interpolate_length_or_auto = [](LengthOrAuto const& from, LengthOrAuto const& to, CalculationContext const& calculation_context, float delta) {
+            if (from.is_auto() && to.is_auto())
+                return LengthOrAuto::make_auto();
+            // FIXME: Actually handle the units not matching.
+            auto interpolated_value = interpolate_raw(from.length().raw_value(), to.length().raw_value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Rect));
+            return LengthOrAuto { Length { interpolated_value, from.length().unit() } };
+        };
+
         return RectStyleValue::create({
-            Length(interpolate_raw(from_rect.top_edge.raw_value(), to_rect.top_edge.raw_value(), delta), from_rect.top_edge.type()),
-            Length(interpolate_raw(from_rect.right_edge.raw_value(), to_rect.right_edge.raw_value(), delta), from_rect.right_edge.type()),
-            Length(interpolate_raw(from_rect.bottom_edge.raw_value(), to_rect.bottom_edge.raw_value(), delta), from_rect.bottom_edge.type()),
-            Length(interpolate_raw(from_rect.left_edge.raw_value(), to_rect.left_edge.raw_value(), delta), from_rect.left_edge.type()),
+            interpolate_length_or_auto(from_rect.top_edge, to_rect.top_edge, calculation_context, delta),
+            interpolate_length_or_auto(from_rect.right_edge, to_rect.right_edge, calculation_context, delta),
+            interpolate_length_or_auto(from_rect.bottom_edge, to_rect.bottom_edge, calculation_context, delta),
+            interpolate_length_or_auto(from_rect.left_edge, to_rect.left_edge, calculation_context, delta),
         });
     }
-    case CSSStyleValue::Type::Transformation:
+    case StyleValue::Type::Transformation:
         VERIFY_NOT_REACHED();
-    case CSSStyleValue::Type::ValueList: {
+    case StyleValue::Type::ValueList: {
         auto const& from_list = from.as_value_list();
         auto const& to_list = to.as_value_list();
         if (from_list.size() != to_list.size())
@@ -933,14 +1344,14 @@ static RefPtr<CSSStyleValue const> interpolate_value_impl(DOM::Element& element,
     }
 }
 
-RefPtr<CSSStyleValue const> interpolate_repeatable_list(DOM::Element& element, CalculationContext const& calculation_context, CSSStyleValue const& from, CSSStyleValue const& to, float delta, AllowDiscrete allow_discrete)
+RefPtr<StyleValue const> interpolate_repeatable_list(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete allow_discrete)
 {
     // https://www.w3.org/TR/web-animations/#repeatable-list
     // Same as by computed value except that if the two lists have differing numbers of items, they are first repeated to the least common multiple number of items.
     // Each item is then combined by computed value.
     // If a pair of values cannot be combined or if any component value uses discrete animation, then the property values combine as discrete.
 
-    auto make_repeatable_list = [&](auto const& from_list, auto const& to_list, Function<void(NonnullRefPtr<CSSStyleValue const>)> append_callback) -> bool {
+    auto make_repeatable_list = [&](auto const& from_list, auto const& to_list, Function<void(NonnullRefPtr<StyleValue const>)> append_callback) -> bool {
         // If the number of components or the types of corresponding components do not match,
         // or if any component value uses discrete animation and the two corresponding values do not match,
         // then the property values combine as discrete
@@ -978,7 +1389,7 @@ RefPtr<CSSStyleValue const> interpolate_repeatable_list(DOM::Element& element, C
     return StyleValueList::create(move(interpolated_values), from_list->as_value_list().separator());
 }
 
-RefPtr<CSSStyleValue const> interpolate_value(DOM::Element& element, CalculationContext const& calculation_context, CSSStyleValue const& from, CSSStyleValue const& to, float delta, AllowDiscrete allow_discrete)
+RefPtr<StyleValue const> interpolate_value(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete allow_discrete)
 {
     if (auto result = interpolate_value_impl(element, calculation_context, from, to, delta, allow_discrete))
         return result;

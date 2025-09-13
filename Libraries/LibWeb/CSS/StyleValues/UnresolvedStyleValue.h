@@ -10,37 +10,33 @@
 #pragma once
 
 #include <AK/Vector.h>
-#include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/Parser/ComponentValue.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
 
-class UnresolvedStyleValue final : public CSSStyleValue {
+class UnresolvedStyleValue final : public StyleValue {
 public:
-    static ValueComparingNonnullRefPtr<UnresolvedStyleValue const> create(Vector<Parser::ComponentValue>&& values, bool contains_arbitrary_substitution_function, Optional<String> original_source_text)
-    {
-        return adopt_ref(*new (nothrow) UnresolvedStyleValue(move(values), contains_arbitrary_substitution_function, move(original_source_text)));
-    }
+    static ValueComparingNonnullRefPtr<UnresolvedStyleValue const> create(Vector<Parser::ComponentValue>&& values, Optional<Parser::SubstitutionFunctionsPresence> = {}, Optional<String> original_source_text = {});
     virtual ~UnresolvedStyleValue() override = default;
 
     virtual String to_string(SerializationMode) const override;
+    virtual Vector<Parser::ComponentValue> tokenize() const override { return m_values; }
 
     Vector<Parser::ComponentValue> const& values() const { return m_values; }
-    bool contains_arbitrary_substitution_function() const { return m_contains_arbitrary_substitution_function; }
+    bool contains_arbitrary_substitution_function() const { return m_substitution_functions_presence.has_any(); }
+    bool includes_attr_function() const { return m_substitution_functions_presence.attr; }
+    bool includes_var_function() const { return m_substitution_functions_presence.var; }
 
-    virtual bool equals(CSSStyleValue const& other) const override;
+    virtual bool equals(StyleValue const& other) const override;
+
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, String const& associated_property) const override;
 
 private:
-    UnresolvedStyleValue(Vector<Parser::ComponentValue>&& values, bool contains_arbitrary_substitution_function, Optional<String> original_source_text)
-        : CSSStyleValue(Type::Unresolved)
-        , m_values(move(values))
-        , m_contains_arbitrary_substitution_function(contains_arbitrary_substitution_function)
-        , m_original_source_text(move(original_source_text))
-    {
-    }
+    UnresolvedStyleValue(Vector<Parser::ComponentValue>&& values, Parser::SubstitutionFunctionsPresence, Optional<String> original_source_text);
 
     Vector<Parser::ComponentValue> m_values;
-    bool m_contains_arbitrary_substitution_function { false };
+    Parser::SubstitutionFunctionsPresence m_substitution_functions_presence {};
     Optional<String> m_original_source_text;
 };
 

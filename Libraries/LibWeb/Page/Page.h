@@ -25,6 +25,7 @@
 #include <LibWeb/CSS/PreferredContrast.h>
 #include <LibWeb/CSS/PreferredMotion.h>
 #include <LibWeb/Cookie/Cookie.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
 #include <LibWeb/HTML/AudioPlayState.h>
@@ -45,7 +46,7 @@ namespace Web {
 
 class PageClient;
 
-class Page final : public JS::Cell {
+class WEB_API Page final : public JS::Cell {
     GC_CELL(Page, JS::Cell);
     GC_DECLARE_ALLOCATOR(Page);
 
@@ -92,6 +93,7 @@ public:
     EventResult handle_mouseup(DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers);
     EventResult handle_mousedown(DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers);
     EventResult handle_mousemove(DevicePixelPoint, DevicePixelPoint screen_position, unsigned buttons, unsigned modifiers);
+    EventResult handle_mouseleave();
     EventResult handle_mousewheel(DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, DevicePixels wheel_delta_x, DevicePixels wheel_delta_y);
     EventResult handle_doubleclick(DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers);
 
@@ -100,14 +102,13 @@ public:
     EventResult handle_keydown(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
     EventResult handle_keyup(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
 
+    void handle_sdl_input_events();
+
     Gfx::Palette palette() const;
     CSSPixelRect web_exposed_screen_area() const;
     CSS::PreferredColorScheme preferred_color_scheme() const;
     CSS::PreferredContrast preferred_contrast() const;
     CSS::PreferredMotion preferred_motion() const;
-
-    bool is_same_origin_policy_enabled() const { return m_same_origin_policy_enabled; }
-    void set_same_origin_policy_enabled(bool b) { m_same_origin_policy_enabled = b; }
 
     bool is_scripting_enabled() const { return m_is_scripting_enabled; }
     void set_is_scripting_enabled(bool b) { m_is_scripting_enabled = b; }
@@ -248,9 +249,6 @@ private:
 
     GC::Ptr<HTML::TraversableNavigable> m_top_level_traversable;
 
-    // FIXME: Enable this by default once CORS preflight checks are supported.
-    bool m_same_origin_policy_enabled { false };
-
     bool m_is_scripting_enabled { true };
 
     bool m_should_block_pop_ups { true };
@@ -324,7 +322,7 @@ public:
     virtual CSS::PreferredMotion preferred_motion() const = 0;
     virtual Queue<QueuedInputEvent>& input_event_queue() = 0;
     virtual void report_finished_handling_input_event(u64 page_id, EventResult event_was_handled) = 0;
-    virtual void page_did_change_title(ByteString const&) { }
+    virtual void page_did_change_title(Utf16String const&) { }
     virtual void page_did_change_url(URL::URL const&) { }
     virtual void page_did_request_refresh() { }
     virtual void page_did_request_resize_window(Gfx::IntSize) { }
@@ -351,14 +349,14 @@ public:
     virtual void page_did_hover_link(URL::URL const&) { }
     virtual void page_did_unhover_link() { }
     virtual void page_did_change_favicon(Gfx::Bitmap const&) { }
-    virtual void page_did_layout() { }
     virtual void page_did_request_alert(String const&) { }
     virtual void page_did_request_confirm(String const&) { }
     virtual void page_did_request_prompt(String const&, String const&) { }
     virtual void page_did_request_set_prompt_text(String const&) { }
     virtual void page_did_request_accept_dialog() { }
     virtual void page_did_request_dismiss_dialog() { }
-    virtual Vector<Web::Cookie::Cookie> page_did_request_all_cookies(URL::URL const&) { return {}; }
+    virtual Vector<Web::Cookie::Cookie> page_did_request_all_cookies_webdriver(URL::URL const&) { return {}; }
+    virtual Vector<Web::Cookie::Cookie> page_did_request_all_cookies_cookiestore(URL::URL const&) { return {}; }
     virtual Optional<Web::Cookie::Cookie> page_did_request_named_cookie(URL::URL const&, String const&) { return {}; }
     virtual String page_did_request_cookie(URL::URL const&, Cookie::Source) { return {}; }
     virtual void page_did_set_cookie(URL::URL const&, Cookie::ParsedCookie const&, Cookie::Source) { }
@@ -389,6 +387,7 @@ public:
 
     virtual void page_did_finish_test([[maybe_unused]] String const& text) { }
     virtual void page_did_set_test_timeout([[maybe_unused]] double milliseconds) { }
+    virtual void page_did_receive_reference_test_metadata(JsonValue) { }
 
     virtual void page_did_set_browser_zoom([[maybe_unused]] double factor) { }
 
@@ -423,9 +422,9 @@ protected:
 namespace IPC {
 
 template<>
-ErrorOr<void> encode(Encoder&, Web::Page::MediaContextMenu const&);
+WEB_API ErrorOr<void> encode(Encoder&, Web::Page::MediaContextMenu const&);
 
 template<>
-ErrorOr<Web::Page::MediaContextMenu> decode(Decoder&);
+WEB_API ErrorOr<Web::Page::MediaContextMenu> decode(Decoder&);
 
 }

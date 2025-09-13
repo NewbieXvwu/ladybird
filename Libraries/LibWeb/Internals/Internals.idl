@@ -1,12 +1,14 @@
 #import <DOM/EventTarget.idl>
 #import <HTML/HTMLElement.idl>
 #import <Internals/InternalAnimationTimeline.idl>
+#import <Internals/InternalGamepad.idl>
 
 [Exposed=Nobody]
 interface Internals {
 
     undefined signalTestIsDone(DOMString text);
     undefined setTestTimeout(double milliseconds);
+    undefined loadReferenceTestMetadata();
 
     DOMString setTimeZone(DOMString timeZone);
 
@@ -22,6 +24,7 @@ interface Internals {
 
     undefined sendText(HTMLElement target, DOMString text, optional unsigned short modifiers = 0);
     undefined sendKey(HTMLElement target, DOMString keyName, optional unsigned short modifiers = 0);
+    undefined paste(HTMLElement target, DOMString text);
     undefined commitText();
 
     undefined click(double x, double y);
@@ -50,4 +53,14 @@ interface Internals {
     undefined setBrowserZoom(double factor);
 
     readonly attribute boolean headless;
+
+    DOMString dumpDisplayList();
+
+    // Returns the shadow root of the element, if it has one, even if it's not normally accessible to JS.
+    ShadowRoot? getShadowRoot(Element element);
+
+    undefined handleSDLInputEvents();
+
+    InternalGamepad connectVirtualGamepad();
+
 };

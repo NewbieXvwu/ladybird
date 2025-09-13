@@ -5,15 +5,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGfx/Bitmap.h>
-#include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/Layout/CheckBox.h>
-#include <LibWeb/Layout/Label.h>
 #include <LibWeb/Painting/CheckBoxPaintable.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/InputColors.h>
+#include <LibWeb/Painting/PaintStyle.h>
 
 namespace Web::Painting {
 
@@ -58,7 +56,7 @@ Layout::CheckBox& CheckBoxPaintable::layout_box()
     return static_cast<Layout::CheckBox&>(layout_node());
 }
 
-void CheckBoxPaintable::paint(PaintContext& context, PaintPhase phase) const
+void CheckBoxPaintable::paint(DisplayListRecordingContext& context, PaintPhase phase) const
 {
     if (!is_visible())
         return;
@@ -102,11 +100,9 @@ void CheckBoxPaintable::paint(PaintContext& context, PaintPhase phase) const
         auto tick_color = increase_contrast(input_colors.base, background_color);
         if (!enabled)
             tick_color = shade(tick_color, 0.5f);
-        context.display_list_recorder().fill_path({
-            .path = check_mark_path(checkbox_rect),
-            .color = tick_color,
-            .translation = checkbox_rect.location().to_type<float>(),
-        });
+        auto path = check_mark_path(checkbox_rect);
+        path.offset(checkbox_rect.location().to_type<float>());
+        context.display_list_recorder().fill_path({ .path = move(path), .paint_style_or_color = tick_color });
     } else {
         auto background_color = input_colors.background_color(enabled);
         auto border_thickness = max(1, checkbox_rect.width() / 10);
@@ -117,7 +113,7 @@ void CheckBoxPaintable::paint(PaintContext& context, PaintPhase phase) const
             int radius = 0.05 * checkbox_rect.width();
             auto dash_color = increase_contrast(input_colors.dark_gray, background_color);
             auto dash_rect = checkbox_rect.inflated(-0.4 * checkbox_rect.width(), -0.8 * checkbox_rect.height());
-            context.display_list_recorder().fill_rect_with_rounded_corners(dash_rect, dash_color, radius, radius, radius, radius);
+            context.display_list_recorder().fill_rect_with_rounded_corners(dash_rect, dash_color, radius);
         }
     }
 }

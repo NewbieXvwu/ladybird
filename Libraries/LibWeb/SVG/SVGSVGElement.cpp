@@ -18,6 +18,7 @@
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/SVGAnimatedRect.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
+#include <LibWeb/SVG/SVGViewElement.h>
 #include <LibWeb/Selection/Selection.h>
 
 namespace Web::SVG {
@@ -33,13 +34,14 @@ void SVGSVGElement::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGSVGElement);
     Base::initialize(realm);
-    m_view_box_for_bindings = realm.create<SVGAnimatedRect>(realm);
+    SVGFitToViewBox::initialize(realm);
 }
 
 void SVGSVGElement::visit_edges(Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_view_box_for_bindings);
+    SVGFitToViewBox::visit_edges(visitor);
+    visitor.visit(m_active_view_element);
 }
 
 GC::Ptr<Layout::Node> SVGSVGElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
@@ -47,7 +49,7 @@ GC::Ptr<Layout::Node> SVGSVGElement::create_layout_node(GC::Ref<CSS::ComputedPro
     return heap().allocate<Layout::SVGSVGBox>(document(), *this, move(style));
 }
 
-RefPtr<CSS::CSSStyleValue const> SVGSVGElement::width_style_value_from_attribute() const
+RefPtr<CSS::StyleValue const> SVGSVGElement::width_style_value_from_attribute() const
 {
     auto parsing_context = CSS::Parser::ParsingParams { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
     auto width_attribute = attribute(SVG::AttributeNames::width);
@@ -63,7 +65,7 @@ RefPtr<CSS::CSSStyleValue const> SVGSVGElement::width_style_value_from_attribute
     return nullptr;
 }
 
-RefPtr<CSS::CSSStyleValue const> SVGSVGElement::height_style_value_from_attribute() const
+RefPtr<CSS::StyleValue const> SVGSVGElement::height_style_value_from_attribute() const
 {
     auto parsing_context = CSS::Parser::ParsingParams { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
     auto height_attribute = attribute(SVG::AttributeNames::height);
@@ -118,23 +120,25 @@ void SVGSVGElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> 
 void SVGSVGElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
+    SVGFitToViewBox::attribute_changed(*this, name, value);
 
-    if (name.equals_ignoring_ascii_case(SVG::AttributeNames::viewBox)) {
-        if (!value.has_value()) {
-            m_view_box_for_bindings->set_nulled(true);
-        } else {
-            m_view_box = try_parse_view_box(value.value_or(String {}));
-            m_view_box_for_bindings->set_nulled(!m_view_box.has_value());
-            if (m_view_box.has_value()) {
-                m_view_box_for_bindings->set_base_val(Gfx::DoubleRect { m_view_box->min_x, m_view_box->min_y, m_view_box->width, m_view_box->height });
-                m_view_box_for_bindings->set_anim_val(Gfx::DoubleRect { m_view_box->min_x, m_view_box->min_y, m_view_box->width, m_view_box->height });
-            }
-        }
-    }
-    if (name.equals_ignoring_ascii_case(SVG::AttributeNames::preserveAspectRatio))
-        m_preserve_aspect_ratio = AttributeParser::parse_preserve_aspect_ratio(value.value_or(String {}));
     if (name.equals_ignoring_ascii_case(SVG::AttributeNames::width) || name.equals_ignoring_ascii_case(SVG::AttributeNames::height))
         update_fallback_view_box_for_svg_as_image();
+}
+
+void SVGSVGElement::children_changed(ChildrenChangedMetadata const*)
+{
+    // FIXME: Add support for all types of SVG fragment identifier.
+    //        See: https://svgwg.org/svg2-draft/linking.html#LinksIntoSVG
+    if (auto url = document().url(); url.fragment().has_value()) {
+        if (auto referenced_element = get_element_by_id(*url.fragment())) {
+            if (auto* view_element = as_if<SVGViewElement>(*referenced_element)) {
+                set_active_view_element(*view_element);
+                return;
+            }
+        }
+        set_active_view_element({});
+    }
 }
 
 void SVGSVGElement::update_fallback_view_box_for_svg_as_image()
@@ -147,7 +151,7 @@ void SVGSVGElement::update_fallback_view_box_for_svg_as_image()
     Optional<double> height;
 
     auto width_attribute = get_attribute_value(SVG::AttributeNames::width);
-    auto parsing_context = CSS::Parser::ParsingParams { document() };
+    auto parsing_context = CSS::Parser::ParsingParams { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
     if (auto width_value = parse_css_value(parsing_context, width_attribute, CSS::PropertyID::Width)) {
         if (width_value->is_length() && width_value->as_length().length().is_absolute())
             width = width_value->as_length().length().absolute_length_to_px().to_double();
@@ -171,10 +175,13 @@ void SVGSVGElement::set_fallback_view_box_for_svg_as_image(Optional<ViewBox> vie
     m_fallback_view_box_for_svg_as_image = view_box;
 }
 
-Optional<ViewBox> SVGSVGElement::view_box() const
+Optional<ViewBox> SVGSVGElement::active_view_box() const
 {
-    if (m_view_box.has_value())
-        return m_view_box;
+    if (m_active_view_element && m_active_view_element->view_box().has_value())
+        return m_active_view_element->view_box().value();
+
+    if (auto view_box = SVGFitToViewBox::view_box(); view_box.has_value())
+        return view_box;
 
     // NOTE: If the parent is a document, we're an <svg> element used as an image.
     if (parent() && parent()->is_document() && m_fallback_view_box_for_svg_as_image.has_value())
@@ -254,7 +261,7 @@ void SVGSVGElement::deselect_all() const
 GC::Ref<SVGLength> SVGSVGElement::create_svg_length() const
 {
     // A new, detached SVGLength object whose value is the unitless <number> 0.
-    return SVGLength::create(realm(), SVGLength::SVG_LENGTHTYPE_NUMBER, 0);
+    return SVGLength::create(realm(), SVGLength::SVG_LENGTHTYPE_NUMBER, 0, SVGLength::ReadOnly::No);
 }
 
 GC::Ref<Geometry::DOMPoint> SVGSVGElement::create_svg_point() const
@@ -309,9 +316,17 @@ SVGSVGElement::NaturalMetrics SVGSVGElement::negotiate_natural_metrics(SVG::SVGS
             return {};
         }
 
-        // FIXME: 2. If an SVG View is active:
-        // FIXME:    1. let viewbox be the viewbox defined by the active SVG View
-        // FIXME:    2. return viewbox.width / viewbox.height
+        // 2. If an SVG View is active:
+        if (auto active_view_element = svg_root.active_view_element(); active_view_element && active_view_element->view_box().has_value()) {
+            // 1. let viewbox be the viewbox defined by the active SVG View
+            auto view_box = active_view_element->view_box().value();
+
+            // 2. return viewbox.width / viewbox.height
+            if (view_box.width != 0 || view_box.height != 0)
+                return view_box.width / view_box.height;
+
+            return {};
+        }
 
         // 3. If the ‘viewBox’ on the ‘svg’ element is correctly specified:
         if (svg_root.view_box().has_value()) {

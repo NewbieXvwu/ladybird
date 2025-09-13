@@ -8,10 +8,11 @@
 
 #include <LibGfx/Forward.h>
 #include <LibGfx/Size.h>
+#include <LibWeb/Export.h>
 
 namespace Web::WebGL {
 
-class OpenGLContext {
+class WEB_API OpenGLContext {
 public:
     enum class WebGLVersion {
         WebGL1,
@@ -50,6 +51,13 @@ private:
     NonnullOwnPtr<Impl> m_impl;
     Optional<Vector<String>> m_requestable_extensions;
     WebGLVersion m_webgl_version;
+
+    void free_surface_resources();
+#if defined(AK_OS_MACOS)
+    void allocate_iosurface_painting_surface();
+#elif defined(USE_VULKAN_IMAGES)
+    void allocate_vkimage_painting_surface();
+#endif
 };
 
 }

@@ -14,7 +14,8 @@
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleComputer.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
+#include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -104,13 +105,13 @@ static WebIDL::ExceptionOr<KeyframeType<AL>> process_a_keyframe_like_object(JS::
         return keyframe_output;
 
     auto& keyframe_object = keyframe_input.as_object();
-    auto composite = TRY(keyframe_object.get("composite"_fly_string));
+    auto composite = TRY(keyframe_object.get("composite"_utf16_fly_string));
     if (composite.is_undefined())
         composite = JS::PrimitiveString::create(vm, "auto"_string);
-    auto easing = TRY(keyframe_object.get("easing"_fly_string));
+    auto easing = TRY(keyframe_object.get("easing"_utf16_fly_string));
     if (easing.is_undefined())
         easing = JS::PrimitiveString::create(vm, "linear"_string);
-    auto offset = TRY(keyframe_object.get("offset"_fly_string));
+    auto offset = TRY(keyframe_object.get("offset"_utf16_fly_string));
 
     if constexpr (AL == AllowLists::Yes) {
         keyframe_output.composite = TRY(convert_value_to_maybe_list(realm, composite, to_composite_operation));
@@ -185,7 +186,7 @@ static WebIDL::ExceptionOr<KeyframeType<AL>> process_a_keyframe_like_object(JS::
         // 1. Let raw value be the result of calling the [[Get]] internal method on keyframe input, with property name
         //    as the property key and keyframe input as the receiver.
         // 2. Check the completion record of raw value.
-        JS::PropertyKey key { property_name, JS::PropertyKey::StringMayBeNumber::No };
+        JS::PropertyKey key { Utf16FlyString::from_utf8(property_name), JS::PropertyKey::StringMayBeNumber::No };
         auto raw_value = TRY(keyframe_object.has_property(key)) ? TRY(keyframe_object.get(key)) : *all_value;
 
         using PropertyValuesType = Conditional<AL == AllowLists::Yes, Vector<String>, String>;
@@ -415,8 +416,7 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
             if (keyframe_a.computed_offset.value() == keyframe_b.computed_offset.value()) {
                 keyframe_a.easing = keyframe_b.easing;
                 keyframe_a.composite = keyframe_b.composite;
-                for (auto const& [property_name, property_value] : keyframe_b.unparsed_properties())
-                    keyframe_a.unparsed_properties().set(property_name, property_value);
+                keyframe_a.unparsed_properties().update(keyframe_b.unparsed_properties());
                 processed_keyframes.remove(i + 1);
                 i--;
             }
@@ -563,7 +563,7 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
         if (!easing_value)
             return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Invalid animation easing value: \"{}\"", easing_string)) };
 
-        keyframe.easing.set(NonnullRefPtr<CSS::CSSStyleValue const> { *easing_value });
+        keyframe.easing.set(NonnullRefPtr<CSS::StyleValue const> { *easing_value });
     }
 
     // 9. Parse each of the values in unused easings using the CSS syntax defined for easing member of the EffectTiming
@@ -591,7 +591,7 @@ void KeyframeEffect::generate_initial_and_final_frames(RefPtr<KeyFrameSet> keyfr
         initial_keyframe = keyframe_set->keyframes_by_key.find(0);
     }
 
-    auto expanded_properties = [&](HashMap<CSS::PropertyID, Variant<KeyFrameSet::UseInitial, NonnullRefPtr<CSS::CSSStyleValue const>>>& properties) {
+    auto expanded_properties = [&](HashMap<CSS::PropertyID, Variant<KeyFrameSet::UseInitial, NonnullRefPtr<CSS::StyleValue const>>>& properties) {
         HashTable<CSS::PropertyID> result;
 
         for (auto property : properties) {
@@ -827,7 +827,7 @@ WebIDL::ExceptionOr<GC::RootVector<JS::Object*>> KeyframeEffect::get_keyframes()
             auto object = JS::Object::create(realm, realm.intrinsics().object_prototype());
             TRY(object->set(vm.names.offset, keyframe.offset.has_value() ? JS::Value(keyframe.offset.value()) : JS::js_null(), ShouldThrowExceptions::Yes));
             TRY(object->set(vm.names.computedOffset, JS::Value(keyframe.computed_offset.value()), ShouldThrowExceptions::Yes));
-            auto easing_value = keyframe.easing.get<NonnullRefPtr<CSS::CSSStyleValue const>>();
+            auto easing_value = keyframe.easing.get<NonnullRefPtr<CSS::StyleValue const>>();
             TRY(object->set(vm.names.easing, JS::PrimitiveString::create(vm, easing_value->to_string(CSS::SerializationMode::Normal)), ShouldThrowExceptions::Yes));
 
             if (keyframe.composite == Bindings::CompositeOperationOrAuto::Replace) {
@@ -841,8 +841,9 @@ WebIDL::ExceptionOr<GC::RootVector<JS::Object*>> KeyframeEffect::get_keyframes()
             }
 
             for (auto const& [id, value] : keyframe.parsed_properties()) {
+                auto key = Utf16FlyString::from_utf8(CSS::camel_case_string_from_property_id(id));
                 auto value_string = JS::PrimitiveString::create(vm, value->to_string(CSS::SerializationMode::Normal));
-                TRY(object->set(JS::PropertyKey { CSS::camel_case_string_from_property_id(id), JS::PropertyKey::StringMayBeNumber::No }, value_string, ShouldThrowExceptions::Yes));
+                TRY(object->set(JS::PropertyKey { move(key), JS::PropertyKey::StringMayBeNumber::No }, value_string, ShouldThrowExceptions::Yes));
             }
 
             m_keyframe_objects.append(object);
@@ -868,7 +869,6 @@ WebIDL::ExceptionOr<void> KeyframeEffect::set_keyframes(Optional<GC::Root<JS::Ob
 
     auto keyframe_set = adopt_ref(*new KeyFrameSet);
     m_target_properties.clear();
-    auto target = this->target();
 
     for (auto& keyframe : m_keyframes) {
         Animations::KeyframeEffect::KeyFrameSet::ResolvedKeyFrame resolved_keyframe;
@@ -876,11 +876,8 @@ WebIDL::ExceptionOr<void> KeyframeEffect::set_keyframes(Optional<GC::Root<JS::Ob
         auto key = static_cast<u64>(keyframe.computed_offset.value() * 100 * AnimationKeyFrameKeyScaleFactor);
 
         for (auto [property_id, property_value] : keyframe.parsed_properties()) {
-            if (property_value->is_unresolved() && target)
-                property_value = CSS::Parser::Parser::resolve_unresolved_style_value(CSS::Parser::ParsingParams { target->document() }, *target, pseudo_element_type(), property_id, property_value->as_unresolved());
-
             resolved_keyframe.properties.set(property_id, property_value);
-            CSS::StyleComputer::for_each_property_expanding_shorthands(property_id, property_value, [&](CSS::PropertyID longhand_id, CSS::CSSStyleValue const&) {
+            CSS::StyleComputer::for_each_property_expanding_shorthands(property_id, property_value, [&](CSS::PropertyID longhand_id, CSS::StyleValue const&) {
                 m_target_properties.set(longhand_id);
             });
         }
@@ -912,28 +909,7 @@ void KeyframeEffect::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_keyframe_objects);
 }
 
-static CSS::RequiredInvalidationAfterStyleChange compute_required_invalidation(HashMap<CSS::PropertyID, NonnullRefPtr<CSS::CSSStyleValue const>> const& old_properties, HashMap<CSS::PropertyID, NonnullRefPtr<CSS::CSSStyleValue const>> const& new_properties)
-{
-    CSS::RequiredInvalidationAfterStyleChange invalidation;
-    auto old_and_new_properties = MUST(Bitmap::create(to_underlying(CSS::last_property_id) + 1, 0));
-    for (auto const& [property_id, _] : old_properties)
-        old_and_new_properties.set(to_underlying(property_id), 1);
-    for (auto const& [property_id, _] : new_properties)
-        old_and_new_properties.set(to_underlying(property_id), 1);
-    for (auto i = to_underlying(CSS::first_property_id); i <= to_underlying(CSS::last_property_id); ++i) {
-        if (!old_and_new_properties.get(i))
-            continue;
-        auto property_id = static_cast<CSS::PropertyID>(i);
-        auto const* old_value = old_properties.get(property_id).value_or({});
-        auto const* new_value = new_properties.get(property_id).value_or({});
-        if (!old_value && !new_value)
-            continue;
-        invalidation |= compute_property_invalidation(property_id, old_value, new_value);
-    }
-    return invalidation;
-}
-
-void KeyframeEffect::update_computed_properties()
+void KeyframeEffect::update_computed_properties(AnimationUpdateContext& context)
 {
     auto target = this->target();
     if (!target || !target->is_connected())
@@ -946,67 +922,17 @@ void KeyframeEffect::update_computed_properties()
         return;
     }
 
-    GC::Ptr<CSS::ComputedProperties> style = {};
-    if (!pseudo_element_type().has_value())
-        style = target->computed_properties();
-    else
-        style = target->pseudo_element_computed_properties(pseudo_element_type().value());
-
-    if (!style)
+    auto computed_properties = target->computed_properties(pseudo_element_type());
+    if (!computed_properties)
         return;
-
-    auto animated_properties_before_update = style->animated_property_values();
-    if (!pseudo_element_type().has_value()) {
-        if (auto computed_properties = target->computed_properties())
-            computed_properties->reset_animated_properties({});
-    } else if (auto computed_properties = target->pseudo_element_computed_properties(pseudo_element_type().value())) {
+    DOM::AbstractElement abstract_element { *target, pseudo_element_type() };
+    context.elements.ensure(abstract_element, [computed_properties] {
+        auto old_animated_properties = computed_properties->animated_property_values();
         computed_properties->reset_animated_properties({});
-    }
-
-    auto& document = target->document();
-    document.style_computer().collect_animation_into(*target, pseudo_element_type(), *this, *style, CSS::StyleComputer::AnimationRefresh::Yes);
-
-    auto invalidation = compute_required_invalidation(animated_properties_before_update, style->animated_property_values());
-
-    if (invalidation.is_none())
-        return;
-
-    // Traversal of the subtree is necessary to update the animated properties inherited from the target element.
-    target->for_each_in_subtree_of_type<DOM::Element>([&](auto& element) {
-        auto element_invalidation = element.recompute_inherited_style();
-        if (element_invalidation.is_none())
-            return TraversalDecision::SkipChildrenAndContinue;
-        invalidation |= element_invalidation;
-        return TraversalDecision::Continue;
+        return make<AnimationUpdateContext::ElementData>(move(old_animated_properties), computed_properties);
     });
 
-    if (!pseudo_element_type().has_value()) {
-        if (target->layout_node())
-            target->layout_node()->apply_style(*style);
-    } else {
-        auto pseudo_element_node = target->get_pseudo_element_node(pseudo_element_type().value());
-        if (auto* node_with_style = dynamic_cast<Layout::NodeWithStyle*>(pseudo_element_node.ptr())) {
-            node_with_style->apply_style(*style);
-        }
-    }
-
-    if (invalidation.relayout && target->layout_node())
-        target->layout_node()->set_needs_layout_update(DOM::SetNeedsLayoutReason::KeyframeEffect);
-    if (invalidation.rebuild_layout_tree) {
-        // We mark layout tree for rebuild starting from parent element to correctly invalidate
-        // "display" property change to/from "contents" value.
-        if (auto parent_element = target->parent_element()) {
-            parent_element->set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::KeyframeEffect);
-        } else {
-            target->set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::KeyframeEffect);
-        }
-    }
-    if (invalidation.repaint) {
-        document.set_needs_display();
-        document.set_needs_to_resolve_paint_only_properties();
-    }
-    if (invalidation.rebuild_stacking_context_tree)
-        document.invalidate_stacking_context_tree();
+    target->document().style_computer().collect_animation_into(abstract_element, *this, *computed_properties);
 }
 
 }

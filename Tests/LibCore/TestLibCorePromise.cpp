@@ -6,16 +6,16 @@
 
 #include <LibCore/EventLoop.h>
 #include <LibCore/Promise.h>
+#include <LibCore/System.h>
 #include <LibCore/ThreadedPromise.h>
 #include <LibTest/TestSuite.h>
 #include <LibThreading/Thread.h>
-#include <unistd.h>
 
 TEST_CASE(promise_await_async_event)
 {
     Core::EventLoop loop;
 
-    auto promise = MUST(Core::Promise<int>::try_create());
+    auto promise = Core::Promise<int>::construct();
 
     loop.deferred_invoke([=] {
         promise->resolve(42);
@@ -30,7 +30,7 @@ TEST_CASE(promise_await_async_event_rejection)
 {
     Core::EventLoop loop;
 
-    auto promise = MUST(Core::Promise<int>::try_create());
+    auto promise = Core::Promise<int>::construct();
 
     loop.deferred_invoke([=] {
         promise->reject(AK::Error::from_string_literal("lol no"));
@@ -48,7 +48,7 @@ TEST_CASE(promise_chain_handlers)
     bool resolved = false;
     bool rejected = false;
 
-    NonnullRefPtr<Core::Promise<int>> promise = MUST(Core::Promise<int>::try_create())
+    NonnullRefPtr<Core::Promise<int>> promise = Core::Promise<int>::construct()
                                                     ->when_resolved([&](int&) -> ErrorOr<void> { resolved = true; return {}; })
                                                     .when_rejected([&](AK::Error const&) { rejected = true; });
 
@@ -68,7 +68,7 @@ TEST_CASE(infallible_promise_chain_handlers)
     bool resolved = false;
     bool rejected = false;
 
-    NonnullRefPtr<Core::Promise<int>> promise = MUST(Core::Promise<int>::try_create())
+    NonnullRefPtr<Core::Promise<int>> promise = Core::Promise<int>::construct()
                                                     ->when_resolved([&](int&) { resolved = true; })
                                                     .when_rejected([&](AK::Error const&) { rejected = true; });
 
@@ -85,7 +85,7 @@ TEST_CASE(promise_map)
 {
     Core::EventLoop loop;
 
-    auto promise = MUST(Core::Promise<int>::try_create());
+    auto promise = Core::Promise<int>::construct();
     auto mapped_promise = promise->map<int>([](int result) {
         return result * 2;
     });
@@ -103,7 +103,7 @@ TEST_CASE(promise_map_already_resolved)
 {
     Core::EventLoop loop;
 
-    auto promise = MUST(Core::Promise<int>::try_create());
+    auto promise = Core::Promise<int>::construct();
     promise->resolve(21);
 
     auto mapped_promise = promise->map<int>([](int result) {
@@ -115,6 +115,9 @@ TEST_CASE(promise_map_already_resolved)
     EXPECT_EQ(result.value(), 42);
 }
 
+// FIXME: Support EventLoop::WaitMode::PollForEvents on Windows, otherwise ThreadedPromise::await() blocks forever
+
+#if !defined(AK_OS_WINDOWS)
 TEST_CASE(threaded_promise_instantly_resolved)
 {
     Core::EventLoop loop;
@@ -165,7 +168,7 @@ TEST_CASE(threaded_promise_resolved_later)
     auto thread = Threading::Thread::construct([&, promise] {
         thread_id = pthread_self();
         while (!unblock_thread)
-            usleep(500);
+            MUST(Core::System::sleep_ms(5));
         promise->resolve(42);
         return 0;
     });
@@ -219,3 +222,5 @@ TEST_CASE(threaded_promise_synchronously_resolved)
     EXPECT(resolved);
     EXPECT(!rejected);
 }
+
+#endif

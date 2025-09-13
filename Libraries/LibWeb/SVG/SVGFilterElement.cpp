@@ -5,11 +5,19 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGfx/ImmutableBitmap.h>
 #include <LibWeb/Bindings/SVGFilterElementPrototype.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/DOM/Text.h>
+#include <LibWeb/Layout/Node.h>
+#include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/SVG/SVGFEBlendElement.h>
 #include <LibWeb/SVG/SVGFEFloodElement.h>
 #include <LibWeb/SVG/SVGFEGaussianBlurElement.h>
+#include <LibWeb/SVG/SVGFEImageElement.h>
+#include <LibWeb/SVG/SVGFEMergeElement.h>
+#include <LibWeb/SVG/SVGFEMergeNodeElement.h>
+#include <LibWeb/SVG/SVGFEOffsetElement.h>
 #include <LibWeb/SVG/SVGFilterElement.h>
 
 namespace Web::SVG {
@@ -73,10 +81,16 @@ void SVGFilterElement::attribute_changed(FlyString const& name, Optional<String>
         m_primitive_units = AttributeParser::parse_units(value.value_or({}));
 }
 
-Optional<Gfx::Filter> SVGFilterElement::gfx_filter()
+Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& referenced_node)
 {
     HashMap<String, Gfx::Filter> result_map;
     Optional<Gfx::Filter> root_filter;
+
+    auto update_result_map = [&](auto& filter_primitive) {
+        auto result = filter_primitive.result()->base_val();
+        if (!result.is_empty())
+            result_map.set(result, *root_filter);
+    };
 
     // https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitive-in
     auto resolve_input_filter = [&](String const& name) -> Optional<Gfx::Filter> {
@@ -93,54 +107,72 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter()
             return Gfx::Filter::color_matrix(matrix);
         }
 
-        auto filter_from_map = result_map.get(name).copy();
-
+        auto filter_from_map = result_map.get(name);
         if (filter_from_map.has_value())
-            return filter_from_map;
+            return filter_from_map.value();
 
         return root_filter;
     };
 
-    for_each_child([&](auto& node) {
-        if (is<SVGFEFloodElement>(node)) {
-            auto& flood_primitive = static_cast<SVGFEFloodElement&>(node);
-
-            root_filter = Gfx::Filter::flood(flood_primitive.flood_color(), flood_primitive.flood_opacity());
-
-            auto result = flood_primitive.result()->base_val();
-            if (!result.is_empty()) {
-                result_map.set(result, *root_filter);
-            }
-        } else if (is<SVGFEBlendElement>(node)) {
-            auto& blend_primitive = static_cast<SVGFEBlendElement&>(node);
-
-            auto foreground = resolve_input_filter(blend_primitive.in1()->base_val());
-
-            auto background = resolve_input_filter(blend_primitive.in2()->base_val());
-
-            // FIXME: Actually resolve the blend mode
-            auto blend_mode = Gfx::CompositingAndBlendingOperator::Normal;
+    for_each_child_of_type<DOM::Element>([&](auto& node) {
+        if (auto* flood_primitive = as_if<SVGFEFloodElement>(node)) {
+            root_filter = Gfx::Filter::flood(flood_primitive->flood_color(), flood_primitive->flood_opacity());
+            update_result_map(*flood_primitive);
+        } else if (auto* blend_primitive = as_if<SVGFEBlendElement>(node)) {
+            auto foreground = resolve_input_filter(blend_primitive->in1()->base_val());
+            auto background = resolve_input_filter(blend_primitive->in2()->base_val());
+            auto blend_mode = blend_primitive->mode();
 
             root_filter = Gfx::Filter::blend(background, foreground, blend_mode);
+            update_result_map(*blend_primitive);
+        } else if (auto* blur_primitive = as_if<SVGFEGaussianBlurElement>(node)) {
+            auto input = resolve_input_filter(blur_primitive->in1()->base_val());
 
-            auto result = blend_primitive.result()->base_val();
-            if (!result.is_empty()) {
-                result_map.set(result, *root_filter);
-            }
-        } else if (is<SVGFEGaussianBlurElement>(node)) {
-            auto& blur_primitive = static_cast<SVGFEGaussianBlurElement&>(node);
-
-            auto input = resolve_input_filter(blur_primitive.in1()->base_val());
-
-            auto radius_x = blur_primitive.std_deviation_x()->base_val();
-            auto radius_y = blur_primitive.std_deviation_y()->base_val();
+            auto radius_x = blur_primitive->std_deviation_x()->base_val();
+            auto radius_y = blur_primitive->std_deviation_y()->base_val();
 
             root_filter = Gfx::Filter::blur(radius_x, radius_y, input);
+            update_result_map(*blur_primitive);
+        } else if (auto* image_primitive = as_if<SVGFEImageElement>(node)) {
+            auto bitmap = image_primitive->current_image_bitmap({});
+            if (!bitmap)
+                return IterationDecision::Continue;
 
-            auto result = blur_primitive.result()->base_val();
-            if (!result.is_empty()) {
-                result_map.set(result, *root_filter);
-            }
+            auto src_rect = image_primitive->content_rect();
+            if (!src_rect.has_value())
+                return IterationDecision::Continue;
+
+            auto* dom_node = referenced_node.dom_node();
+            if (!dom_node)
+                return IterationDecision::Continue;
+
+            auto* paintable_box = dom_node->paintable_box();
+            if (!paintable_box)
+                return IterationDecision::Continue;
+
+            auto dest_rect = Gfx::enclosing_int_rect(paintable_box->absolute_rect().to_type<float>());
+            auto scaling_mode = CSS::to_gfx_scaling_mode(paintable_box->computed_values().image_rendering(), *src_rect, dest_rect);
+            root_filter = Gfx::Filter::image(*bitmap, *src_rect, dest_rect, scaling_mode);
+            update_result_map(*image_primitive);
+        } else if (auto* merge_primitive = as_if<SVGFEMergeElement>(node)) {
+            Vector<Optional<Gfx::Filter>> merge_inputs;
+            merge_primitive->template for_each_child_of_type<SVGFEMergeNodeElement>([&](auto& merge_node) {
+                merge_inputs.append(resolve_input_filter(merge_node.in1()->base_val()));
+                return IterationDecision::Continue;
+            });
+
+            root_filter = Gfx::Filter::merge(merge_inputs);
+            update_result_map(*merge_primitive);
+        } else if (auto* offset_primitive = as_if<SVGFEOffsetElement>(node)) {
+            auto input = resolve_input_filter(offset_primitive->in1()->base_val());
+
+            auto dx = offset_primitive->dx()->base_val();
+            auto dy = offset_primitive->dy()->base_val();
+
+            root_filter = Gfx::Filter::offset(dx, dy, input);
+            update_result_map(*offset_primitive);
+        } else {
+            dbgln("SVGFilterElement::gfx_filter(): Unknown or unsupported filter element '{}'", node.debug_description());
         }
 
         return IterationDecision::Continue;

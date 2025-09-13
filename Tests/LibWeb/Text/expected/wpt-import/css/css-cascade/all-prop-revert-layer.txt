@@ -1,8 +1,8 @@
 Harness status: OK
 
-Found 248 tests
+Found 259 tests
 
-241 Pass
+252 Pass
 7 Fail
 Pass	accent-color
 Pass	border-collapse
@@ -11,6 +11,7 @@ Pass	caption-side
 Pass	caret-color
 Pass	clip-rule
 Pass	color
+Pass	color-interpolation
 Pass	color-scheme
 Pass	cursor
 Pass	direction
@@ -42,8 +43,10 @@ Pass	list-style-type
 Pass	math-depth
 Pass	math-shift
 Pass	math-style
+Pass	paint-order
 Pass	pointer-events
 Pass	quotes
+Pass	shape-rendering
 Pass	stroke
 Pass	stroke-dasharray
 Pass	stroke-dashoffset
@@ -61,6 +64,7 @@ Pass	text-justify
 Pass	text-rendering
 Pass	text-shadow
 Pass	text-transform
+Pass	text-underline-offset
 Pass	text-wrap-mode
 Pass	text-wrap-style
 Pass	visibility
@@ -185,7 +189,13 @@ Pass	margin-inline-start
 Pass	margin-left
 Pass	margin-right
 Pass	margin-top
+Pass	mask-clip
+Pass	mask-composite
 Pass	mask-image
+Pass	mask-mode
+Pass	mask-origin
+Pass	mask-repeat
+Pass	mask-size
 Pass	mask-type
 Pass	max-block-size
 Pass	max-height
@@ -249,6 +259,7 @@ Pass	vertical-align
 Pass	view-transition-name
 Pass	white-space-trim
 Fail	width
+Pass	will-change
 Pass	x
 Pass	y
 Pass	z-index

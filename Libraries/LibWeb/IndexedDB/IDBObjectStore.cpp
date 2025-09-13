@@ -76,11 +76,11 @@ WebIDL::ExceptionOr<void> IDBObjectStore::set_name(String const& value)
 
     // 5. If transaction is not an upgrade transaction, throw an "InvalidStateError" DOMException.
     if (!transaction->is_upgrade_transaction())
-        return WebIDL::InvalidStateError::create(realm, "Attempted to set name outside of version change"_string);
+        return WebIDL::InvalidStateError::create(realm, "Attempted to set name outside of version change"_utf16);
 
     // 6. If transaction’s state is not active, throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while updating object store name"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while updating object store name"_utf16);
 
     // 7. If store’s name is equal to name, terminate these steps.
     if (store->name() == name)
@@ -88,7 +88,7 @@ WebIDL::ExceptionOr<void> IDBObjectStore::set_name(String const& value)
 
     // 8. If an object store named name already exists in store’s database, throw a "ConstraintError" DOMException.
     if (store->database()->object_store_with_name(name))
-        return WebIDL::ConstraintError::create(realm, "Object store with the given name already exists"_string);
+        return WebIDL::ConstraintError::create(realm, "Object store with the given name already exists"_utf16);
 
     // 9. Set store’s name to name.
     store->set_name(name);
@@ -155,21 +155,21 @@ WebIDL::ExceptionOr<GC::Ref<IDBIndex>> IDBObjectStore::create_index(String const
 
     // 3. If transaction is not an upgrade transaction, throw an "InvalidStateError" DOMException.
     if (!transaction->is_upgrade_transaction())
-        return WebIDL::InvalidStateError::create(realm, "Transaction is not an upgrade transaction"_string);
+        return WebIDL::InvalidStateError::create(realm, "Transaction is not an upgrade transaction"_utf16);
 
     // FIXME: 4. If store has been deleted, throw an "InvalidStateError" DOMException.
 
     // 5. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while creating index"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while creating index"_utf16);
 
     // 6. If an index named name already exists in store, throw a "ConstraintError" DOMException.
     if (store->index_set().contains(name))
-        return WebIDL::ConstraintError::create(realm, "An index with the given name already exists"_string);
+        return WebIDL::ConstraintError::create(realm, "An index with the given name already exists"_utf16);
 
     // 7. If keyPath is not a valid key path, throw a "SyntaxError" DOMException.
     if (!is_valid_key_path(key_path))
-        return WebIDL::SyntaxError::create(realm, "Key path is not valid"_string);
+        return WebIDL::SyntaxError::create(realm, "Key path is not valid"_utf16);
 
     // 8. Let unique be options’s unique member.
     auto unique = options.unique;
@@ -179,7 +179,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBIndex>> IDBObjectStore::create_index(String const
 
     // 10. If keyPath is a sequence and multiEntry is true, throw an "InvalidAccessError" DOMException.
     if (key_path.has<Vector<String>>() && multi_entry)
-        return WebIDL::InvalidAccessError::create(realm, "Key path is a sequence and multiEntry is true"_string);
+        return WebIDL::InvalidAccessError::create(realm, "Key path is a sequence and multiEntry is true"_utf16);
 
     // 11. Let index be a new index in store.
     //     Set index’s name to name, key path to keyPath, unique flag to unique, and multiEntry flag to multiEntry.
@@ -205,12 +205,12 @@ WebIDL::ExceptionOr<GC::Ref<IDBIndex>> IDBObjectStore::index(String const& name)
 
     // 4. If transaction’s state is finished, then throw an "InvalidStateError" DOMException.
     if (transaction->state() == IDBTransaction::TransactionState::Finished)
-        return WebIDL::InvalidStateError::create(realm(), "Transaction is finished"_string);
+        return WebIDL::InvalidStateError::create(realm(), "Transaction is finished"_utf16);
 
     // 5. Let index be the index named name in this’s index set if one exists, or throw a "NotFoundError" DOMException otherwise.
     auto index = m_indexes.get(name);
     if (!index.has_value())
-        return WebIDL::NotFoundError::create(realm(), "Index not found in object store"_string);
+        return WebIDL::NotFoundError::create(realm(), "Index not found in object store"_utf16);
 
     // 6. Return an index handle associated with index and this.
     return IDBIndex::create(realm(), *index, *this);
@@ -229,18 +229,18 @@ WebIDL::ExceptionOr<void> IDBObjectStore::delete_index(String const& name)
 
     // 3. If transaction is not an upgrade transaction, throw an "InvalidStateError" DOMException.
     if (!transaction->is_upgrade_transaction())
-        return WebIDL::InvalidStateError::create(realm, "Transaction is not an upgrade transaction"_string);
+        return WebIDL::InvalidStateError::create(realm, "Transaction is not an upgrade transaction"_utf16);
 
     // FIXME: 4. If store has been deleted, throw an "InvalidStateError" DOMException.
 
     // 5. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while deleting index"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while deleting index"_utf16);
 
     // 6. Let index be the index named name in store if one exists, or throw a "NotFoundError" DOMException otherwise.
     auto index = m_indexes.get(name);
     if (!index.has_value())
-        return WebIDL::NotFoundError::create(realm, "Index not found while trying to delete it"_string);
+        return WebIDL::NotFoundError::create(realm, "Index not found while trying to delete it"_utf16);
 
     // 7. Remove index from this’s index set.
     m_indexes.remove(name);
@@ -266,21 +266,21 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::add_or_put(GC::Ref<IDBO
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while running add/put"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while running add/put"_utf16);
 
     // 5. If transaction is a read-only transaction, throw a "ReadOnlyError" DOMException.
     if (transaction->is_readonly())
-        return WebIDL::ReadOnlyError::create(realm, "Transaction is read-only"_string);
+        return WebIDL::ReadOnlyError::create(realm, "Transaction is read-only"_utf16);
 
     auto key_was_given = key.has_value() && key != JS::js_undefined();
 
     // 6. If store uses in-line keys and key was given, throw a "DataError" DOMException.
     if (store.uses_inline_keys() && key_was_given)
-        return WebIDL::DataError::create(realm, "Store uses in-line keys and key was given"_string);
+        return WebIDL::DataError::create(realm, "Store uses in-line keys and key was given"_utf16);
 
     // 7. If store uses out-of-line keys and has no key generator and key was not given, throw a "DataError" DOMException.
     if (store.uses_out_of_line_keys() && !store.uses_a_key_generator() && !key_was_given)
-        return WebIDL::DataError::create(realm, "Store uses out-of-line keys and has no key generator and key was not given"_string);
+        return WebIDL::DataError::create(realm, "Store uses out-of-line keys and has no key generator and key was not given"_utf16);
 
     GC::Ptr<Key> key_value;
     // 8. If key was given, then:
@@ -290,7 +290,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::add_or_put(GC::Ref<IDBO
 
         // 2. If r is invalid, throw a "DataError" DOMException.
         if (r->is_invalid())
-            return WebIDL::DataError::create(realm, "Key is invalid"_string);
+            return WebIDL::DataError::create(realm, "Key is invalid"_utf16);
 
         // 3. Let key be r.
         key_value = r;
@@ -314,18 +314,18 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::add_or_put(GC::Ref<IDBO
 
             // 2. If kpk is invalid, throw a "DataError" DOMException.
             if (key_value->is_invalid())
-                return WebIDL::DataError::create(realm, key_value->value_as_string());
+                return WebIDL::DataError::create(realm, Utf16String::from_utf8(key_value->value_as_string()));
         }
 
         // 4. Otherwise (kpk is failure):
         else {
             // 1. If store does not have a key generator, throw a "DataError" DOMException.
             if (!store.uses_a_key_generator())
-                return WebIDL::DataError::create(realm, "Store does not have a key generator"_string);
+                return WebIDL::DataError::create(realm, "Store does not have a key generator"_utf16);
 
             // 2. Otherwise, if check that a key could be injected into a value with clone and store’s key path return false, throw a "DataError" DOMException.
             if (!check_that_a_key_could_be_injected_into_a_value(realm, clone, store.key_path().value()))
-                return WebIDL::DataError::create(realm, "Key could not be injected into value"_string);
+                return WebIDL::DataError::create(realm, "Key could not be injected into value"_utf16);
         }
     }
 
@@ -374,7 +374,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::count(Optional<JS::Valu
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while doing count"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while doing count"_utf16);
 
     // 5. Let range be the result of converting a value to a key range with query. Rethrow any exceptions.
     auto range = TRY(convert_a_value_to_a_key_range(realm, move(query)));
@@ -405,7 +405,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::get(JS::Value query)
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while getting"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while getting"_utf16);
 
     // 5. Let range be the result of converting a value to a key range with query and true. Rethrow any exceptions.
     auto range = TRY(convert_a_value_to_a_key_range(realm, query, true));
@@ -436,7 +436,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::open_cursor(JS::Value q
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while opening cursor"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while opening cursor"_utf16);
 
     // 5. Let range be the result of converting a value to a key range with query. Rethrow any exceptions.
     auto range = TRY(convert_a_value_to_a_key_range(realm, query, false));
@@ -476,11 +476,11 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::delete_(JS::Value query
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while deleting object store"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while deleting object store"_utf16);
 
     // 5. If transaction is a read-only transaction, throw a "ReadOnlyError" DOMException.
     if (transaction->is_readonly())
-        return WebIDL::ReadOnlyError::create(realm, "Transaction is read-only while deleting object store"_string);
+        return WebIDL::ReadOnlyError::create(realm, "Transaction is read-only while deleting object store"_utf16);
 
     // 6. Let range be the result of converting a value to a key range with query and true. Rethrow any exceptions.
     auto range = TRY(convert_a_value_to_a_key_range(realm, query, true));
@@ -511,11 +511,11 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::clear()
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while clearing object store"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while clearing object store"_utf16);
 
     // 5. If transaction is a read-only transaction, throw a "ReadOnlyError" DOMException.
     if (transaction->is_readonly())
-        return WebIDL::ReadOnlyError::create(realm, "Transaction is read-only while clearing object store"_string);
+        return WebIDL::ReadOnlyError::create(realm, "Transaction is read-only while clearing object store"_utf16);
 
     // 6. Let operation be an algorithm to run clear an object store with store.
     auto operation = GC::Function<WebIDL::ExceptionOr<JS::Value>()>::create(realm.heap(), [store] -> WebIDL::ExceptionOr<JS::Value> {
@@ -543,7 +543,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::get_key(JS::Value query
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while getting key"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while getting key"_utf16);
 
     // 5. Let range be the result of converting a value to a key range with query and true. Rethrow any exceptions.
     auto range = TRY(convert_a_value_to_a_key_range(realm, query, true));
@@ -560,34 +560,11 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::get_key(JS::Value query
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbobjectstore-getall
-WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::get_all(Optional<JS::Value> value, Optional<WebIDL::UnsignedLong> count)
+WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::get_all(Optional<JS::Value> query_or_options, Optional<WebIDL::UnsignedLong> count)
 {
-    auto& realm = this->realm();
-
-    // 1. Let transaction be this’s transaction.
-    auto transaction = this->transaction();
-
-    // 2. Let store be this’s object store.
-    auto store = this->store();
-
-    // FIXME: 3. If store has been deleted, throw an "InvalidStateError" DOMException.
-
-    // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
-    if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while getting all"_string);
-
-    // 5. Let range be the result of converting a value to a key range with query. Rethrow any exceptions.
-    auto range = TRY(convert_a_value_to_a_key_range(realm, move(value)));
-
-    // 6. Let operation be an algorithm to run retrieve multiple values from an object store with the current Realm record, store, range, and count if given.
-    auto operation = GC::Function<WebIDL::ExceptionOr<JS::Value>()>::create(realm.heap(), [&realm, store, range, count] -> WebIDL::ExceptionOr<JS::Value> {
-        return retrieve_multiple_values_from_an_object_store(realm, store, range, count);
-    });
-
-    // 7. Return the result (an IDBRequest) of running asynchronously execute a request with this and operation.
-    auto result = asynchronously_execute_a_request(realm, GC::Ref(*this), operation);
-    dbgln_if(IDB_DEBUG, "Executing request for get all with uuid {}", result->uuid());
-    return result;
+    // 1. Return the result of creating a request to retrieve multiple items with the current Realm record, this,
+    //    "value", queryOrOptions, and count if given. Rethrow any exceptions.
+    return create_a_request_to_retrieve_multiple_items(realm(), GC::Ref(*this), RecordKind::Value, *query_or_options, count);
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbobjectstore-openkeycursor
@@ -605,7 +582,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::open_key_cursor(JS::Val
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while opening key cursor"_string);
+        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while opening key cursor"_utf16);
 
     // 5. Let range be the result of converting a value to a key range with query. Rethrow any exceptions.
     auto range = TRY(convert_a_value_to_a_key_range(realm, query));
@@ -630,34 +607,25 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::open_key_cursor(JS::Val
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbobjectstore-getallkeys
-WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::get_all_keys(Optional<JS::Value> query, Optional<WebIDL::UnsignedLong> count)
+WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::get_all_keys(Optional<JS::Value> query_or_options, Optional<WebIDL::UnsignedLong> count)
 {
-    auto& realm = this->realm();
+    // 1. Return the result of creating a request to retrieve multiple items with the current Realm record, this, "key",
+    //    queryOrOptions, and count if given. Rethrow any exceptions.
+    return create_a_request_to_retrieve_multiple_items(realm(), GC::Ref(*this), RecordKind::Key, *query_or_options, count);
+}
 
-    // 1. Let transaction be this’s transaction.
-    auto transaction = this->transaction();
+// https://pr-preview.s3.amazonaws.com/w3c/IndexedDB/pull/461.html#dom-idbobjectstore-getallrecords
+WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBObjectStore::get_all_records(IDBGetAllOptions const& options)
+{
+    // 1. Return the result of creating a request to retrieve multiple items with the current Realm record, this,
+    //    "record", and options. Rethrow any exceptions.
 
-    // 2. Let store be this’s object store.
-    auto store = this->store();
+    auto converted_options = JS::Object::create(realm(), nullptr);
+    MUST(converted_options->create_data_property("query"_utf16_fly_string, options.query));
+    MUST(converted_options->create_data_property("count"_utf16_fly_string, options.count.has_value() ? JS::Value(options.count.value()) : JS::js_undefined()));
+    MUST(converted_options->create_data_property("direction"_utf16_fly_string, JS::PrimitiveString::create(realm().vm(), idl_enum_to_string(options.direction))));
 
-    // FIXME: 3. If store has been deleted, throw an "InvalidStateError" DOMException.
-
-    // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
-    if (!transaction->is_active())
-        return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while getting all keys"_string);
-
-    // 5. Let range be the result of converting a value to a key range with query. Rethrow any exceptions.
-    auto range = TRY(convert_a_value_to_a_key_range(realm, move(query)));
-
-    // 6. Let operation be an algorithm to run retrieve multiple keys from an object store with store, range, and count if given.
-    auto operation = GC::Function<WebIDL::ExceptionOr<JS::Value>()>::create(realm.heap(), [&realm, store, range, count] -> WebIDL::ExceptionOr<JS::Value> {
-        return retrieve_multiple_keys_from_an_object_store(realm, store, range, count);
-    });
-
-    // 7. Return the result (an IDBRequest) of running asynchronously execute a request with this and operation.
-    auto result = asynchronously_execute_a_request(realm, GC::Ref(*this), operation);
-    dbgln_if(IDB_DEBUG, "Executing request for get all keys with uuid {}", result->uuid());
-    return result;
+    return create_a_request_to_retrieve_multiple_items(realm(), GC::Ref(*this), RecordKind::Record, converted_options, {});
 }
 
 }

@@ -9,6 +9,7 @@
 #include <AK/NonnullRefPtr.h>
 #include <LibGC/Ptr.h>
 #include <LibGC/Root.h>
+#include <LibJS/Export.h>
 #include <LibJS/ParserError.h>
 #include <LibJS/Runtime/Realm.h>
 
@@ -43,7 +44,7 @@ public:
     Vector<ModuleWithSpecifier> const& loaded_modules() const { return m_loaded_modules; }
 
     HostDefined* host_defined() const { return m_host_defined; }
-    StringView filename() const { return m_filename; }
+    StringView filename() const LIFETIME_BOUND { return m_filename; }
 
 private:
     Script(Realm&, StringView filename, NonnullRefPtr<Program>, HostDefined* = nullptr);

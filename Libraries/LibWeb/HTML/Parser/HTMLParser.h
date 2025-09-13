@@ -9,6 +9,7 @@
 #include <LibGfx/Color.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibWeb/DOM/Node.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/Parser/HTMLTokenizer.h>
 #include <LibWeb/HTML/Parser/ListOfActiveFormattingElements.h>
 #include <LibWeb/HTML/Parser/StackOfOpenElements.h>
@@ -51,7 +52,7 @@ namespace Web::HTML {
     __ENUMERATE_INSERTION_MODE(AfterAfterBody)  \
     __ENUMERATE_INSERTION_MODE(AfterAfterFrameset)
 
-class HTMLParser final : public JS::Cell {
+class WEB_API HTMLParser final : public JS::Cell {
     GC_CELL(HTMLParser, JS::Cell);
     GC_DECLARE_ALLOCATOR(HTMLParser);
 
@@ -65,7 +66,7 @@ public:
     static GC::Ref<HTMLParser> create(DOM::Document&, StringView input, StringView encoding);
 
     void run(HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
-    void run(const URL::URL&, HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
+    void run(URL::URL const&, HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
 
     static void the_end(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser> = nullptr);
 
@@ -228,11 +229,11 @@ private:
     Vector<HTMLToken> m_pending_table_character_tokens;
 
     GC::Ptr<DOM::Text> m_character_insertion_node;
-    StringBuilder m_character_insertion_builder;
+    StringBuilder m_character_insertion_builder { StringBuilder::Mode::UTF16 };
 } SWIFT_UNSAFE_REFERENCE;
 
-RefPtr<CSS::CSSStyleValue const> parse_dimension_value(StringView);
-RefPtr<CSS::CSSStyleValue const> parse_nonzero_dimension_value(StringView);
+RefPtr<CSS::StyleValue const> parse_dimension_value(StringView);
+RefPtr<CSS::StyleValue const> parse_nonzero_dimension_value(StringView);
 Optional<Color> parse_legacy_color_value(StringView);
 
 // Swift interop

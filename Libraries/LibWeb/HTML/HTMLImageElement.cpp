@@ -12,8 +12,8 @@
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleComputer.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentObserver.h>
@@ -49,7 +49,7 @@ GC_DEFINE_ALLOCATOR(HTMLImageElement);
 HTMLImageElement::HTMLImageElement(DOM::Document& document, DOM::QualifiedName qualified_name)
     : HTMLElement(document, move(qualified_name))
 {
-    m_animation_timer = Core::Timer::try_create().release_value_but_fixme_should_propagate_errors();
+    m_animation_timer = Core::Timer::create();
     m_animation_timer->on_timeout = [this] { animate(); };
 
     document.register_viewport_client(*this);
@@ -86,6 +86,7 @@ void HTMLImageElement::adopted_from(DOM::Document& old_document)
 void HTMLImageElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
+    image_provider_visit_edges(visitor);
     visitor.visit(m_current_request);
     visitor.visit(m_pending_request);
     visitor.visit(m_document_observer);
@@ -124,7 +125,7 @@ void HTMLImageElement::apply_presentational_hints(GC::Ref<CSS::CascadedPropertie
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomWidth, width_value);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderLeftWidth, width_value);
 
-                auto solid_value = CSS::CSSKeywordValue::create(CSS::Keyword::Solid);
+                auto solid_value = CSS::KeywordStyleValue::create(CSS::Keyword::Solid);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderTopStyle, solid_value);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderRightStyle, solid_value);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomStyle, solid_value);
@@ -134,7 +135,7 @@ void HTMLImageElement::apply_presentational_hints(GC::Ref<CSS::CascadedPropertie
     });
 }
 
-void HTMLImageElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const&)
+void HTMLImageElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const& value, Optional<FlyString> const&)
 {
     if (name == HTML::AttributeNames::crossorigin) {
         m_cors_setting = cors_setting_attribute_from_keyword(value);
@@ -172,6 +173,13 @@ RefPtr<Gfx::ImmutableBitmap> HTMLImageElement::immutable_bitmap() const
     return current_image_bitmap();
 }
 
+RefPtr<Gfx::ImmutableBitmap> HTMLImageElement::default_image_bitmap_sized(Gfx::IntSize size) const
+{
+    if (auto data = m_current_request->image_data())
+        return data->bitmap(0, size);
+    return nullptr;
+}
+
 bool HTMLImageElement::is_image_available() const
 {
     return m_current_request && m_current_request->is_available();
@@ -198,7 +206,7 @@ Optional<CSSPixelFraction> HTMLImageElement::intrinsic_aspect_ratio() const
     return {};
 }
 
-RefPtr<Gfx::ImmutableBitmap> HTMLImageElement::current_image_bitmap(Gfx::IntSize size) const
+RefPtr<Gfx::ImmutableBitmap> HTMLImageElement::current_image_bitmap_sized(Gfx::IntSize size) const
 {
     if (auto data = m_current_request->image_data())
         return data->bitmap(m_current_frame_index, size);
@@ -344,7 +352,7 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> HTMLImageElement::decode() const
             if (this->document().is_fully_active())
                 return false;
 
-            auto exception = WebIDL::EncodingError::create(realm, "Node document not fully active"_string);
+            auto exception = WebIDL::EncodingError::create(realm, "Node document not fully active"_utf16);
             HTML::TemporaryExecutionContext context(realm);
             WebIDL::reject_promise(realm, promise, exception);
             return true;
@@ -354,7 +362,7 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> HTMLImageElement::decode() const
             if (this->current_request().state() != ImageRequest::State::Broken)
                 return false;
 
-            auto exception = WebIDL::EncodingError::create(realm, "Current request state is broken"_string);
+            auto exception = WebIDL::EncodingError::create(realm, "Current request state is broken"_utf16);
             HTML::TemporaryExecutionContext context(realm);
             WebIDL::reject_promise(realm, promise, exception);
             return true;
@@ -371,8 +379,8 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> HTMLImageElement::decode() const
         // 3. Otherwise, in parallel wait for one of the following cases to occur, and perform the corresponding actions:
         Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(heap(), [this, promise, &realm, &global] {
             Platform::EventLoopPlugin::the().spin_until(GC::create_function(heap(), [this, promise, &realm, &global] {
-                auto queue_reject_task = [promise, &realm, &global](String const& message) {
-                    queue_global_task(Task::Source::DOMManipulation, global, GC::create_function(realm.heap(), [&realm, promise, message = String(message)] {
+                auto queue_reject_task = [promise, &realm, &global](Utf16String message) {
+                    queue_global_task(Task::Source::DOMManipulation, global, GC::create_function(realm.heap(), [&realm, promise, message = move(message)] {
                         auto exception = WebIDL::EncodingError::create(realm, message);
                         HTML::TemporaryExecutionContext context(realm);
                         WebIDL::reject_promise(realm, promise, exception);
@@ -382,7 +390,7 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> HTMLImageElement::decode() const
                 // -> This img element's node document stops being fully active
                 if (!document().is_fully_active()) {
                     // Queue a global task on the DOM manipulation task source with global to reject promise with an "EncodingError" DOMException.
-                    queue_reject_task("Node document not fully active"_string);
+                    queue_reject_task("Node document not fully active"_utf16);
                     return true;
                 }
 
@@ -391,14 +399,14 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> HTMLImageElement::decode() const
                 // -> FIXME: This img element's current request changes or is mutated
                 if (false) {
                     // Queue a global task on the DOM manipulation task source with global to reject promise with an "EncodingError" DOMException.
-                    queue_reject_task("Current request changed or was mutated"_string);
+                    queue_reject_task("Current request changed or was mutated"_utf16);
                     return true;
                 }
 
                 // -> This img element's current request's state becomes broken
                 if (state == ImageRequest::State::Broken) {
                     // Queue a global task on the DOM manipulation task source with global to reject promise with an "EncodingError" DOMException.
-                    queue_reject_task("Current request state is broken"_string);
+                    queue_reject_task("Current request state is broken"_utf16);
                     return true;
                 }
 
@@ -1079,8 +1087,8 @@ static void update_the_source_set(DOM::Element& element)
     VERIFY(is<HTMLImageElement>(element) || is<HTMLLinkElement>(element));
 
     // 1. Set el's source set to an empty source set.
-    if (is<HTMLImageElement>(element))
-        static_cast<HTMLImageElement&>(element).set_source_set(SourceSet {});
+    if (auto* image_element = as_if<HTMLImageElement>(element))
+        image_element->set_source_set(SourceSet {});
     else if (is<HTMLLinkElement>(element))
         TODO();
 

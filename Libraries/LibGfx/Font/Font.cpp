@@ -30,7 +30,6 @@ Font::Font(NonnullRefPtr<Typeface const> typeface, float point_width, float poin
     m_y_scale = (point_height * dpi_y) / (POINTS_PER_INCH * units_per_em);
 
     m_pixel_size = m_point_height * (DEFAULT_DPI / POINTS_PER_INCH);
-    m_pixel_size_rounded_up = static_cast<int>(ceilf(m_pixel_size));
 
     auto const* sk_typeface = as<TypefaceSkia>(*m_typeface).sk_typeface();
     SkFont const font { sk_ref_sp(sk_typeface), m_pixel_size };
@@ -64,6 +63,7 @@ ScaledFontMetrics Font::metrics() const
 
 float Font::width(StringView view) const { return measure_text_width(Utf8View(view), *this, {}); }
 float Font::width(Utf8View const& view) const { return measure_text_width(view, *this, {}); }
+float Font::width(Utf16View const& view) const { return measure_text_width(view, *this, {}); }
 
 float Font::glyph_width(u32 code_point) const
 {
@@ -86,11 +86,6 @@ NonnullRefPtr<Font> Font::with_size(float point_size) const
 float Font::pixel_size() const
 {
     return m_pixel_size;
-}
-
-int Font::pixel_size_rounded_up() const
-{
-    return m_pixel_size_rounded_up;
 }
 
 float Font::point_size() const

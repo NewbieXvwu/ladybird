@@ -32,10 +32,10 @@ void SVGForeignObjectElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 
     // FIXME: These never actually get updated!
-    m_x = SVGAnimatedLength::create(realm, SVGLength::create(realm, 0, 0), SVGLength::create(realm, 0, 0));
-    m_y = SVGAnimatedLength::create(realm, SVGLength::create(realm, 0, 0), SVGLength::create(realm, 0, 0));
-    m_width = SVGAnimatedLength::create(realm, SVGLength::create(realm, 0, 0), SVGLength::create(realm, 0, 0));
-    m_height = SVGAnimatedLength::create(realm, SVGLength::create(realm, 0, 0), SVGLength::create(realm, 0, 0));
+    m_x = fake_animated_length_fixme();
+    m_y = fake_animated_length_fixme();
+    m_width = fake_animated_length_fixme();
+    m_height = fake_animated_length_fixme();
 }
 
 void SVGForeignObjectElement::visit_edges(Cell::Visitor& visitor)
@@ -65,7 +65,7 @@ bool SVGForeignObjectElement::is_presentational_hint(FlyString const& name) cons
 void SVGForeignObjectElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
 {
     Base::apply_presentational_hints(cascaded_properties);
-    auto parsing_context = CSS::Parser::ParsingParams { document() };
+    auto parsing_context = CSS::Parser::ParsingParams { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
     if (auto width_value = parse_css_value(parsing_context, get_attribute_value(Web::HTML::AttributeNames::width), CSS::PropertyID::Width))
         cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Width, width_value.release_nonnull());
 

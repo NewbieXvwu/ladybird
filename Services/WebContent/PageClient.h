@@ -55,6 +55,7 @@ public:
     void set_viewport_size(Web::DevicePixelSize const&);
     void set_screen_rects(Vector<Web::DevicePixelRect, 4> const& rects, size_t main_screen_index) { m_screen_rect = rects[main_screen_index]; }
     void set_device_pixels_per_css_pixel(float device_pixels_per_css_pixel) { m_device_pixels_per_css_pixel = device_pixels_per_css_pixel; }
+    void set_maximum_frames_per_second(u64 maximum_frames_per_second);
     void set_preferred_color_scheme(Web::CSS::PreferredColorScheme);
     void set_preferred_contrast(Web::CSS::PreferredContrast);
     void set_preferred_motion(Web::CSS::PreferredMotion);
@@ -62,8 +63,6 @@ public:
     void set_is_scripting_enabled(bool);
     void set_window_position(Web::DevicePixelPoint);
     void set_window_size(Web::DevicePixelSize);
-
-    Web::DevicePixelSize content_size() const { return m_content_size; }
 
     Web::WebIDL::ExceptionOr<void> toggle_media_play_state();
     void toggle_media_mute_state();
@@ -112,8 +111,7 @@ private:
     virtual Web::CSS::PreferredContrast preferred_contrast() const override { return m_preferred_contrast; }
     virtual Web::CSS::PreferredMotion preferred_motion() const override { return m_preferred_motion; }
     virtual void page_did_request_cursor_change(Gfx::Cursor const&) override;
-    virtual void page_did_layout() override;
-    virtual void page_did_change_title(ByteString const&) override;
+    virtual void page_did_change_title(Utf16String const&) override;
     virtual void page_did_change_url(URL::URL const&) override;
     virtual void page_did_request_refresh() override;
     virtual void page_did_request_resize_window(Gfx::IntSize) override;
@@ -145,7 +143,8 @@ private:
     virtual void page_did_request_accept_dialog() override;
     virtual void page_did_request_dismiss_dialog() override;
     virtual void page_did_change_favicon(Gfx::Bitmap const&) override;
-    virtual Vector<Web::Cookie::Cookie> page_did_request_all_cookies(URL::URL const&) override;
+    virtual Vector<Web::Cookie::Cookie> page_did_request_all_cookies_webdriver(URL::URL const&) override;
+    virtual Vector<Web::Cookie::Cookie> page_did_request_all_cookies_cookiestore(URL::URL const&) override;
     virtual Optional<Web::Cookie::Cookie> page_did_request_named_cookie(URL::URL const&, String const&) override;
     virtual String page_did_request_cookie(URL::URL const&, Web::Cookie::Source) override;
     virtual void page_did_set_cookie(URL::URL const&, Web::Cookie::ParsedCookie const&, Web::Cookie::Source) override;
@@ -167,6 +166,7 @@ private:
     virtual void page_did_request_select_dropdown(Web::CSSPixelPoint content_position, Web::CSSPixels minimum_width, Vector<Web::HTML::SelectItem> items) override;
     virtual void page_did_finish_test(String const& text) override;
     virtual void page_did_set_test_timeout(double milliseconds) override;
+    virtual void page_did_receive_reference_test_metadata(JsonValue) override;
     virtual void page_did_set_browser_zoom(double factor) override;
     virtual void page_did_change_theme_color(Gfx::Color color) override;
     virtual void page_did_insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation const&, StringView presentation_style) override;
@@ -179,7 +179,6 @@ private:
     virtual void page_did_take_screenshot(Gfx::ShareableBitmap const& screenshot) override;
     virtual void received_message_from_web_ui(String const& name, JS::Value data) override;
 
-    Web::Layout::Viewport* layout_root();
     void setup_palette();
     ConnectionFromClient& client() const;
 
@@ -187,8 +186,8 @@ private:
     GC::Ref<Web::Page> m_page;
     RefPtr<Gfx::PaletteImpl> m_palette_impl;
     Web::DevicePixelRect m_screen_rect;
-    Web::DevicePixelSize m_content_size;
     float m_device_pixels_per_css_pixel { 1.0f };
+    double m_maximum_frames_per_second { 60.0 };
     u64 m_id { 0 };
     bool m_has_focus { false };
 

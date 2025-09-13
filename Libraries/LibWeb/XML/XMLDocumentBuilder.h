@@ -32,19 +32,22 @@ public:
 private:
     virtual void set_source(ByteString) override;
     virtual void set_doctype(XML::Doctype) override;
-    virtual void element_start(XML::Name const& name, HashMap<XML::Name, ByteString> const& attributes) override;
+    virtual void element_start(XML::Name const& name, OrderedHashMap<XML::Name, ByteString> const& attributes) override;
     virtual void element_end(XML::Name const& name) override;
     virtual void text(StringView data) override;
     virtual void comment(StringView data) override;
+    virtual void cdata_section(StringView data) override;
+    virtual void processing_instruction(StringView target, StringView data) override;
     virtual void document_end() override;
 
     Optional<FlyString> namespace_for_name(XML::Name const&);
 
     GC::Ref<DOM::Document> m_document;
+    GC::RootVector<GC::Ref<DOM::Node>> m_template_node_stack;
     GC::Ptr<DOM::Node> m_current_node;
     XMLScriptingSupport m_scripting_support { XMLScriptingSupport::Enabled };
     bool m_has_error { false };
-    StringBuilder text_builder;
+    StringBuilder m_text_builder { StringBuilder::Mode::UTF16 };
 
     struct NamespaceAndPrefix {
         FlyString ns;

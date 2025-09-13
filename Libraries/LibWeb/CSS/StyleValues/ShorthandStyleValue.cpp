@@ -10,15 +10,15 @@
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/BorderRadiusStyleValue.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
 #include <LibWeb/CSS/StyleValues/GridTemplateAreaStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTrackPlacementStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
 
 namespace Web::CSS {
 
-ShorthandStyleValue::ShorthandStyleValue(PropertyID shorthand, Vector<PropertyID> sub_properties, Vector<ValueComparingNonnullRefPtr<CSSStyleValue const>> values)
+ShorthandStyleValue::ShorthandStyleValue(PropertyID shorthand, Vector<PropertyID> sub_properties, Vector<ValueComparingNonnullRefPtr<StyleValue const>> values)
     : StyleValueWithDefaultOperators(Type::Shorthand)
     , m_properties { shorthand, move(sub_properties), move(values) }
 {
@@ -30,7 +30,7 @@ ShorthandStyleValue::ShorthandStyleValue(PropertyID shorthand, Vector<PropertyID
 
 ShorthandStyleValue::~ShorthandStyleValue() = default;
 
-ValueComparingRefPtr<CSSStyleValue const> ShorthandStyleValue::longhand(PropertyID longhand) const
+ValueComparingRefPtr<StyleValue const> ShorthandStyleValue::longhand(PropertyID longhand) const
 {
     for (auto i = 0u; i < m_properties.sub_properties.size(); ++i) {
         if (m_properties.sub_properties[i] == longhand)
@@ -44,7 +44,7 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
     // If all the longhands are the same CSS-wide keyword, just return that once.
     Optional<Keyword> built_in_keyword;
     bool all_same_keyword = true;
-    StyleComputer::for_each_property_expanding_shorthands(m_properties.shorthand_property, *this, [&](PropertyID name, CSSStyleValue const& value) {
+    StyleComputer::for_each_property_expanding_shorthands(m_properties.shorthand_property, *this, [&](PropertyID name, StyleValue const& value) {
         (void)name;
         if (!value.is_css_wide_keyword()) {
             all_same_keyword = false;
@@ -67,6 +67,39 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
 
         return ""_string;
     }
+
+    auto positional_value_list_shorthand_to_string = [&](Vector<ValueComparingNonnullRefPtr<StyleValue const>> values) -> String {
+        switch (values.size()) {
+        case 2: {
+            auto first_property_serialized = values[0]->to_string(mode);
+            auto second_property_serialized = values[1]->to_string(mode);
+
+            if (first_property_serialized == second_property_serialized)
+                return first_property_serialized;
+
+            return MUST(String::formatted("{} {}", first_property_serialized, second_property_serialized));
+        }
+        case 4: {
+            auto first_property_serialized = values[0]->to_string(mode);
+            auto second_property_serialized = values[1]->to_string(mode);
+            auto third_property_serialized = values[2]->to_string(mode);
+            auto fourth_property_serialized = values[3]->to_string(mode);
+
+            if (first_is_equal_to_all_of(first_property_serialized, second_property_serialized, third_property_serialized, fourth_property_serialized))
+                return first_property_serialized;
+
+            if (first_property_serialized == third_property_serialized && second_property_serialized == fourth_property_serialized)
+                return MUST(String::formatted("{} {}", first_property_serialized, second_property_serialized));
+
+            if (second_property_serialized == fourth_property_serialized)
+                return MUST(String::formatted("{} {} {}", first_property_serialized, second_property_serialized, third_property_serialized));
+
+            return MUST(String::formatted("{} {} {} {}", first_property_serialized, second_property_serialized, third_property_serialized, fourth_property_serialized));
+        }
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    };
 
     auto default_to_string = [&]() {
         auto all_properties_same_value = true;
@@ -154,7 +187,7 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
             return serialize_layer(color->to_string(mode), image->to_string(mode), position_x->to_string(mode), position_y->to_string(mode), size->to_string(mode), repeat->to_string(mode), attachment->to_string(mode), origin->to_string(mode), clip->to_string(mode));
         }
 
-        auto get_layer_value_string = [mode](ValueComparingRefPtr<CSSStyleValue const> const& style_value, size_t index) {
+        auto get_layer_value_string = [mode](ValueComparingRefPtr<StyleValue const> const& style_value, size_t index) {
             if (style_value->is_value_list())
                 return style_value->as_value_list().value_at(index, true)->to_string(mode);
             return style_value->to_string(mode);
@@ -189,7 +222,7 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
             return MUST(String::formatted("{} {}", x_edges->to_string(mode), y_edges->to_string(mode)));
         }
 
-        auto get_layer_value_string = [mode](ValueComparingRefPtr<CSSStyleValue const> const& style_value, size_t index) {
+        auto get_layer_value_string = [mode](ValueComparingRefPtr<StyleValue const> const& style_value, size_t index) {
             if (style_value->is_value_list())
                 return style_value->as_value_list().value_at(index, true)->to_string(mode);
             return style_value->to_string(mode);
@@ -204,6 +237,19 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
         }
 
         return MUST(builder.to_string());
+    }
+    case PropertyID::Border: {
+        auto all_longhands_same_value = [](ValueComparingRefPtr<StyleValue const> const& shorthand) -> bool {
+            auto longhands = shorthand->as_shorthand().values();
+
+            return all_of(longhands, [&](auto const& longhand) { return longhand == longhands[0]; });
+        };
+
+        // `border` only has a reasonable value if all four sides are the same.
+        if (!all_longhands_same_value(longhand(PropertyID::BorderWidth)) || !all_longhands_same_value(longhand(PropertyID::BorderStyle)) || !all_longhands_same_value(longhand(PropertyID::BorderColor)))
+            return ""_string;
+
+        return default_to_string();
     }
     case PropertyID::BorderImage: {
         auto source = longhand(PropertyID::BorderImageSource);
@@ -226,7 +272,7 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
 
         auto horizontal_radius = [&](auto& style_value) -> String {
             if (style_value->is_border_radius())
-                return style_value->as_border_radius().horizontal_radius().to_string();
+                return style_value->as_border_radius().horizontal_radius().to_string(mode);
             return style_value->to_string(mode);
         };
 
@@ -237,7 +283,7 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
 
         auto vertical_radius = [&](auto& style_value) -> String {
             if (style_value->is_border_radius())
-                return style_value->as_border_radius().vertical_radius().to_string();
+                return style_value->as_border_radius().vertical_radius().to_string(mode);
             return style_value->to_string(mode);
         };
 
@@ -267,15 +313,26 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
     case PropertyID::Columns: {
         auto column_width = longhand(PropertyID::ColumnWidth)->to_string(mode);
         auto column_count = longhand(PropertyID::ColumnCount)->to_string(mode);
+        auto column_height = longhand(PropertyID::ColumnHeight)->to_string(mode);
 
-        if (column_width == column_count)
-            return column_width;
-        if (column_width.equals_ignoring_ascii_case("auto"sv))
-            return column_count;
-        if (column_count.equals_ignoring_ascii_case("auto"sv))
-            return column_width;
+        StringBuilder builder;
 
-        return MUST(String::formatted("{} {}", column_width, column_count));
+        if (column_width == column_count) {
+            builder.append(column_width);
+        } else if (column_width.equals_ignoring_ascii_case("auto"sv)) {
+            builder.append(column_count);
+        } else if (column_count.equals_ignoring_ascii_case("auto"sv)) {
+            builder.append(column_width);
+        } else {
+            builder.append(MUST(String::formatted("{} {}", column_width, column_count)));
+        }
+
+        if (!column_height.equals_ignoring_ascii_case("auto"sv)) {
+            builder.append(" / "sv);
+            builder.append(column_height);
+        }
+
+        return builder.to_string_without_validation();
     }
     case PropertyID::Flex:
         return MUST(String::formatted("{} {} {}", longhand(PropertyID::FlexGrow)->to_string(mode), longhand(PropertyID::FlexShrink)->to_string(mode), longhand(PropertyID::FlexBasis)->to_string(mode)));
@@ -344,6 +401,10 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
         auto position = longhand(PropertyID::FontVariantPosition);
         auto emoji = longhand(PropertyID::FontVariantEmoji);
 
+        // If ligatures is `none` and any other value isn't `normal`, that's invalid.
+        if (ligatures->to_keyword() == Keyword::None && !first_is_equal_to_all_of(Keyword::Normal, caps->to_keyword(), alternates->to_keyword(), numeric->to_keyword(), east_asian->to_keyword(), position->to_keyword(), emoji->to_keyword()))
+            return ""_string;
+
         Vector<String> values;
         if (ligatures->to_keyword() != Keyword::Normal)
             values.append(ligatures->to_string(mode));
@@ -364,27 +425,25 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
             return "normal"_string;
         return MUST(String::join(' ', values));
     }
-    case PropertyID::Gap: {
-        auto row_gap = longhand(PropertyID::RowGap);
-        auto column_gap = longhand(PropertyID::ColumnGap);
-        if (row_gap == column_gap)
-            return row_gap->to_string(mode);
-        return MUST(String::formatted("{} {}", row_gap->to_string(mode), column_gap->to_string(mode)));
-    }
     case PropertyID::GridArea: {
-        auto& row_start = longhand(PropertyID::GridRowStart)->as_grid_track_placement();
-        auto& column_start = longhand(PropertyID::GridColumnStart)->as_grid_track_placement();
-        auto& row_end = longhand(PropertyID::GridRowEnd)->as_grid_track_placement();
-        auto& column_end = longhand(PropertyID::GridColumnEnd)->as_grid_track_placement();
+        auto row_start = longhand(PropertyID::GridRowStart);
+        auto column_start = longhand(PropertyID::GridColumnStart);
+        auto row_end = longhand(PropertyID::GridRowEnd);
+        auto column_end = longhand(PropertyID::GridColumnEnd);
+        auto is_auto = [](auto const& track_placement) {
+            if (track_placement->is_grid_track_placement())
+                return track_placement->as_grid_track_placement().grid_track_placement().is_auto();
+            return false;
+        };
         StringBuilder builder;
-        if (!row_start.grid_track_placement().is_auto())
-            builder.appendff("{}", row_start.grid_track_placement().to_string());
-        if (!column_start.grid_track_placement().is_auto())
-            builder.appendff(" / {}", column_start.grid_track_placement().to_string());
-        if (!row_end.grid_track_placement().is_auto())
-            builder.appendff(" / {}", row_end.grid_track_placement().to_string());
-        if (!column_end.grid_track_placement().is_auto())
-            builder.appendff(" / {}", column_end.grid_track_placement().to_string());
+        if (!is_auto(row_start))
+            builder.appendff("{}", row_start->to_string(mode));
+        if (!is_auto(column_start))
+            builder.appendff(" / {}", column_start->to_string(mode));
+        if (!is_auto(row_end))
+            builder.appendff(" / {}", row_end->to_string(mode));
+        if (!is_auto(column_end))
+            builder.appendff(" / {}", column_end->to_string(mode));
         if (builder.is_empty())
             return "auto"_string;
         return MUST(builder.to_string());
@@ -392,9 +451,19 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
         // FIXME: Serialize Grid differently once we support it better!
     case PropertyID::Grid:
     case PropertyID::GridTemplate: {
-        auto& areas = longhand(PropertyID::GridTemplateAreas)->as_grid_template_area();
-        auto& rows = longhand(PropertyID::GridTemplateRows)->as_grid_track_size_list();
-        auto& columns = longhand(PropertyID::GridTemplateColumns)->as_grid_track_size_list();
+        auto areas_value = longhand(PropertyID::GridTemplateAreas);
+        auto rows_value = longhand(PropertyID::GridTemplateRows);
+        auto columns_value = longhand(PropertyID::GridTemplateColumns);
+
+        if (!areas_value->is_grid_template_area()
+            || !rows_value->is_grid_track_size_list()
+            || !columns_value->is_grid_track_size_list()) {
+            return default_to_string();
+        }
+
+        auto& areas = areas_value->as_grid_template_area();
+        auto& rows = rows_value->as_grid_track_size_list();
+        auto& columns = columns_value->as_grid_track_size_list();
 
         if (areas.grid_template_area().size() == 0 && rows.grid_track_size_list().track_list().size() == 0 && columns.grid_track_size_list().track_list().size() == 0)
             return "none"_string;
@@ -412,7 +481,7 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
                     }
                     builder.append("\" "sv);
                 }
-                builder.append(row.to_string());
+                builder.append(row.to_string(mode));
                 if (idx < rows.grid_track_size_list().track_list().size() - 1)
                     builder.append(' ');
                 idx++;
@@ -422,7 +491,7 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
 
         if (columns.grid_track_size_list().track_list().size() == 0)
             return MUST(String::formatted("{}", construct_rows_string()));
-        return MUST(String::formatted("{} / {}", construct_rows_string(), columns.grid_track_size_list().to_string()));
+        return MUST(String::formatted("{} / {}", construct_rows_string(), columns.grid_track_size_list().to_string(mode)));
     }
     case PropertyID::GridColumn: {
         auto start = longhand(PropertyID::GridColumnStart);
@@ -438,35 +507,120 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
             return start->to_string(mode);
         return MUST(String::formatted("{} / {}", start->to_string(mode), end->to_string(mode)));
     }
-    case PropertyID::Overflow: {
-        auto overflow_x = longhand(PropertyID::OverflowX);
-        auto overflow_y = longhand(PropertyID::OverflowY);
-        if (overflow_x == overflow_y)
-            return overflow_x->to_string(mode);
+    case PropertyID::Mask: {
+        StringBuilder builder;
 
-        return MUST(String::formatted("{} {}", overflow_x->to_string(mode), overflow_y->to_string(mode)));
+        auto serialize_layer = [mode, &builder](String image_value_string, String position_value_string, String size_value_string, String repeat_value_string, String origin_value_string, String clip_value_string, String composite_value_string, String mode_value_string) {
+            PropertyID canonical_property_order[] = {
+                PropertyID::MaskImage,
+                PropertyID::MaskPosition,
+                // Intentionally skipping MaskSize here, it is handled together with MaskPosition.
+                PropertyID::MaskRepeat,
+                PropertyID::MaskOrigin,
+                PropertyID::MaskClip,
+                PropertyID::MaskComposite,
+                PropertyID::MaskMode,
+            };
+
+            auto property_value = [&](PropertyID property) -> String const& {
+                switch (property) {
+                case PropertyID::MaskImage:
+                    return image_value_string;
+                case PropertyID::MaskPosition:
+                    return position_value_string;
+                case PropertyID::MaskSize:
+                    return size_value_string;
+                case PropertyID::MaskRepeat:
+                    return repeat_value_string;
+                case PropertyID::MaskOrigin:
+                    return origin_value_string;
+                case PropertyID::MaskClip:
+                    return clip_value_string;
+                case PropertyID::MaskComposite:
+                    return composite_value_string;
+                case PropertyID::MaskMode:
+                    return mode_value_string;
+                default:
+                    VERIFY_NOT_REACHED();
+                }
+            };
+
+            auto is_initial_value = [mode, property_value](PropertyID property) -> bool {
+                return property_value(property) == property_initial_value(property)->to_string(mode);
+            };
+
+            auto can_skip_serializing_initial_value = [is_initial_value, property_value](PropertyID property) -> bool {
+                switch (property) {
+                case PropertyID::MaskPosition:
+                    return is_initial_value(PropertyID::MaskSize);
+                case PropertyID::MaskOrigin:
+                    return is_initial_value(PropertyID::MaskClip) || property_value(PropertyID::MaskClip) == string_from_keyword(Keyword::NoClip);
+                default:
+                    return true;
+                }
+            };
+
+            bool layer_is_empty = true;
+            for (size_t i = 0; i < array_size(canonical_property_order); i++) {
+                auto property = canonical_property_order[i];
+                auto const& value = property_value(property);
+
+                if (is_initial_value(property) && can_skip_serializing_initial_value(property))
+                    continue;
+                if (property == PropertyID::MaskClip && value == property_value(PropertyID::MaskOrigin))
+                    continue;
+
+                if (!layer_is_empty)
+                    builder.append(" "sv);
+                builder.append(value);
+                if (property == PropertyID::MaskPosition && !is_initial_value(PropertyID::MaskSize)) {
+                    builder.append(" / "sv);
+                    builder.append(property_value(PropertyID::MaskSize));
+                }
+                layer_is_empty = false;
+            }
+
+            if (layer_is_empty)
+                builder.append("none"sv);
+        };
+
+        auto get_layer_count = [](auto const& style_value) -> size_t {
+            return style_value->is_value_list() ? style_value->as_value_list().size() : 1;
+        };
+
+        auto mask_image = longhand(PropertyID::MaskImage);
+        auto mask_position = longhand(PropertyID::MaskPosition);
+        auto mask_size = longhand(PropertyID::MaskSize);
+        auto mask_repeat = longhand(PropertyID::MaskRepeat);
+        auto mask_origin = longhand(PropertyID::MaskOrigin);
+        auto mask_clip = longhand(PropertyID::MaskClip);
+        auto mask_composite = longhand(PropertyID::MaskComposite);
+        auto mask_mode = longhand(PropertyID::MaskMode);
+
+        auto layer_count = max(get_layer_count(mask_image), max(get_layer_count(mask_position), max(get_layer_count(mask_size), max(get_layer_count(mask_repeat), max(get_layer_count(mask_origin), max(get_layer_count(mask_clip), max(get_layer_count(mask_composite), get_layer_count(mask_mode))))))));
+
+        if (layer_count == 1) {
+            serialize_layer(mask_image->to_string(mode), mask_position->to_string(mode), mask_size->to_string(mode), mask_repeat->to_string(mode), mask_origin->to_string(mode), mask_clip->to_string(mode), mask_composite->to_string(mode), mask_mode->to_string(mode));
+        } else {
+            auto get_layer_value_string = [mode](ValueComparingRefPtr<StyleValue const> const& style_value, size_t index) {
+                if (style_value->is_value_list())
+                    return style_value->as_value_list().value_at(index, true)->to_string(mode);
+                return style_value->to_string(mode);
+            };
+
+            for (size_t i = 0; i < layer_count; i++) {
+                if (i)
+                    builder.append(", "sv);
+
+                serialize_layer(get_layer_value_string(mask_image, i), get_layer_value_string(mask_position, i), get_layer_value_string(mask_size, i), get_layer_value_string(mask_repeat, i), get_layer_value_string(mask_origin, i), get_layer_value_string(mask_clip, i), get_layer_value_string(mask_composite, i), get_layer_value_string(mask_mode, i));
+            }
+        }
+        return builder.to_string_without_validation();
     }
-    case PropertyID::PlaceContent: {
-        auto align_content = longhand(PropertyID::AlignContent)->to_string(mode);
-        auto justify_content = longhand(PropertyID::JustifyContent)->to_string(mode);
-        if (align_content == justify_content)
-            return align_content;
-        return MUST(String::formatted("{} {}", align_content, justify_content));
-    }
-    case PropertyID::PlaceItems: {
-        auto align_items = longhand(PropertyID::AlignItems)->to_string(mode);
-        auto justify_items = longhand(PropertyID::JustifyItems)->to_string(mode);
-        if (align_items == justify_items)
-            return align_items;
-        return MUST(String::formatted("{} {}", align_items, justify_items));
-    }
-    case PropertyID::PlaceSelf: {
-        auto align_self = longhand(PropertyID::AlignSelf)->to_string(mode);
-        auto justify_self = longhand(PropertyID::JustifySelf)->to_string(mode);
-        if (align_self == justify_self)
-            return align_self;
-        return MUST(String::formatted("{} {}", align_self, justify_self));
-    }
+    case PropertyID::PlaceContent:
+    case PropertyID::PlaceItems:
+    case PropertyID::PlaceSelf:
+        return positional_value_list_shorthand_to_string(m_properties.values);
     case PropertyID::TextDecoration: {
         // The rule here seems to be, only print what's different from the default value,
         // but if they're all default, print the line.
@@ -495,7 +649,7 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
         auto text_wrap_mode_property = longhand(PropertyID::TextWrapMode);
         auto white_space_trim_property = longhand(PropertyID::WhiteSpaceTrim);
 
-        RefPtr<CSSStyleValue const> value;
+        RefPtr<StyleValue const> value;
 
         if (white_space_trim_property->is_keyword() && white_space_trim_property->as_keyword().keyword() == Keyword::None) {
             auto white_space_collapse_keyword = white_space_collapse_property->as_keyword().keyword();
@@ -517,6 +671,9 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
         return default_to_string();
     }
     default:
+        if (property_is_positional_value_list_shorthand(m_properties.shorthand_property))
+            return positional_value_list_shorthand_to_string(m_properties.values);
+
         return default_to_string();
     }
 }
@@ -525,7 +682,7 @@ void ShorthandStyleValue::set_style_sheet(GC::Ptr<CSSStyleSheet> style_sheet)
 {
     Base::set_style_sheet(style_sheet);
     for (auto& value : m_properties.values)
-        const_cast<CSSStyleValue&>(*value).set_style_sheet(style_sheet);
+        const_cast<StyleValue&>(*value).set_style_sheet(style_sheet);
 }
 
 }

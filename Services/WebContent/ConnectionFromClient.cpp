@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2020-2023, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2021-2024, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2021-2023, Linus Groh <linusg@serenityos.org>
  * Copyright (c) 2022, Tobias Christiansen <tobyase@serenityos.org>
  * Copyright (c) 2022, Tim Flynn <trflynn89@serenityos.org>
@@ -22,7 +22,9 @@
 #include <LibWeb/ARIA/RoleType.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/Parser/ErrorReporter.h>
 #include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/CookieStore/CookieStore.h>
 #include <LibWeb/DOM/Attr.h>
 #include <LibWeb/DOM/CharacterData.h>
 #include <LibWeb/DOM/Document.h>
@@ -72,7 +74,7 @@ void ConnectionFromClient::die()
 Messages::WebContentServer::InitTransportResponse ConnectionFromClient::init_transport([[maybe_unused]] int peer_pid)
 {
 #ifdef AK_OS_WINDOWS
-    m_transport.set_peer_pid(peer_pid);
+    m_transport->set_peer_pid(peer_pid);
     return Core::System::getpid();
 #endif
     VERIFY_NOT_REACHED();
@@ -136,6 +138,12 @@ void ConnectionFromClient::connect_to_image_decoder(IPC::File image_decoder_sock
 {
     if (on_image_decoder_connection)
         on_image_decoder_connection(image_decoder_socket);
+}
+
+void ConnectionFromClient::connect_to_request_server(IPC::File request_server_socket)
+{
+    if (on_request_server_connection)
+        on_request_server_connection(request_server_socket);
 }
 
 void ConnectionFromClient::update_system_theme(u64 page_id, Core::AnonymousBuffer theme_buffer)
@@ -251,6 +259,15 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
     if (request == "dump-session-history") {
         auto const& traversable = page->page().top_level_traversable();
         Web::dump_tree(*traversable);
+        return;
+    }
+
+    if (request == "dump-display-list") {
+        if (auto* doc = page->page().top_level_browsing_context().active_document()) {
+            auto display_list_dump = doc->dump_display_list();
+            dbgln("{}", display_list_dump);
+        }
+        return;
     }
 
     if (request == "dump-dom-tree") {
@@ -310,9 +327,8 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
     if (request == "dump-all-resolved-styles") {
         auto dump_style = [](String const& title, Web::CSS::ComputedProperties const& style, HashMap<FlyString, Web::CSS::StyleProperty> const& custom_properties) {
             dbgln("+ {}", title);
-            for (size_t i = 0; i < Web::CSS::ComputedProperties::number_of_properties; ++i) {
-                auto property = style.maybe_null_property(static_cast<Web::CSS::PropertyID>(i));
-                dbgln("|  {} = {}", Web::CSS::string_from_property_id(static_cast<Web::CSS::PropertyID>(i)), property ? property->to_string(Web::CSS::SerializationMode::Normal) : ""_string);
+            for (size_t i = to_underlying(Web::CSS::first_longhand_property_id); i < to_underlying(Web::CSS::last_longhand_property_id); ++i) {
+                dbgln("|  {} = {}", Web::CSS::string_from_property_id(static_cast<Web::CSS::PropertyID>(i)), style.property(static_cast<Web::CSS::PropertyID>(i)).to_string(Web::CSS::SerializationMode::Normal));
             }
             for (auto const& [name, property] : custom_properties) {
                 dbgln("|  {} = {}", name, property.value->to_string(Web::CSS::SerializationMode::Normal));
@@ -328,7 +344,7 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
                 for (auto& child : node->children_as_vector())
                     nodes_to_visit.enqueue(child.ptr());
                 if (auto* element = as_if<Web::DOM::Element>(node)) {
-                    auto styles = doc->style_computer().compute_style(*element);
+                    auto styles = doc->style_computer().compute_style({ *element });
                     dump_style(MUST(String::formatted("Element {}", node->debug_description())), styles, element->custom_properties({}));
 
                     for (auto pseudo_element_index = 0; pseudo_element_index < to_underlying(Web::CSS::PseudoElement::KnownPseudoElementCount); ++pseudo_element_index) {
@@ -340,6 +356,11 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
                 }
             }
         }
+        return;
+    }
+
+    if (request == "dump-all-css-errors") {
+        Web::CSS::Parser::ErrorReporter::the().dump();
         return;
     }
 
@@ -369,11 +390,6 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
         return;
     }
 
-    if (request == "same-origin-policy") {
-        page->page().set_same_origin_policy_enabled(argument == "on");
-        return;
-    }
-
     if (request == "scripting") {
         page->page().set_is_scripting_enabled(argument == "on");
         return;
@@ -385,44 +401,12 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
     }
 
     if (request == "dump-local-storage") {
-        if (auto* document = page->page().top_level_browsing_context().active_document())
-            document->window()->local_storage().release_value_but_fixme_should_propagate_errors()->dump();
-        return;
-    }
-
-    if (request == "load-reference-page") {
         if (auto* document = page->page().top_level_browsing_context().active_document()) {
-            auto has_mismatch_selector = false;
-
-            auto maybe_link = [&]() -> Web::WebIDL::ExceptionOr<GC::Ptr<Web::DOM::Element>> {
-                auto maybe_link = document->query_selector("link[rel=match]"sv);
-                if (maybe_link.is_error() || maybe_link.value())
-                    return maybe_link;
-
-                auto maybe_mismatch_link = document->query_selector("link[rel=mismatch]"sv);
-                if (maybe_mismatch_link.is_error() || maybe_mismatch_link.value()) {
-                    has_mismatch_selector = maybe_mismatch_link.value();
-                    return maybe_mismatch_link;
-                }
-
-                return nullptr;
-            }();
-
-            if (maybe_link.is_error() || !maybe_link.value()) {
-                // To make sure that we fail the ref-test if the link is missing, load the error page->
-                load_html(page_id, "<h1>Failed to find &lt;link rel=&quot;match&quot; /&gt; or &lt;link rel=&quot;mismatch&quot; /&gt; in ref test page!</h1> Make sure you added it.");
-            } else {
-                auto link = maybe_link.release_value();
-                auto url = document->encoding_parse_url(link->get_attribute_value(Web::HTML::AttributeNames::href));
-                if (url->query().has_value() && !url->query()->is_empty()) {
-                    load_html(page_id, "<h1>Invalid ref test link - query string must be empty</h1>");
-                    return;
-                }
-                if (has_mismatch_selector)
-                    url->set_query("mismatch"_string);
-
-                load_url(page_id, *url);
-            }
+            auto storage_or_error = document->window()->local_storage();
+            if (storage_or_error.is_error())
+                dbgln("Failed to retrieve local storage: {}", storage_or_error.release_error());
+            else
+                storage_or_error.release_value()->dump();
         }
         return;
     }
@@ -484,13 +468,7 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     auto& element = as<Web::DOM::Element>(*node);
     node->document().set_inspected_node(node);
 
-    GC::Ptr<Web::CSS::ComputedProperties> properties;
-    if (pseudo_element.has_value()) {
-        if (auto pseudo_element_node = element.get_pseudo_element_node(*pseudo_element))
-            properties = element.pseudo_element_computed_properties(*pseudo_element);
-    } else {
-        properties = element.computed_properties();
-    }
+    auto properties = element.computed_properties(pseudo_element);
 
     if (!properties) {
         async_did_inspect_dom_node(page_id, { property_type, {} });
@@ -679,7 +657,7 @@ void ConnectionFromClient::get_dom_node_inner_html(u64 page_id, Web::UniqueNodeI
         html = element.inner_html().release_value_but_fixme_should_propagate_errors();
     } else if (dom_node->is_text() || dom_node->is_comment()) {
         auto const& character_data = static_cast<Web::DOM::CharacterData const&>(*dom_node);
-        html = character_data.data();
+        html = character_data.data().to_utf8_but_should_be_ported_to_utf16();
     } else {
         return;
     }
@@ -700,7 +678,7 @@ void ConnectionFromClient::get_dom_node_outer_html(u64 page_id, Web::UniqueNodeI
         html = element.outer_html().release_value_but_fixme_should_propagate_errors();
     } else if (dom_node->is_text() || dom_node->is_comment()) {
         auto const& character_data = static_cast<Web::DOM::CharacterData const&>(*dom_node);
-        html = character_data.data();
+        html = character_data.data().to_utf8_but_should_be_ported_to_utf16();
     } else {
         return;
     }
@@ -721,7 +699,7 @@ void ConnectionFromClient::set_dom_node_outer_html(u64 page_id, Web::UniqueNodeI
         element.set_outer_html(html).release_value_but_fixme_should_propagate_errors();
     } else if (dom_node->is_text() || dom_node->is_comment()) {
         auto& character_data = static_cast<Web::DOM::CharacterData&>(*dom_node);
-        character_data.set_data(html);
+        character_data.set_data(Utf16String::from_utf8(html));
     } else {
         async_did_finish_editing_dom_node(page_id, {});
         return;
@@ -739,7 +717,7 @@ void ConnectionFromClient::set_dom_node_text(u64 page_id, Web::UniqueNodeID node
     }
 
     auto& character_data = static_cast<Web::DOM::CharacterData&>(*dom_node);
-    character_data.set_data(text);
+    character_data.set_data(Utf16String::from_utf8(text));
 
     async_did_finish_editing_dom_node(page_id, character_data.unique_id());
 }
@@ -833,7 +811,7 @@ void ConnectionFromClient::create_child_text_node(u64 page_id, Web::UniqueNodeID
         return;
     }
 
-    auto text_node = dom_node->realm().create<Web::DOM::Text>(dom_node->document(), "text"_string);
+    auto text_node = dom_node->realm().create<Web::DOM::Text>(dom_node->document(), "text"_utf16);
     dom_node->append_child(text_node).release_value_but_fixme_should_propagate_errors();
 
     async_did_finish_editing_dom_node(page_id, text_node->unique_id());
@@ -1187,6 +1165,12 @@ void ConnectionFromClient::set_device_pixels_per_css_pixel(u64 page_id, float de
         page->set_device_pixels_per_css_pixel(device_pixels_per_css_pixel);
 }
 
+void ConnectionFromClient::set_maximum_frames_per_second(u64 page_id, double maximum_frames_per_second)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->set_maximum_frames_per_second(maximum_frames_per_second);
+}
+
 void ConnectionFromClient::set_window_position(u64 page_id, Web::DevicePixelPoint position)
 {
     if (auto page = this->page(page_id); page.has_value())
@@ -1334,6 +1318,16 @@ void ConnectionFromClient::system_time_zone_changed()
 {
     JS::clear_system_time_zone_cache();
     Unicode::clear_system_time_zone_cache();
+}
+
+void ConnectionFromClient::cookies_changed(Vector<Web::Cookie::Cookie> cookies)
+{
+    for (auto& navigable : Web::HTML::all_navigables()) {
+        auto window = navigable->active_window();
+        if (!window)
+            return;
+        window->cookie_store()->process_cookie_changes(cookies);
+    }
 }
 
 }

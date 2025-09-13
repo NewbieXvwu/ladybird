@@ -40,17 +40,38 @@
     "stretch",
     "unsafe"
   ],
-  "animation-fill-mode": [
-    "backwards",
-    "both",
-    "forwards",
-    "none"
+  "anchor-side": [
+    "inside",
+    "outside",
+    "top",
+    "left",
+    "right",
+    "bottom",
+    "start",
+    "end",
+    "self-start",
+    "self-end",
+    "center"
+  ],
+  "anchor-size": [
+    "block",
+    "height",
+    "inline",
+    "self-block",
+    "self-inline",
+    "width"
   ],
   "animation-direction": [
     "alternate",
     "alternate-reverse",
     "normal",
     "reverse"
+  ],
+  "animation-fill-mode": [
+    "backwards",
+    "both",
+    "forwards",
+    "none"
   ],
   "animation-play-state": [
     "paused",
@@ -111,9 +132,20 @@
     "inline-start",
     "inline-end"
   ],
+  "color-interpolation": [
+    "auto",
+    "linearrgb",
+    "srgb"
+  ],
   "column-span": [
     "none",
     "all"
+  ],
+  "compositing-operator": [
+    "add",
+    "subtract",
+    "intersect",
+    "exclude"
   ],
   "contain": [
     "none",
@@ -130,6 +162,14 @@
     "auto",
     "hidden"
   ],
+  "coord-box": [
+    "content-box",
+    "padding-box",
+    "border-box",
+    "fill-box",
+    "stroke-box",
+    "view-box"
+  ],
   "counter-style-name-keyword": [
     "circle",
     "decimal",
@@ -138,6 +178,7 @@
     "disclosure-closed",
     "disclosure-open",
     "lower-alpha",
+    "lower-greek",
     "lower-latin",
     "lower-roman",
     "none",
@@ -463,6 +504,11 @@
     "luminance",
     "alpha"
   ],
+  "masking-mode": [
+    "alpha",
+    "luminance",
+    "match-source"
+  ],
   "math-shift": [
     "normal",
     "compact"
@@ -529,6 +575,11 @@
     "legal",
     "ledger"
   ],
+  "paint-order": [
+    "fill",
+    "stroke",
+    "markers"
+  ],
   "pointer-events": [
     "auto",
     "all",
@@ -540,19 +591,19 @@
     "lch",
     "oklch"
   ],
-  "positioning": [
-    "absolute",
-    "fixed",
-    "relative",
-    "static",
-    "sticky"
-  ],
   "position-edge": [
     "center",
     "left",
     "right",
     "top",
     "bottom"
+  ],
+  "positioning": [
+    "absolute",
+    "fixed",
+    "relative",
+    "static",
+    "sticky"
   ],
   "referrer-policy-modifier-value": [
     "no-referrer",
@@ -564,7 +615,7 @@
     "strict-origin-when-cross-origin",
     "unsafe-url"
   ],
-  "repeat": [
+  "repetition": [
     "no-repeat",
     "repeat",
     "round",
@@ -585,6 +636,12 @@
     "auto",
     "thin",
     "none"
+  ],
+  "shape-rendering": [
+    "auto",
+    "optimizespeed",
+    "crispedges",
+    "geometricprecision"
   ],
   "stroke-linecap": [
     "butt",
@@ -609,6 +666,7 @@
     "right",
     "match-parent",
     "-libweb-center",
+    "-libweb-inherit-or-center",
     "-libweb-left",
     "-libweb-right"
   ],
@@ -637,8 +695,7 @@
     "auto",
     "none",
     "inter-word",
-    "inter-character",
-    "distribute=inter-character"
+    "inter-character"
   ],
   "text-overflow": [
     "clip",

@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
+#include <LibUnicode/Segmenter.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/DOM/Comment.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentFragment.h>
@@ -27,16 +28,16 @@
 namespace Web::Editing {
 
 // https://w3c.github.io/editing/docs/execCommand/#the-backcolor-command
-bool command_back_color_action(DOM::Document& document, String const& value)
+bool command_back_color_action(DOM::Document& document, Utf16String const& value)
 {
     // 1. If value is not a valid CSS color, prepend "#" to it.
     auto resulting_value = value;
-    if (!Color::from_string(resulting_value).has_value()) {
-        resulting_value = MUST(String::formatted("#{}", resulting_value));
+    if (!Color::from_utf16_string(resulting_value).has_value()) {
+        resulting_value = Utf16String::formatted("#{}", resulting_value);
 
         // 2. If value is still not a valid CSS color, or if it is currentColor, return false.
         // AD-HOC: No browser does this. They always return true.
-        if (!Color::from_string(resulting_value).has_value()) {
+        if (!Color::from_utf16_string(resulting_value).has_value()) {
             // FIXME: Also return true in case of currentColor.
             return true;
         }
@@ -50,16 +51,16 @@ bool command_back_color_action(DOM::Document& document, String const& value)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-bold-command
-bool command_bold_action(DOM::Document& document, String const&)
+bool command_bold_action(DOM::Document& document, Utf16String const&)
 {
     // If queryCommandState("bold") returns true, set the selection's value to "normal".
     if (MUST(document.query_command_state(CommandNames::bold))) {
-        set_the_selections_value(document, CommandNames::bold, "normal"_string);
+        set_the_selections_value(document, CommandNames::bold, "normal"_utf16);
     }
 
     // Otherwise set the selection's value to "bold".
     else {
-        set_the_selections_value(document, CommandNames::bold, "bold"_string);
+        set_the_selections_value(document, CommandNames::bold, "bold"_utf16);
     }
 
     // Either way, return true.
@@ -67,7 +68,7 @@ bool command_bold_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-createlink-command
-bool command_create_link_action(DOM::Document& document, String const& value)
+bool command_create_link_action(DOM::Document& document, Utf16String const& value)
 {
     // 1. If value is the empty string, return false.
     if (value.is_empty())
@@ -82,7 +83,7 @@ bool command_create_link_action(DOM::Document& document, String const& value)
                 return IterationDecision::Break;
             if (auto* anchor = as_if<HTML::HTMLAnchorElement>(*ancestor); anchor && anchor->is_editable()
                 && anchor->has_attribute(HTML::AttributeNames::href))
-                MUST(anchor->set_href(value));
+                MUST(anchor->set_href(value.to_utf8_but_should_be_ported_to_utf16()));
             visited_ancestors.set(ancestor.ptr());
             return IterationDecision::Continue;
         });
@@ -100,7 +101,7 @@ bool command_create_link_action(DOM::Document& document, String const& value)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-defaultparagraphseparator-command
-bool command_default_paragraph_separator_action(DOM::Document& document, String const& input_value)
+bool command_default_paragraph_separator_action(DOM::Document& document, Utf16String const& input_value)
 {
     // Let value be converted to ASCII lowercase.
     auto value = input_value.to_ascii_lowercase();
@@ -121,14 +122,14 @@ bool command_default_paragraph_separator_action(DOM::Document& document, String 
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-defaultparagraphseparator-command
-String command_default_paragraph_separator_value(DOM::Document const& document)
+Utf16String command_default_paragraph_separator_value(DOM::Document const& document)
 {
     // Return the context object's default single-line container name.
-    return document.default_single_line_container_name().to_string();
+    return Utf16String::from_utf8_without_validation(document.default_single_line_container_name().to_string());
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-delete-command
-bool command_delete_action(DOM::Document& document, String const&)
+bool command_delete_action(DOM::Document& document, Utf16String const&)
 {
     // 1. If the active range is not collapsed, delete the selection and return true.
     auto& selection = *document.get_selection();
@@ -204,12 +205,17 @@ bool command_delete_action(DOM::Document& document, String const&)
             block_node_child_is_relevant_type = child_element.local_name().is_one_of(HTML::TagNames::br, HTML::TagNames::hr, HTML::TagNames::img);
         }
     }
-    if ((is<DOM::Text>(*node) && offset != 0) || block_node_child_is_relevant_type) {
+
+    if (auto const* text_node = as_if<DOM::Text>(*node); (text_node && offset != 0) || block_node_child_is_relevant_type) {
+        auto start_offset = text_node
+            ? text_node->grapheme_segmenter().previous_boundary(offset).value_or(offset - 1)
+            : offset - 1;
+
         // 1. Call collapse(node, offset) on the context object's selection.
         MUST(selection.collapse(node, offset));
 
         // 2. Call extend(node, offset − 1) on the context object's selection.
-        MUST(selection.extend(*node, offset - 1));
+        MUST(selection.extend(*node, start_offset));
 
         // 3. Delete the selection.
         delete_the_selection(selection);
@@ -240,7 +246,7 @@ bool command_delete_action(DOM::Document& document, String const&)
 
         // 3. Record the values of the one-node list consisting of node, and let values be the
         //    result.
-        auto values = record_the_values_of_nodes({ *node });
+        auto values = record_the_values_of_nodes(document.heap(), { *node });
 
         // 4. Split the parent of the one-node list consisting of node.
         split_the_parent_of_nodes({ *node });
@@ -377,7 +383,7 @@ bool command_delete_action(DOM::Document& document, String const&)
     //     is an hr, or the child is a br whose previousSibling is either a br or not an inline
     //     node:
     if (offset == 0 && is<DOM::Element>(offset_minus_one_child.ptr())) {
-        auto& child_element = static_cast<DOM::Element&>(*offset_minus_one_child);
+        auto& child_element = as<DOM::Element>(*offset_minus_one_child);
         auto* previous_sibling = child_element.previous_sibling();
         if (is<HTML::HTMLHRElement>(child_element)
             || (is<HTML::HTMLBRElement>(child_element) && previous_sibling && (is<HTML::HTMLBRElement>(*previous_sibling) || !is_inline_node(*previous_sibling)))) {
@@ -495,7 +501,7 @@ bool command_delete_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-fontname-command
-bool command_font_name_action(DOM::Document& document, String const& value)
+bool command_font_name_action(DOM::Document& document, Utf16String const& value)
 {
     // Set the selection's value to value, then return true.
     set_the_selections_value(document, CommandNames::fontName, value);
@@ -509,29 +515,29 @@ enum class FontSizeMode : u8 {
 };
 
 // https://w3c.github.io/editing/docs/execCommand/#the-fontsize-command
-bool command_font_size_action(DOM::Document& document, String const& value)
+bool command_font_size_action(DOM::Document& document, Utf16String const& value)
 {
     // 1. Strip leading and trailing whitespace from value.
-    auto resulting_value = MUST(value.trim_ascii_whitespace());
+    auto resulting_value = value.utf16_view().trim_ascii_whitespace();
 
     // 2. If value is not a valid floating point number, and would not be a valid floating point number if a single
     //    leading "+" character were stripped, return false.
-    if (!HTML::is_valid_floating_point_number(resulting_value)) {
-        if (!resulting_value.starts_with_bytes("+"sv)
-            || !HTML::is_valid_floating_point_number(MUST(resulting_value.substring_from_byte_offset(1))))
+    if (!HTML::is_valid_floating_point_number(resulting_value.to_utf8_but_should_be_ported_to_utf16())) {
+        if (!resulting_value.starts_with('+')
+            || !HTML::is_valid_floating_point_number(resulting_value.substring_view(1).to_utf8_but_should_be_ported_to_utf16()))
             return false;
     }
 
     // 3. If the first character of value is "+", delete the character and let mode be "relative-plus".
     auto mode = FontSizeMode::Absolute;
-    if (resulting_value.starts_with_bytes("+"sv)) {
-        resulting_value = MUST(resulting_value.substring_from_byte_offset(1));
+    if (resulting_value.starts_with('+')) {
+        resulting_value = resulting_value.substring_view(1);
         mode = FontSizeMode::RelativePlus;
     }
 
     // 4. Otherwise, if the first character of value is "-", delete the character and let mode be "relative-minus".
-    else if (resulting_value.starts_with_bytes("-"sv)) {
-        resulting_value = MUST(resulting_value.substring_from_byte_offset(1));
+    else if (resulting_value.starts_with('-')) {
+        resulting_value = resulting_value.substring_view(1);
         mode = FontSizeMode::RelativeMinus;
     }
 
@@ -539,7 +545,7 @@ bool command_font_size_action(DOM::Document& document, String const& value)
     // NOTE: This is the default set in step 3.
 
     // 6. Apply the rules for parsing non-negative integers to value, and let number be the result.
-    i64 number = HTML::parse_non_negative_integer(resulting_value).release_value();
+    i64 number = HTML::parse_non_negative_integer(resulting_value.to_utf8_but_should_be_ported_to_utf16()).release_value();
 
     // 7. If mode is "relative-plus", add three to number.
     if (mode == FontSizeMode::RelativePlus)
@@ -564,17 +570,17 @@ bool command_font_size_action(DOM::Document& document, String const& value)
     // 6: xx-large
     // 7: xxx-large
     auto const& font_sizes = named_font_sizes();
-    resulting_value = MUST(String::from_utf8(font_sizes[number - 1]));
+    resulting_value = font_sizes[number - 1];
 
     // 12. Set the selection's value to value.
-    set_the_selections_value(document, CommandNames::fontSize, resulting_value);
+    set_the_selections_value(document, CommandNames::fontSize, Utf16String::from_utf16(resulting_value));
 
     // 13. Return true.
     return true;
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-fontsize-command
-String command_font_size_value(DOM::Document const& document)
+Utf16String command_font_size_value(DOM::Document const& document)
 {
     // 1. If the active range is null, return the empty string.
     auto range = active_range(document);
@@ -595,16 +601,16 @@ String command_font_size_value(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-forecolor-command
-bool command_fore_color_action(DOM::Document& document, String const& value)
+bool command_fore_color_action(DOM::Document& document, Utf16String const& value)
 {
     // 1. If value is not a valid CSS color, prepend "#" to it.
     auto resulting_value = value;
-    if (!Color::from_string(resulting_value).has_value()) {
-        resulting_value = MUST(String::formatted("#{}", resulting_value));
+    if (!Color::from_utf16_string(resulting_value).has_value()) {
+        resulting_value = Utf16String::formatted("#{}", resulting_value);
 
         // 2. If value is still not a valid CSS color, or if it is currentColor, return false.
         // AD-HOC: No browser does this. They always return true.
-        if (!Color::from_string(resulting_value).has_value()) {
+        if (!Color::from_utf16_string(resulting_value).has_value()) {
             // FIXME: Also return true in case of currentColor.
             return true;
         }
@@ -618,19 +624,19 @@ bool command_fore_color_action(DOM::Document& document, String const& value)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-formatblock-command
-bool command_format_block_action(DOM::Document& document, String const& value)
+bool command_format_block_action(DOM::Document& document, Utf16String const& value)
 {
     // 1. If value begins with a "<" character and ends with a ">" character, remove the first and last characters from
     //    it.
     auto resulting_value = value;
-    if (resulting_value.starts_with_bytes("<"sv) && resulting_value.ends_with_bytes(">"sv))
-        resulting_value = MUST(resulting_value.substring_from_byte_offset(1, resulting_value.bytes_as_string_view().length() - 2));
+    if (value.starts_with('<') && value.ends_with('>'))
+        resulting_value = Utf16String::from_utf16(value.substring_view(1, value.length_in_code_units() - 2));
 
     // 2. Let value be converted to ASCII lowercase.
     resulting_value = resulting_value.to_ascii_lowercase();
 
     // 3. If value is not a formattable block name, return false.
-    if (!is_formattable_block_name(resulting_value))
+    if (!is_formattable_block_name(resulting_value.to_utf8_but_should_be_ported_to_utf16()))
         return false;
 
     // 4. Block-extend the active range, and let new range be the result.
@@ -665,7 +671,7 @@ bool command_format_block_action(DOM::Document& document, String const& value)
     });
 
     // 7. Record the values of node list, and let values be the result.
-    auto values = record_the_values_of_nodes(node_list);
+    auto values = record_the_values_of_nodes(document.heap(), node_list);
 
     // 8. For each node in node list, while node is the descendant of an editable HTML element in the same editing host,
     //    whose local name is a formattable block name, and which is not the ancestor of a prohibited paragraph child,
@@ -713,7 +719,7 @@ bool command_format_block_action(DOM::Document& document, String const& value)
             });
 
             // 2. Record the values of sublist, and let values be the result.
-            auto values = record_the_values_of_nodes(sublist);
+            auto values = record_the_values_of_nodes(document.heap(), sublist);
 
             // 3. Remove the first member of node list from its parent, preserving its descendants.
             remove_node_preserving_its_descendants(node_list.first());
@@ -751,7 +757,7 @@ bool command_format_block_action(DOM::Document& document, String const& value)
                 auto const* html_element = as_if<HTML::HTMLElement>(*sibling);
                 return html_element && html_element->local_name() == resulting_value && !html_element->has_attributes();
             },
-            [&] { return MUST(DOM::create_element(document, resulting_value, Namespace::HTML)); });
+            [&] { return MUST(DOM::create_element(document, resulting_value.to_utf8_but_should_be_ported_to_utf16(), Namespace::HTML)); });
         if (result)
             fix_disallowed_ancestors_of_node(*result);
     }
@@ -820,7 +826,7 @@ bool command_format_block_indeterminate(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-formatblock-command
-String command_format_block_value(DOM::Document const& document)
+Utf16String command_format_block_value(DOM::Document const& document)
 {
     // 1. If the active range is null, return the empty string.
     auto range = active_range(document);
@@ -862,7 +868,7 @@ String command_format_block_value(DOM::Document const& document)
             return TraversalDecision::Continue;
         });
         if (!is_ancestor_of_prohibited_paragraph_child)
-            return html_element->local_name().to_string().to_ascii_lowercase();
+            return Utf16String::from_utf8(html_element->local_name().to_string().to_ascii_lowercase());
     }
 
     // 6. Return the empty string.
@@ -870,7 +876,7 @@ String command_format_block_value(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-forwarddelete-command
-bool command_forward_delete_action(DOM::Document& document, String const&)
+bool command_forward_delete_action(DOM::Document& document, Utf16String const&)
 {
     // 1. If the active range is not collapsed, delete the selection and return true.
     auto& selection = *document.get_selection();
@@ -927,9 +933,9 @@ bool command_forward_delete_action(DOM::Document& document, String const&)
     }
 
     // 5. If node is a Text node and offset is not node's length:
-    if (is<DOM::Text>(*node) && offset != node->length()) {
+    if (auto const* text_node = as_if<DOM::Text>(*node); text_node && offset != node->length()) {
         // 1. Let end offset be offset plus one.
-        auto end_offset = offset + 1;
+        auto end_offset = text_node->grapheme_segmenter().next_boundary(offset).value_or(offset + 1);
 
         // FIXME: 2. While end offset is not node's length and the end offsetth code unit of node's data has general category M
         //    when interpreted as a Unicode code point, add one to end offset.
@@ -1061,7 +1067,7 @@ bool command_forward_delete_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-indent-command
-bool command_indent_action(DOM::Document& document, String const&)
+bool command_indent_action(DOM::Document& document, Utf16String const&)
 {
     // 1. Let items be a list of all lis that are inclusive ancestors of the active range's start and/or end node.
     Vector<GC::Ref<DOM::Node>> items;
@@ -1136,7 +1142,7 @@ bool command_indent_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-inserthorizontalrule-command
-bool command_insert_horizontal_rule_action(DOM::Document& document, String const&)
+bool command_insert_horizontal_rule_action(DOM::Document& document, Utf16String const&)
 {
     // 1. Let start node, start offset, end node, and end offset be the active range's start and end nodes and offsets.
     auto range = active_range(document);
@@ -1205,7 +1211,7 @@ bool command_insert_horizontal_rule_action(DOM::Document& document, String const
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-inserthtml-command
-bool command_insert_html_action(DOM::Document& document, String const& value)
+bool command_insert_html_action(DOM::Document& document, Utf16String const& value)
 {
     // FIXME: 1. Set value to the result of invoking get trusted types compliant string with TrustedHTML, this's relevant
     //    global object, value, "Document execCommand", and "script".
@@ -1221,7 +1227,7 @@ bool command_insert_html_action(DOM::Document& document, String const& value)
         return true;
 
     // 4. Let frag be the result of calling createContextualFragment(value) on the active range.
-    auto frag = MUST(range->create_contextual_fragment(resulting_value));
+    auto frag = MUST(range->create_contextual_fragment(resulting_value.to_utf8_but_should_be_ported_to_utf16()));
 
     // 5. Let last child be the lastChild of frag.
     GC::Ptr<DOM::Node> last_child = frag->last_child();
@@ -1277,7 +1283,7 @@ bool command_insert_html_action(DOM::Document& document, String const& value)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-insertimage-command
-bool command_insert_image_action(DOM::Document& document, String const& value)
+bool command_insert_image_action(DOM::Document& document, Utf16String const& value)
 {
     // 1. If value is the empty string, return false.
     if (value.is_empty())
@@ -1322,7 +1328,7 @@ bool command_insert_image_action(DOM::Document& document, String const& value)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-insertlinebreak-command
-bool command_insert_linebreak_action(DOM::Document& document, String const&)
+bool command_insert_linebreak_action(DOM::Document& document, Utf16String const&)
 {
     // 1. Delete the selection, with strip wrappers false.
     auto& selection = *document.get_selection();
@@ -1366,10 +1372,10 @@ bool command_insert_linebreak_action(DOM::Document& document, String const&)
     if (auto* text_node = as_if<DOM::Text>(*start_node); text_node) {
         auto resolved_white_space_collapse = resolved_keyword(*start_node, CSS::PropertyID::WhiteSpaceCollapse);
         if (resolved_white_space_collapse.has_value() && first_is_one_of(resolved_white_space_collapse.value(), CSS::Keyword::Preserve, CSS::Keyword::PreserveBreaks)) {
-            MUST(text_node->insert_data(active_range.start_offset(), "\n"_string));
+            MUST(text_node->insert_data(active_range.start_offset(), "\n"_utf16));
             MUST(selection.collapse(start_node, active_range.start_offset() + 1));
             if (selection.range()->start_offset() == start_node->length())
-                MUST(text_node->insert_data(active_range.start_offset(), "\n"_string));
+                MUST(text_node->insert_data(active_range.start_offset(), "\n"_utf16));
             return true;
         }
     }
@@ -1396,7 +1402,7 @@ bool command_insert_linebreak_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-insertorderedlist-command
-bool command_insert_ordered_list_action(DOM::Document& document, String const&)
+bool command_insert_ordered_list_action(DOM::Document& document, Utf16String const&)
 {
     // Toggle lists with tag name "ol", then return true.
     toggle_lists(document, HTML::TagNames::ol);
@@ -1418,7 +1424,7 @@ bool command_insert_ordered_list_state(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-insertparagraph-command
-bool command_insert_paragraph_action(DOM::Document& document, String const&)
+bool command_insert_paragraph_action(DOM::Document& document, Utf16String const&)
 {
     // 1. Delete the selection.
     auto& selection = *document.get_selection();
@@ -1471,7 +1477,7 @@ bool command_insert_paragraph_action(DOM::Document& document, String const&)
     //     or "div":
     if (container->is_editable() && is_single_line_container(*container) && is_in_same_editing_host(*container, *node)
         && is<DOM::Element>(*container)
-        && static_cast<DOM::Element&>(*container).local_name().is_one_of(HTML::TagNames::p, HTML::TagNames::div)) {
+        && as<DOM::Element>(*container).local_name().is_one_of(HTML::TagNames::p, HTML::TagNames::div)) {
         // 1. Let outer container equal container.
         auto outer_container = container;
 
@@ -1480,7 +1486,7 @@ bool command_insert_paragraph_action(DOM::Document& document, String const&)
         auto is_li_dt_or_dd = [](DOM::Element const& node) {
             return node.local_name().is_one_of(HTML::TagNames::li, HTML::TagNames::dt, HTML::TagNames::dd);
         };
-        while (!is<DOM::Element>(*outer_container) || !is_li_dt_or_dd(static_cast<DOM::Element&>(*outer_container))) {
+        while (!is<DOM::Element>(*outer_container) || !is_li_dt_or_dd(as<DOM::Element>(*outer_container))) {
             auto outer_container_parent = outer_container->parent();
             if (!outer_container_parent->is_editable())
                 break;
@@ -1488,7 +1494,7 @@ bool command_insert_paragraph_action(DOM::Document& document, String const&)
         }
 
         // 3. If outer container is a dd or dt or li, set container to outer container.
-        if (is<DOM::Element>(*outer_container) && is_li_dt_or_dd(static_cast<DOM::Element&>(*outer_container)))
+        if (is<DOM::Element>(*outer_container) && is_li_dt_or_dd(as<DOM::Element>(*outer_container)))
             container = outer_container;
     }
 
@@ -1729,7 +1735,7 @@ bool command_insert_paragraph_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-inserttext-command
-bool command_insert_text_action(DOM::Document& document, String const& value)
+bool command_insert_text_action(DOM::Document& document, Utf16String const& value)
 {
     // 1. Delete the selection, with strip wrappers false.
     auto& selection = *document.get_selection();
@@ -1741,10 +1747,12 @@ bool command_insert_text_action(DOM::Document& document, String const& value)
         return true;
 
     // 3. If value's length is greater than one:
-    if (value.code_points().length() > 1) {
+    if (value.length_in_code_units() > 1) {
         // 1. For each code unit el in value, take the action for the insertText command, with value equal to el.
-        for (auto el : value.code_points())
-            command_insert_text_action(document, String::from_code_point(el));
+        for (size_t i = 0; i < value.length_in_code_units(); ++i) {
+            auto code_unit = value.code_unit_at(i);
+            take_the_action_for_command(document, CommandNames::insertText, Utf16String::from_code_point(code_unit));
+        }
 
         // 2. Return true.
         return true;
@@ -1756,7 +1764,7 @@ bool command_insert_text_action(DOM::Document& document, String const& value)
 
     // 5. If value is a newline (U+000A), take the action for the insertParagraph command and return true.
     if (value == "\n"sv) {
-        command_insert_paragraph_action(document, {});
+        take_the_action_for_command(document, CommandNames::insertParagraph, {});
         return true;
     }
 
@@ -1844,7 +1852,7 @@ bool command_insert_text_action(DOM::Document& document, String const& value)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-insertunorderedlist-command
-bool command_insert_unordered_list_action(DOM::Document& document, String const&)
+bool command_insert_unordered_list_action(DOM::Document& document, Utf16String const&)
 {
     // Toggle lists with tag name "ul", then return true.
     toggle_lists(document, HTML::TagNames::ul);
@@ -1866,16 +1874,16 @@ bool command_insert_unordered_list_state(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-italic-command
-bool command_italic_action(DOM::Document& document, String const&)
+bool command_italic_action(DOM::Document& document, Utf16String const&)
 {
     // If queryCommandState("italic") returns true, set the selection's value to "normal".
     if (MUST(document.query_command_state(CommandNames::italic))) {
-        set_the_selections_value(document, CommandNames::italic, "normal"_string);
+        set_the_selections_value(document, CommandNames::italic, "normal"_utf16);
     }
 
     // Otherwise set the selection's value to "italic".
     else {
-        set_the_selections_value(document, CommandNames::italic, "italic"_string);
+        set_the_selections_value(document, CommandNames::italic, "italic"_utf16);
     }
 
     // Either way, return true.
@@ -1933,7 +1941,7 @@ static bool justify_state(DOM::Document const& document, JustifyAlignment alignm
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-justifycenter-command
-static String justify_value(DOM::Document const& document)
+static Utf16String justify_value(DOM::Document const& document)
 {
     // NOTE: This definition is taken from the "justifyCenter" spec and was made generic.
 
@@ -1961,7 +1969,7 @@ static String justify_value(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-justifycenter-command
-bool command_justify_center_action(DOM::Document& document, String const&)
+bool command_justify_center_action(DOM::Document& document, Utf16String const&)
 {
     // Justify the selection with alignment "center", then return true.
     justify_the_selection(document, JustifyAlignment::Center);
@@ -1981,13 +1989,13 @@ bool command_justify_center_state(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-justifycenter-command
-String command_justify_center_value(DOM::Document const& document)
+Utf16String command_justify_center_value(DOM::Document const& document)
 {
     return justify_value(document);
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-justifyfull-command
-bool command_justify_full_action(DOM::Document& document, String const&)
+bool command_justify_full_action(DOM::Document& document, Utf16String const&)
 {
     // Justify the selection with alignment "justify", then return true.
     justify_the_selection(document, JustifyAlignment::Justify);
@@ -2007,13 +2015,13 @@ bool command_justify_full_state(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-justifyfull-command
-String command_justify_full_value(DOM::Document const& document)
+Utf16String command_justify_full_value(DOM::Document const& document)
 {
     return justify_value(document);
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-justifyleft-command
-bool command_justify_left_action(DOM::Document& document, String const&)
+bool command_justify_left_action(DOM::Document& document, Utf16String const&)
 {
     // Justify the selection with alignment "left", then return true.
     justify_the_selection(document, JustifyAlignment::Left);
@@ -2033,13 +2041,13 @@ bool command_justify_left_state(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-justifyleft-command
-String command_justify_left_value(DOM::Document const& document)
+Utf16String command_justify_left_value(DOM::Document const& document)
 {
     return justify_value(document);
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-justifyright-command
-bool command_justify_right_action(DOM::Document& document, String const&)
+bool command_justify_right_action(DOM::Document& document, Utf16String const&)
 {
     // Justify the selection with alignment "right", then return true.
     justify_the_selection(document, JustifyAlignment::Right);
@@ -2059,13 +2067,13 @@ bool command_justify_right_state(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-justifyright-command
-String command_justify_right_value(DOM::Document const& document)
+Utf16String command_justify_right_value(DOM::Document const& document)
 {
     return justify_value(document);
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-outdent-command
-bool command_outdent_action(DOM::Document& document, String const&)
+bool command_outdent_action(DOM::Document& document, Utf16String const&)
 {
     // 1. Let items be a list of all lis that are inclusive ancestors of the active range's start and/or end node.
     Vector<GC::Ref<DOM::Node>> items;
@@ -2138,7 +2146,7 @@ bool command_outdent_action(DOM::Document& document, String const&)
             sublist.append(node_list.take_first());
 
         // 6. Record the values of sublist, and let values be the result.
-        auto values = record_the_values_of_nodes(sublist);
+        auto values = record_the_values_of_nodes(document.heap(), sublist);
 
         // 7. Split the parent of sublist.
         split_the_parent_of_nodes(sublist);
@@ -2156,7 +2164,7 @@ bool command_outdent_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-removeformat-command
-bool command_remove_format_action(DOM::Document& document, String const&)
+bool command_remove_format_action(DOM::Document& document, Utf16String const&)
 {
     // 1. Let elements to remove be a list of every removeFormat candidate effectively contained in the active range.
     Vector<GC::Ref<DOM::Element>> elements_to_remove;
@@ -2231,7 +2239,7 @@ bool command_remove_format_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-selectall-command
-bool command_select_all_action(DOM::Document& document, String const&)
+bool command_select_all_action(DOM::Document& document, Utf16String const&)
 {
     // NOTE: The spec mentions "This is totally broken". So fair warning :^)
 
@@ -2258,7 +2266,7 @@ bool command_select_all_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-strikethrough-command
-bool command_strikethrough_action(DOM::Document& document, String const&)
+bool command_strikethrough_action(DOM::Document& document, Utf16String const&)
 {
     // If queryCommandState("strikethrough") returns true, set the selection's value to null.
     if (MUST(document.query_command_state(CommandNames::strikethrough))) {
@@ -2267,7 +2275,7 @@ bool command_strikethrough_action(DOM::Document& document, String const&)
 
     // Otherwise set the selection's value to "line-through".
     else {
-        set_the_selections_value(document, CommandNames::strikethrough, "line-through"_string);
+        set_the_selections_value(document, CommandNames::strikethrough, "line-through"_utf16);
     }
 
     // Either way, return true.
@@ -2275,7 +2283,7 @@ bool command_strikethrough_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-stylewithcss-command
-bool command_style_with_css_action(DOM::Document& document, String const& value)
+bool command_style_with_css_action(DOM::Document& document, Utf16String const& value)
 {
     // If value is an ASCII case-insensitive match for the string "false", set the CSS styling flag to false.
     // Otherwise, set the CSS styling flag to true.
@@ -2293,7 +2301,7 @@ bool command_style_with_css_state(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-subscript-command
-bool command_subscript_action(DOM::Document& document, String const&)
+bool command_subscript_action(DOM::Document& document, Utf16String const&)
 {
     // 1. Call queryCommandState("subscript"), and let state be the result.
     auto state = MUST(document.query_command_state(CommandNames::subscript));
@@ -2303,7 +2311,7 @@ bool command_subscript_action(DOM::Document& document, String const&)
 
     // 3. If state is false, set the selection's value to "subscript".
     if (!state)
-        set_the_selections_value(document, CommandNames::subscript, "subscript"_string);
+        set_the_selections_value(document, CommandNames::subscript, "subscript"_utf16);
 
     // 4. Return true.
     return true;
@@ -2346,7 +2354,7 @@ bool command_subscript_indeterminate(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-superscript-command
-bool command_superscript_action(DOM::Document& document, String const&)
+bool command_superscript_action(DOM::Document& document, Utf16String const&)
 {
     // 1. Call queryCommandState("superscript"), and let state be the result.
     auto state = MUST(document.query_command_state(CommandNames::superscript));
@@ -2356,7 +2364,7 @@ bool command_superscript_action(DOM::Document& document, String const&)
 
     // 3. If state is false, set the selection's value to "superscript".
     if (!state)
-        set_the_selections_value(document, CommandNames::superscript, "superscript"_string);
+        set_the_selections_value(document, CommandNames::superscript, "superscript"_utf16);
 
     // 4. Return true.
     return true;
@@ -2399,7 +2407,7 @@ bool command_superscript_indeterminate(DOM::Document const& document)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-underline-command
-bool command_underline_action(DOM::Document& document, String const&)
+bool command_underline_action(DOM::Document& document, Utf16String const&)
 {
     // If queryCommandState("underline") returns true, set the selection's value to null.
     if (MUST(document.query_command_state(CommandNames::underline))) {
@@ -2408,7 +2416,7 @@ bool command_underline_action(DOM::Document& document, String const&)
 
     // Otherwise set the selection's value to "underline".
     else {
-        set_the_selections_value(document, CommandNames::underline, "underline"_string);
+        set_the_selections_value(document, CommandNames::underline, "underline"_utf16);
     }
 
     // Either way, return true.
@@ -2416,7 +2424,7 @@ bool command_underline_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-unlink-command
-bool command_unlink_action(DOM::Document& document, String const&)
+bool command_unlink_action(DOM::Document& document, Utf16String const&)
 {
     // 1. Let hyperlinks be a list of every a element that has an href attribute and is contained in the active range or
     //    is an ancestor of one of its boundary points.
@@ -2451,7 +2459,7 @@ bool command_unlink_action(DOM::Document& document, String const&)
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#the-usecss-command
-bool command_use_css_action(DOM::Document& document, String const& value)
+bool command_use_css_action(DOM::Document& document, Utf16String const& value)
 {
     // If value is an ASCII case-insensitive match for the string "false", set the CSS styling flag to true.
     // Otherwise, set the CSS styling flag to false.

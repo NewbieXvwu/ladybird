@@ -16,7 +16,7 @@
 
 namespace JS::Intl {
 
-class JS_API DurationFormat final : public IntlObject {
+class DurationFormat final : public IntlObject {
     JS_OBJECT(DurationFormat, IntlObject);
     GC_DECLARE_ALLOCATOR(DurationFormat);
 
@@ -66,7 +66,7 @@ public:
     };
 
     // 13.5.6.1 Duration Unit Options Records, https://tc39.es/ecma402/#sec-durationformat-unit-options-record
-    struct JS_API DurationUnitOptions {
+    struct DurationUnitOptions {
         ValueStyle style { ValueStyle::Long };
         Display display { Display::Auto };
     };
@@ -82,11 +82,11 @@ public:
     void set_numbering_system(String numbering_system) { m_numbering_system = move(numbering_system); }
     String const& numbering_system() const { return m_numbering_system; }
 
-    void set_hour_minute_separator(String hour_minute_separator) { m_hour_minute_separator = move(hour_minute_separator); }
-    String const& hour_minute_separator() const { return m_hour_minute_separator; }
+    void set_hour_minute_separator(Utf16String hour_minute_separator) { m_hour_minute_separator = move(hour_minute_separator); }
+    Utf16String const& hour_minute_separator() const { return m_hour_minute_separator; }
 
-    void set_minute_second_separator(String minute_second_separator) { m_minute_second_separator = move(minute_second_separator); }
-    String const& minute_second_separator() const { return m_minute_second_separator; }
+    void set_minute_second_separator(Utf16String minute_second_separator) { m_minute_second_separator = move(minute_second_separator); }
+    Utf16String const& minute_second_separator() const { return m_minute_second_separator; }
 
     void set_style(StringView style) { m_style = style_from_string(style); }
     Style style() const { return m_style; }
@@ -129,10 +129,10 @@ public:
 private:
     explicit DurationFormat(Object& prototype);
 
-    String m_locale;                  // [[Locale]]
-    String m_numbering_system;        // [[NumberingSystem]]
-    String m_hour_minute_separator;   // [[HourMinutesSeparator]]
-    String m_minute_second_separator; // [[MinutesSecondsSeparator]]
+    String m_locale;                       // [[Locale]]
+    String m_numbering_system;             // [[NumberingSystem]]
+    Utf16String m_hour_minute_separator;   // [[HourMinutesSeparator]]
+    Utf16String m_minute_second_separator; // [[MinutesSecondsSeparator]]
 
     Style m_style { Style::Long };              // [[Style]]
     DurationUnitOptions m_years_options;        // [[YearsOptions]]
@@ -148,7 +148,7 @@ private:
     Optional<u8> m_fractional_digits;           // [[FractionalDigits]]
 };
 
-struct JS_API DurationInstanceComponent {
+struct DurationInstanceComponent {
     double (Temporal::Duration::*value_slot)() const;
     DurationFormat::DurationUnitOptions (DurationFormat::*get_internal_slot)() const;
     void (DurationFormat::*set_internal_slot)(DurationFormat::DurationUnitOptions);
@@ -176,21 +176,21 @@ static constexpr auto duration_instances_components = to_array<DurationInstanceC
     { &Temporal::Duration::nanoseconds, &DurationFormat::nanoseconds_options, &DurationFormat::set_nanoseconds_options, DurationFormat::Unit::Nanoseconds, sub_second_styles, DurationFormat::ValueStyle::Numeric },
 });
 
-struct JS_API DurationFormatPart {
+struct DurationFormatPart {
     StringView type;
-    String value;
-    StringView unit;
+    Utf16String value;
+    Utf16View unit;
 };
 
-JS_API ThrowCompletionOr<DurationFormat::DurationUnitOptions> get_duration_unit_options(VM&, DurationFormat::Unit unit, Object const& options, DurationFormat::Style base_style, ReadonlySpan<StringView> styles_list, DurationFormat::ValueStyle digital_base, Optional<DurationFormat::ValueStyle> previous_style, bool two_digit_hours);
-JS_API Crypto::BigFraction compute_fractional_digits(DurationFormat const&, Temporal::Duration const&);
-JS_API bool next_unit_fractional(DurationFormat const&, DurationFormat::Unit unit);
-JS_API Vector<DurationFormatPart> format_numeric_hours(VM&, DurationFormat const&, MathematicalValue const& hours_value, bool sign_displayed);
-JS_API Vector<DurationFormatPart> format_numeric_minutes(VM&, DurationFormat const&, MathematicalValue const& minutes_value, bool hours_displayed, bool sign_displayed);
-JS_API Vector<DurationFormatPart> format_numeric_seconds(VM&, DurationFormat const&, MathematicalValue const& seconds_value, bool minutes_displayed, bool sign_displayed);
-JS_API Vector<DurationFormatPart> format_numeric_units(VM&, DurationFormat const&, Temporal::Duration const&, DurationFormat::Unit first_numeric_unit, bool sign_displayed);
-JS_API bool is_fractional_second_unit_name(DurationFormat::Unit);
-JS_API Vector<DurationFormatPart> list_format_parts(VM&, DurationFormat const&, Vector<Vector<DurationFormatPart>>& partitioned_parts_list);
-JS_API Vector<DurationFormatPart> partition_duration_format_pattern(VM&, DurationFormat const&, Temporal::Duration const&);
+ThrowCompletionOr<DurationFormat::DurationUnitOptions> get_duration_unit_options(VM&, DurationFormat::Unit unit, Object const& options, DurationFormat::Style base_style, ReadonlySpan<StringView> styles_list, DurationFormat::ValueStyle digital_base, Optional<DurationFormat::ValueStyle> previous_style, bool two_digit_hours);
+Crypto::BigFraction compute_fractional_digits(DurationFormat const&, Temporal::Duration const&);
+bool next_unit_fractional(DurationFormat const&, DurationFormat::Unit unit);
+Vector<DurationFormatPart> format_numeric_hours(VM&, DurationFormat const&, MathematicalValue const& hours_value, bool sign_displayed);
+Vector<DurationFormatPart> format_numeric_minutes(VM&, DurationFormat const&, MathematicalValue const& minutes_value, bool hours_displayed, bool sign_displayed);
+Vector<DurationFormatPart> format_numeric_seconds(VM&, DurationFormat const&, MathematicalValue const& seconds_value, bool minutes_displayed, bool sign_displayed);
+Vector<DurationFormatPart> format_numeric_units(VM&, DurationFormat const&, Temporal::Duration const&, DurationFormat::Unit first_numeric_unit, bool sign_displayed);
+bool is_fractional_second_unit_name(DurationFormat::Unit);
+Vector<DurationFormatPart> list_format_parts(VM&, DurationFormat const&, Vector<Vector<DurationFormatPart>>& partitioned_parts_list);
+Vector<DurationFormatPart> partition_duration_format_pattern(VM&, DurationFormat const&, Temporal::Duration const&);
 
 }

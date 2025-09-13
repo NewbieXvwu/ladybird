@@ -17,6 +17,7 @@
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/DOM/NodeType.h>
 #include <LibWeb/DOM/Slottable.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/XMLSerializer.h>
 #include <LibWeb/TraversalDecision.h>
 #include <LibWeb/TreeNode.h>
@@ -50,6 +51,7 @@ enum class ShouldComputeRole {
 
 #define ENUMERATE_STYLE_INVALIDATION_REASONS(X)     \
     X(AdoptedStyleSheetsList)                       \
+    X(BaseURLChanged)                               \
     X(CSSFontLoaded)                                \
     X(CSSImportRule)                                \
     X(CSSStylePropertiesRemoveProperty)             \
@@ -60,8 +62,10 @@ enum class ShouldComputeRole {
     X(DidLoseFocus)                                 \
     X(DidReceiveFocus)                              \
     X(EditingInsertion)                             \
+    X(EditingDeletion)                              \
     X(ElementAttributeChange)                       \
     X(ElementSetShadowRoot)                         \
+    X(HTMLDialogElementSetIsModal)                  \
     X(HTMLHyperlinkElementHrefChange)               \
     X(HTMLIFrameElementGeometryChange)              \
     X(HTMLInputElementSetChecked)                   \
@@ -94,6 +98,7 @@ enum class StyleInvalidationReason {
 #define ENUMERATE_SET_NEEDS_LAYOUT_REASONS(X)         \
     X(CharacterDataReplaceData)                       \
     X(FinalizeACrossDocumentNavigation)               \
+    X(GeneratedContentImageFinishedLoading)           \
     X(HTMLCanvasElementWidthOrHeightChange)           \
     X(HTMLImageElementReactToChangesInTheEnvironment) \
     X(HTMLImageElementUpdateTheImageData)             \
@@ -102,6 +107,7 @@ enum class StyleInvalidationReason {
     X(LayoutTreeUpdate)                               \
     X(NavigableSetViewportSize)                       \
     X(SVGImageElementFetchTheDocument)                \
+    X(SVGImageFilterFetch)                            \
     X(StyleChange)
 
 enum class SetNeedsLayoutReason {
@@ -125,6 +131,7 @@ enum class SetNeedsLayoutReason {
     X(NodeSetTextContent)                                 \
     X(None)                                               \
     X(SVGGraphicsElementTransformChange)                  \
+    X(SVGViewBoxChange)                                   \
     X(StyleChange)
 
 enum class SetNeedsLayoutTreeUpdateReason {
@@ -135,7 +142,7 @@ enum class SetNeedsLayoutTreeUpdateReason {
 
 [[nodiscard]] StringView to_string(SetNeedsLayoutTreeUpdateReason);
 
-class Node : public EventTarget
+class WEB_API Node : public EventTarget
     , public TreeNode<Node> {
     WEB_PLATFORM_OBJECT(Node, EventTarget);
 
@@ -171,6 +178,7 @@ public:
     virtual bool is_svg_style_element() const { return false; }
     virtual bool is_svg_svg_element() const { return false; }
     virtual bool is_svg_use_element() const { return false; }
+    virtual bool is_svg_view_element() const { return false; }
     virtual bool is_svg_a_element() const { return false; }
     virtual bool is_svg_foreign_object_element() const { return false; }
 
@@ -182,6 +190,7 @@ public:
     bool is_editable() const;
     bool is_editing_host() const;
     bool is_editable_or_editing_host() const { return is_editable() || is_editing_host(); }
+    GC::Ptr<Node> editing_host();
 
     virtual bool is_dom_node() const final { return true; }
     virtual bool is_html_element() const { return false; }
@@ -267,9 +276,9 @@ public:
 
     virtual Optional<String> alternative_text() const;
 
-    String descendant_text_content() const;
-    Optional<String> text_content() const;
-    void set_text_content(Optional<String> const&);
+    Utf16String descendant_text_content() const;
+    Optional<Utf16String> text_content() const;
+    void set_text_content(Optional<Utf16String> const&);
 
     WebIDL::ExceptionOr<void> normalize();
 
@@ -283,11 +292,11 @@ public:
 
     GC::Ptr<Document> owner_document() const;
 
-    const HTML::HTMLAnchorElement* enclosing_link_element() const;
-    const HTML::HTMLElement* enclosing_html_element() const;
-    const HTML::HTMLElement* enclosing_html_element_with_attribute(FlyString const&) const;
+    HTML::HTMLAnchorElement const* enclosing_link_element() const;
+    HTML::HTMLElement const* enclosing_html_element() const;
+    HTML::HTMLElement const* enclosing_html_element_with_attribute(FlyString const&) const;
 
-    String child_text_content() const;
+    Utf16String child_text_content() const;
 
     Node& shadow_including_root();
     Node const& shadow_including_root() const
@@ -362,7 +371,6 @@ public:
     void invalidate_style(StyleInvalidationReason);
     struct StyleInvalidationOptions {
         bool invalidate_self { false };
-        bool invalidate_elements_that_use_css_custom_properties { false };
     };
     void invalidate_style(StyleInvalidationReason, Vector<CSS::InvalidationSet::Property> const&, StyleInvalidationOptions);
 
@@ -374,7 +382,7 @@ public:
     template<typename T>
     bool fast_is() const = delete;
 
-    WebIDL::ExceptionOr<void> ensure_pre_insertion_validity(GC::Ref<Node> node, GC::Ptr<Node> child) const;
+    WebIDL::ExceptionOr<void> ensure_pre_insertion_validity(JS::Realm&, GC::Ref<Node> node, GC::Ptr<Node> child) const;
 
     bool is_host_including_inclusive_ancestor_of(Node const&) const;
 
@@ -398,7 +406,7 @@ public:
     WebIDL::ExceptionOr<void> unsafely_set_html(Element&, StringView);
 
     void replace_all(GC::Ptr<Node>);
-    void string_replace_all(String const&);
+    void string_replace_all(Utf16String);
 
     bool is_same_node(Node const*) const;
     bool is_equal_node(Node const*) const;

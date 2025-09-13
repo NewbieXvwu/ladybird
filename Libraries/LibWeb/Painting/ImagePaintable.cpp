@@ -26,7 +26,9 @@ GC::Ref<ImagePaintable> ImagePaintable::create(Layout::SVGImageBox const& layout
 
 GC::Ref<ImagePaintable> ImagePaintable::create(Layout::ImageBox const& layout_box)
 {
-    auto alt = layout_box.dom_node().get_attribute_value(HTML::AttributeNames::alt);
+    String alt;
+    if (auto element = layout_box.dom_node())
+        alt = element->get_attribute_value(HTML::AttributeNames::alt);
     return layout_box.heap().allocate<ImagePaintable>(layout_box, layout_box.image_provider(), layout_box.renders_as_alt_text(), move(alt), false);
 }
 
@@ -43,7 +45,7 @@ ImagePaintable::ImagePaintable(Layout::Box const& layout_box, Layout::ImageProvi
 void ImagePaintable::visit_edges(JS::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_image_provider.to_html_element());
+    m_image_provider.image_provider_visit_edges(visitor);
 }
 
 void ImagePaintable::finalize()
@@ -55,7 +57,7 @@ void ImagePaintable::finalize()
     document().unregister_viewport_client(*this);
 }
 
-void ImagePaintable::paint(PaintContext& context, PaintPhase phase) const
+void ImagePaintable::paint(DisplayListRecordingContext& context, PaintPhase phase) const
 {
     if (!is_visible())
         return;
@@ -71,7 +73,7 @@ void ImagePaintable::paint(PaintContext& context, PaintPhase phase) const
                 context.display_list_recorder().draw_rect(enclosing_rect, Gfx::Color::Black);
                 context.display_list_recorder().draw_text(enclosing_rect, m_alt_text, *Platform::FontPlugin::the().default_font(12), Gfx::TextAlignment::Center, computed_values().color());
             }
-        } else if (auto bitmap = m_image_provider.current_image_bitmap(image_rect_device_pixels.size().to_type<int>())) {
+        } else if (auto bitmap = m_image_provider.current_image_bitmap_sized(image_rect_device_pixels.size().to_type<int>())) {
             ScopedCornerRadiusClip corner_clip { context, image_rect_device_pixels, normalized_border_radii_data(ShrinkRadiiForBorders::Yes) };
             auto image_int_rect_device_pixels = image_rect_device_pixels.to_type<int>();
             auto bitmap_rect = bitmap->rect();

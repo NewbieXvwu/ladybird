@@ -13,6 +13,7 @@
 #include <AK/NonnullOwnPtr.h>
 #include <AK/StackInfo.h>
 #include <AK/UFixedBigInt.h>
+#include <LibWasm/Export.h>
 #include <LibWasm/Types.h>
 
 namespace Wasm {
@@ -193,6 +194,7 @@ public:
 private:
     u128 m_value;
 };
+static_assert(IsTriviallyDestructible<Value>);
 
 struct ExternallyManagedTrap {
     Array<u8, 64> data;
@@ -260,9 +262,15 @@ private:
     Variant<Vector<Value>, Trap> m_result;
 };
 
+enum class InstantiationErrorSource : u8 {
+    Linking,
+    StartFunction,
+};
+
 struct InstantiationError {
     ByteString error { "Unknown error" };
     Optional<Trap> relevant_trap {};
+    InstantiationErrorSource source { InstantiationErrorSource::Linking };
 };
 
 using ExternValue = Variant<FunctionAddress, TableAddress, MemoryAddress, GlobalAddress>;
@@ -544,7 +552,7 @@ private:
     Vector<Reference> m_references;
 };
 
-class Store {
+class WASM_API Store {
 public:
     Store() = default;
 
@@ -563,6 +571,8 @@ public:
     GlobalInstance* get(GlobalAddress);
     DataInstance* get(DataAddress);
     ElementInstance* get(ElementAddress);
+
+    MemoryInstance* unsafe_get(MemoryAddress address) { return &m_memories.data()[address.value()]; }
 
 private:
     Vector<FunctionInstance> m_functions;
@@ -624,7 +634,7 @@ struct HostVisitOps {
     Function<void(ExternallyManagedTrap&)> visit_trap;
 };
 
-class AbstractMachine {
+class WASM_API AbstractMachine {
 public:
     explicit AbstractMachine() = default;
 
@@ -675,7 +685,7 @@ private:
     bool m_should_limit_instruction_count { false };
 };
 
-class Linker {
+class WASM_API Linker {
 public:
     struct Name {
         ByteString module;

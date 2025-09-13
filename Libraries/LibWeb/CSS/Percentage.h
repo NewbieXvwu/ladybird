@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2022-2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,12 +7,8 @@
 #pragma once
 
 #include <AK/String.h>
-#include <AK/Variant.h>
-#include <LibWeb/CSS/Angle.h>
-#include <LibWeb/CSS/Frequency.h>
-#include <LibWeb/CSS/Length.h>
-#include <LibWeb/CSS/Number.h>
-#include <LibWeb/CSS/Time.h>
+#include <LibWeb/CSS/SerializationMode.h>
+#include <LibWeb/CSS/Serialize.h>
 
 namespace Web::CSS {
 
@@ -26,9 +22,15 @@ public:
     double value() const { return m_value; }
     double as_fraction() const { return m_value * 0.01; }
 
-    String to_string() const
+    String to_string(SerializationMode = SerializationMode::Normal) const
     {
-        return MUST(String::formatted("{}%", m_value));
+        // https://drafts.csswg.org/cssom/#serialize-a-css-value
+        // -> <percentage>
+        // The <number> component serialized as per <number> followed by the literal string "%" (U+0025).
+        StringBuilder builder;
+        serialize_a_number(builder, m_value);
+        builder.append("%"sv);
+        return builder.to_string_without_validation();
     }
 
     bool operator==(Percentage const& other) const { return m_value == other.m_value; }
@@ -47,3 +49,11 @@ private:
 };
 
 }
+
+template<>
+struct AK::Formatter<Web::CSS::Percentage> : Formatter<StringView> {
+    ErrorOr<void> format(FormatBuilder& builder, Web::CSS::Percentage const& percentage)
+    {
+        return Formatter<StringView>::format(builder, percentage.to_string());
+    }
+};

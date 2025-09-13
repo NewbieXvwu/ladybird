@@ -9,6 +9,7 @@
 #include <AK/ByteBuffer.h>
 #include <AK/Function.h>
 #include <AK/Variant.h>
+#include <LibJS/Export.h>
 #include <LibJS/Runtime/BigInt.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/GlobalObject.h>
@@ -34,11 +35,23 @@ struct DataBlock {
         Yes,
     };
 
+    struct UnownedFixedLengthByteBuffer {
+        explicit UnownedFixedLengthByteBuffer(ByteBuffer* buffer)
+            : buffer(buffer)
+            , size(buffer ? buffer->size() : 0)
+        {
+        }
+
+        ByteBuffer* buffer = nullptr;
+        size_t size = 0;
+    };
+
     ByteBuffer& buffer()
     {
-        ByteBuffer* ptr { nullptr };
-        byte_buffer.visit([&](Empty) { VERIFY_NOT_REACHED(); }, [&](auto* pointer) { ptr = pointer; }, [&](auto& value) { ptr = &value; });
-        return *ptr;
+        return byte_buffer.visit(
+            [&](Empty) -> ByteBuffer& { VERIFY_NOT_REACHED(); },
+            [&](ByteBuffer& value) -> ByteBuffer& { return value; },
+            [&](UnownedFixedLengthByteBuffer& value) -> ByteBuffer& { return *value.buffer; });
     }
     ByteBuffer const& buffer() const { return const_cast<DataBlock*>(this)->buffer(); }
 
@@ -47,10 +60,10 @@ struct DataBlock {
         return byte_buffer.visit(
             [](Empty) -> size_t { return 0u; },
             [](ByteBuffer const& buffer) { return buffer.size(); },
-            [](ByteBuffer const* buffer) { return buffer->size(); });
+            [](UnownedFixedLengthByteBuffer const& value) { return value.size; });
     }
 
-    Variant<Empty, ByteBuffer, ByteBuffer*> byte_buffer;
+    Variant<Empty, ByteBuffer, UnownedFixedLengthByteBuffer> byte_buffer;
     Shared is_shared = { Shared::No };
 };
 
@@ -59,9 +72,9 @@ class JS_API ArrayBuffer : public Object {
     GC_DECLARE_ALLOCATOR(ArrayBuffer);
 
 public:
-    static ThrowCompletionOr<GC::Ref<ArrayBuffer>> create(Realm&, size_t);
-    static GC::Ref<ArrayBuffer> create(Realm&, ByteBuffer);
-    static GC::Ref<ArrayBuffer> create(Realm&, ByteBuffer*);
+    static ThrowCompletionOr<GC::Ref<ArrayBuffer>> create(Realm&, size_t, DataBlock::Shared = DataBlock::Shared::No);
+    static GC::Ref<ArrayBuffer> create(Realm&, ByteBuffer, DataBlock::Shared = DataBlock::Shared::No);
+    static GC::Ref<ArrayBuffer> create(Realm&, ByteBuffer*, DataBlock::Shared = DataBlock::Shared::No);
 
     virtual ~ArrayBuffer() override = default;
 
@@ -132,8 +145,8 @@ public:
     Value get_modify_set_value(size_t byte_index, Value value, ReadWriteModifyFunction operation, bool is_little_endian = true);
 
 private:
-    ArrayBuffer(ByteBuffer buffer, Object& prototype);
-    ArrayBuffer(ByteBuffer* buffer, Object& prototype);
+    ArrayBuffer(ByteBuffer buffer, DataBlock::Shared, Object& prototype);
+    ArrayBuffer(ByteBuffer* buffer, DataBlock::Shared, Object& prototype);
 
     virtual void visit_edges(Visitor&) override;
 
@@ -147,10 +160,10 @@ private:
 
 JS_API ThrowCompletionOr<DataBlock> create_byte_data_block(VM& vm, size_t size);
 JS_API void copy_data_block_bytes(ByteBuffer& to_block, u64 to_index, ByteBuffer const& from_block, u64 from_index, u64 count);
-JS_API ThrowCompletionOr<ArrayBuffer*> allocate_array_buffer(VM&, FunctionObject& constructor, size_t byte_length, Optional<size_t> const& max_byte_length = {});
-JS_API ThrowCompletionOr<ArrayBuffer*> array_buffer_copy_and_detach(VM&, ArrayBuffer& array_buffer, Value new_length, PreserveResizability preserve_resizability);
+ThrowCompletionOr<ArrayBuffer*> allocate_array_buffer(VM&, FunctionObject& constructor, size_t byte_length, Optional<size_t> const& max_byte_length = {});
+ThrowCompletionOr<ArrayBuffer*> array_buffer_copy_and_detach(VM&, ArrayBuffer& array_buffer, Value new_length, PreserveResizability preserve_resizability);
 JS_API ThrowCompletionOr<void> detach_array_buffer(VM&, ArrayBuffer& array_buffer, Optional<Value> key = {});
-JS_API ThrowCompletionOr<Optional<size_t>> get_array_buffer_max_byte_length_option(VM&, Value options);
+ThrowCompletionOr<Optional<size_t>> get_array_buffer_max_byte_length_option(VM&, Value options);
 JS_API ThrowCompletionOr<ArrayBuffer*> clone_array_buffer(VM&, ArrayBuffer& source_buffer, size_t source_byte_offset, size_t source_length);
 JS_API ThrowCompletionOr<GC::Ref<ArrayBuffer>> allocate_shared_array_buffer(VM&, FunctionObject& constructor, size_t byte_length);
 

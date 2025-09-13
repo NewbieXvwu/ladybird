@@ -7,16 +7,16 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibURL/Parser.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Fetch.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
-#include <LibWeb/Painting/PaintContext.h>
+#include <LibWeb/Painting/DisplayListRecordingContext.h>
 #include <LibWeb/Platform/Timer.h>
 
 namespace Web::CSS {
@@ -43,7 +43,7 @@ void ImageStyleValue::visit_edges(JS::Cell::Visitor& visitor) const
 {
     Base::visit_edges(visitor);
     // FIXME: visit_edges in non-GC allocated classes is confusing pattern.
-    //        Consider making CSSStyleValue to be GC allocated instead.
+    //        Consider making StyleValue to be GC allocated instead.
     visitor.visit(m_resource_request);
     visitor.visit(m_style_sheet);
     visitor.visit(m_timer);
@@ -65,6 +65,9 @@ void ImageStyleValue::load_any_resources(DOM::Document& document)
             [this, weak_this = make_weak_ptr()] {
                 if (!weak_this || !m_document)
                     return;
+
+                for (auto* client : m_clients)
+                    client->image_style_value_did_update(*this);
 
                 auto image_data = m_resource_request->image_data();
                 if (image_data->is_animated() && image_data->frame_count() > 1) {
@@ -119,7 +122,7 @@ String ImageStyleValue::to_string(SerializationMode) const
     return m_url.to_string();
 }
 
-bool ImageStyleValue::equals(CSSStyleValue const& other) const
+bool ImageStyleValue::equals(StyleValue const& other) const
 {
     if (type() != other.type())
         return false;
@@ -147,7 +150,7 @@ Optional<CSSPixelFraction> ImageStyleValue::natural_aspect_ratio() const
     return {};
 }
 
-void ImageStyleValue::paint(PaintContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering image_rendering) const
+void ImageStyleValue::paint(DisplayListRecordingContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering image_rendering) const
 {
     if (auto const* b = bitmap(m_current_frame_index, dest_rect.size().to_type<int>()); b != nullptr) {
         auto scaling_mode = to_gfx_scaling_mode(image_rendering, b->rect(), dest_rect.to_type<int>());
@@ -183,7 +186,7 @@ void ImageStyleValue::set_style_sheet(GC::Ptr<CSSStyleSheet> style_sheet)
     m_style_sheet = style_sheet;
 }
 
-ValueComparingNonnullRefPtr<CSSStyleValue const> ImageStyleValue::absolutized(CSSPixelRect const&, Length::FontMetrics const&, Length::FontMetrics const&) const
+ValueComparingNonnullRefPtr<StyleValue const> ImageStyleValue::absolutized(CSSPixelRect const&, Length::FontMetrics const&, Length::FontMetrics const&) const
 {
     if (m_url.url().is_empty())
         return *this;
@@ -205,11 +208,38 @@ ValueComparingNonnullRefPtr<CSSStyleValue const> ImageStyleValue::absolutized(CS
     }();
 
     if (base_url.has_value()) {
-        if (auto resolved_url = ::URL::Parser::basic_parse(m_url.url(), *base_url); resolved_url.has_value())
+        if (auto resolved_url = DOMURL::parse(m_url.url(), *base_url); resolved_url.has_value())
             return ImageStyleValue::create(*resolved_url);
     }
 
     return *this;
+}
+
+void ImageStyleValue::register_client(Client& client)
+{
+    auto result = m_clients.set(&client);
+    VERIFY(result == AK::HashSetResult::InsertedNewEntry);
+}
+
+void ImageStyleValue::unregister_client(Client& client)
+{
+    auto did_remove = m_clients.remove(&client);
+    VERIFY(did_remove);
+}
+
+ImageStyleValue::Client::Client(ImageStyleValue& image_style_value)
+    : m_image_style_value(image_style_value)
+{
+    m_image_style_value.register_client(*this);
+}
+
+ImageStyleValue::Client::~Client()
+{
+}
+
+void ImageStyleValue::Client::image_style_value_finalize()
+{
+    m_image_style_value.unregister_client(*this);
 }
 
 }

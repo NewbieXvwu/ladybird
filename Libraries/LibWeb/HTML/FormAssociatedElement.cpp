@@ -13,6 +13,7 @@
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/Position.h>
 #include <LibWeb/DOM/SelectionchangeEventDispatching.h>
+#include <LibWeb/GraphemeEdgeTracker.h>
 #include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLButtonElement.h>
@@ -26,6 +27,7 @@
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/ValidityState.h>
 #include <LibWeb/Infra/Strings.h>
+#include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Selection/Selection.h>
 
@@ -235,6 +237,46 @@ WebIDL::ExceptionOr<void> FormAssociatedElement::set_form_action(String const& v
     return html_element.set_attribute(HTML::AttributeNames::formaction, value);
 }
 
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-reportvalidity
+bool FormAssociatedElement::report_validity()
+{
+    // The reportValidity() method, when invoked, must run the report validity steps on this element.
+    return report_validity_steps();
+}
+
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-checkvalidity
+bool FormAssociatedElement::check_validity()
+{
+    // The checkValidity() method, when invoked, must run the check validity steps on this element.
+    return check_validity_steps();
+}
+
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-willvalidate
+bool FormAssociatedElement::will_validate() const
+{
+    // The willValidate attribute's getter must return true, if this element is a candidate for constraint validation,
+    // and false otherwise (i.e., false if any conditions are barring it from constraint validation).
+    return is_candidate_for_constraint_validation();
+}
+
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-validationmessage
+Utf16String FormAssociatedElement::validation_message() const
+{
+    // 1. If this element is not a candidate for constraint validation or if this element satisfies its constraints,
+    //    then return the empty string.
+    if (!is_candidate_for_constraint_validation() || satisfies_its_constraints())
+        return {};
+
+    // FIXME
+    // 2. Return a suitably localized message that the user agent would show the user if this were the only form
+    //    control with a validity constraint problem. If the user agent would not actually show a textual message in
+    //    such a situation (e.g., it would show a graphical cue instead), then return a suitably localized message that
+    //    expresses (one or more of) the validity constraint(s) that the control does not satisfy. If the element is a
+    //    candidate for constraint validation and is suffering from a custom error, then the custom validity error
+    //    message should be present in the return value.
+    return "Invalid form"_utf16;
+}
+
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#check-validity-steps
 bool FormAssociatedElement::check_validity_steps()
 {
@@ -397,7 +439,7 @@ bool FormAssociatedElement::suffering_from_a_custom_error() const
 void FormAssociatedTextControlElement::relevant_value_was_changed()
 {
     auto the_relevant_value = relevant_value();
-    auto relevant_value_length = the_relevant_value.code_points().length();
+    auto relevant_value_length = the_relevant_value.length_in_code_units();
 
     // 1. If the element has a selection:
     if (m_selection_start < m_selection_end) {
@@ -478,7 +520,7 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_start_
     if (is<HTMLInputElement>(html_element)) {
         auto& input_element = static_cast<HTMLInputElement&>(html_element);
         if (!input_element.selection_or_range_applies())
-            return WebIDL::InvalidStateError::create(html_element.realm(), "setSelectionStart does not apply to this input type"_string);
+            return WebIDL::InvalidStateError::create(html_element.realm(), "setSelectionStart does not apply to this input type"_utf16);
     }
 
     // 2. Let end be the value of this element's selectionEnd attribute.
@@ -531,7 +573,7 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_end_bi
     if (is<HTMLInputElement>(html_element)) {
         auto& input_element = static_cast<HTMLInputElement&>(html_element);
         if (!input_element.selection_or_range_applies())
-            return WebIDL::InvalidStateError::create(html_element.realm(), "setSelectionEnd does not apply to this input type"_string);
+            return WebIDL::InvalidStateError::create(html_element.realm(), "setSelectionEnd does not apply to this input type"_utf16);
     }
 
     // 2. Set the selection range with the value of this element's selectionStart attribute, the
@@ -584,7 +626,7 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_direct
     if (is<HTMLInputElement>(html_element)) {
         auto const& input_element = static_cast<HTMLInputElement const&>(html_element);
         if (!input_element.selection_direction_applies())
-            return WebIDL::InvalidStateError::create(input_element.realm(), "selectionDirection does not apply to element"_string);
+            return WebIDL::InvalidStateError::create(input_element.realm(), "selectionDirection does not apply to element"_utf16);
     }
 
     set_the_selection_range(m_selection_start, m_selection_end, string_to_selection_direction(direction));
@@ -592,26 +634,26 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_direct
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-setrangetext
-WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text_binding(String const& replacement)
+WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text_binding(Utf16String const& replacement)
 {
     return set_range_text_binding(replacement, m_selection_start, m_selection_end);
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-setrangetext
-WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text_binding(String const& replacement, WebIDL::UnsignedLong start, WebIDL::UnsignedLong end, Bindings::SelectionMode selection_mode)
+WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text_binding(Utf16String const& replacement, WebIDL::UnsignedLong start, WebIDL::UnsignedLong end, Bindings::SelectionMode selection_mode)
 {
     auto& html_element = form_associated_element_to_html_element();
 
     // 1. If this element is an input element, and setRangeText() does not apply to this element,
     //    throw an "InvalidStateError" DOMException.
     if (is<HTMLInputElement>(html_element) && !static_cast<HTMLInputElement&>(html_element).selection_or_range_applies())
-        return WebIDL::InvalidStateError::create(html_element.realm(), "setRangeText does not apply to this input type"_string);
+        return WebIDL::InvalidStateError::create(html_element.realm(), "setRangeText does not apply to this input type"_utf16);
 
     return set_range_text(replacement, start, end, selection_mode);
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-setrangetext
-WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text(String const& replacement, WebIDL::UnsignedLong start, WebIDL::UnsignedLong end, Bindings::SelectionMode selection_mode)
+WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text(Utf16String const& replacement, WebIDL::UnsignedLong start, WebIDL::UnsignedLong end, Bindings::SelectionMode selection_mode)
 {
     auto& html_element = form_associated_element_to_html_element();
 
@@ -624,11 +666,11 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text(Strin
 
     // 4. If start is greater than end, then throw an "IndexSizeError" DOMException.
     if (start > end)
-        return WebIDL::IndexSizeError::create(html_element.realm(), "The start argument must be less than or equal to the end argument"_string);
+        return WebIDL::IndexSizeError::create(html_element.realm(), "The start argument must be less than or equal to the end argument"_utf16);
 
     // 5. If start is greater than the length of the relevant value of the text control, then set it to the length of the relevant value of the text control.
     auto the_relevant_value = relevant_value();
-    auto relevant_value_length = the_relevant_value.code_points().length();
+    auto relevant_value_length = the_relevant_value.length_in_code_units();
     if (start > relevant_value_length)
         start = relevant_value_length;
 
@@ -645,26 +687,24 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text(Strin
     // 9. If start is less than end, delete the sequence of code units within the element's relevant value starting with
     //    the code unit at the startth position and ending with the code unit at the (end-1)th position.
     if (start < end) {
-        StringBuilder builder;
-        auto before_removal_point_view = the_relevant_value.code_points().unicode_substring_view(0, start);
-        builder.append(before_removal_point_view.as_string());
-        auto after_removal_point_view = the_relevant_value.code_points().unicode_substring_view(end);
-        builder.append(after_removal_point_view.as_string());
-        the_relevant_value = MUST(builder.to_string());
+        StringBuilder builder(StringBuilder::Mode::UTF16, the_relevant_value.length_in_code_units() - (end - start));
+        builder.append(the_relevant_value.substring_view(0, start));
+        builder.append(the_relevant_value.substring_view(end));
+
+        the_relevant_value = builder.to_utf16_string();
     }
 
     // 10. Insert the value of the first argument into the text of the relevant value of the text control, immediately before the startth code unit.
-    StringBuilder builder;
-    auto before_insertion_point_view = the_relevant_value.code_points().unicode_substring_view(0, start);
-    builder.append(before_insertion_point_view.as_string());
+    StringBuilder builder(StringBuilder::Mode::UTF16, the_relevant_value.length_in_code_units() + replacement.length_in_code_units());
+    builder.append(the_relevant_value.substring_view(0, start));
     builder.append(replacement);
-    auto after_insertion_point_view = the_relevant_value.code_points().unicode_substring_view(start);
-    builder.append(after_insertion_point_view.as_string());
-    the_relevant_value = MUST(builder.to_string());
+    builder.append(the_relevant_value.substring_view(start));
+
+    the_relevant_value = builder.to_utf16_string();
     TRY(set_relevant_value(the_relevant_value));
 
     // 11. Let new length be the length of the value of the first argument.
-    i64 new_length = replacement.code_points().length();
+    auto new_length = replacement.length_in_code_units();
 
     // 12. Let new end be the sum of start and new length.
     auto new_end = start + new_length;
@@ -733,7 +773,7 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_range(
     //    element, throw an "InvalidStateError" DOMException.
     auto& html_element = form_associated_element_to_html_element();
     if (is<HTMLInputElement>(html_element) && !static_cast<HTMLInputElement&>(html_element).selection_or_range_applies())
-        return WebIDL::InvalidStateError::create(html_element.realm(), "setSelectionRange does not apply to this input type"_string);
+        return WebIDL::InvalidStateError::create(html_element.realm(), "setSelectionRange does not apply to this input type"_utf16);
 
     // 2. Set the selection range with start, end, and direction.
     set_the_selection_range(start, end, string_to_selection_direction(direction));
@@ -755,7 +795,8 @@ void FormAssociatedTextControlElement::set_the_selection_range(Optional<WebIDL::
     //    relevant value of the text control (including the special value infinity) must be treated
     //    as pointing at the end of the text control.
     auto the_relevant_value = relevant_value();
-    auto relevant_value_length = the_relevant_value.code_points().length();
+    auto relevant_value_length = the_relevant_value.length_in_code_units();
+
     auto new_selection_start = AK::min(start.value(), relevant_value_length);
     auto new_selection_end = AK::min(end.value(), relevant_value_length);
 
@@ -797,20 +838,20 @@ void FormAssociatedTextControlElement::set_the_selection_range(Optional<WebIDL::
     }
 }
 
-void FormAssociatedTextControlElement::handle_insert(String const& data)
+void FormAssociatedTextControlElement::handle_insert(Utf16String const& data)
 {
     auto text_node = form_associated_element_to_text_node();
     if (!text_node || !is_mutable())
         return;
 
-    String data_for_insertion = data;
-    // FIXME: Cut by UTF-16 code units instead of raw bytes
+    auto data_for_insertion = data;
+
     if (auto max_length = text_node->max_length(); max_length.has_value()) {
-        auto remaining_length = *max_length - text_node->data().code_points().length();
-        if (remaining_length < data.code_points().length()) {
-            data_for_insertion = MUST(data.substring_from_byte_offset(0, remaining_length));
-        }
+        auto remaining_length = *max_length - text_node->length_in_utf16_code_units();
+        if (remaining_length < data.length_in_code_units())
+            data_for_insertion = Utf16String::from_utf16(data.substring_view(0, remaining_length));
     }
+
     auto selection_start = this->selection_start();
     auto selection_end = this->selection_end();
     MUST(set_range_text(data_for_insertion, selection_start, selection_end, Bindings::SelectionMode::End));
@@ -824,21 +865,24 @@ void FormAssociatedTextControlElement::handle_delete(DeleteDirection direction)
     auto text_node = form_associated_element_to_text_node();
     if (!text_node || !is_mutable())
         return;
+
     auto selection_start = this->selection_start();
     auto selection_end = this->selection_end();
+
     if (selection_start == selection_end) {
         if (direction == DeleteDirection::Backward) {
-            if (selection_start > 0) {
-                MUST(set_range_text(String {}, selection_start - 1, selection_end, Bindings::SelectionMode::End));
-            }
+            if (auto offset = text_node->grapheme_segmenter().previous_boundary(m_selection_end); offset.has_value())
+                selection_start = *offset;
         } else {
-            if (selection_start < text_node->data().code_points().length()) {
-                MUST(set_range_text(String {}, selection_start, selection_end + 1, Bindings::SelectionMode::End));
-            }
+            if (auto offset = text_node->grapheme_segmenter().next_boundary(m_selection_end); offset.has_value())
+                selection_end = *offset;
         }
-        return;
     }
-    MUST(set_range_text(String {}, selection_start, selection_end, Bindings::SelectionMode::End));
+
+    MUST(set_range_text({}, selection_start, selection_end, Bindings::SelectionMode::End));
+
+    text_node->invalidate_style(DOM::StyleInvalidationReason::EditingDeletion);
+    did_edit_text_node();
 }
 
 EventResult FormAssociatedTextControlElement::handle_return_key(FlyString const&)
@@ -982,7 +1026,7 @@ void FormAssociatedTextControlElement::increment_cursor_position_to_next_word(Co
 
     while (true) {
         if (auto offset = text_node->word_segmenter().next_boundary(m_selection_end); offset.has_value()) {
-            auto word = text_node->data().code_points().substring_view(m_selection_end, *offset - m_selection_end);
+            auto word = text_node->data().substring_view(m_selection_end, *offset - m_selection_end);
             if (collapse == CollapseSelection::Yes) {
                 collapse_selection_to_offset(*offset);
             } else {
@@ -1005,7 +1049,7 @@ void FormAssociatedTextControlElement::decrement_cursor_position_to_previous_wor
 
     while (true) {
         if (auto offset = text_node->word_segmenter().previous_boundary(m_selection_end); offset.has_value()) {
-            auto word = text_node->data().code_points().substring_view(*offset, m_selection_end - *offset);
+            auto word = text_node->data().substring_view(*offset, m_selection_end - *offset);
             if (collapse == CollapseSelection::Yes) {
                 collapse_selection_to_offset(*offset);
             } else {
@@ -1016,6 +1060,119 @@ void FormAssociatedTextControlElement::decrement_cursor_position_to_previous_wor
         }
         break;
     }
+
+    selection_was_changed();
+}
+
+static constexpr size_t find_line_start(Utf16View const& view, size_t offset)
+{
+    while (offset != 0 && view.code_unit_at(offset - 1) != '\n')
+        --offset;
+    return offset;
+}
+
+static constexpr size_t find_line_end(Utf16View const& view, size_t offset)
+{
+    auto length = view.length_in_code_units();
+    while (offset < length && view.code_unit_at(offset) != '\n')
+        ++offset;
+    return offset;
+}
+
+static float measure_text_width(Layout::TextNode const& text_node, Utf16View const& text)
+{
+    if (text.is_empty())
+        return 0;
+
+    auto segmenter = text_node.grapheme_segmenter().clone();
+    segmenter->set_segmented_text(text);
+
+    Layout::TextNode::ChunkIterator iterator { text_node, text, *segmenter, false, false };
+    float width = 0;
+
+    for (auto chunk = iterator.next(); chunk.has_value(); chunk = iterator.next())
+        width += chunk->font->width(chunk->view);
+
+    return width;
+}
+
+static size_t translate_position_across_lines(Layout::TextNode const& text_node, Utf16View const& source_line, Utf16View const& target_line)
+{
+    GraphemeEdgeTracker tracker(measure_text_width(text_node, source_line));
+    auto previous_index = 0uz;
+
+    text_node.grapheme_segmenter().clone()->for_each_boundary(target_line, [&](auto index) {
+        auto current_width = measure_text_width(text_node, target_line.substring_view(previous_index, index - previous_index));
+
+        if (tracker.update(index - previous_index, current_width) == IterationDecision::Break)
+            return IterationDecision::Break;
+
+        previous_index = index;
+        return IterationDecision::Continue;
+    });
+
+    return tracker.resolve();
+}
+
+void FormAssociatedTextControlElement::increment_cursor_position_to_next_line(CollapseSelection collapse)
+{
+    auto dom_node = form_associated_element_to_text_node();
+    if (!dom_node)
+        return;
+
+    auto const* layout_node = as_if<Layout::TextNode>(dom_node->layout_node());
+    if (!layout_node)
+        return;
+
+    auto text = dom_node->data().utf16_view();
+    auto new_offset = text.length_in_code_units();
+
+    if (auto current_line_end = find_line_end(text, m_selection_end); current_line_end < text.length_in_code_units()) {
+        auto current_line_start = find_line_start(text, m_selection_end);
+        auto current_line_text = text.substring_view(current_line_start, m_selection_end - current_line_start);
+
+        auto next_line_start = current_line_end + 1;
+        auto next_line_length = find_line_end(text, next_line_start) - next_line_start;
+        auto next_line_text = text.substring_view(next_line_start, next_line_length);
+
+        new_offset = next_line_start + translate_position_across_lines(*layout_node, current_line_text, next_line_text);
+    }
+
+    if (collapse == CollapseSelection::Yes)
+        collapse_selection_to_offset(new_offset);
+    else
+        m_selection_end = new_offset;
+
+    selection_was_changed();
+}
+
+void FormAssociatedTextControlElement::decrement_cursor_position_to_previous_line(CollapseSelection collapse)
+{
+    auto dom_node = form_associated_element_to_text_node();
+    if (!dom_node)
+        return;
+
+    auto const* layout_node = as_if<Layout::TextNode>(dom_node->layout_node());
+    if (!layout_node)
+        return;
+
+    auto text = dom_node->data().utf16_view();
+    auto new_offset = 0uz;
+
+    if (auto current_line_start = find_line_start(text, m_selection_end); current_line_start != 0) {
+        auto current_line_text = text.substring_view(current_line_start, m_selection_end - current_line_start);
+
+        auto previous_line_start = find_line_start(text, current_line_start - 1);
+        auto previous_line_length = current_line_start - previous_line_start - 1;
+        auto previous_line_text = text.substring_view(previous_line_start, previous_line_length);
+
+        new_offset = previous_line_start + translate_position_across_lines(*layout_node, current_line_text, previous_line_text);
+    }
+
+    if (collapse == CollapseSelection::Yes)
+        collapse_selection_to_offset(new_offset);
+    else
+        m_selection_end = new_offset;
 
     selection_was_changed();
 }

@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2020, Matthew Olsson <mattco@serenityos.org>
  * Copyright (c) 2023, Preston Taylor <95388976+PrestonLTaylor@users.noreply.github.com>
+ * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -54,6 +55,7 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
         NamedPropertyID(CSS::PropertyID::ClipPath),
         NamedPropertyID(CSS::PropertyID::ClipRule),
         NamedPropertyID(CSS::PropertyID::Color),
+        NamedPropertyID(CSS::PropertyID::ColorInterpolation),
         NamedPropertyID(CSS::PropertyID::Cursor),
         NamedPropertyID(CSS::PropertyID::Cx, { SVG::TagNames::circle, SVG::TagNames::ellipse }),
         NamedPropertyID(CSS::PropertyID::Cy, { SVG::TagNames::circle, SVG::TagNames::ellipse }),
@@ -75,10 +77,12 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
         NamedPropertyID(CSS::PropertyID::MaskType),
         NamedPropertyID(CSS::PropertyID::Opacity),
         NamedPropertyID(CSS::PropertyID::Overflow),
+        NamedPropertyID(CSS::PropertyID::PaintOrder),
         NamedPropertyID(CSS::PropertyID::PointerEvents),
         NamedPropertyID(CSS::PropertyID::R, { SVG::TagNames::circle }),
         NamedPropertyID(CSS::PropertyID::Rx, { SVG::TagNames::ellipse, SVG::TagNames::rect }),
         NamedPropertyID(CSS::PropertyID::Ry, { SVG::TagNames::ellipse, SVG::TagNames::rect }),
+        NamedPropertyID(CSS::PropertyID::ShapeRendering),
         NamedPropertyID(CSS::PropertyID::StopColor),
         NamedPropertyID(CSS::PropertyID::StopOpacity),
         NamedPropertyID(CSS::PropertyID::Stroke),
@@ -143,7 +147,7 @@ bool SVGElement::should_include_in_accessibility_tree() const
     bool has_title_or_desc = false;
     auto role = role_from_role_attribute_value();
     for_each_child_of_type<SVGElement>([&has_title_or_desc](auto& child) {
-        if ((is<SVGTitleElement>(child) || is<SVGDescElement>(child)) && !child.text_content()->trim_ascii_whitespace().value().is_empty()) {
+        if ((is<SVGTitleElement>(child) || is<SVGDescElement>(child)) && !child.text_content()->utf16_view().trim_ascii_whitespace().is_empty()) {
             has_title_or_desc = true;
             return IterationDecision::Break;
         }
@@ -152,9 +156,9 @@ bool SVGElement::should_include_in_accessibility_tree() const
     // https://w3c.github.io/svg-aam/#include_elements
     // TODO: Add support for the SVG tabindex attribute, and include a check for it here.
     return has_title_or_desc
-        || (aria_label().has_value() && !aria_label().value().trim_ascii_whitespace().value().is_empty())
-        || (aria_labelled_by().has_value() && !aria_labelled_by().value().trim_ascii_whitespace().value().is_empty())
-        || (aria_described_by().has_value() && !aria_described_by().value().trim_ascii_whitespace().value().is_empty())
+        || (aria_label().has_value() && !aria_label()->bytes_as_string_view().trim_whitespace().is_empty())
+        || (aria_labelled_by().has_value() && !aria_labelled_by()->bytes_as_string_view().trim_whitespace().is_empty())
+        || (aria_described_by().has_value() && !aria_described_by()->bytes_as_string_view().trim_whitespace().is_empty())
         || (role.has_value() && ARIA::is_abstract_role(role.value()) && role != ARIA::Role::none && role != ARIA::Role::presentation);
 }
 
@@ -240,6 +244,13 @@ void SVGElement::removed_from(Node* old_parent, Node& old_root)
 {
     Base::removed_from(old_parent, old_root);
 
+    if (auto* shadow_root = as_if<DOM::ShadowRoot>(root())) {
+        // If this element is in a shadow root hosted by a use element,
+        // it already represents a clone and is not itself referenced.
+        if (shadow_root->host() && is<SVGUseElement>(*shadow_root->host()))
+            return;
+    }
+
     remove_from_use_element_that_reference_this();
 }
 
@@ -289,17 +300,30 @@ GC::Ptr<SVGElement> SVGElement::viewport_element()
     return nullptr;
 }
 
+GC::Ref<SVGAnimatedLength> SVGElement::fake_animated_length_fixme() const
+{
+    // FIXME: All callers of this method must implement their animated length correctly.
+    auto base_length = SVGLength::create(realm(), 0, 0, SVGLength::ReadOnly::No);
+    auto anim_length = SVGLength::create(realm(), 0, 0, SVGLength::ReadOnly::Yes);
+    return SVGAnimatedLength::create(realm(), base_length, anim_length);
+}
+
 GC::Ref<SVGAnimatedLength> SVGElement::svg_animated_length_for_property(CSS::PropertyID property) const
 {
     // FIXME: Create a proper animated value when animations are supported.
-    auto make_length = [&] {
+    auto make_length = [&](SVGLength::ReadOnly read_only) {
         if (auto const computed_properties = this->computed_properties()) {
-            if (auto length = computed_properties->length_percentage(property); length.has_value())
-                return SVGLength::from_length_percentage(realm(), *length);
+            if (auto layout_node = this->layout_node()) {
+                if (auto length = computed_properties->length_percentage(property, *layout_node, CSS::ComputedProperties::ClampNegativeLengths::Yes); length.has_value())
+                    return SVGLength::from_length_percentage(realm(), *length, read_only);
+            }
         }
-        return SVGLength::create(realm(), 0, 0.0f);
+        return SVGLength::create(realm(), 0, 0, read_only);
     };
-    return SVGAnimatedLength::create(realm(), make_length(), make_length());
+    return SVGAnimatedLength::create(
+        realm(),
+        make_length(SVGLength::ReadOnly::No),
+        make_length(SVGLength::ReadOnly::Yes));
 }
 
 }

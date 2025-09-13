@@ -7,15 +7,18 @@
 #pragma once
 
 #include <LibGC/Cell.h>
-#include <LibWeb/CSS/Selector.h>
+#include <LibWeb/CSS/PseudoElement.h>
+#include <LibWeb/CSS/StyleProperty.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::DOM {
 
 // Either an Element or a PseudoElement
-class AbstractElement {
+class WEB_API AbstractElement {
 public:
     AbstractElement(GC::Ref<Element>, Optional<CSS::PseudoElement> = {});
+
+    Document& document() const;
 
     Element& element() { return m_element; }
     Element const& element() const { return m_element; }
@@ -25,6 +28,7 @@ public:
     GC::Ptr<Layout::NodeWithStyle const> layout_node() const { return const_cast<AbstractElement*>(this)->layout_node(); }
 
     GC::Ptr<Element const> parent_element() const;
+    Optional<AbstractElement> element_to_inherit_style_from() const;
     Optional<AbstractElement> previous_in_tree_order() { return walk_layout_tree(WalkMethod::Previous); }
     Optional<AbstractElement> previous_sibling_in_tree_order() { return walk_layout_tree(WalkMethod::PreviousSibling); }
     bool is_before(AbstractElement const&) const;
@@ -33,7 +37,10 @@ public:
 
     void set_custom_properties(HashMap<FlyString, CSS::StyleProperty>&& custom_properties);
     [[nodiscard]] HashMap<FlyString, CSS::StyleProperty> const& custom_properties() const;
-    RefPtr<CSS::CSSStyleValue const> get_custom_property(FlyString const& name) const;
+    RefPtr<CSS::StyleValue const> get_custom_property(FlyString const& name) const;
+
+    GC::Ptr<CSS::CascadedProperties> cascaded_properties() const;
+    void set_cascaded_properties(GC::Ptr<CSS::CascadedProperties>);
 
     bool has_non_empty_counters_set() const;
     Optional<CSS::CountersSet const&> counters_set() const;
@@ -57,3 +64,11 @@ private:
 };
 
 }
+
+template<>
+struct AK::Traits<Web::DOM::AbstractElement> : public DefaultTraits<Web::DOM::AbstractElement> {
+    static unsigned hash(Web::DOM::AbstractElement const& key)
+    {
+        return pair_int_hash(ptr_hash(&key.element()), key.pseudo_element().has_value() ? to_underlying(key.pseudo_element().value()) : -1);
+    }
+};

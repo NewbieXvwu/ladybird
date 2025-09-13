@@ -19,12 +19,14 @@
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleInvalidation.h>
 #include <LibWeb/CSS/StyleProperty.h>
+#include <LibWeb/CSS/StylePropertyMapReadOnly.h>
 #include <LibWeb/DOM/ChildNode.h>
 #include <LibWeb/DOM/NonDocumentTypeChildNode.h>
 #include <LibWeb/DOM/ParentNode.h>
 #include <LibWeb/DOM/PseudoElement.h>
 #include <LibWeb/DOM/QualifiedName.h>
 #include <LibWeb/DOM/Slottable.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/AttributeNames.h>
 #include <LibWeb/HTML/EventLoop/Task.h>
 #include <LibWeb/HTML/LazyLoadingElement.h>
@@ -99,7 +101,7 @@ enum class ProximityToTheViewport {
     NotDetermined,
 };
 
-class Element
+class WEB_API Element
     : public ParentNode
     , public ChildNode<Element>
     , public NonDocumentTypeChildNode<Element>
@@ -144,6 +146,7 @@ public:
     Optional<String> lang() const;
 
     WebIDL::ExceptionOr<void> set_attribute(FlyString const& name, String const& value);
+    WebIDL::ExceptionOr<void> set_attribute(FlyString const& name, Utf16String const& value);
 
     WebIDL::ExceptionOr<void> set_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& qualified_name, String const& value);
     void set_attribute_value(FlyString const& local_name, String const& value, Optional<FlyString> const& prefix = {}, Optional<FlyString> const& namespace_ = {});
@@ -200,7 +203,7 @@ public:
 
     void run_attribute_change_steps(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_);
 
-    CSS::RequiredInvalidationAfterStyleChange recompute_style();
+    CSS::RequiredInvalidationAfterStyleChange recompute_style(bool& did_change_custom_properties);
     CSS::RequiredInvalidationAfterStyleChange recompute_inherited_style();
 
     Optional<CSS::PseudoElement> use_pseudo_element() const { return m_use_pseudo_element; }
@@ -209,16 +212,12 @@ public:
     GC::Ptr<Layout::NodeWithStyle> layout_node();
     GC::Ptr<Layout::NodeWithStyle const> layout_node() const;
 
-    GC::Ptr<CSS::ComputedProperties> computed_properties() { return m_computed_properties; }
-    GC::Ptr<CSS::ComputedProperties const> computed_properties() const { return m_computed_properties; }
-    void set_computed_properties(GC::Ptr<CSS::ComputedProperties>);
-    GC::Ref<CSS::ComputedProperties> resolved_css_values(Optional<CSS::PseudoElement> = {});
+    GC::Ptr<CSS::ComputedProperties> computed_properties(Optional<CSS::PseudoElement> = {});
+    GC::Ptr<CSS::ComputedProperties const> computed_properties(Optional<CSS::PseudoElement> = {}) const;
+    void set_computed_properties(Optional<CSS::PseudoElement>, GC::Ptr<CSS::ComputedProperties>);
 
     [[nodiscard]] GC::Ptr<CSS::CascadedProperties> cascaded_properties(Optional<CSS::PseudoElement>) const;
     void set_cascaded_properties(Optional<CSS::PseudoElement>, GC::Ptr<CSS::CascadedProperties>);
-
-    void set_pseudo_element_computed_properties(CSS::PseudoElement, GC::Ptr<CSS::ComputedProperties>);
-    GC::Ptr<CSS::ComputedProperties> pseudo_element_computed_properties(CSS::PseudoElement);
 
     Optional<PseudoElement&> get_pseudo_element(CSS::PseudoElement) const;
 
@@ -227,11 +226,14 @@ public:
     void set_inline_style(GC::Ptr<CSS::CSSStyleProperties>);
 
     GC::Ref<CSS::CSSStyleProperties> style_for_bindings();
+    GC::Ref<CSS::StylePropertyMap> attribute_style_map();
 
     CSS::StyleSheetList& document_or_shadow_root_style_sheets();
     ElementByIdMap& document_or_shadow_root_element_by_id_map();
 
     WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> parse_fragment(StringView markup);
+
+    [[nodiscard]] GC::Ptr<Element const> element_to_inherit_style_from(Optional<CSS::PseudoElement>) const;
 
     WebIDL::ExceptionOr<String> inner_html() const;
     WebIDL::ExceptionOr<void> set_inner_html(StringView);
@@ -258,8 +260,10 @@ public:
     void set_custom_properties(Optional<CSS::PseudoElement>, HashMap<FlyString, CSS::StyleProperty> custom_properties);
     [[nodiscard]] HashMap<FlyString, CSS::StyleProperty> const& custom_properties(Optional<CSS::PseudoElement>) const;
 
-    bool style_uses_css_custom_properties() const { return m_style_uses_css_custom_properties; }
-    void set_style_uses_css_custom_properties(bool value) { m_style_uses_css_custom_properties = value; }
+    bool style_uses_attr_css_function() const { return m_style_uses_attr_css_function; }
+    void set_style_uses_attr_css_function() { m_style_uses_attr_css_function = true; }
+    bool style_uses_var_css_function() const { return m_style_uses_var_css_function; }
+    void set_style_uses_var_css_function() { m_style_uses_var_css_function = true; }
 
     // NOTE: The function is wrapped in a GC::HeapFunction immediately.
     HTML::TaskID queue_an_element_task(HTML::Task::Source, Function<void()>);
@@ -309,7 +313,7 @@ public:
     bool is_actually_disabled() const;
 
     WebIDL::ExceptionOr<GC::Ptr<Element>> insert_adjacent_element(String const& where, GC::Ref<Element> element);
-    WebIDL::ExceptionOr<void> insert_adjacent_text(String const& where, String const& data);
+    WebIDL::ExceptionOr<void> insert_adjacent_text(String const& where, Utf16String const& data);
 
     // https://w3c.github.io/csswg-drafts/cssom-view-1/#dom-element-scrollintoview
     ErrorOr<void> scroll_into_view(Optional<Variant<bool, ScrollIntoViewOptions>> = {});
@@ -400,6 +404,7 @@ public:
         Rtl,
     };
     Directionality directionality() const;
+    bool is_auto_directionality_form_associated_element() const;
 
     Optional<FlyString> const& id() const { return m_id; }
     Optional<FlyString> const& name() const { return m_name; }
@@ -434,6 +439,7 @@ public:
     bool matches_enabled_pseudo_class() const;
     bool matches_disabled_pseudo_class() const;
     bool matches_checked_pseudo_class() const;
+    bool matches_unchecked_pseudo_class() const;
     bool matches_placeholder_shown_pseudo_class() const;
     bool matches_link_pseudo_class() const;
     bool matches_local_link_pseudo_class() const;
@@ -484,10 +490,11 @@ public:
     void for_each_numbered_item_owned_by_list_owner(Callback callback)
     {
         for (auto* node = this->first_child(); node != nullptr; node = node->next_in_pre_order(this)) {
-            if (!is<Element>(*node))
+            auto* element = as_if<Element>(node);
+            if (!element)
                 continue;
 
-            static_cast<Element*>(node)->m_is_contained_in_list_subtree = true;
+            element->m_is_contained_in_list_subtree = true;
 
             if (node->is_html_ol_ul_menu_element()) {
                 // Skip list nodes and their descendents. They have their own, unrelated ordinals.
@@ -500,8 +507,6 @@ public:
             if (!node->layout_node())
                 continue; // Skip nodes that do not participate in the layout.
 
-            auto* element = static_cast<Element*>(node);
-
             if (!element->computed_properties()->display().is_list_item())
                 continue; // Skip nodes that are not list items.
 
@@ -509,6 +514,18 @@ public:
                 return;
         }
     }
+
+    bool captured_in_a_view_transition() const { return m_captured_in_a_view_transition; }
+    void set_captured_in_a_view_transition(bool value) { m_captured_in_a_view_transition = value; }
+
+    // https://drafts.csswg.org/css-images-4/#element-not-rendered
+    bool not_rendered() const;
+
+    // https://drafts.csswg.org/css-view-transitions-1/#document-scoped-view-transition-name
+    Optional<FlyString> document_scoped_view_transition_name();
+
+    // https://drafts.csswg.org/css-view-transitions-1/#capture-the-image
+    RefPtr<Gfx::ImmutableBitmap> capture_the_image();
 
     void set_pointer_capture(WebIDL::Long pointer_id);
     void release_pointer_capture(WebIDL::Long pointer_id);
@@ -518,6 +535,8 @@ public:
 
     void set_had_duplicate_attribute_during_tokenization(Badge<HTML::HTMLParser>);
     bool had_duplicate_attribute_during_tokenization() const { return m_had_duplicate_attribute_during_tokenization; }
+
+    GC::Ref<CSS::StylePropertyMapReadOnly> computed_style_map();
 
 protected:
     Element(Document&, DOM::QualifiedName);
@@ -555,13 +574,13 @@ private:
     Optional<Directionality> auto_directionality() const;
     Optional<Directionality> contained_text_auto_directionality(bool can_exclude_root) const;
     Directionality parent_directionality() const;
-    bool is_auto_directionality_form_associated_element() const;
 
     QualifiedName m_qualified_name;
     mutable Optional<FlyString> m_html_uppercased_qualified_name;
 
     GC::Ptr<NamedNodeMap> m_attributes;
     GC::Ptr<CSS::CSSStyleProperties> m_inline_style;
+    GC::Ptr<CSS::StylePropertyMap> m_attribute_style_map;
     GC::Ptr<DOMTokenList> m_class_list;
     GC::Ptr<ShadowRoot> m_shadow_root;
 
@@ -602,11 +621,17 @@ private:
     // Element objects have an internal [[RegisteredIntersectionObservers]] slot, which is initialized to an empty list.
     OwnPtr<Vector<IntersectionObserver::IntersectionObserverRegistration>> m_registered_intersection_observers;
 
+    // https://drafts.css-houdini.org/css-typed-om-1/#dom-element-computedstylemapcache-slot
+    // Every Element has a [[computedStyleMapCache]] internal slot, initially set to null, which caches the result of
+    // the computedStyleMap() method when it is first called.
+    GC::Ptr<CSS::StylePropertyMapReadOnly> m_computed_style_map_cache;
+
     CSSPixelPoint m_scroll_offset;
 
     bool m_in_top_layer : 1 { false };
     bool m_rendered_in_top_layer : 1 { false };
-    bool m_style_uses_css_custom_properties : 1 { false };
+    bool m_style_uses_attr_css_function : 1 { false };
+    bool m_style_uses_var_css_function : 1 { false };
     bool m_affected_by_has_pseudo_class_in_subject_position : 1 { false };
     bool m_affected_by_has_pseudo_class_in_non_subject_position : 1 { false };
     bool m_affected_by_direct_sibling_combinator : 1 { false };
@@ -628,6 +653,9 @@ private:
 
     // https://drafts.csswg.org/css-contain/#proximity-to-the-viewport
     ProximityToTheViewport m_proximity_to_the_viewport { ProximityToTheViewport::NotDetermined };
+
+    // https://drafts.csswg.org/css-view-transitions-1/#captured-in-a-view-transition
+    bool m_captured_in_a_view_transition { false };
 
     // https://html.spec.whatwg.org/multipage/grouping-content.html#ordinal-value
     Optional<i32> m_ordinal_value;

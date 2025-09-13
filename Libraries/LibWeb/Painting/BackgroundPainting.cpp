@@ -18,9 +18,9 @@
 
 namespace Web::Painting {
 
-static RefPtr<DisplayList> compute_text_clip_paths(PaintContext& context, Paintable const& paintable, CSSPixelPoint containing_block_location)
+static RefPtr<DisplayList> compute_text_clip_paths(DisplayListRecordingContext& context, Paintable const& paintable, CSSPixelPoint containing_block_location)
 {
-    auto text_clip_paths = DisplayList::create();
+    auto text_clip_paths = DisplayList::create(context.device_pixels_per_css_pixel());
     DisplayListRecorder display_list_recorder(*text_clip_paths);
     // Remove containing block offset, so executing the display list will produce mask at (0, 0)
     display_list_recorder.translate(-context.floored_device_point(containing_block_location).to_type<int>());
@@ -37,13 +37,12 @@ static RefPtr<DisplayList> compute_text_clip_paths(PaintContext& context, Painta
             fragment_absolute_rect.x().to_float(),
             fragment_absolute_rect.y().to_float() + fragment.baseline().to_float(),
         } * scale;
-        display_list_recorder.draw_text_run(baseline_start, *glyph_run, Gfx::Color::Black, fragment_absolute_device_rect.to_type<int>(), scale, fragment.orientation());
+        display_list_recorder.draw_glyph_run(baseline_start, *glyph_run, Gfx::Color::Black, fragment_absolute_device_rect.to_type<int>(), scale, fragment.orientation());
     };
 
     paintable.for_each_in_inclusive_subtree([&](auto& paintable) {
-        if (is<PaintableWithLines>(paintable)) {
-            auto const& paintable_lines = static_cast<PaintableWithLines const&>(paintable);
-            for (auto const& fragment : paintable_lines.fragments()) {
+        if (auto* paintable_lines = as_if<PaintableWithLines>(paintable)) {
+            for (auto const& fragment : paintable_lines->fragments()) {
                 if (is<Layout::TextNode>(fragment.layout_node()))
                     add_text_clip_path(fragment);
             }
@@ -75,7 +74,7 @@ static BackgroundBox get_box(CSS::BackgroundBox box_clip, BackgroundBox border_b
 }
 
 // https://www.w3.org/TR/css-backgrounds-3/#backgrounds
-void paint_background(PaintContext& context, PaintableBox const& paintable_box, CSS::ImageRendering image_rendering, ResolvedBackground resolved_background, BorderRadiiData const& border_radii)
+void paint_background(DisplayListRecordingContext& context, PaintableBox const& paintable_box, CSS::ImageRendering image_rendering, ResolvedBackground resolved_background, BorderRadiiData const& border_radii)
 {
     auto& display_list_recorder = context.display_list_recorder();
 
@@ -116,10 +115,7 @@ void paint_background(PaintContext& context, PaintableBox const& paintable_box, 
         display_list_recorder.fill_rect_with_rounded_corners(
             context.rounded_device_rect(color_box.rect).to_type<int>(),
             resolved_background.color,
-            color_box.radii.top_left.as_corner(context),
-            color_box.radii.top_right.as_corner(context),
-            color_box.radii.bottom_right.as_corner(context),
-            color_box.radii.bottom_left.as_corner(context));
+            color_box.radii.as_corners(context.device_pixel_converter()));
     }
 
     struct {
@@ -204,11 +200,11 @@ void paint_background(PaintContext& context, PaintableBox const& paintable_box, 
         CSSPixels y_step = 0;
 
         switch (layer.repeat_x) {
-        case CSS::Repeat::Round:
+        case CSS::Repetition::Round:
             x_step = image_rect.width();
             repeat_x = true;
             break;
-        case CSS::Repeat::Space: {
+        case CSS::Repetition::Space: {
             int whole_images = (background_positioning_area.width() / image_rect.width()).to_int();
             if (whole_images <= 1) {
                 x_step = image_rect.width();
@@ -221,11 +217,11 @@ void paint_background(PaintContext& context, PaintableBox const& paintable_box, 
             }
             break;
         }
-        case CSS::Repeat::Repeat:
+        case CSS::Repetition::Repeat:
             x_step = image_rect.width();
             repeat_x = true;
             break;
-        case CSS::Repeat::NoRepeat:
+        case CSS::Repetition::NoRepeat:
             repeat_x = false;
             break;
         }
@@ -236,11 +232,11 @@ void paint_background(PaintContext& context, PaintableBox const& paintable_box, 
         }
 
         switch (layer.repeat_y) {
-        case CSS::Repeat::Round:
+        case CSS::Repetition::Round:
             y_step = image_rect.height();
             repeat_y = true;
             break;
-        case CSS::Repeat::Space: {
+        case CSS::Repetition::Space: {
             int whole_images = (background_positioning_area.height() / image_rect.height()).to_int();
             if (whole_images <= 1) {
                 y_step = image_rect.height();
@@ -253,11 +249,11 @@ void paint_background(PaintContext& context, PaintableBox const& paintable_box, 
             }
             break;
         }
-        case CSS::Repeat::Repeat:
+        case CSS::Repetition::Repeat:
             y_step = image_rect.height();
             repeat_y = true;
             break;
-        case CSS::Repeat::NoRepeat:
+        case CSS::Repetition::NoRepeat:
             repeat_y = false;
             break;
         }
@@ -373,9 +369,9 @@ ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> co
         Optional<CSSPixels> specified_height {};
         if (layer.size_type == CSS::BackgroundSize::LengthPercentage) {
             if (!layer.size_x.is_auto())
-                specified_width = layer.size_x.to_px(paintable_box.layout_node(), background_positioning_area.width());
+                specified_width = layer.size_x.length_percentage().to_px(paintable_box.layout_node(), background_positioning_area.width());
             if (!layer.size_y.is_auto())
-                specified_height = layer.size_y.to_px(paintable_box.layout_node(), background_positioning_area.height());
+                specified_height = layer.size_y.length_percentage().to_px(paintable_box.layout_node(), background_positioning_area.height());
         }
         auto concrete_image_size = CSS::run_default_sizing_algorithm(
             specified_width, specified_height,
@@ -417,15 +413,15 @@ ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> co
         // If background-repeat is round for one (or both) dimensions, there is a second step.
         // The UA must scale the image in that dimension (or both dimensions) so that it fits a
         // whole number of times in the background positioning area.
-        if (layer.repeat_x == CSS::Repeat::Round || layer.repeat_y == CSS::Repeat::Round) {
+        if (layer.repeat_x == CSS::Repetition::Round || layer.repeat_y == CSS::Repetition::Round) {
             // If X ≠ 0 is the width of the image after step one and W is the width of the
             // background positioning area, then the rounded width X' = W / round(W / X)
             // where round() is a function that returns the nearest natural number
             // (integer greater than zero).
-            if (layer.repeat_x == CSS::Repeat::Round) {
+            if (layer.repeat_x == CSS::Repetition::Round) {
                 image_rect.set_width(background_positioning_area.width() / round(background_positioning_area.width() / image_rect.width()));
             }
-            if (layer.repeat_y == CSS::Repeat::Round) {
+            if (layer.repeat_y == CSS::Repetition::Round) {
                 image_rect.set_height(background_positioning_area.height() / round(background_positioning_area.height() / image_rect.height()));
             }
 

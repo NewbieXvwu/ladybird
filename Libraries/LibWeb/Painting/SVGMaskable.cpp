@@ -73,7 +73,7 @@ Optional<Gfx::Bitmap::MaskKind> SVGMaskable::get_mask_type_of_svg() const
     return {};
 }
 
-RefPtr<Gfx::ImmutableBitmap> SVGMaskable::calculate_mask_of_svg(PaintContext& context, CSSPixelRect const& masking_area) const
+RefPtr<Gfx::ImmutableBitmap> SVGMaskable::calculate_mask_of_svg(DisplayListRecordingContext& context, CSSPixelRect const& masking_area) const
 {
     auto const& graphics_element = as<SVG::SVGGraphicsElement const>(*dom_node_of_svg());
     auto mask_rect = context.enclosing_device_rect(masking_area);
@@ -83,7 +83,7 @@ RefPtr<Gfx::ImmutableBitmap> SVGMaskable::calculate_mask_of_svg(PaintContext& co
         if (mask_bitmap_or_error.is_error())
             return {};
         mask_bitmap = mask_bitmap_or_error.release_value();
-        auto display_list = DisplayList::create();
+        auto display_list = DisplayList::create(context.device_pixels_per_css_pixel());
         DisplayListRecorder display_list_recorder(*display_list);
         display_list_recorder.translate(-mask_rect.location().to_type<int>());
         auto paint_context = context.clone(display_list_recorder);
@@ -100,8 +100,7 @@ RefPtr<Gfx::ImmutableBitmap> SVGMaskable::calculate_mask_of_svg(PaintContext& co
         StackingContext::paint_svg(paint_context, paintable, PaintPhase::Foreground);
         auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(*mask_bitmap);
         DisplayListPlayerSkia display_list_player;
-        ScrollStateSnapshot scroll_state_snapshot;
-        display_list_player.execute(display_list, scroll_state_snapshot, painting_surface);
+        display_list_player.execute(display_list, {}, painting_surface);
         return mask_bitmap;
     };
     RefPtr<Gfx::Bitmap> mask_bitmap = {};

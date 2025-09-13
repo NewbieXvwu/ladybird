@@ -14,6 +14,7 @@
 #include <LibSyntax/HighlighterClient.h>
 #include <LibSyntax/Language.h>
 #include <LibURL/Forward.h>
+#include <LibWebView/Forward.h>
 
 namespace WebView {
 
@@ -22,7 +23,7 @@ enum class HighlightOutputMode {
     SourceOnly,   // Just the highlighted source
 };
 
-class SourceDocument final : public Syntax::Document {
+class WEBVIEW_API SourceDocument final : public Syntax::Document {
 public:
     static NonnullRefPtr<SourceDocument> create(String const& source)
     {
@@ -30,7 +31,7 @@ public:
     }
     virtual ~SourceDocument() = default;
 
-    StringView text() const { return m_source; }
+    StringView text() const LIFETIME_BOUND { return m_source; }
     size_t line_count() const { return m_lines.size(); }
 
     // ^ Syntax::Document
@@ -47,7 +48,7 @@ private:
     Vector<Syntax::TextDocumentLine> m_lines;
 };
 
-class SourceHighlighterClient final : public Syntax::HighlighterClient {
+class WEBVIEW_API SourceHighlighterClient final : public Syntax::HighlighterClient {
 public:
     SourceHighlighterClient(String const& source, Syntax::Language);
     virtual ~SourceHighlighterClient() = default;
@@ -75,7 +76,7 @@ private:
     OwnPtr<Syntax::Highlighter> m_highlighter;
 };
 
-String highlight_source(Optional<URL::URL> const&, URL::URL const& base_url, String const& source, Syntax::Language, HighlightOutputMode);
+WEBVIEW_API String highlight_source(Optional<URL::URL> const&, URL::URL const& base_url, String const& source, Syntax::Language, HighlightOutputMode);
 
 constexpr inline StringView HTML_HIGHLIGHTER_STYLE = R"~~~(
     @media (prefers-color-scheme: dark) {

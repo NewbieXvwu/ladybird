@@ -15,6 +15,7 @@
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibJS/Runtime/ValueInlines.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
@@ -141,7 +142,7 @@ inline JS::Completion clean_up_on_return(JS::Realm& stored_realm, JS::Realm& rel
 
 // https://webidl.spec.whatwg.org/#call-a-user-objects-operation
 // https://whatpr.org/webidl/1437.html#call-a-user-objects-operation
-JS::Completion call_user_object_operation(CallbackType& callback, String const& operation_name, Optional<JS::Value> this_argument, ReadonlySpan<JS::Value> args)
+JS::Completion call_user_object_operation(CallbackType& callback, Utf16FlyString const& operation_name, Optional<JS::Value> this_argument, ReadonlySpan<JS::Value> args)
 {
     // 1. Let completion be an uninitialized variable.
     JS::Completion completion;
@@ -234,9 +235,19 @@ JS::ThrowCompletionOr<String> to_string(JS::VM& vm, JS::Value value)
     return value.to_string(vm);
 }
 
+JS::ThrowCompletionOr<Utf16String> to_utf16_string(JS::VM& vm, JS::Value value)
+{
+    return value.to_utf16_string(vm);
+}
+
 JS::ThrowCompletionOr<String> to_usv_string(JS::VM& vm, JS::Value value)
 {
-    return value.to_well_formed_string(vm);
+    return TRY(value.to_utf16_string(vm)).to_well_formed_utf8();
+}
+
+JS::ThrowCompletionOr<Utf16String> to_utf16_usv_string(JS::VM& vm, JS::Value value)
+{
+    return TRY(value.to_utf16_string(vm)).to_well_formed();
 }
 
 // https://webidl.spec.whatwg.org/#invoke-a-callback-function
@@ -528,14 +539,14 @@ JS::ThrowCompletionOr<T> convert_to_int(JS::VM& vm, JS::Value value, EnforceRang
     return x;
 }
 
-template JS::ThrowCompletionOr<Byte> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
-template JS::ThrowCompletionOr<Octet> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
-template JS::ThrowCompletionOr<Short> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
-template JS::ThrowCompletionOr<UnsignedShort> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
-template JS::ThrowCompletionOr<Long> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
-template JS::ThrowCompletionOr<UnsignedLong> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
-template JS::ThrowCompletionOr<LongLong> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
-template JS::ThrowCompletionOr<UnsignedLongLong> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
+template WEB_API JS::ThrowCompletionOr<Byte> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
+template WEB_API JS::ThrowCompletionOr<Octet> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
+template WEB_API JS::ThrowCompletionOr<Short> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
+template WEB_API JS::ThrowCompletionOr<UnsignedShort> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
+template WEB_API JS::ThrowCompletionOr<Long> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
+template WEB_API JS::ThrowCompletionOr<UnsignedLong> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
+template WEB_API JS::ThrowCompletionOr<LongLong> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
+template WEB_API JS::ThrowCompletionOr<UnsignedLongLong> convert_to_int(JS::VM& vm, JS::Value, EnforceRange, Clamp);
 
 // AD-HOC: For same-object caching purposes, this can be used to compare a cached JS array of DOM::Elements with another
 //         list. Either list can be null, in which case they are considered the same only if they are both null.

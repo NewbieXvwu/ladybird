@@ -42,9 +42,7 @@ public:
     String type_for_bindings() const;
     WebIDL::ExceptionOr<void> set_type_for_bindings(String const&);
 
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
-
-    bool will_validate();
+    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
     // ^EventTarget
     // https://html.spec.whatwg.org/multipage/interaction.html#the-tabindex-attribute:the-button-element
@@ -60,7 +58,7 @@ public:
     virtual bool is_submittable() const override { return true; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-autocapitalize
-    virtual bool is_auto_capitalize_inheriting() const override { return true; }
+    virtual bool is_autocapitalize_and_autocorrect_inheriting() const override { return true; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#concept-button
     // https://html.spec.whatwg.org/multipage/form-elements.html#the-button-element:concept-button
@@ -75,7 +73,7 @@ public:
     // https://www.w3.org/TR/html-aria/#el-button
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::button; }
 
-    virtual String value() const override;
+    virtual Utf16String value() const override;
     virtual Optional<String> optional_value() const override;
 
     virtual bool has_activation_behavior() const override;
@@ -86,6 +84,9 @@ public:
 
     GC::Ptr<DOM::Element> command_for_element() { return m_command_for_element; }
     void set_command_for_element(GC::Ptr<DOM::Element> value) { m_command_for_element = value; }
+
+    // https://html.spec.whatwg.org/multipage/rendering.html#the-button-element-2:button-layout-2
+    virtual bool uses_button_layout() const override { return true; }
 
 private:
     virtual void visit_edges(Visitor&) override;

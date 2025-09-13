@@ -5,11 +5,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include "Token.h"
 #include <AK/Assertions.h>
 #include <AK/CharacterTypes.h>
 #include <AK/GenericLexer.h>
 #include <AK/StringBuilder.h>
+#include <LibJS/Token.h>
 
 namespace JS {
 
@@ -54,61 +54,58 @@ double Token::double_value() const
 {
     VERIFY(type() == TokenType::NumericLiteral);
 
-    Vector<char, 32> buffer;
+    auto value = this->value();
+    Utf16String buffer;
 
-    for (auto ch : value()) {
-        if (ch == '_')
-            continue;
-        buffer.append(ch);
+    if (value.contains('_')) {
+        buffer = value.replace("_"sv, {}, ReplaceMode::All);
+        value = buffer;
     }
-    buffer.append('\0');
 
-    auto value_string = StringView { buffer.data(), buffer.size() - 1 };
-    if (value_string[0] == '0' && value_string.length() >= 2) {
-        if (value_string[1] == 'x' || value_string[1] == 'X') {
-            // hexadecimal
-            return static_cast<double>(strtoul(value_string.characters_without_null_termination() + 2, nullptr, 16));
-        } else if (value_string[1] == 'o' || value_string[1] == 'O') {
-            // octal
-            return static_cast<double>(strtoul(value_string.characters_without_null_termination() + 2, nullptr, 8));
-        } else if (value_string[1] == 'b' || value_string[1] == 'B') {
-            // binary
-            return static_cast<double>(strtoul(value_string.characters_without_null_termination() + 2, nullptr, 2));
-        } else if (is_ascii_digit(value_string[1])) {
-            // also octal, but syntax error in strict mode
-            if (!value().contains('8') && !value().contains('9'))
-                return static_cast<double>(strtoul(value_string.characters_without_null_termination() + 1, nullptr, 8));
-        }
+    if (value.length_in_code_units() >= 2 && value.starts_with('0')) {
+        static constexpr auto fallback = NumericLimits<u64>::max();
+        auto next = value.code_unit_at(1);
+
+        // hexadecimal
+        if (next == 'x' || next == 'X')
+            return static_cast<double>(value.substring_view(2).to_number<u64>(TrimWhitespace::No, 16).value_or(fallback));
+
+        // octal
+        if (next == 'o' || next == 'O')
+            return static_cast<double>(value.substring_view(2).to_number<u64>(TrimWhitespace::No, 8).value_or(fallback));
+
+        // binary
+        if (next == 'b' || next == 'B')
+            return static_cast<double>(value.substring_view(2).to_number<u64>(TrimWhitespace::No, 2).value_or(fallback));
+
+        // also octal, but syntax error in strict mode
+        if (is_ascii_digit(next) && !value.contains_any_of({ { '8', '9' } }))
+            return static_cast<double>(value.substring_view(1).to_number<u64>(TrimWhitespace::No, 8).value_or(fallback));
     }
+
     // This should always be a valid double
-    return value_string.to_number<double>().release_value();
+    return value.to_number<double>(TrimWhitespace::No).value();
 }
 
-static u32 hex2int(char x)
-{
-    VERIFY(is_ascii_hex_digit(x));
-    if (x >= '0' && x <= '9')
-        return x - '0';
-    return 10u + (to_ascii_lowercase(x) - 'a');
-}
-
-ByteString Token::string_value(StringValueStatus& status) const
+Utf16String Token::string_value(StringValueStatus& status) const
 {
     VERIFY(type() == TokenType::StringLiteral || type() == TokenType::TemplateLiteralString);
 
     auto is_template = type() == TokenType::TemplateLiteralString;
-    GenericLexer lexer(is_template ? value() : value().substring_view(1, value().length() - 2));
+    auto value = this->value();
 
-    auto encoding_failure = [&status](StringValueStatus parse_status) -> ByteString {
+    Utf16GenericLexer lexer(is_template ? value : value.substring_view(1, value.length_in_code_units() - 2));
+
+    auto encoding_failure = [&status](StringValueStatus parse_status) -> Utf16String {
         status = parse_status;
         return {};
     };
 
-    StringBuilder builder;
+    StringBuilder builder(StringBuilder::Mode::UTF16);
+
     while (!lexer.is_eof()) {
         // No escape, consume one char and continue
         if (!lexer.next_is('\\')) {
-
             if (is_template && lexer.next_is('\r')) {
                 lexer.ignore();
                 if (lexer.next_is('\n'))
@@ -118,7 +115,7 @@ ByteString Token::string_value(StringValueStatus& status) const
                 continue;
             }
 
-            builder.append(lexer.consume());
+            builder.append_code_unit(lexer.consume());
             continue;
         }
 
@@ -128,9 +125,9 @@ ByteString Token::string_value(StringValueStatus& status) const
 
             if (code_point_or_error.is_error()) {
                 switch (code_point_or_error.error()) {
-                case GenericLexer::UnicodeEscapeError::MalformedUnicodeEscape:
+                case AK::UnicodeEscapeError::MalformedUnicodeEscape:
                     return encoding_failure(StringValueStatus::MalformedUnicodeEscape);
-                case GenericLexer::UnicodeEscapeError::UnicodeEscapeOverflow:
+                case AK::UnicodeEscapeError::UnicodeEscapeOverflow:
                     return encoding_failure(StringValueStatus::UnicodeEscapeOverflow);
                 }
             }
@@ -144,14 +141,14 @@ ByteString Token::string_value(StringValueStatus& status) const
 
         // Line continuation
         if (lexer.next_is('\n') || lexer.next_is('\r')) {
-            if (lexer.next_is("\r\n"))
+            if (lexer.next_is("\r\n"sv))
                 lexer.ignore();
             lexer.ignore();
             continue;
         }
         // Line continuation
-        if (lexer.next_is(LINE_SEPARATOR_STRING) || lexer.next_is(PARAGRAPH_SEPARATOR_STRING)) {
-            lexer.ignore(3);
+        if (lexer.next_is(LINE_SEPARATOR) || lexer.next_is(PARAGRAPH_SEPARATOR)) {
+            lexer.ignore();
             continue;
         }
         // Null-byte escape
@@ -165,19 +162,21 @@ ByteString Token::string_value(StringValueStatus& status) const
             lexer.ignore();
             if (!is_ascii_hex_digit(lexer.peek()) || !is_ascii_hex_digit(lexer.peek(1)))
                 return encoding_failure(StringValueStatus::MalformedHexEscape);
-            auto code_point = hex2int(lexer.consume()) * 16 + hex2int(lexer.consume());
+
+            auto code_point = lexer.consume(2).to_number<u32>(TrimWhitespace::No, 16).value();
             VERIFY(code_point <= 255);
+
             builder.append_code_point(code_point);
             continue;
         }
 
         // In non-strict mode LegacyOctalEscapeSequence is allowed in strings:
         // https://tc39.es/ecma262/#sec-additional-syntax-string-literals
-        Optional<ByteString> octal_str;
+        Optional<Utf16View> octal_str;
 
-        auto is_octal_digit = [](char ch) { return ch >= '0' && ch <= '7'; };
-        auto is_zero_to_three = [](char ch) { return ch >= '0' && ch <= '3'; };
-        auto is_four_to_seven = [](char ch) { return ch >= '4' && ch <= '7'; };
+        auto is_octal_digit = [](auto ch) { return ch >= '0' && ch <= '7'; };
+        auto is_zero_to_three = [](auto ch) { return ch >= '0' && ch <= '3'; };
+        auto is_four_to_seven = [](auto ch) { return ch >= '4' && ch <= '7'; };
 
         // OctalDigit [lookahead ∉ OctalDigit]
         if (is_octal_digit(lexer.peek()) && !is_octal_digit(lexer.peek(1)))
@@ -194,26 +193,29 @@ ByteString Token::string_value(StringValueStatus& status) const
 
         if (octal_str.has_value()) {
             status = StringValueStatus::LegacyOctalEscapeSequence;
-            auto code_point = strtoul(octal_str->characters(), nullptr, 8);
+
+            auto code_point = octal_str->to_number<u32>(TrimWhitespace::No, 8).value();
             VERIFY(code_point <= 255);
+
             builder.append_code_point(code_point);
             continue;
         }
 
         if (lexer.next_is('8') || lexer.next_is('9')) {
             status = StringValueStatus::LegacyOctalEscapeSequence;
-            builder.append(lexer.consume());
+            builder.append_code_unit(lexer.consume());
             continue;
         }
 
         lexer.retreat();
-        builder.append(lexer.consume_escaped_character('\\', "b\bf\fn\nr\rt\tv\v"sv));
+        builder.append_code_unit(lexer.consume_escaped_character('\\', "b\bf\fn\nr\rt\tv\v"sv));
     }
-    return builder.to_byte_string();
+
+    return builder.to_utf16_string();
 }
 
 // 12.8.6.2 Static Semantics: TRV, https://tc39.es/ecma262/#sec-static-semantics-trv
-ByteString Token::raw_template_value() const
+Utf16String Token::raw_template_value() const
 {
     return value().replace("\r\n"sv, "\n"sv, ReplaceMode::All).replace("\r"sv, "\n"sv, ReplaceMode::All);
 }
@@ -221,7 +223,7 @@ ByteString Token::raw_template_value() const
 bool Token::bool_value() const
 {
     VERIFY(type() == TokenType::BoolLiteral);
-    return value() == "true";
+    return value() == "true"sv;
 }
 
 bool Token::is_identifier_name() const
@@ -274,7 +276,7 @@ bool Token::is_identifier_name() const
 
 bool Token::trivia_contains_line_terminator() const
 {
-    return m_trivia.contains('\n') || m_trivia.contains('\r') || m_trivia.contains(LINE_SEPARATOR_STRING) || m_trivia.contains(PARAGRAPH_SEPARATOR_STRING);
+    return m_trivia.contains('\n') || m_trivia.contains('\r') || m_trivia.contains(LINE_SEPARATOR) || m_trivia.contains(PARAGRAPH_SEPARATOR);
 }
 
 }

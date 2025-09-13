@@ -94,6 +94,10 @@
 #include <LibWeb/SVG/SVGFEBlendElement.h>
 #include <LibWeb/SVG/SVGFEFloodElement.h>
 #include <LibWeb/SVG/SVGFEGaussianBlurElement.h>
+#include <LibWeb/SVG/SVGFEImageElement.h>
+#include <LibWeb/SVG/SVGFEMergeElement.h>
+#include <LibWeb/SVG/SVGFEMergeNodeElement.h>
+#include <LibWeb/SVG/SVGFEOffsetElement.h>
 #include <LibWeb/SVG/SVGFilterElement.h>
 #include <LibWeb/SVG/SVGForeignObjectElement.h>
 #include <LibWeb/SVG/SVGGElement.h>
@@ -117,6 +121,7 @@
 #include <LibWeb/SVG/SVGTextPathElement.h>
 #include <LibWeb/SVG/SVGTitleElement.h>
 #include <LibWeb/SVG/SVGUseElement.h>
+#include <LibWeb/SVG/SVGViewElement.h>
 #include <LibWeb/SVG/TagNames.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 
@@ -470,6 +475,14 @@ static GC::Ref<SVG::SVGElement> create_svg_element(JS::Realm& realm, Document& d
         return realm.create<SVG::SVGFEFloodElement>(document, move(qualified_name));
     if (local_name == SVG::TagNames::feGaussianBlur)
         return realm.create<SVG::SVGFEGaussianBlurElement>(document, move(qualified_name));
+    if (local_name == SVG::TagNames::feImage)
+        return realm.create<SVG::SVGFEImageElement>(document, move(qualified_name));
+    if (local_name == SVG::TagNames::feMerge)
+        return realm.create<SVG::SVGFEMergeElement>(document, move(qualified_name));
+    if (local_name == SVG::TagNames::feMergeNode)
+        return realm.create<SVG::SVGFEMergeNodeElement>(document, move(qualified_name));
+    if (local_name == SVG::TagNames::feOffset)
+        return realm.create<SVG::SVGFEOffsetElement>(document, move(qualified_name));
     if (local_name == SVG::TagNames::filter)
         return realm.create<SVG::SVGFilterElement>(document, move(qualified_name));
     if (local_name.equals_ignoring_ascii_case(SVG::TagNames::foreignObject))
@@ -512,6 +525,8 @@ static GC::Ref<SVG::SVGElement> create_svg_element(JS::Realm& realm, Document& d
         return realm.create<SVG::SVGUseElement>(document, move(qualified_name));
     if (local_name == SVG::TagNames::script)
         return realm.create<SVG::SVGScriptElement>(document, move(qualified_name));
+    if (local_name == SVG::TagNames::view)
+        return realm.create<SVG::SVGViewElement>(document, move(qualified_name));
     if (local_name == SVG::TagNames::a)
         return realm.create<SVG::SVGAElement>(document, move(qualified_name));
     if (local_name == SVG::TagNames::image)
@@ -603,23 +618,23 @@ WebIDL::ExceptionOr<GC::Ref<Element>> create_element(Document& document, FlyStri
 
                 // 5. If result’s attribute list is not empty, then throw a "NotSupportedError" DOMException.
                 if (element->has_attributes())
-                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element cannot have attributes"_string));
+                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element cannot have attributes"_utf16));
 
                 // 6. If result has children, then throw a "NotSupportedError" DOMException.
                 if (element->has_children())
-                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element cannot have children"_string));
+                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element cannot have children"_utf16));
 
                 // 7. If result’s parent is not null, then throw a "NotSupportedError" DOMException.
                 if (element->parent())
-                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element cannot have a parent"_string));
+                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element cannot have a parent"_utf16));
 
                 // 8. If result’s node document is not document, then throw a "NotSupportedError" DOMException.
                 if (&element->document() != &document)
-                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element must be in the same document that element creation was invoked in"_string));
+                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element must be in the same document that element creation was invoked in"_utf16));
 
                 // 9. If result’s local name is not equal to localName, then throw a "NotSupportedError" DOMException.
                 if (element->local_name() != local_name)
-                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element must have the same local name that element creation was invoked with"_string));
+                    return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Synchronously created custom element must have the same local name that element creation was invoked with"_utf16));
 
                 // 10. Set result’s namespace prefix to prefix.
                 element->set_prefix(prefix);

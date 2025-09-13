@@ -11,7 +11,6 @@
 #include <LibGC/CellAllocator.h>
 #include <LibWeb/CSS/Clip.h>
 #include <LibWeb/CSS/ComputedProperties.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
 #include <LibWeb/CSS/StyleValues/ColorSchemeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ContentStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CounterDefinitionsStyleValue.h>
@@ -24,6 +23,7 @@
 #include <LibWeb/CSS/StyleValues/GridTrackPlacementStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
 #include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/MathDepthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
@@ -57,13 +57,17 @@ void ComputedProperties::visit_edges(Visitor& visitor)
 
 bool ComputedProperties::is_property_important(PropertyID property_id) const
 {
-    size_t n = to_underlying(property_id);
+    VERIFY(property_id >= first_longhand_property_id && property_id <= last_longhand_property_id);
+
+    size_t n = to_underlying(property_id) - to_underlying(first_longhand_property_id);
     return m_property_important[n / 8] & (1 << (n % 8));
 }
 
 void ComputedProperties::set_property_important(PropertyID property_id, Important important)
 {
-    size_t n = to_underlying(property_id);
+    VERIFY(property_id >= first_longhand_property_id && property_id <= last_longhand_property_id);
+
+    size_t n = to_underlying(property_id) - to_underlying(first_longhand_property_id);
     if (important == Important::Yes)
         m_property_important[n / 8] |= (1 << (n % 8));
     else
@@ -72,36 +76,69 @@ void ComputedProperties::set_property_important(PropertyID property_id, Importan
 
 bool ComputedProperties::is_property_inherited(PropertyID property_id) const
 {
-    size_t n = to_underlying(property_id);
+    VERIFY(property_id >= first_longhand_property_id && property_id <= last_longhand_property_id);
+
+    size_t n = to_underlying(property_id) - to_underlying(first_longhand_property_id);
     return m_property_inherited[n / 8] & (1 << (n % 8));
+}
+
+bool ComputedProperties::is_animated_property_inherited(PropertyID property_id) const
+{
+    VERIFY(property_id >= first_longhand_property_id && property_id <= last_longhand_property_id);
+
+    size_t n = to_underlying(property_id) - to_underlying(first_longhand_property_id);
+    return m_animated_property_inherited[n / 8] & (1 << (n % 8));
 }
 
 void ComputedProperties::set_property_inherited(PropertyID property_id, Inherited inherited)
 {
-    size_t n = to_underlying(property_id);
+    VERIFY(property_id >= first_longhand_property_id && property_id <= last_longhand_property_id);
+
+    size_t n = to_underlying(property_id) - to_underlying(first_longhand_property_id);
     if (inherited == Inherited::Yes)
         m_property_inherited[n / 8] |= (1 << (n % 8));
     else
         m_property_inherited[n / 8] &= ~(1 << (n % 8));
 }
 
-void ComputedProperties::set_property(PropertyID id, NonnullRefPtr<CSSStyleValue const> value, Inherited inherited, Important important)
+void ComputedProperties::set_animated_property_inherited(PropertyID property_id, Inherited inherited)
 {
-    m_property_values[to_underlying(id)] = move(value);
+    VERIFY(property_id >= first_longhand_property_id && property_id <= last_longhand_property_id);
+
+    size_t n = to_underlying(property_id) - to_underlying(first_longhand_property_id);
+    if (inherited == Inherited::Yes)
+        m_animated_property_inherited[n / 8] |= (1 << (n % 8));
+    else
+        m_animated_property_inherited[n / 8] &= ~(1 << (n % 8));
+}
+
+void ComputedProperties::set_property(PropertyID id, NonnullRefPtr<StyleValue const> value, Inherited inherited, Important important)
+{
+    VERIFY(id >= first_longhand_property_id && id <= last_longhand_property_id);
+
+    m_property_values[to_underlying(id) - to_underlying(first_longhand_property_id)] = move(value);
     set_property_important(id, important);
     set_property_inherited(id, inherited);
 }
 
 void ComputedProperties::revert_property(PropertyID id, ComputedProperties const& style_for_revert)
 {
-    m_property_values[to_underlying(id)] = style_for_revert.m_property_values[to_underlying(id)];
+    VERIFY(id >= first_longhand_property_id && id <= last_longhand_property_id);
+
+    m_property_values[to_underlying(id) - to_underlying(first_longhand_property_id)] = style_for_revert.m_property_values[to_underlying(id) - to_underlying(first_longhand_property_id)];
     set_property_important(id, style_for_revert.is_property_important(id) ? Important::Yes : Important::No);
     set_property_inherited(id, style_for_revert.is_property_inherited(id) ? Inherited::Yes : Inherited::No);
 }
 
-void ComputedProperties::set_animated_property(PropertyID id, NonnullRefPtr<CSSStyleValue const> value)
+void ComputedProperties::set_animated_property(PropertyID id, NonnullRefPtr<StyleValue const> value, Inherited inherited)
 {
     m_animated_property_values.set(id, move(value));
+    set_animated_property_inherited(id, inherited);
+}
+
+void ComputedProperties::remove_animated_property(PropertyID id)
+{
+    m_animated_property_values.remove(id);
 }
 
 void ComputedProperties::reset_animated_properties(Badge<Animations::KeyframeEffect>)
@@ -109,22 +146,17 @@ void ComputedProperties::reset_animated_properties(Badge<Animations::KeyframeEff
     m_animated_property_values.clear();
 }
 
-CSSStyleValue const& ComputedProperties::property(PropertyID property_id, WithAnimationsApplied return_animated_value) const
+StyleValue const& ComputedProperties::property(PropertyID property_id, WithAnimationsApplied return_animated_value) const
 {
+    VERIFY(property_id >= first_longhand_property_id && property_id <= last_longhand_property_id);
+
     if (return_animated_value == WithAnimationsApplied::Yes) {
         if (auto animated_value = m_animated_property_values.get(property_id); animated_value.has_value())
             return *animated_value.value();
     }
 
     // By the time we call this method, all properties have values assigned.
-    return *m_property_values[to_underlying(property_id)];
-}
-
-CSSStyleValue const* ComputedProperties::maybe_null_property(PropertyID property_id) const
-{
-    if (auto animated_value = m_animated_property_values.get(property_id); animated_value.has_value())
-        return animated_value.value();
-    return m_property_values[to_underlying(property_id)];
+    return *m_property_values[to_underlying(property_id) - to_underlying(first_longhand_property_id)];
 }
 
 Variant<LengthPercentage, NormalGap> ComputedProperties::gap_value(PropertyID id) const
@@ -166,7 +198,9 @@ Size ComputedProperties::size_value(PropertyID id) const
     }
     if (value.is_fit_content()) {
         auto& fit_content = value.as_fit_content();
-        return Size::make_fit_content(fit_content.length_percentage());
+        if (auto length_percentage = fit_content.length_percentage(); length_percentage.has_value())
+            return Size::make_fit_content(length_percentage.release_value());
+        return Size::make_fit_content();
     }
 
     if (value.is_calculated())
@@ -175,58 +209,110 @@ Size ComputedProperties::size_value(PropertyID id) const
     if (value.is_percentage())
         return Size::make_percentage(value.as_percentage().percentage());
 
-    if (value.is_length()) {
-        auto length = value.as_length().length();
-        if (length.is_auto())
-            return Size::make_auto();
-        return Size::make_length(length);
-    }
+    if (value.is_length())
+        return Size::make_length(value.as_length().length());
 
-    // FIXME: Support `fit-content(<length>)`
+    // FIXME: Support `anchor-size(..)`
+    if (value.is_anchor_size())
+        return Size::make_none();
+
     dbgln("FIXME: Unsupported size value: `{}`, treating as `auto`", value.to_string(SerializationMode::Normal));
     return Size::make_auto();
 }
 
-LengthPercentage ComputedProperties::length_percentage_or_fallback(PropertyID id, LengthPercentage const& fallback) const
-{
-    return length_percentage(id).value_or(fallback);
-}
-
-Optional<LengthPercentage> ComputedProperties::length_percentage(PropertyID id) const
+Optional<LengthPercentage> ComputedProperties::length_percentage(PropertyID id, Layout::NodeWithStyle const& layout_node, ClampNegativeLengths disallow_negative_lengths) const
 {
     auto const& value = property(id);
 
     if (value.is_calculated())
         return LengthPercentage { value.as_calculated() };
 
-    if (value.is_percentage())
-        return value.as_percentage().percentage();
+    if (value.is_percentage()) {
+        auto percentage = value.as_percentage().percentage();
 
-    if (value.is_length())
-        return value.as_length().length();
+        // FIXME: This value can be negative as interpolation does not yet clamp values to allowed ranges - remove this
+        //        once we do that.
+        if (disallow_negative_lengths == ClampNegativeLengths::Yes && percentage.as_fraction() < 0)
+            return {};
 
-    if (value.has_auto())
-        return LengthPercentage { Length::make_auto() };
+        return percentage;
+    }
+
+    if (value.is_length()) {
+        auto length = value.as_length().length();
+
+        // FIXME: This value can be negative as interpolation does not yet clamp values to allowed ranges - remove this
+        //        once we do that.
+        if (disallow_negative_lengths == ClampNegativeLengths::Yes && length.to_px(layout_node) < 0)
+            return {};
+
+        return length;
+    }
 
     return {};
 }
 
-LengthBox ComputedProperties::length_box(PropertyID left_id, PropertyID top_id, PropertyID right_id, PropertyID bottom_id, Length const& default_value) const
+Length ComputedProperties::length(PropertyID property_id) const
 {
-    LengthBox box;
-    box.left() = length_percentage_or_fallback(left_id, default_value);
-    box.top() = length_percentage_or_fallback(top_id, default_value);
-    box.right() = length_percentage_or_fallback(right_id, default_value);
-    box.bottom() = length_percentage_or_fallback(bottom_id, default_value);
-    return box;
+    return property(property_id).as_length().length();
 }
 
-Color ComputedProperties::color_or_fallback(PropertyID id, Layout::NodeWithStyle const& node, Color fallback) const
+LengthBox ComputedProperties::length_box(PropertyID left_id, PropertyID top_id, PropertyID right_id, PropertyID bottom_id, Layout::NodeWithStyle const& layout_node, ClampNegativeLengths disallow_negative_lengths, LengthPercentageOrAuto const& default_value) const
+{
+    auto length_box_side = [&](PropertyID id) -> LengthPercentageOrAuto {
+        auto const& value = property(id);
+
+        if (value.is_calculated())
+            return LengthPercentage { value.as_calculated() };
+
+        if (value.is_percentage()) {
+            auto percentage = value.as_percentage().percentage();
+
+            // FIXME: This value can be negative as interpolation does not yet clamp values to allowed ranges - remove this
+            //        once we do that.
+            if (disallow_negative_lengths == ClampNegativeLengths::Yes && percentage.as_fraction() < 0)
+                return default_value;
+
+            return percentage;
+        }
+
+        if (value.is_length()) {
+            auto length = value.as_length().length();
+
+            // FIXME: This value can be negative as interpolation does not yet clamp values to allowed ranges - remove this
+            //        once we do that.
+            if (disallow_negative_lengths == ClampNegativeLengths::Yes && length.to_px(layout_node) < 0)
+                return default_value;
+
+            return value.as_length().length();
+        }
+
+        if (value.has_auto())
+            return LengthPercentageOrAuto::make_auto();
+
+        return default_value;
+    };
+
+    return LengthBox {
+        length_box_side(top_id),
+        length_box_side(right_id),
+        length_box_side(bottom_id),
+        length_box_side(left_id)
+    };
+}
+
+Color ComputedProperties::color_or_fallback(PropertyID id, ColorResolutionContext color_resolution_context, Color fallback) const
 {
     auto const& value = property(id);
     if (!value.has_color())
         return fallback;
-    return value.to_color(node, { .length_resolution_context = Length::ResolutionContext::for_layout_node(node) });
+    return value.to_color(color_resolution_context).value();
+}
+
+ColorInterpolation ComputedProperties::color_interpolation() const
+{
+    auto const& value = property(PropertyID::ColorInterpolation);
+    return keyword_to_color_interpolation(value.to_keyword()).value_or(CSS::ColorInterpolation::Auto);
 }
 
 // https://drafts.csswg.org/css-color-adjust-1/#determine-the-used-color-scheme
@@ -288,36 +374,33 @@ CSSPixels ComputedProperties::compute_line_height(CSSPixelRect const& viewport_r
     if (line_height.is_keyword() && line_height.to_keyword() == Keyword::Normal)
         return CSSPixels { round_to<i32>(font_metrics.font_size * normal_line_height_scale) };
 
-    if (line_height.is_length()) {
-        auto line_height_length = line_height.as_length().length();
-        if (!line_height_length.is_auto())
-            return line_height_length.to_px(viewport_rect, font_metrics, root_font_metrics);
-    }
+    if (line_height.is_length())
+        return line_height.as_length().length().to_px(viewport_rect, font_metrics, root_font_metrics);
 
     if (line_height.is_number())
-        return Length(line_height.as_number().number(), Length::Type::Em).to_px(viewport_rect, font_metrics, root_font_metrics);
+        return Length(line_height.as_number().number(), LengthUnit::Em).to_px(viewport_rect, font_metrics, root_font_metrics);
 
     if (line_height.is_percentage()) {
         // Percentages are relative to 1em. https://www.w3.org/TR/css-inline-3/#valdef-line-height-percentage
         auto const& percentage = line_height.as_percentage().percentage();
-        return Length(percentage.as_fraction(), Length::Type::Em).to_px(viewport_rect, font_metrics, root_font_metrics);
+        return Length(percentage.as_fraction(), LengthUnit::Em).to_px(viewport_rect, font_metrics, root_font_metrics);
     }
 
     if (line_height.is_calculated()) {
         CalculationResolutionContext context {
-            .percentage_basis = Length(1, Length::Type::Em),
+            .percentage_basis = Length(1, LengthUnit::Em),
             .length_resolution_context = Length::ResolutionContext { viewport_rect, font_metrics, root_font_metrics },
         };
         if (line_height.as_calculated().resolves_to_number()) {
-            auto resolved = line_height.as_calculated().resolve_number(context);
+            auto resolved = line_height.as_calculated().resolve_number_deprecated(context);
             if (!resolved.has_value()) {
                 dbgln("FIXME: Failed to resolve calc() line-height (number): {}", line_height.as_calculated().to_string(SerializationMode::Normal));
                 return CSSPixels::nearest_value_for(m_font_list->first().pixel_metrics().line_spacing());
             }
-            return Length(resolved.value(), Length::Type::Em).to_px(viewport_rect, font_metrics, root_font_metrics);
+            return Length(resolved.value(), LengthUnit::Em).to_px(viewport_rect, font_metrics, root_font_metrics);
         }
 
-        auto resolved = line_height.as_calculated().resolve_length(context);
+        auto resolved = line_height.as_calculated().resolve_length_deprecated(context);
         if (!resolved.has_value()) {
             dbgln("FIXME: Failed to resolve calc() line-height: {}", line_height.as_calculated().to_string(SerializationMode::Normal));
             return CSSPixels::nearest_value_for(m_font_list->first().pixel_metrics().line_spacing());
@@ -335,63 +418,41 @@ Optional<int> ComputedProperties::z_index() const
         return {};
 
     // Clamp z-index to the range of a signed 32-bit integer for consistency with other engines.
-    auto clamp = [](auto number) -> int {
+    if (value.is_integer()) {
+        auto number = value.as_integer().integer();
+
         if (number >= NumericLimits<int>::max())
             return NumericLimits<int>::max();
         if (number <= NumericLimits<int>::min())
             return NumericLimits<int>::min();
-        return static_cast<int>(number);
-    };
 
-    if (value.is_integer()) {
-        return clamp(value.as_integer().integer());
+        return value.as_integer().integer();
     }
+
     if (value.is_calculated()) {
-        auto maybe_double = value.as_calculated().resolve_number({});
+        auto maybe_double = value.as_calculated().resolve_number_deprecated({});
         if (maybe_double.has_value()) {
-            return clamp(maybe_double.value());
+            if (*maybe_double >= NumericLimits<int>::max())
+                return NumericLimits<int>::max();
+
+            if (*maybe_double <= NumericLimits<int>::min())
+                return NumericLimits<int>::min();
+
+            // Round up on half
+            return floor(maybe_double.value() + 0.5f);
         }
     }
     return {};
 }
 
-float ComputedProperties::resolve_opacity_value(CSSStyleValue const& value)
-{
-    float unclamped_opacity = 1.0f;
-
-    if (value.is_number()) {
-        unclamped_opacity = value.as_number().number();
-    } else if (value.is_calculated()) {
-        auto const& calculated = value.as_calculated();
-        CalculationResolutionContext context {};
-        if (calculated.resolves_to_percentage()) {
-            auto maybe_percentage = value.as_calculated().resolve_percentage(context);
-            if (maybe_percentage.has_value())
-                unclamped_opacity = maybe_percentage->as_fraction();
-            else
-                dbgln("Unable to resolve calc() as opacity (percentage): {}", value.to_string(SerializationMode::Normal));
-        } else if (calculated.resolves_to_number()) {
-            auto maybe_number = value.as_calculated().resolve_number(context);
-            if (maybe_number.has_value())
-                unclamped_opacity = maybe_number.value();
-            else
-                dbgln("Unable to resolve calc() as opacity (number): {}", value.to_string(SerializationMode::Normal));
-        }
-    }
-
-    return clamp(unclamped_opacity, 0.0f, 1.0f);
-}
-
 float ComputedProperties::opacity() const
 {
-    auto const& value = property(PropertyID::Opacity);
-    return resolve_opacity_value(value);
+    return property(PropertyID::Opacity).as_number().number();
 }
 
 float ComputedProperties::fill_opacity() const
 {
-    auto const& value = property(PropertyID::FillOpacity);
-    return resolve_opacity_value(value);
+    return property(PropertyID::FillOpacity).as_number().number();
 }
 
 StrokeLinecap ComputedProperties::stroke_linecap() const
@@ -421,14 +482,12 @@ NumberOrCalculated ComputedProperties::stroke_miterlimit() const
 
 float ComputedProperties::stroke_opacity() const
 {
-    auto const& value = property(PropertyID::StrokeOpacity);
-    return resolve_opacity_value(value);
+    return property(PropertyID::StrokeOpacity).as_number().number();
 }
 
 float ComputedProperties::stop_opacity() const
 {
-    auto const& value = property(PropertyID::StopOpacity);
-    return resolve_opacity_value(value);
+    return property(PropertyID::StopOpacity).as_number().number();
 }
 
 FillRule ComputedProperties::fill_rule() const
@@ -443,20 +502,9 @@ ClipRule ComputedProperties::clip_rule() const
     return keyword_to_fill_rule(value.to_keyword()).release_value();
 }
 
-Color ComputedProperties::flood_color(Layout::NodeWithStyle const& node) const
-{
-    auto const& value = property(PropertyID::FloodColor);
-    if (value.has_color()) {
-        return value.to_color(node, { .length_resolution_context = Length::ResolutionContext::for_layout_node(node) });
-    }
-
-    return InitialValues::flood_color();
-}
-
 float ComputedProperties::flood_opacity() const
 {
-    auto const& value = property(PropertyID::FloodOpacity);
-    return resolve_opacity_value(value);
+    return property(PropertyID::FloodOpacity).as_number().number();
 }
 
 FlexDirection ComputedProperties::flex_direction() const
@@ -517,7 +565,7 @@ Length ComputedProperties::border_spacing_horizontal(Layout::Node const& layout_
         if (style_value.is_length())
             return style_value.as_length().length();
         if (style_value.is_calculated())
-            return style_value.as_calculated().resolve_length({ .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node) }).value_or(Length(0, Length::Type::Px));
+            return style_value.as_calculated().resolve_length_deprecated({ .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node) }).value_or(Length::make_px(0));
         return {};
     };
 
@@ -539,7 +587,7 @@ Length ComputedProperties::border_spacing_vertical(Layout::Node const& layout_no
         if (style_value.is_length())
             return style_value.as_length().length();
         if (style_value.is_calculated())
-            return style_value.as_calculated().resolve_length({ .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node) }).value_or(Length(0, Length::Type::Px));
+            return style_value.as_calculated().resolve_length_deprecated({ .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node) }).value_or(Length::make_px(0));
         return {};
     };
 
@@ -587,7 +635,7 @@ JustifySelf ComputedProperties::justify_self() const
     return keyword_to_justify_self(value.to_keyword()).release_value();
 }
 
-Vector<Transformation> ComputedProperties::transformations_for_style_value(CSSStyleValue const& value)
+Vector<Transformation> ComputedProperties::transformations_for_style_value(StyleValue const& value)
 {
     if (value.is_keyword() && value.to_keyword() == Keyword::None)
         return {};
@@ -635,7 +683,7 @@ Optional<Transformation> ComputedProperties::scale() const
     return value.as_transformation().to_transformation();
 }
 
-static Optional<LengthPercentage> length_percentage_for_style_value(CSSStyleValue const& value)
+static Optional<LengthPercentage> length_percentage_for_style_value(StyleValue const& value)
 {
     if (value.is_length())
         return value.as_length().length();
@@ -654,7 +702,7 @@ TransformBox ComputedProperties::transform_box() const
 
 TransformOrigin ComputedProperties::transform_origin() const
 {
-    auto length_percentage_with_keywords_resolved = [](CSSStyleValue const& value) -> Optional<LengthPercentage> {
+    auto length_percentage_with_keywords_resolved = [](StyleValue const& value) -> Optional<LengthPercentage> {
         if (value.is_keyword()) {
             auto keyword = value.to_keyword();
             if (keyword == Keyword::Left || keyword == Keyword::Top)
@@ -686,7 +734,7 @@ Optional<Color> ComputedProperties::accent_color(Layout::NodeWithStyle const& no
 {
     auto const& value = property(PropertyID::AccentColor);
     if (value.has_color())
-        return value.to_color(node, { .length_resolution_context = Length::ResolutionContext::for_layout_node(node) });
+        return value.to_color(ColorResolutionContext::for_layout_node_with_style(node));
     return {};
 }
 
@@ -760,9 +808,6 @@ Positioning ComputedProperties::position() const
 
 bool ComputedProperties::operator==(ComputedProperties const& other) const
 {
-    if (m_property_values.size() != other.m_property_values.size())
-        return false;
-
     for (size_t i = 0; i < m_property_values.size(); ++i) {
         auto const& my_style = m_property_values[i];
         auto const& other_style = other.m_property_values[i];
@@ -814,6 +859,31 @@ TextRendering ComputedProperties::text_rendering() const
     return keyword_to_text_rendering(value.to_keyword()).release_value();
 }
 
+CSSPixels ComputedProperties::text_underline_offset() const
+{
+    auto const& computed_text_underline_offset = property(PropertyID::TextUnderlineOffset);
+
+    // auto
+    if (computed_text_underline_offset.to_keyword() == Keyword::Auto)
+        return InitialValues::text_underline_offset();
+
+    // <length>
+    if (computed_text_underline_offset.is_length())
+        return computed_text_underline_offset.as_length().length().absolute_length_to_px();
+
+    // <percentage>
+    if (computed_text_underline_offset.is_percentage())
+        return font_size().scaled(computed_text_underline_offset.as_percentage().percentage().as_fraction());
+
+    // NOTE: We also support calc()'d <length-percentage>
+    if (computed_text_underline_offset.is_calculated())
+        // NOTE: We don't need to pass a length resolution context here as lengths have already been absolutized in
+        //       StyleComputer::compute_text_underline_offset
+        return computed_text_underline_offset.as_calculated().resolve_length({ .percentage_basis = Length::make_px(font_size()), .length_resolution_context = {} })->absolute_length_to_px();
+
+    VERIFY_NOT_REACHED();
+}
+
 PointerEvents ComputedProperties::pointer_events() const
 {
     auto const& value = property(PropertyID::PointerEvents);
@@ -845,20 +915,22 @@ WordBreak ComputedProperties::word_break() const
     return keyword_to_word_break(value.to_keyword()).release_value();
 }
 
-Optional<LengthOrCalculated> ComputedProperties::word_spacing() const
+CSSPixels ComputedProperties::word_spacing() const
 {
     auto const& value = property(PropertyID::WordSpacing);
-    if (value.is_calculated()) {
-        auto& math_value = value.as_calculated();
-        if (math_value.resolves_to_length()) {
-            return LengthOrCalculated { math_value };
-        }
-    }
+    if (value.is_keyword() && value.to_keyword() == Keyword::Normal)
+        return 0;
 
     if (value.is_length())
-        return LengthOrCalculated { value.as_length().length() };
+        return value.as_length().length().absolute_length_to_px();
 
-    return {};
+    if (value.is_percentage())
+        return font_size().scale_by(value.as_percentage().percentage().as_fraction());
+
+    if (value.is_calculated())
+        return value.as_calculated().resolve_length({ .percentage_basis = Length::make_px(font_size()), .length_resolution_context = {} })->absolute_length_to_px();
+
+    VERIFY_NOT_REACHED();
 }
 
 WhiteSpaceCollapse ComputedProperties::white_space_collapse() const
@@ -899,20 +971,22 @@ WhiteSpaceTrimData ComputedProperties::white_space_trim() const
     VERIFY_NOT_REACHED();
 }
 
-Optional<LengthOrCalculated> ComputedProperties::letter_spacing() const
+CSSPixels ComputedProperties::letter_spacing() const
 {
     auto const& value = property(PropertyID::LetterSpacing);
-    if (value.is_calculated()) {
-        auto const& math_value = value.as_calculated();
-        if (math_value.resolves_to_length()) {
-            return LengthOrCalculated { math_value };
-        }
-    }
+    if (value.is_keyword() && value.to_keyword() == Keyword::Normal)
+        return 0;
 
     if (value.is_length())
-        return LengthOrCalculated { value.as_length().length() };
+        return value.as_length().length().absolute_length_to_px();
 
-    return {};
+    if (value.is_percentage())
+        return font_size().scale_by(value.as_percentage().percentage().as_fraction());
+
+    if (value.is_calculated())
+        return value.as_calculated().resolve_length({ .percentage_basis = Length::make_px(font_size()), .length_resolution_context = {} })->absolute_length_to_px();
+
+    VERIFY_NOT_REACHED();
 }
 
 LineStyle ComputedProperties::line_style(PropertyID property_id) const
@@ -940,7 +1014,7 @@ Color ComputedProperties::caret_color(Layout::NodeWithStyle const& node) const
         return node.computed_values().color();
 
     if (value.has_color())
-        return value.to_color(node, { .length_resolution_context = Length::ResolutionContext::for_layout_node(node) });
+        return value.to_color(ColorResolutionContext::for_layout_node_with_style(node)).value();
 
     return InitialValues::caret_color();
 }
@@ -987,17 +1061,13 @@ ComputedProperties::ContentDataAndQuoteNestingLevel ComputedProperties::content(
 
         ContentData content_data;
 
-        // FIXME: The content is a list of things: strings, identifiers or functions that return strings, and images.
-        //        So it can't always be represented as a single String, but may have to be multiple boxes.
-        //        For now, we'll just assume strings since that is easiest.
-        StringBuilder builder;
         for (auto const& item : content_style_value.content().values()) {
             if (item->is_string()) {
-                builder.append(item->as_string().string_value());
+                content_data.data.append(item->as_string().string_value().to_string());
             } else if (item->is_keyword()) {
                 switch (item->to_keyword()) {
                 case Keyword::OpenQuote:
-                    builder.append(get_quote_string(true, quote_nesting_level++));
+                    content_data.data.append(get_quote_string(true, quote_nesting_level++).to_string());
                     break;
                 case Keyword::CloseQuote:
                     // A 'close-quote' or 'no-close-quote' that would make the depth negative is in error and is ignored
@@ -1006,7 +1076,7 @@ ComputedProperties::ContentDataAndQuoteNestingLevel ComputedProperties::content(
                     // - https://www.w3.org/TR/CSS21/generate.html#quotes-insert
                     // (This is missing from the CONTENT-3 spec.)
                     if (quote_nesting_level > 0)
-                        builder.append(get_quote_string(false, --quote_nesting_level));
+                        content_data.data.append(get_quote_string(false, --quote_nesting_level).to_string());
                     break;
                 case Keyword::NoOpenQuote:
                     quote_nesting_level++;
@@ -1021,14 +1091,15 @@ ComputedProperties::ContentDataAndQuoteNestingLevel ComputedProperties::content(
                     break;
                 }
             } else if (item->is_counter()) {
-                builder.append(item->as_counter().resolve(element_reference));
+                content_data.data.append(item->as_counter().resolve(element_reference));
+            } else if (item->is_image()) {
+                content_data.data.append(NonnullRefPtr { const_cast<ImageStyleValue&>(item->as_image()) });
             } else {
                 // TODO: Implement images, and other things.
                 dbgln("`{}` is not supported in `content` (yet?)", item->to_string(SerializationMode::Normal));
             }
         }
-        content_data.type = ContentData::Type::String;
-        content_data.data = MUST(builder.to_string());
+        content_data.type = ContentData::Type::List;
 
         if (content_style_value.has_alt_text()) {
             StringBuilder alt_text_builder;
@@ -1049,9 +1120,9 @@ ComputedProperties::ContentDataAndQuoteNestingLevel ComputedProperties::content(
 
     switch (value.to_keyword()) {
     case Keyword::None:
-        return { { ContentData::Type::None }, quote_nesting_level };
+        return { { ContentData::Type::None, {} }, quote_nesting_level };
     case Keyword::Normal:
-        return { { ContentData::Type::Normal }, quote_nesting_level };
+        return { { ContentData::Type::Normal, {} }, quote_nesting_level };
     default:
         break;
     }
@@ -1137,6 +1208,28 @@ TextDecorationStyle ComputedProperties::text_decoration_style() const
     return keyword_to_text_decoration_style(value.to_keyword()).release_value();
 }
 
+TextDecorationThickness ComputedProperties::text_decoration_thickness() const
+{
+    auto const& value = property(PropertyID::TextDecorationThickness);
+    if (value.is_keyword()) {
+        switch (value.to_keyword()) {
+        case Keyword::Auto:
+            return { TextDecorationThickness::Auto {} };
+        case Keyword::FromFont:
+            return { TextDecorationThickness::FromFont {} };
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+    if (value.is_length())
+        return TextDecorationThickness { LengthPercentage { value.as_length().length() } };
+    if (value.is_percentage())
+        return TextDecorationThickness { LengthPercentage { value.as_percentage().percentage() } };
+    if (value.is_calculated())
+        return TextDecorationThickness { LengthPercentage { value.as_calculated() } };
+    VERIFY_NOT_REACHED();
+}
+
 TextTransform ComputedProperties::text_transform() const
 {
     auto const& value = property(PropertyID::TextTransform);
@@ -1177,11 +1270,11 @@ Vector<ShadowData> ComputedProperties::shadow(PropertyID property_id, Layout::No
 {
     auto const& value = property(property_id);
 
-    auto resolve_to_length = [&layout_node](NonnullRefPtr<CSSStyleValue const> const& value) -> Optional<Length> {
+    auto resolve_to_length = [&layout_node](NonnullRefPtr<StyleValue const> const& value) -> Optional<Length> {
         if (value->is_length())
             return value->as_length().length();
         if (value->is_calculated())
-            return value->as_calculated().resolve_length({ .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node) });
+            return value->as_calculated().resolve_length_deprecated({ .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node) });
         return {};
     };
 
@@ -1203,7 +1296,7 @@ Vector<ShadowData> ComputedProperties::shadow(PropertyID property_id, Layout::No
             maybe_offset_y.release_value(),
             maybe_blur_radius.release_value(),
             maybe_spread_distance.release_value(),
-            value.color()->to_color(as<Layout::NodeWithStyle>(layout_node), { .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node) }),
+            value.color()->to_color(ColorResolutionContext::for_layout_node_with_style(as<Layout::NodeWithStyle>(layout_node))).value(),
             value.placement()
         };
     };
@@ -1501,7 +1594,7 @@ Optional<HashMap<FlyString, IntegerOrCalculated>> ComputedProperties::font_featu
             auto const& feature_tag = tag_value->as_open_type_tagged();
 
             if (feature_tag.value()->is_integer()) {
-                result.set(feature_tag.tag(), feature_tag.value()->as_integer().value());
+                result.set(feature_tag.tag(), feature_tag.value()->as_integer().integer());
             } else {
                 VERIFY(feature_tag.value()->is_calculated());
                 result.set(feature_tag.tag(), IntegerOrCalculated { feature_tag.value()->as_calculated() });
@@ -1528,7 +1621,7 @@ Optional<HashMap<FlyString, NumberOrCalculated>> ComputedProperties::font_variat
             auto const& axis_tag = tag_value->as_open_type_tagged();
 
             if (axis_tag.value()->is_number()) {
-                result.set(axis_tag.tag(), axis_tag.value()->as_number().value());
+                result.set(axis_tag.tag(), axis_tag.value()->as_number().number());
             } else {
                 VERIFY(axis_tag.value()->is_calculated());
                 result.set(axis_tag.tag(), NumberOrCalculated { axis_tag.value()->as_calculated() });
@@ -1813,24 +1906,6 @@ MaskType ComputedProperties::mask_type() const
     return keyword_to_mask_type(value.to_keyword()).release_value();
 }
 
-Color ComputedProperties::stop_color() const
-{
-    NonnullRawPtr<CSSStyleValue const> value = property(PropertyID::StopColor);
-    if (value->is_keyword()) {
-        // Workaround lack of layout node to resolve current color.
-        auto const& keyword = value->as_keyword();
-        if (keyword.keyword() == Keyword::Currentcolor)
-            value = property(PropertyID::Color);
-    }
-    if (value->has_color()) {
-        // FIXME: This is used by the SVGStopElement, which does not participate in layout, so we can't pass a layout
-        //        node or CalculationResolutionContext. This means we don't support all valid colors (e.g. palette
-        //        colors, calculated values which depend on length resolution, etc)
-        return value->to_color({}, {});
-    }
-    return Color::Black;
-}
-
 void ComputedProperties::set_math_depth(int math_depth)
 {
     m_math_depth = math_depth;
@@ -1883,7 +1958,7 @@ Vector<CounterData> ComputedProperties::counter_data(PropertyID property_id) con
                 if (counter.value->is_integer()) {
                     data.value = AK::clamp_to<i32>(counter.value->as_integer().integer());
                 } else if (counter.value->is_calculated()) {
-                    auto maybe_int = counter.value->as_calculated().resolve_integer({});
+                    auto maybe_int = counter.value->as_calculated().resolve_integer_deprecated({});
                     if (maybe_int.has_value())
                         data.value = AK::clamp_to<i32>(*maybe_int);
                 } else {
@@ -1910,8 +1985,8 @@ ScrollbarColorData ComputedProperties::scrollbar_color(Layout::NodeWithStyle con
 
     if (value.is_scrollbar_color()) {
         auto& scrollbar_color_value = value.as_scrollbar_color();
-        auto thumb_color = scrollbar_color_value.thumb_color()->to_color(layout_node, { .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node) });
-        auto track_color = scrollbar_color_value.track_color()->to_color(layout_node, { .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node) });
+        auto thumb_color = scrollbar_color_value.thumb_color()->to_color(ColorResolutionContext::for_layout_node_with_style(layout_node)).value();
+        auto track_color = scrollbar_color_value.track_color()->to_color(ColorResolutionContext::for_layout_node_with_style(layout_node)).value();
         return { thumb_color, track_color };
     }
 
@@ -1922,6 +1997,101 @@ ScrollbarWidth ComputedProperties::scrollbar_width() const
 {
     auto const& value = property(PropertyID::ScrollbarWidth);
     return keyword_to_scrollbar_width(value.to_keyword()).release_value();
+}
+
+ShapeRendering ComputedProperties::shape_rendering() const
+{
+    auto const& value = property(PropertyID::ShapeRendering);
+    return keyword_to_shape_rendering(value.to_keyword()).release_value();
+}
+
+PaintOrderList ComputedProperties::paint_order() const
+{
+    auto const& value = property(PropertyID::PaintOrder);
+    if (value.is_keyword()) {
+        auto keyword = value.as_keyword().keyword();
+        if (keyword == Keyword::Normal)
+            return InitialValues::paint_order();
+        auto paint_order_keyword = keyword_to_paint_order(keyword);
+        VERIFY(paint_order_keyword.has_value());
+        switch (*paint_order_keyword) {
+        case PaintOrder::Fill:
+            return InitialValues::paint_order();
+        case PaintOrder::Stroke:
+            return PaintOrderList { PaintOrder::Stroke, PaintOrder::Fill, PaintOrder::Markers };
+        case PaintOrder::Markers:
+            return PaintOrderList { PaintOrder::Markers, PaintOrder::Fill, PaintOrder::Stroke };
+        }
+    }
+
+    VERIFY(value.is_value_list());
+    auto const& value_list = value.as_value_list();
+    // The list must contain 2 values at this point, since the third value is omitted during parsing due to the
+    // shortest-serialization principle.
+    VERIFY(value_list.size() == 2);
+    PaintOrderList paint_order_list {};
+
+    // We use the sum of the keyword values to infer what the missing keyword is. Since each keyword can only appear in
+    // the list once, the sum of their values will always be 3.
+    auto sum = 0;
+    for (auto i = 0; i < 2; i++) {
+        auto keyword = value_list.value_at(i, false)->as_keyword().keyword();
+        auto paint_order_keyword = keyword_to_paint_order(keyword);
+        VERIFY(paint_order_keyword.has_value());
+        sum += to_underlying(*paint_order_keyword);
+        paint_order_list[i] = *paint_order_keyword;
+    }
+    VERIFY(sum <= 3);
+    paint_order_list[2] = static_cast<PaintOrder>(3 - sum);
+    return paint_order_list;
+}
+
+WillChange ComputedProperties::will_change() const
+{
+    auto const& value = property(PropertyID::WillChange);
+    if (value.to_keyword() == Keyword::Auto)
+        return WillChange::make_auto();
+
+    auto to_will_change_entry = [](StyleValue const& value) -> Optional<WillChange::WillChangeEntry> {
+        if (value.is_keyword()) {
+            switch (value.as_keyword().keyword()) {
+            case Keyword::Contents:
+                return WillChange::Type::Contents;
+            case Keyword::ScrollPosition:
+                return WillChange::Type::ScrollPosition;
+            default:
+                VERIFY_NOT_REACHED();
+            }
+        }
+        VERIFY(value.is_custom_ident());
+        auto custom_ident = value.as_custom_ident().custom_ident();
+        auto property_id = property_id_from_string(custom_ident);
+        if (!property_id.has_value())
+            return {};
+
+        return property_id.release_value();
+    };
+
+    if (value.is_value_list()) {
+        auto const& value_list = value.as_value_list();
+        Vector<WillChange::WillChangeEntry> will_change_entries;
+        for (auto const& style_value : value_list.values()) {
+            if (auto entry = to_will_change_entry(*style_value); entry.has_value())
+                will_change_entries.append(*entry);
+        }
+        return WillChange(move(will_change_entries));
+    }
+
+    auto will_change_entry = to_will_change_entry(value);
+    if (will_change_entry.has_value())
+        return WillChange({ *will_change_entry });
+    return WillChange::make_auto();
+}
+
+CSSPixels ComputedProperties::font_size() const
+{
+    // FIXME: Respect animated font-size here once we store it in computed form
+    return property(PropertyID::FontSize, WithAnimationsApplied::No).as_length().length().absolute_length_to_px();
 }
 
 }

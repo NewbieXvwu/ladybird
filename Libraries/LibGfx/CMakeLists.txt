@@ -21,7 +21,7 @@ set(SOURCES
     Font/WOFF/Loader.cpp
     Font/WOFF2/Loader.cpp
     GradientPainting.cpp
-    ImageFormats/AnimationWriter.cpp
+    ImageFormats/AVIFLoader.cpp
     ImageFormats/BMPLoader.cpp
     ImageFormats/BMPWriter.cpp
     ImageFormats/BooleanDecoder.cpp
@@ -40,7 +40,6 @@ set(SOURCES
     ImageFormats/WebPSharedLossless.cpp
     ImageFormats/WebPWriter.cpp
     ImageFormats/WebPWriterLossless.cpp
-    ImageFormats/AVIFLoader.cpp
     ImmutableBitmap.cpp
     SkiaUtils.cpp
     PaintingSurface.cpp
@@ -169,6 +168,7 @@ endif()
 
 if (APPLE)
     target_link_libraries(LibCore PUBLIC "-framework Metal")
+    target_link_libraries(LibCore PUBLIC "-framework Accelerate")
 endif()
 
 if (HAS_VULKAN)

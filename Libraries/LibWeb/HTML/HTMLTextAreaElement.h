@@ -12,6 +12,7 @@
 #include <LibCore/Timer.h>
 #include <LibWeb/ARIA/Roles.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/AutocompleteElement.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
@@ -19,7 +20,7 @@
 
 namespace Web::HTML {
 
-class HTMLTextAreaElement final
+class WEB_API HTMLTextAreaElement final
     : public HTMLElement
     , public FormAssociatedTextControlElement
     , public AutocompleteElement {
@@ -59,7 +60,7 @@ public:
     virtual bool is_resettable() const override { return true; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-autocapitalize
-    virtual bool is_auto_capitalize_inheriting() const override { return true; }
+    virtual bool is_autocapitalize_and_autocorrect_inheriting() const override { return true; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-label
     virtual bool is_labelable() const override { return true; }
@@ -70,25 +71,25 @@ public:
     virtual WebIDL::ExceptionOr<void> cloned(Node&, bool) const override;
 
     virtual void form_associated_element_was_inserted() override;
-    virtual void form_associated_element_attribute_changed(FlyString const&, Optional<String> const&, Optional<FlyString> const&) override;
+    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
     virtual void children_changed(ChildrenChangedMetadata const*) override;
 
     // https://www.w3.org/TR/html-aria/#el-textarea
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::textbox; }
 
-    String default_value() const;
-    void set_default_value(String const&);
+    Utf16String default_value() const;
+    void set_default_value(Utf16String const&);
 
-    String value() const override;
-    void set_value(String const&);
+    Utf16String value() const override;
+    void set_value(Utf16String const&);
 
     // https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element:concept-fe-api-value-3
-    String api_value() const;
+    Utf16String api_value() const;
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-textarea/input-relevant-value
-    virtual String relevant_value() override { return api_value(); }
-    virtual WebIDL::ExceptionOr<void> set_relevant_value(String const& value) override;
+    virtual Utf16String relevant_value() override { return api_value(); }
+    virtual WebIDL::ExceptionOr<void> set_relevant_value(Utf16String const& value) override;
 
     virtual void set_dirty_value_flag(bool flag) override { m_dirty_value = flag; }
 
@@ -96,10 +97,6 @@ public:
     void set_user_validity(bool flag) { m_user_validity = flag; }
 
     u32 text_length() const;
-
-    bool will_validate();
-    bool check_validity();
-    bool report_validity();
 
     WebIDL::Long max_length() const;
     WebIDL::ExceptionOr<void> set_max_length(WebIDL::Long);
@@ -134,20 +131,22 @@ public:
     // https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element%3Asuffering-from-being-missing
     virtual bool suffering_from_being_missing() const override;
 
+    // https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element:concept-fe-mutable
+    virtual bool is_mutable() const override;
+
 private:
     HTMLTextAreaElement(DOM::Document&, DOM::QualifiedName);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
-    void set_raw_value(String);
+    void set_raw_value(Utf16String);
 
     // ^DOM::Element
     virtual i32 default_tab_index_value() const override;
 
     void create_shadow_tree_if_needed();
 
-    void handle_readonly_attribute(Optional<String> const& value);
     void handle_maxlength_attribute();
 
     void queue_firing_input_event();
@@ -169,10 +168,10 @@ private:
     bool m_user_validity { false };
 
     // https://html.spec.whatwg.org/multipage/form-elements.html#concept-textarea-raw-value
-    String m_raw_value;
+    Utf16String m_raw_value;
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-fe-api-value
-    mutable Optional<String> m_api_value;
+    mutable Optional<Utf16String> m_api_value;
 };
 
 }

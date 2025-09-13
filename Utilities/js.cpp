@@ -199,8 +199,10 @@ static ErrorOr<bool> parse_and_run(JS::Realm& realm, StringView source, StringVi
     if (!s_as_module) {
         auto script_or_error = JS::Script::parse(source, realm, source_name);
         if (script_or_error.is_error()) {
+            auto utf16_source = Utf16String::from_utf8(source);
+
             auto error = script_or_error.error()[0];
-            auto hint = error.source_location_hint(source);
+            auto hint = error.source_location_hint(utf16_source);
             if (!hint.is_empty())
                 outln("{}", hint);
 
@@ -213,8 +215,10 @@ static ErrorOr<bool> parse_and_run(JS::Realm& realm, StringView source, StringVi
     } else {
         auto module_or_error = JS::SourceTextModule::parse(source, realm, source_name);
         if (module_or_error.is_error()) {
+            auto utf16_source = Utf16String::from_utf8(source);
+
             auto error = module_or_error.error()[0];
-            auto hint = error.source_location_hint(source);
+            auto hint = error.source_location_hint(utf16_source);
             if (!hint.is_empty())
                 outln("{}", hint);
 
@@ -266,9 +270,9 @@ static JS::ThrowCompletionOr<JS::Value> load_ini_impl(JS::VM& vm)
         auto group_object = JS::Object::create(realm, realm.intrinsics().object_prototype());
         for (auto const& key : config_file->keys(group)) {
             auto entry = config_file->read_entry(group, key);
-            group_object->define_direct_property(MUST(String::from_byte_string(key)), JS::PrimitiveString::create(vm, move(entry)), JS::Attribute::Enumerable | JS::Attribute::Configurable | JS::Attribute::Writable);
+            group_object->define_direct_property(Utf16String::from_utf8(key), JS::PrimitiveString::create(vm, move(entry)), JS::Attribute::Enumerable | JS::Attribute::Configurable | JS::Attribute::Writable);
         }
-        object->define_direct_property(MUST(String::from_byte_string(group)), group_object, JS::Attribute::Enumerable | JS::Attribute::Configurable | JS::Attribute::Writable);
+        object->define_direct_property(Utf16String::from_utf8(group), group_object, JS::Attribute::Enumerable | JS::Attribute::Configurable | JS::Attribute::Writable);
     }
     return object;
 }
@@ -295,18 +299,18 @@ void ReplObject::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
 
-    define_direct_property("global"_fly_string, this, JS::Attribute::Enumerable);
+    define_direct_property("global"_utf16_fly_string, this, JS::Attribute::Enumerable);
     u8 attr = JS::Attribute::Configurable | JS::Attribute::Writable | JS::Attribute::Enumerable;
-    define_native_function(realm, "exit"_fly_string, exit_interpreter, 0, attr);
-    define_native_function(realm, "help"_fly_string, repl_help, 0, attr);
-    define_native_function(realm, "save"_fly_string, save_to_file, 1, attr);
-    define_native_function(realm, "loadINI"_fly_string, load_ini, 1, attr);
-    define_native_function(realm, "loadJSON"_fly_string, load_json, 1, attr);
-    define_native_function(realm, "print"_fly_string, print, 1, attr);
+    define_native_function(realm, "exit"_utf16_fly_string, exit_interpreter, 0, attr);
+    define_native_function(realm, "help"_utf16_fly_string, repl_help, 0, attr);
+    define_native_function(realm, "save"_utf16_fly_string, save_to_file, 1, attr);
+    define_native_function(realm, "loadINI"_utf16_fly_string, load_ini, 1, attr);
+    define_native_function(realm, "loadJSON"_utf16_fly_string, load_json, 1, attr);
+    define_native_function(realm, "print"_utf16_fly_string, print, 1, attr);
 
     define_native_accessor(
         realm,
-        "_"_fly_string,
+        "_"_utf16_fly_string,
         [](JS::VM&) {
             return g_last_value.value();
         },
@@ -380,11 +384,11 @@ void ScriptObject::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
 
-    define_direct_property("global"_fly_string, this, JS::Attribute::Enumerable);
+    define_direct_property("global"_utf16_fly_string, this, JS::Attribute::Enumerable);
     u8 attr = JS::Attribute::Configurable | JS::Attribute::Writable | JS::Attribute::Enumerable;
-    define_native_function(realm, "loadINI"_fly_string, load_ini, 1, attr);
-    define_native_function(realm, "loadJSON"_fly_string, load_json, 1, attr);
-    define_native_function(realm, "print"_fly_string, print, 1, attr);
+    define_native_function(realm, "loadINI"_utf16_fly_string, load_ini, 1, attr);
+    define_native_function(realm, "loadJSON"_utf16_fly_string, load_json, 1, attr);
+    define_native_function(realm, "print"_utf16_fly_string, print, 1, attr);
 }
 
 JS_DEFINE_NATIVE_FUNCTION(ScriptObject::load_ini)
@@ -619,7 +623,7 @@ static ErrorOr<int> run_repl(bool gc_on_every_allocation, bool syntax_highlight)
         JS::Lexer lexer(line);
         bool indenters_starting_line = true;
         for (JS::Token token = lexer.next(); token.type() != JS::TokenType::Eof; token = lexer.next()) {
-            auto length = Utf8View { token.value() }.length();
+            auto length = token.value().length_in_code_units();
             auto start = token.offset();
             auto end = start + length;
             if (indenters_starting_line) {
@@ -680,8 +684,8 @@ static ErrorOr<int> run_repl(bool gc_on_every_allocation, bool syntax_highlight)
             CompleteProperty,
         } mode { Initial };
 
-        FlyString variable_name;
-        FlyString property_name;
+        Utf16FlyString variable_name;
+        Utf16FlyString property_name;
 
         // we're only going to complete either
         //    - <N>
@@ -727,11 +731,11 @@ static ErrorOr<int> run_repl(bool gc_on_every_allocation, bool syntax_highlight)
             }
         }
 
-        bool last_token_has_trivia = js_token.trivia().length() > 0;
+        bool last_token_has_trivia = !js_token.trivia().is_empty();
 
         if (mode == CompleteNullProperty) {
             mode = CompleteProperty;
-            property_name = ""_fly_string;
+            property_name = Utf16FlyString {};
             last_token_has_trivia = false; // <name> <dot> [tab] is sensible to complete.
         }
 
@@ -740,16 +744,18 @@ static ErrorOr<int> run_repl(bool gc_on_every_allocation, bool syntax_highlight)
 
         Vector<Line::CompletionSuggestion> results;
 
-        Function<void(JS::Shape const&, StringView)> list_all_properties = [&results, &list_all_properties](JS::Shape const& shape, auto property_pattern) {
+        Function<void(JS::Shape const&, Utf16FlyString const&)> list_all_properties = [&results, &list_all_properties](JS::Shape const& shape, Utf16FlyString const& property_pattern) {
             for (auto const& descriptor : shape.property_table()) {
                 if (!descriptor.key.is_string())
                     continue;
-                auto key = descriptor.key.as_string();
-                if (key.bytes_as_string_view().starts_with(property_pattern)) {
-                    Line::CompletionSuggestion completion { key, Line::CompletionSuggestion::ForSearch };
+
+                auto key = descriptor.key.as_string().to_utf16_string();
+
+                if (key.starts_with(property_pattern.view())) {
+                    Line::CompletionSuggestion completion { key.to_utf8_but_should_be_ported_to_utf16(), Line::CompletionSuggestion::ForSearch };
                     if (!results.contains_slow(completion)) { // hide duplicates
-                        results.append(key.to_string().to_byte_string());
-                        results.last().invariant_offset = property_pattern.length();
+                        results.append(key.to_byte_string());
+                        results.last().invariant_offset = property_pattern.length_in_code_units();
                     }
                 }
             }
@@ -782,9 +788,9 @@ static ErrorOr<int> run_repl(bool gc_on_every_allocation, bool syntax_highlight)
             list_all_properties(variable.shape(), variable_name);
 
             for (auto const& name : global_environment.declarative_record().bindings()) {
-                if (name.bytes_as_string_view().starts_with(variable_name)) {
-                    results.empend(name);
-                    results.last().invariant_offset = variable_name.bytes().size();
+                if (name.view().starts_with(variable_name.view())) {
+                    results.empend(MUST(name.view().to_byte_string()));
+                    results.last().invariant_offset = variable_name.length_in_code_units();
                 }
             }
 

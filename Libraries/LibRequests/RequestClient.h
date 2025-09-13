@@ -32,12 +32,14 @@ public:
 
     RefPtr<Request> start_request(ByteString const& method, URL::URL const&, HTTP::HeaderMap const& request_headers = {}, ReadonlyBytes request_body = {}, Core::ProxyData const& = {});
 
-    RefPtr<WebSocket> websocket_connect(const URL::URL&, ByteString const& origin = {}, Vector<ByteString> const& protocols = {}, Vector<ByteString> const& extensions = {}, HTTP::HeaderMap const& request_headers = {});
+    RefPtr<WebSocket> websocket_connect(URL::URL const&, ByteString const& origin = {}, Vector<ByteString> const& protocols = {}, Vector<ByteString> const& extensions = {}, HTTP::HeaderMap const& request_headers = {});
 
     void ensure_connection(URL::URL const&, ::RequestServer::CacheLevel);
 
     bool stop_request(Badge<Request>, Request&);
     bool set_certificate(Badge<Request>, Request&, ByteString, ByteString);
+
+    Function<void()> on_request_server_died;
 
 private:
     virtual void die() override;

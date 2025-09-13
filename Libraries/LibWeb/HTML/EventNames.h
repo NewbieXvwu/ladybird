@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/FlyString.h>
+#include <LibWeb/Export.h>
 
 namespace Web::HTML::EventNames {
 
@@ -18,6 +19,7 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(animationend)             \
     __ENUMERATE_HTML_EVENT(animationiteration)       \
     __ENUMERATE_HTML_EVENT(animationstart)           \
+    __ENUMERATE_HTML_EVENT(audioprocess)             \
     __ENUMERATE_HTML_EVENT(beforeinput)              \
     __ENUMERATE_HTML_EVENT(beforematch)              \
     __ENUMERATE_HTML_EVENT(beforeprint)              \
@@ -42,6 +44,7 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(cuechange)                \
     __ENUMERATE_HTML_EVENT(currententrychange)       \
     __ENUMERATE_HTML_EVENT(cut)                      \
+    __ENUMERATE_HTML_EVENT(disconnect)               \
     __ENUMERATE_HTML_EVENT(dispose)                  \
     __ENUMERATE_HTML_EVENT(DOMContentLoaded)         \
     __ENUMERATE_HTML_EVENT(drag)                     \
@@ -132,7 +135,7 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(webkitAnimationStart)     \
     __ENUMERATE_HTML_EVENT(webkitTransitionEnd)
 
-#define __ENUMERATE_HTML_EVENT(name) extern FlyString name;
+#define __ENUMERATE_HTML_EVENT(name) extern WEB_API FlyString name;
 ENUMERATE_HTML_EVENTS
 #undef __ENUMERATE_HTML_EVENT
 

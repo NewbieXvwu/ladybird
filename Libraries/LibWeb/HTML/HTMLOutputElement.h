@@ -31,11 +31,11 @@ public:
         return output;
     }
 
-    String default_value() const;
-    void set_default_value(String const&);
+    Utf16String default_value() const;
+    void set_default_value(Utf16String const&);
 
-    String value() const override;
-    void set_value(String const&);
+    Utf16String value() const override;
+    void set_value(Utf16String const&);
 
     // ^FormAssociatedElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-listed
@@ -45,7 +45,7 @@ public:
     virtual bool is_resettable() const override { return true; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-autocapitalize
-    virtual bool is_auto_capitalize_inheriting() const override { return true; }
+    virtual bool is_autocapitalize_and_autocorrect_inheriting() const override { return true; }
 
     // ^HTMLElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-label
@@ -57,19 +57,17 @@ public:
     // https://www.w3.org/TR/html-aria/#el-output
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::status; }
 
-    static bool will_validate();
-
 private:
     HTMLOutputElement(DOM::Document&, DOM::QualifiedName);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor& visitor) override;
 
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const&) override;
+    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
     GC::Ptr<DOM::DOMTokenList> m_html_for;
 
-    Optional<String> m_default_value_override {};
+    Optional<Utf16String> m_default_value_override;
 };
 
 }

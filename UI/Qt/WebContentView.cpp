@@ -47,7 +47,7 @@ namespace Ladybird {
 
 bool is_using_dark_system_theme(QWidget&);
 
-WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient> parent_client, size_t page_index)
+WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient> parent_client, size_t page_index, WebContentViewInitialState initial_state)
     : QWidget(window)
 {
     m_client_state.client = parent_client;
@@ -60,6 +60,7 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
     setFocusPolicy(Qt::FocusPolicy::StrongFocus);
 
     m_device_pixel_ratio = devicePixelRatio();
+    m_maximum_frames_per_second = initial_state.maximum_frames_per_second;
 
     QObject::connect(qGuiApp, &QGuiApplication::screenRemoved, [this](QScreen*) {
         update_screen_rects();
@@ -164,12 +165,6 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
         }
 
         m_select_dropdown->exec(map_point_to_global_position(content_position));
-    };
-
-    on_set_browser_zoom = [this](double factor) {
-        set_zoom(factor);
-        auto* window = static_cast<BrowserWindow*>(this->window());
-        window->update_displayed_zoom_level();
     };
 }
 
@@ -401,6 +396,14 @@ QVariant WebContentView::inputMethodQuery(Qt::InputMethodQuery) const
     return QVariant();
 }
 
+void WebContentView::leaveEvent(QEvent* event)
+{
+    static QMouseEvent mouse_event { QEvent::Type::Leave, {}, {}, Qt::MouseButton::NoButton, Qt::MouseButton::NoButton, Qt::KeyboardModifier::NoModifier };
+    enqueue_native_event(Web::MouseEvent::Type::MouseLeave, mouse_event);
+
+    QWidget::leaveEvent(event);
+}
+
 void WebContentView::mouseMoveEvent(QMouseEvent* event)
 {
     if (!m_tooltip_override) {
@@ -538,6 +541,12 @@ void WebContentView::set_device_pixel_ratio(double device_pixel_ratio)
     handle_resize();
 }
 
+void WebContentView::set_maximum_frames_per_second(double maximum_frames_per_second)
+{
+    m_maximum_frames_per_second = maximum_frames_per_second;
+    client().async_set_maximum_frames_per_second(m_client_state.page_index, m_maximum_frames_per_second);
+}
+
 void WebContentView::update_viewport_size()
 {
     auto scaled_width = int(width() * m_device_pixel_ratio);
@@ -549,7 +558,7 @@ void WebContentView::update_viewport_size()
 
 void WebContentView::update_zoom()
 {
-    client().async_set_device_pixels_per_css_pixel(m_client_state.page_index, m_device_pixel_ratio * m_zoom_level);
+    ViewImplementation::update_zoom();
     update_viewport_size();
 }
 
@@ -670,6 +679,9 @@ void WebContentView::update_cursor(Gfx::Cursor cursor)
             break;
         case Gfx::StandardCursor::Help:
             setCursor(Qt::WhatsThisCursor);
+            break;
+        case Gfx::StandardCursor::OpenHand:
+            setCursor(Qt::OpenHandCursor);
             break;
         case Gfx::StandardCursor::Drag:
             setCursor(Qt::ClosedHandCursor);

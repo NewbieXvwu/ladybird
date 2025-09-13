@@ -96,7 +96,7 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> WindowProxy::internal_ge
                 return Optional<JS::PropertyDescriptor> {};
 
             // 2. Throw a "SecurityError" DOMException.
-            return throw_completion(WebIDL::SecurityError::create(m_window->realm(), MUST(String::formatted("Can't access property '{}' on cross-origin object", property_key))));
+            return throw_completion(WebIDL::SecurityError::create(m_window->realm(), Utf16String::formatted("Can't access property '{}' on cross-origin object", property_key)));
         }
 
         // 6. Return PropertyDescriptor { [[Value]]: value, [[Writable]]: false, [[Enumerable]]: true, [[Configurable]]: true }.
@@ -117,7 +117,7 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> WindowProxy::internal_ge
 
     // 6. If property is undefined and P is in W's document-tree child navigable target name property set, then:
     auto navigable_property_set = m_window->document_tree_child_navigable_target_name_property_set();
-    auto property_key_string = property_key.to_string();
+    auto property_key_string = property_key.to_string().to_utf8_but_should_be_ported_to_utf16();
 
     if (auto navigable = navigable_property_set.get(property_key_string); navigable.has_value()) {
         // 1. Let value be the active WindowProxy of the named object of W with the name P.
@@ -149,7 +149,7 @@ JS::ThrowCompletionOr<bool> WindowProxy::internal_define_own_property(JS::Proper
     }
 
     // 3. Throw a "SecurityError" DOMException.
-    return throw_completion(WebIDL::SecurityError::create(m_window->realm(), MUST(String::formatted("Can't define property '{}' on cross-origin object", property_key))));
+    return throw_completion(WebIDL::SecurityError::create(m_window->realm(), Utf16String::formatted("Can't define property '{}' on cross-origin object", property_key)));
 }
 
 // 7.4.7 [[Get]] ( P, Receiver ), https://html.spec.whatwg.org/multipage/nav-history-apis.html#windowproxy-get
@@ -224,7 +224,7 @@ JS::ThrowCompletionOr<bool> WindowProxy::internal_delete(JS::PropertyKey const& 
     }
 
     // 3. Throw a "SecurityError" DOMException.
-    return throw_completion(WebIDL::SecurityError::create(m_window->realm(), MUST(String::formatted("Can't delete property '{}' on cross-origin object", property_key))));
+    return throw_completion(WebIDL::SecurityError::create(m_window->realm(), Utf16String::formatted("Can't delete property '{}' on cross-origin object", property_key)));
 }
 
 // 7.4.10 [[OwnPropertyKeys]] ( ), https://html.spec.whatwg.org/multipage/window-object.html#windowproxy-ownpropertykeys

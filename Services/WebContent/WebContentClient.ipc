@@ -34,7 +34,7 @@ endpoint WebContentClient
     did_request_refresh(u64 page_id) =|
     did_paint(u64 page_id, Gfx::IntRect content_rect, i32 bitmap_id) =|
     did_request_cursor_change(u64 page_id, Gfx::Cursor cursor) =|
-    did_change_title(u64 page_id, ByteString title) =|
+    did_change_title(u64 page_id, Utf16String title) =|
     did_change_url(u64 page_id, URL::URL url) =|
     did_request_tooltip_override(u64 page_id, Gfx::IntPoint position, ByteString title) =|
     did_stop_tooltip_override(u64 page_id) =|
@@ -72,7 +72,8 @@ endpoint WebContentClient
     did_get_internal_page_info(u64 page_id, WebView::PageInfoType type, String info) =|
 
     did_change_favicon(u64 page_id, Gfx::ShareableBitmap favicon) =|
-    did_request_all_cookies(URL::URL url) => (Vector<Web::Cookie::Cookie> cookies)
+    did_request_all_cookies_webdriver(URL::URL url) => (Vector<Web::Cookie::Cookie> cookies)
+    did_request_all_cookies_cookiestore(URL::URL url) => (Vector<Web::Cookie::Cookie> cookies)
     did_request_named_cookie(URL::URL url, String name) => (Optional<Web::Cookie::Cookie> cookie)
     did_request_cookie(URL::URL url, Web::Cookie::Source source) => (String cookie)
     did_set_cookie(URL::URL url, Web::Cookie::ParsedCookie cookie, Web::Cookie::Source source) => ()
@@ -114,6 +115,7 @@ endpoint WebContentClient
 
     did_finish_test(u64 page_id, String text) =|
     did_set_test_timeout(u64 page_id, double milliseconds) =|
+    did_receive_reference_test_metadata(u64 page_id, JsonValue result) =|
 
     did_set_browser_zoom(u64 page_id, double factor) =|
 

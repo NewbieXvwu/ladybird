@@ -80,7 +80,7 @@ WebIDL::ExceptionOr<void> HTMLButtonElement::set_type_for_bindings(String const&
     return set_attribute(HTML::AttributeNames::type, type);
 }
 
-void HTMLButtonElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLButtonElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const& value, Optional<FlyString> const& namespace_)
 {
     PopoverInvokerElement::associated_attribute_changed(name, value, namespace_);
 }
@@ -117,10 +117,10 @@ bool HTMLButtonElement::is_submit_button() const
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#the-button-element:concept-fe-value
-String HTMLButtonElement::value() const
+Utf16String HTMLButtonElement::value() const
 {
     // The element's value is the value of the element's value attribute, if there is one; otherwise the empty string.
-    return attribute(AttributeNames::value).value_or(String {});
+    return Utf16String::from_utf8(attribute(AttributeNames::value).value_or(String {}));
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#the-button-element:concept-fe-optional-value
@@ -271,13 +271,6 @@ void HTMLButtonElement::activation_behavior(DOM::Event const& event)
     // 6. Otherwise, run the popover target attribute activation behavior given element and event's target.
     else if (event.target() && event.target()->is_dom_node())
         PopoverInvokerElement::popover_target_activation_behaviour(*this, as<DOM::Node>(*event.target()));
-}
-
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-willvalidate
-bool HTMLButtonElement::will_validate()
-{
-    // The willValidate attribute's getter must return true, if this element is a candidate for constraint validation
-    return is_candidate_for_constraint_validation();
 }
 
 bool HTMLButtonElement::is_focusable() const

@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021, Tobias Christiansen <tobyase@serenityos.org>
- * Copyright (c) 2021-2024, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2022-2023, MacDue <macdue@dueutil.tech>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -9,11 +9,11 @@
 
 #pragma once
 
-#include <LibWeb/CSS/StyleValues/CSSUnitValue.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
 
-class NumberStyleValue final : public CSSUnitValue {
+class NumberStyleValue final : public StyleValue {
 public:
     static ValueComparingNonnullRefPtr<NumberStyleValue const> create(double value)
     {
@@ -21,12 +21,12 @@ public:
     }
 
     double number() const { return m_value; }
-    virtual double value() const override { return m_value; }
-    virtual StringView unit() const override { return "number"sv; }
 
     virtual String to_string(SerializationMode) const override;
+    virtual Vector<Parser::ComponentValue> tokenize() const override;
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, String const& associated_property) const override;
 
-    bool equals(CSSStyleValue const& other) const override
+    bool equals(StyleValue const& other) const override
     {
         if (type() != other.type())
             return false;
@@ -36,7 +36,7 @@ public:
 
 private:
     explicit NumberStyleValue(double value)
-        : CSSUnitValue(Type::Number)
+        : StyleValue(Type::Number)
         , m_value(value)
     {
     }

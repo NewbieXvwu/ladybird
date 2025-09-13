@@ -90,7 +90,7 @@ WebIDL::ExceptionOr<GC::Ref<XMLDocument>> DOMImplementation::create_document(Opt
 }
 
 // https://dom.spec.whatwg.org/#dom-domimplementation-createhtmldocument
-GC::Ref<Document> DOMImplementation::create_html_document(Optional<String> const& title) const
+GC::Ref<Document> DOMImplementation::create_html_document(Optional<Utf16String> const& title) const
 {
     // 1. Let doc be a new document that is an HTML document.
     auto html_document = HTML::HTMLDocument::create(realm());
@@ -142,7 +142,7 @@ WebIDL::ExceptionOr<GC::Ref<DocumentType>> DOMImplementation::create_document_ty
 
     // 1. If name is not a valid doctype name, then throw an "InvalidCharacterError" DOMException.
     if (!is_valid_doctype_name(name))
-        return WebIDL::InvalidCharacterError::create(realm(), "Invalid doctype name"_string);
+        return WebIDL::InvalidCharacterError::create(realm(), "Invalid doctype name"_utf16);
 
     // 2. Return a new doctype, with name as its name, publicId as its public ID, and systemId as its system ID, and with its node document set to the associated document of this.
     auto document_type = DocumentType::create(document());

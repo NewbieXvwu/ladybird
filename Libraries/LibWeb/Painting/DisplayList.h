@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2024-2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -15,22 +15,24 @@
 #include <LibGfx/ImmutableBitmap.h>
 #include <LibGfx/PaintStyle.h>
 #include <LibWeb/CSS/Enums.h>
-#include <LibWeb/Painting/Command.h>
+#include <LibWeb/Forward.h>
+#include <LibWeb/Painting/ClipFrame.h>
+#include <LibWeb/Painting/DisplayListCommand.h>
 #include <LibWeb/Painting/ScrollState.h>
 
 namespace Web::Painting {
-
-class DisplayList;
 
 class DisplayListPlayer {
 public:
     virtual ~DisplayListPlayer() = default;
 
-    void execute(DisplayList&, ScrollStateSnapshot const&, RefPtr<Gfx::PaintingSurface>);
+    void execute(DisplayList&, ScrollStateSnapshotByDisplayList&&, RefPtr<Gfx::PaintingSurface>);
 
 protected:
     Gfx::PaintingSurface& surface() const { return m_surfaces.last(); }
     void execute_impl(DisplayList&, ScrollStateSnapshot const& scroll_state, RefPtr<Gfx::PaintingSurface>);
+
+    ScrollStateSnapshotByDisplayList m_scroll_state_snapshots_by_display_list;
 
 private:
     virtual void flush() = 0;
@@ -53,16 +55,13 @@ private:
     virtual void paint_inner_box_shadow(PaintInnerBoxShadow const&) = 0;
     virtual void paint_text_shadow(PaintTextShadow const&) = 0;
     virtual void fill_rect_with_rounded_corners(FillRectWithRoundedCorners const&) = 0;
-    virtual void fill_path_using_color(FillPathUsingColor const&) = 0;
-    virtual void fill_path_using_paint_style(FillPathUsingPaintStyle const&) = 0;
-    virtual void stroke_path_using_color(StrokePathUsingColor const&) = 0;
-    virtual void stroke_path_using_paint_style(StrokePathUsingPaintStyle const&) = 0;
+    virtual void fill_path(FillPath const&) = 0;
+    virtual void stroke_path(StrokePath const&) = 0;
     virtual void draw_ellipse(DrawEllipse const&) = 0;
     virtual void fill_ellipse(FillEllipse const&) = 0;
     virtual void draw_line(DrawLine const&) = 0;
     virtual void apply_backdrop_filter(ApplyBackdropFilter const&) = 0;
     virtual void draw_rect(DrawRect const&) = 0;
-    virtual void draw_triangle_wave(DrawTriangleWave const&) = 0;
     virtual void add_rounded_rect_clip(AddRoundedRectClip const&) = 0;
     virtual void add_mask(AddMask const&) = 0;
     virtual void paint_nested_display_list(PaintNestedDisplayList const&) = 0;
@@ -74,32 +73,39 @@ private:
     virtual void apply_mask_bitmap(ApplyMaskBitmap const&) = 0;
     virtual bool would_be_fully_clipped_by_painter(Gfx::IntRect) const = 0;
 
+    void apply_clip_frame(ClipFrame const&, ScrollStateSnapshot const&, DevicePixelConverter const&);
+    void remove_clip_frame(ClipFrame const&);
+
     Vector<NonnullRefPtr<Gfx::PaintingSurface>, 1> m_surfaces;
 };
 
 class DisplayList : public AtomicRefCounted<DisplayList> {
 public:
-    static NonnullRefPtr<DisplayList> create()
+    static NonnullRefPtr<DisplayList> create(double device_pixels_per_css_pixel)
     {
-        return adopt_ref(*new DisplayList());
+        return adopt_ref(*new DisplayList(device_pixels_per_css_pixel));
     }
 
-    void append(Command&& command, Optional<i32> scroll_frame_id);
+    void append(DisplayListCommand&& command, Optional<i32> scroll_frame_id, RefPtr<ClipFrame const>);
 
-    struct CommandListItem {
+    struct DisplayListCommandWithScrollAndClip {
         Optional<i32> scroll_frame_id;
-        Command command;
+        RefPtr<ClipFrame const> clip_frame;
+        DisplayListCommand command;
     };
 
-    AK::SegmentedVector<CommandListItem, 512> const& commands() const { return m_commands; }
-
-    void set_device_pixels_per_css_pixel(double device_pixels_per_css_pixel) { m_device_pixels_per_css_pixel = device_pixels_per_css_pixel; }
+    AK::SegmentedVector<DisplayListCommandWithScrollAndClip, 512> const& commands() const { return m_commands; }
     double device_pixels_per_css_pixel() const { return m_device_pixels_per_css_pixel; }
 
-private:
-    DisplayList() = default;
+    String dump() const;
 
-    AK::SegmentedVector<CommandListItem, 512> m_commands;
+private:
+    DisplayList(double device_pixels_per_css_pixel)
+        : m_device_pixels_per_css_pixel(device_pixels_per_css_pixel)
+    {
+    }
+
+    AK::SegmentedVector<DisplayListCommandWithScrollAndClip, 512> m_commands;
     double m_device_pixels_per_css_pixel;
 };
 

@@ -13,6 +13,7 @@
 #include <AK/IDAllocator.h>
 #include <AK/Variant.h>
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Fetch/Request.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/ImageBitmap.h>
@@ -27,7 +28,7 @@ namespace Web::HTML {
 using TimerHandler = Variant<GC::Ref<WebIDL::CallbackType>, String>;
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#windoworworkerglobalscope
-class WindowOrWorkerGlobalScopeMixin {
+class WEB_API WindowOrWorkerGlobalScopeMixin {
 public:
     virtual ~WindowOrWorkerGlobalScopeMixin();
 
@@ -103,6 +104,8 @@ public:
 
     [[nodiscard]] GC::Ref<ServiceWorker::CacheStorage> caches();
 
+    [[nodiscard]] GC::Ref<TrustedTypes::TrustedTypePolicyFactory> trusted_types();
+
 protected:
     void initialize(JS::Realm&);
     void visit_edges(JS::Cell::Visitor&);
@@ -150,6 +153,8 @@ private:
     GC::Ptr<Crypto::Crypto> m_crypto;
 
     GC::Ptr<ServiceWorker::CacheStorage> m_cache_storage;
+
+    GC::Ptr<TrustedTypes::TrustedTypePolicyFactory> m_trusted_type_policy_factory;
 
     bool m_error_reporting_mode { false };
 

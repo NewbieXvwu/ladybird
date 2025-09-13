@@ -22,6 +22,7 @@
 #include <LibWeb/HTML/ErrorEvent.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/EventSource.h>
+#include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/ImageBitmap.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -42,7 +43,9 @@
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Platform/ImageCodecPlugin.h>
 #include <LibWeb/ResourceTiming/PerformanceResourceTiming.h>
+#include <LibWeb/SVG/SVGImageElement.h>
 #include <LibWeb/ServiceWorker/CacheStorage.h>
+#include <LibWeb/TrustedTypes/TrustedTypePolicyFactory.h>
 #include <LibWeb/UserTiming/PerformanceMark.h>
 #include <LibWeb/UserTiming/PerformanceMeasure.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
@@ -82,6 +85,7 @@ void WindowOrWorkerGlobalScopeMixin::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_crypto);
     visitor.visit(m_cache_storage);
     visitor.visit(m_resource_timing_secondary_buffer);
+    visitor.visit(m_trusted_type_policy_factory);
 }
 
 void WindowOrWorkerGlobalScopeMixin::finalize()
@@ -122,7 +126,94 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap(Ima
     return create_image_bitmap_impl(image, sx, sy, sw, sh, options);
 }
 
-GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_impl(ImageBitmapSource& image, [[maybe_unused]] Optional<WebIDL::Long> sx, [[maybe_unused]] Optional<WebIDL::Long> sy, Optional<WebIDL::Long> sw, Optional<WebIDL::Long> sh, Optional<ImageBitmapOptions>& options) const
+// https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#cropped-to-the-source-rectangle-with-formatting
+static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> crop_to_the_source_rectangle_with_formatting(RefPtr<Gfx::Bitmap const> input, Optional<WebIDL::Long> sx, Optional<WebIDL::Long> sy, Optional<WebIDL::Long> sw, Optional<WebIDL::Long> sh, Optional<ImageBitmapOptions> const& options)
+{
+    // 1. Let input be the bitmap data being transformed.
+
+    // 2. If sx, sy, sw and sh are specified, let sourceRectangle be a rectangle whose corners are the four points
+    //    (sx, sy), (sx+sw, sy), (sx+sw, sy+sh), (sx, sy+sh). Otherwise, let sourceRectangle be a rectangle whose
+    //    corners are the four points (0, 0), (width of input, 0), (width of input, height of input), (0, height of input).
+    //    NOTE: If either sw or sh are negative, then the top-left corner of this rectangle will be to the left or above the (sx, sy) point.
+    Gfx::IntRect source_rectangle;
+    if (sx.has_value() && sy.has_value() && sw.has_value() && sh.has_value()) {
+        WebIDL::Long effective_sx = sx.value();
+        WebIDL::Long effective_sy = sy.value();
+        WebIDL::Long effective_sw = sw.value();
+        WebIDL::Long effective_sh = sh.value();
+        if (effective_sw < 0) {
+            effective_sw = -effective_sw;
+            effective_sx -= effective_sw;
+        }
+        if (effective_sh < 0) {
+            effective_sh = -effective_sh;
+            effective_sy -= effective_sh;
+        }
+        source_rectangle = { effective_sx, effective_sy, effective_sw, effective_sh };
+    } else {
+        source_rectangle = input->rect();
+    }
+
+    // 3. Let outputWidth be determined as follows:
+    int output_width;
+    // -> If the resizeWidth member of options is specified
+    if (options.has_value() && options->resize_width.has_value()) {
+        // the value of the resizeWidth member of options
+        output_width = options->resize_width.value();
+    }
+    // -> If the resizeWidth member of options is not specified, but the resizeHeight member is specified
+    else if (options.has_value() && options->resize_height.has_value()) {
+        // the width of sourceRectangle, times the value of the resizeHeight member of options, divided by the height
+        //  of sourceRectangle, rounded up to the nearest integer
+        output_width = ceil_div(source_rectangle.width() * options->resize_height.value(), source_rectangle.height());
+    }
+    // -> If neither resizeWidth nor resizeHeight are specified
+    else {
+        // the width of sourceRectangle
+        output_width = source_rectangle.width();
+    }
+
+    // 4. Let outputHeight be determined as follows:
+    int output_height;
+    // -> If the resizeHeight member of options is specified
+    if (options.has_value() && options->resize_height.has_value()) {
+        // the value of the resizeHeight member of options
+        output_height = options->resize_height.value();
+    }
+    // -> If the resizeHeight member of options is not specified, but the resizeWidth member is specified
+    else if (options.has_value() && options->resize_width.has_value()) {
+        // the height of sourceRectangle, times the value of the resizeWidth member of options, divided by the width
+        //  of sourceRectangle, rounded up to the nearest integer
+        output_height = ceil_div(source_rectangle.height() * options->resize_width.value(), source_rectangle.width());
+    }
+    // -> If neither resizeWidth nor resizeHeight are specified
+    else {
+        // the height of sourceRectangle
+        output_height = source_rectangle.height();
+    }
+
+    // 5. Place input on an infinite transparent black grid plane, positioned so that its top left corner is at the
+    //    origin of the plane, with the x-coordinate increasing to the right, and the y-coordinate increasing down,
+    //    and with each pixel in the input image data occupying a cell on the plane's grid.
+    // 6. Let output be the rectangle on the plane denoted by sourceRectangle.
+    auto output = TRY(input->cropped(source_rectangle, Gfx::Color::Transparent));
+
+    // FIXME: 7. Scale output to the size specified by outputWidth and outputHeight. The user agent should use the
+    //  value of the resizeQuality option to guide the choice of scaling algorithm.
+    (void)output_width;
+    (void)output_height;
+
+    // FIXME: 8. If the value of the imageOrientation member of options is "flipY", output must be flipped vertically,
+    //  disregarding any image orientation metadata of the source (such as EXIF metadata), if any. [EXIF]
+    // FIXME: 9. If image is an img element or a Blob object, let val be the value of the colorSpaceConversion member
+    //  of options, and then run these substeps:
+    // FIXME: 10. Let val be the value of premultiplyAlpha member of options, and then run these substeps:
+
+    // 11. Return output.
+    return output;
+}
+
+GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_impl(ImageBitmapSource& image, Optional<WebIDL::Long> sx, Optional<WebIDL::Long> sy, Optional<WebIDL::Long> sw, Optional<WebIDL::Long> sh, Optional<ImageBitmapOptions>& options) const
 {
     auto& realm = this_impl().realm();
 
@@ -133,9 +224,9 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
         return WebIDL::create_rejected_promise(realm, move(error));
     }
 
-    // FIXME:
     // 2. If either options's resizeWidth or options's resizeHeight is present and is 0, then return a promise rejected with an "InvalidStateError" DOMException.
-    (void)options;
+    if (options.has_value() && ((options->resize_width.has_value() && options->resize_width == 0u) || (options->resize_height.has_value() && options->resize_height == 0u)))
+        return WebIDL::create_rejected_promise_from_exception(realm, WebIDL::InvalidStateError::create(realm, "resizeWidth/resizeHeight must not be 0"_utf16));
 
     // 3. Check the usability of the image argument. If this throws an exception or returns bad, then return a promise rejected with an "InvalidStateError" DOMException.
     auto error_promise = image.visit(
@@ -148,7 +239,7 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
         [&](auto& canvas_image_source) -> Optional<GC::Ref<WebIDL::Promise>> {
             // Note: "Check the usability of the image argument" is only defined for CanvasImageSource
             if (auto usability = check_usability_of_image(canvas_image_source); usability.is_error() or usability.value() == CanvasImageSourceUsability::Bad) {
-                auto error = WebIDL::InvalidStateError::create(this_impl().realm(), "image argument is not usable"_string);
+                auto error = WebIDL::InvalidStateError::create(this_impl().realm(), "image argument is not usable"_utf16);
                 return WebIDL::create_rejected_promise_from_exception(realm, error);
             }
 
@@ -189,17 +280,27 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
                     auto& realm = relevant_realm(p->promise());
                     queue_global_task(Task::Source::BitmapTask, realm.global_object(), GC::create_function(realm.heap(), [&realm, p] {
                         TemporaryExecutionContext const context { realm, TemporaryExecutionContext::CallbacksEnabled::Yes };
-                        WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(realm, "Image does not contain a supported image format"_string));
+                        WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(realm, "Image does not contain a supported image format"_utf16));
                     }));
                 };
 
-                auto on_successful_decode = [image_bitmap = GC::Root(*image_bitmap), p = GC::Root(*p)](Web::Platform::DecodedImage& result) -> ErrorOr<void> {
+                auto on_successful_decode = [image_bitmap = GC::Root(*image_bitmap), p = GC::Root(*p), sx, sy, sw, sh, options = Optional(options)](Web::Platform::DecodedImage& result) -> ErrorOr<void> {
                     // 4. Set imageBitmap's bitmap data to imageData, cropped to the source rectangle with formatting.
                     // If this is an animated image, imageBitmap's bitmap data must only be taken from the default image
                     // of the animation (the one that the format defines is to be used when animation is not supported
                     // or is disabled), or, if there is no such image, the first frame of the animation.
-                    // FIXME: Actually crop the image to the source rectangle with formatting: https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#cropped-to-the-source-rectangle-with-formatting
-                    image_bitmap->set_bitmap(result.frames.take_first().bitmap);
+                    auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(result.frames.take_first().bitmap, sx, sy, sw, sh, options);
+                    // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
+                    // Spec issue: https://github.com/whatwg/html/issues/3323
+                    if (cropped_bitmap_or_error.is_error()) {
+                        auto& realm = relevant_realm(p->promise());
+                        queue_global_task(Task::Source::BitmapTask, realm.global_object(), GC::create_function(realm.heap(), [&realm, p] {
+                            TemporaryExecutionContext const context { realm, TemporaryExecutionContext::CallbacksEnabled::Yes };
+                            WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(realm, "Image size is invalid"_utf16));
+                        }));
+                        return {};
+                    }
+                    image_bitmap->set_bitmap(cropped_bitmap_or_error.release_value());
 
                     auto& realm = relevant_realm(p->promise());
 
@@ -222,13 +323,19 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
 
             // 2. If IsDetachedBuffer(buffer) is true, then return a promise rejected with an "InvalidStateError" DOMException.
             if (buffer->is_detached()) {
-                WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image data is detached"_string));
+                WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image data is detached"_utf16));
                 return;
             }
 
             // 3. Set imageBitmap's bitmap data to image's image data, cropped to the source rectangle with formatting.
-            // FIXME: Actually crop the image to the source rectangle with formatting: https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#cropped-to-the-source-rectangle-with-formatting
-            image_bitmap->set_bitmap(image_data->bitmap());
+            auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(image_data->bitmap(), sx, sy, sw, sh, options);
+            // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
+            // Spec issue: https://github.com/whatwg/html/issues/3323
+            if (cropped_bitmap_or_error.is_error()) {
+                WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image size is invalid"_utf16));
+                return;
+            }
+            image_bitmap->set_bitmap(cropped_bitmap_or_error.release_value());
 
             // 4. Queue a global task, using the bitmap task source, to resolve promise with imageBitmap.
             queue_global_task(Task::Source::BitmapTask, image_bitmap, GC::create_function(realm.heap(), [p, image_bitmap] {
@@ -239,26 +346,33 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
         },
         [&](CanvasImageSource const& image_source) {
             image_source.visit(
-                // -> img
-                [&](GC::Root<HTMLImageElement> const&) {
-                    dbgln("(STUBBED) createImageBitmap() for HTMLImageElement");
-                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for HTMLImageElement"sv);
-                    TemporaryExecutionContext const context { relevant_realm(p->promise()), TemporaryExecutionContext::CallbacksEnabled::Yes };
-                    WebIDL::reject_promise(realm, *p, error);
-                },
-                // -> SVG image
-                [&](GC::Root<SVG::SVGImageElement> const&) {
-                    dbgln("(STUBBED) createImageBitmap() for SVGImageElement");
-                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for SVGImageElement"sv);
-                    TemporaryExecutionContext const context { relevant_realm(p->promise()), TemporaryExecutionContext::CallbacksEnabled::Yes };
-                    WebIDL::reject_promise(realm, *p, error);
-                },
                 // -> canvas
-                [&](GC::Root<HTMLCanvasElement> const&) {
-                    dbgln("(STUBBED) createImageBitmap() for HTMLCanvasElement");
-                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for HTMLCanvasElement"sv);
-                    TemporaryExecutionContext const context { relevant_realm(p->promise()), TemporaryExecutionContext::CallbacksEnabled::Yes };
-                    WebIDL::reject_promise(realm, *p, error);
+                [&](GC::Root<HTMLCanvasElement> const& canvas_element) {
+                    // 1. Set imageBitmap's bitmap data to a copy of image's bitmap data, cropped to the source rectangle with formatting.
+                    auto canvas_bitmap = canvas_element->get_bitmap_from_surface();
+                    // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
+                    // Spec issue: https://github.com/whatwg/html/issues/3323
+                    if (!canvas_bitmap) {
+                        WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image size is invalid"_utf16));
+                        return;
+                    }
+                    auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(canvas_bitmap, sx, sy, sw, sh, options);
+                    // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
+                    // Spec issue: https://github.com/whatwg/html/issues/3323
+                    if (cropped_bitmap_or_error.is_error()) {
+                        WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image size is invalid"_utf16));
+                        return;
+                    }
+                    image_bitmap->set_bitmap(cropped_bitmap_or_error.release_value());
+
+                    // FIXME: 2. Set the origin-clean flag of the imageBitmap's bitmap to the same value as the origin-clean flag of image's bitmap.
+
+                    // 3. Queue a global task, using the bitmap task source, to resolve promise with imageBitmap.
+                    queue_global_task(Task::Source::BitmapTask, image_bitmap, GC::create_function(realm.heap(), [p, image_bitmap] {
+                        auto& realm = relevant_realm(image_bitmap);
+                        TemporaryExecutionContext const context { realm, TemporaryExecutionContext::CallbacksEnabled::Yes };
+                        WebIDL::resolve_promise(realm, *p, image_bitmap);
+                    }));
                 },
                 // -> ImageBitmap
                 [&](GC::Root<ImageBitmap> const&) {
@@ -279,6 +393,42 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
                     auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for HTMLVideoElement"sv);
                     TemporaryExecutionContext const context { relevant_realm(p->promise()), TemporaryExecutionContext::CallbacksEnabled::Yes };
                     WebIDL::reject_promise(realm, *p, error);
+                },
+                // -> img
+                // -> SVG image
+                [&](auto const& image_element) {
+                    // 1. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified content size) and options's resizeWidth or options's resizeHeight is not present, then return a promise rejected with an "InvalidStateError" DOMException.
+                    auto const has_natural_dimensions = image_element->intrinsic_width().has_value() && image_element->intrinsic_height().has_value();
+                    if (!has_natural_dimensions && (!options.has_value() || !options->resize_width.has_value() || !options->resize_width.has_value())) {
+                        WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image data is detached"_utf16));
+                        return;
+                    }
+
+                    // 2. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified content size), it should be rendered to a bitmap of the size specified by the resizeWidth and the resizeHeight options.
+                    // 3. Set imageBitmap's bitmap data to a copy of image's media data, cropped to the source rectangle with formatting. If this is an animated image, imageBitmap's bitmap data must only be taken from the default image of the animation (the one that the format defines is to be used when animation is not supported or is disabled), or, if there is no such image, the first frame of the animation.
+                    RefPtr<Gfx::ImmutableBitmap> immutable_bitmap;
+                    if (has_natural_dimensions) {
+                        immutable_bitmap = image_element->default_image_bitmap_sized(Gfx::IntSize { *image_element->intrinsic_width(), *image_element->intrinsic_height() });
+                    } else {
+                        immutable_bitmap = image_element->default_image_bitmap_sized(Gfx::IntSize { *options->resize_width, *options->resize_height });
+                    }
+                    auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(immutable_bitmap->bitmap(), sx, sy, sw, sh, options);
+                    // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
+                    // Spec issue: https://github.com/whatwg/html/issues/3323
+                    if (cropped_bitmap_or_error.is_error()) {
+                        WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image size is invalid"_utf16));
+                        return;
+                    }
+                    image_bitmap->set_bitmap(cropped_bitmap_or_error.release_value());
+
+                    // FIXME: 4. If image is not origin-clean, then set the origin-clean flag of imageBitmap's bitmap to false.
+
+                    // 5. Queue a global task, using the bitmap task source, to resolve promise with imageBitmap.
+                    queue_global_task(Task::Source::BitmapTask, image_bitmap, GC::create_function(realm.heap(), [p, image_bitmap] {
+                        auto& realm = relevant_realm(image_bitmap);
+                        TemporaryExecutionContext const context { realm, TemporaryExecutionContext::CallbacksEnabled::Yes };
+                        WebIDL::resolve_promise(realm, *p, image_bitmap);
+                    }));
                 });
         });
 
@@ -717,7 +867,7 @@ void WindowOrWorkerGlobalScopeMixin::queue_the_performance_observer_task()
             //    droppedEntriesCount if droppedEntriesCount is not null, otherwise unset.
             auto callback_options = JS::Object::create(realm, realm.intrinsics().object_prototype());
             if (dropped_entries_count.has_value())
-                MUST(callback_options->create_data_property("droppedEntriesCount"_fly_string, JS::Value(dropped_entries_count.value())));
+                MUST(callback_options->create_data_property("droppedEntriesCount"_utf16_fly_string, JS::Value(dropped_entries_count.value())));
 
             // 9. Call po’s observer callback with observerEntryList as the first argument, with po as the second
             //    argument and as callback this value, and with callbackOptions as the third argument.
@@ -1112,6 +1262,17 @@ GC::Ref<ServiceWorker::CacheStorage> WindowOrWorkerGlobalScopeMixin::caches()
     if (!m_cache_storage)
         m_cache_storage = realm.create<ServiceWorker::CacheStorage>(realm);
     return GC::Ref { *m_cache_storage };
+}
+
+// https://w3c.github.io/trusted-types/dist/spec/#extensions-to-the-windoworworkerglobalscope-interface
+GC::Ref<TrustedTypes::TrustedTypePolicyFactory> WindowOrWorkerGlobalScopeMixin::trusted_types()
+{
+    auto const& platform_object = this_impl();
+    auto& realm = platform_object.realm();
+
+    if (!m_trusted_type_policy_factory)
+        m_trusted_type_policy_factory = realm.create<TrustedTypes::TrustedTypePolicyFactory>(realm);
+    return *m_trusted_type_policy_factory;
 }
 
 }

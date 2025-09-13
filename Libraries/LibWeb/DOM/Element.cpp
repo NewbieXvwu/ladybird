@@ -26,8 +26,9 @@
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/SelectorEngine.h>
 #include <LibWeb/CSS/StyleComputer.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
+#include <LibWeb/CSS/StylePropertyMap.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/DOM/Attr.h>
@@ -84,6 +85,7 @@
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/StackingContext.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/SVG/SVGAElement.h>
 #include <LibWeb/Selection/Selection.h>
@@ -122,6 +124,8 @@ void Element::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_custom_state_set);
     visitor.visit(m_cascaded_properties);
     visitor.visit(m_computed_properties);
+    visitor.visit(m_computed_style_map_cache);
+    visitor.visit(m_attribute_style_map);
     if (m_pseudo_element_data) {
         for (auto& pseudo_element : *m_pseudo_element_data) {
             visitor.visit(pseudo_element.value);
@@ -206,7 +210,7 @@ WebIDL::ExceptionOr<void> Element::set_attribute(FlyString const& name, String c
 {
     // 1. If qualifiedName is not a valid attribute local name, then throw an "InvalidCharacterError" DOMException.
     if (!is_valid_attribute_local_name(name))
-        return WebIDL::InvalidCharacterError::create(realm(), "Attribute name must not be empty or contain invalid characters"_string);
+        return WebIDL::InvalidCharacterError::create(realm(), "Attribute name must not be empty or contain invalid characters"_utf16);
 
     // 2. If this is in the HTML namespace and its node document is an HTML document, then set qualifiedName to qualifiedName in ASCII lowercase.
     bool insert_as_lowercase = namespace_uri() == Namespace::HTML && document().document_type() == Document::Type::HTML;
@@ -229,6 +233,12 @@ WebIDL::ExceptionOr<void> Element::set_attribute(FlyString const& name, String c
     return {};
 }
 
+// https://dom.spec.whatwg.org/#dom-element-setattribute
+WebIDL::ExceptionOr<void> Element::set_attribute(FlyString const& name, Utf16String const& value)
+{
+    return set_attribute(name, value.to_utf8_but_should_be_ported_to_utf16());
+}
+
 // https://dom.spec.whatwg.org/#valid-namespace-prefix
 bool is_valid_namespace_prefix(FlyString const& prefix)
 {
@@ -237,6 +247,7 @@ bool is_valid_namespace_prefix(FlyString const& prefix)
     return !prefix.is_empty() && !prefix.code_points().contains_any_of(INVALID_NAMESPACE_PREFIX_CHARACTERS);
 }
 
+// https://dom.spec.whatwg.org/#valid-attribute-local-name
 bool is_valid_attribute_local_name(FlyString const& local_name)
 {
     // A string is a valid attribute local name if its length is at least 1 and it does not contain ASCII whitespace, U+0000 NULL, U+002F (/), U+003D (=), or U+003E (>).
@@ -304,7 +315,7 @@ WebIDL::ExceptionOr<QualifiedName> validate_and_extract(JS::Realm& realm, Option
 
         // 4. If prefix is not a valid namespace prefix, then throw an "InvalidCharacterError" DOMException.
         if (!is_valid_namespace_prefix(*prefix))
-            return WebIDL::InvalidCharacterError::create(realm, "Prefix not a valid namespace prefix."_string);
+            return WebIDL::InvalidCharacterError::create(realm, "Prefix not a valid namespace prefix."_utf16);
     }
 
     // 5. Assert: prefix is either null or a valid namespace prefix.
@@ -312,27 +323,27 @@ WebIDL::ExceptionOr<QualifiedName> validate_and_extract(JS::Realm& realm, Option
 
     // 6. If context is "attribute" and localName is not a valid attribute local name, then throw an "InvalidCharacterError" DOMException.
     if (context == ValidationContext::Attribute && !is_valid_attribute_local_name(local_name))
-        return WebIDL::InvalidCharacterError::create(realm, "Local name not a valid attribute local name."_string);
+        return WebIDL::InvalidCharacterError::create(realm, "Local name not a valid attribute local name."_utf16);
 
     // 7. If context is "element" and localName is not a valid element local name, then throw an "InvalidCharacterError" DOMException.
     if (context == ValidationContext::Element && !is_valid_element_local_name(local_name))
-        return WebIDL::InvalidCharacterError::create(realm, "Local name not a valid element local name."_string);
+        return WebIDL::InvalidCharacterError::create(realm, "Local name not a valid element local name."_utf16);
 
     // 8. If prefix is non-null and namespace is null, then throw a "NamespaceError" DOMException.
     if (prefix.has_value() && !namespace_.has_value())
-        return WebIDL::NamespaceError::create(realm, "Prefix is non-null and namespace is null."_string);
+        return WebIDL::NamespaceError::create(realm, "Prefix is non-null and namespace is null."_utf16);
 
     // 9. If prefix is "xml" and namespace is not the XML namespace, then throw a "NamespaceError" DOMException.
     if (prefix == "xml"sv && namespace_ != Namespace::XML)
-        return WebIDL::NamespaceError::create(realm, "Prefix is 'xml' and namespace is not the XML namespace."_string);
+        return WebIDL::NamespaceError::create(realm, "Prefix is 'xml' and namespace is not the XML namespace."_utf16);
 
     // 10. If either qualifiedName or prefix is "xmlns" and namespace is not the XMLNS namespace, then throw a "NamespaceError" DOMException.
     if ((qualified_name == "xmlns"sv || prefix == "xmlns"sv) && namespace_ != Namespace::XMLNS)
-        return WebIDL::NamespaceError::create(realm, "Either qualifiedName or prefix is 'xmlns' and namespace is not the XMLNS namespace."_string);
+        return WebIDL::NamespaceError::create(realm, "Either qualifiedName or prefix is 'xmlns' and namespace is not the XMLNS namespace."_utf16);
 
     // 11. If namespace is the XMLNS namespace and neither qualifiedName nor prefix is "xmlns", then throw a "NamespaceError" DOMException.
     if (namespace_ == Namespace::XMLNS && !(qualified_name == "xmlns"sv || prefix == "xmlns"sv))
-        return WebIDL::NamespaceError::create(realm, "Namespace is the XMLNS namespace and neither qualifiedName nor prefix is 'xmlns'."_string);
+        return WebIDL::NamespaceError::create(realm, "Namespace is the XMLNS namespace and neither qualifiedName nor prefix is 'xmlns'."_utf16);
 
     // 12. Return (namespace, prefix, localName).
     return QualifiedName { local_name, prefix, namespace_ };
@@ -449,7 +460,7 @@ WebIDL::ExceptionOr<bool> Element::toggle_attribute(FlyString const& name, Optio
 {
     // 1. If qualifiedName is not a valid attribute local name, then throw an "InvalidCharacterError" DOMException.
     if (!is_valid_attribute_local_name(name))
-        return WebIDL::InvalidCharacterError::create(realm(), "Attribute name must not be empty or contain invalid characters"_string);
+        return WebIDL::InvalidCharacterError::create(realm(), "Attribute name must not be empty or contain invalid characters"_utf16);
 
     // 2. If this is in the HTML namespace and its node document is an HTML document, then set qualifiedName to qualifiedName in ASCII lowercase.
     bool insert_as_lowercase = namespace_uri() == Namespace::HTML && document().document_type() == Document::Type::HTML;
@@ -664,22 +675,20 @@ static CSS::RequiredInvalidationAfterStyleChange compute_required_invalidation(C
     if (!old_style.computed_font_list().equals(new_style.computed_font_list()))
         invalidation.relayout = true;
 
-    for (auto i = to_underlying(CSS::first_property_id); i <= to_underlying(CSS::last_property_id); ++i) {
+    for (auto i = to_underlying(CSS::first_longhand_property_id); i <= to_underlying(CSS::last_longhand_property_id); ++i) {
         auto property_id = static_cast<CSS::PropertyID>(i);
-        auto old_value = old_style.maybe_null_property(property_id);
-        auto new_value = new_style.maybe_null_property(property_id);
-        if (!old_value && !new_value)
-            continue;
 
-        invalidation |= CSS::compute_property_invalidation(property_id, old_value, new_value);
+        invalidation |= CSS::compute_property_invalidation(property_id, old_style.property(property_id), new_style.property(property_id));
     }
     return invalidation;
 }
 
-CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
+CSS::RequiredInvalidationAfterStyleChange Element::recompute_style(bool& did_change_custom_properties)
 {
     VERIFY(parent());
 
+    m_style_uses_attr_css_function = false;
+    m_style_uses_var_css_function = false;
     m_affected_by_has_pseudo_class_in_subject_position = false;
     m_affected_by_has_pseudo_class_in_non_subject_position = false;
     m_affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator = false;
@@ -690,14 +699,14 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
     m_sibling_invalidation_distance = 0;
 
     auto& style_computer = document().style_computer();
-    auto new_computed_properties = style_computer.compute_style(*this);
+    auto new_computed_properties = style_computer.compute_style({ *this }, did_change_custom_properties);
 
     // Tables must not inherit -libweb-* values for text-align.
     // FIXME: Find the spec for this.
     if (is<HTML::HTMLTableElement>(*this)) {
         auto text_align = new_computed_properties->text_align();
         if (text_align == CSS::TextAlign::LibwebLeft || text_align == CSS::TextAlign::LibwebCenter || text_align == CSS::TextAlign::LibwebRight)
-            new_computed_properties->set_property(CSS::PropertyID::TextAlign, CSS::CSSKeywordValue::create(CSS::Keyword::Start));
+            new_computed_properties->set_property(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::Start));
     }
 
     bool had_list_marker = false;
@@ -713,7 +722,7 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
     auto old_display_is_none = m_computed_properties ? m_computed_properties->display().is_none() : true;
     auto new_display_is_none = new_computed_properties->display().is_none();
 
-    set_computed_properties(move(new_computed_properties));
+    set_computed_properties({}, move(new_computed_properties));
 
     if (old_display_is_none != new_display_is_none) {
         for_each_shadow_including_inclusive_descendant([&](auto& node) {
@@ -729,8 +738,8 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
     auto recompute_pseudo_element_style = [&](CSS::PseudoElement pseudo_element) {
         style_computer.push_ancestor(*this);
 
-        auto pseudo_element_style = pseudo_element_computed_properties(pseudo_element);
-        auto new_pseudo_element_style = style_computer.compute_pseudo_element_style_if_needed(*this, pseudo_element);
+        auto pseudo_element_style = computed_properties(pseudo_element);
+        auto new_pseudo_element_style = style_computer.compute_pseudo_element_style_if_needed({ *this, pseudo_element }, did_change_custom_properties);
 
         // TODO: Can we be smarter about invalidation?
         if (pseudo_element_style && new_pseudo_element_style) {
@@ -739,7 +748,7 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
             invalidation = CSS::RequiredInvalidationAfterStyleChange::full();
         }
 
-        set_pseudo_element_computed_properties(pseudo_element, move(new_pseudo_element_style));
+        set_computed_properties(pseudo_element, move(new_pseudo_element_style));
         style_computer.pop_ancestor(*this);
     };
 
@@ -769,7 +778,7 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
             if (!pseudo_element.has_value() || !pseudo_element->layout_node())
                 continue;
 
-            auto pseudo_element_style = pseudo_element_computed_properties(pseudo_element_type);
+            auto pseudo_element_style = computed_properties(pseudo_element_type);
             if (!pseudo_element_style)
                 continue;
 
@@ -792,11 +801,13 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_inherited_style()
 
     CSS::RequiredInvalidationAfterStyleChange invalidation;
 
-    HashMap<size_t, RefPtr<CSS::CSSStyleValue const>> old_values_with_relative_units;
-    for (auto i = to_underlying(CSS::first_property_id); i <= to_underlying(CSS::last_property_id); ++i) {
+    HashMap<size_t, RefPtr<CSS::StyleValue const>> old_values_with_relative_units;
+    for (auto i = to_underlying(CSS::first_longhand_property_id); i <= to_underlying(CSS::last_longhand_property_id); ++i) {
         auto property_id = static_cast<CSS::PropertyID>(i);
+        // FIXME: We should use the specified value rather than the cascaded value as the cascaded value may include
+        //        unresolved CSS-wide keywords (e.g. 'initial' or 'inherit') rather than the resolved value.
         auto const& preabsolutized_value = m_cascaded_properties->property(property_id);
-        RefPtr old_value = computed_properties->maybe_null_property(property_id);
+        RefPtr old_value = computed_properties->property(property_id);
         // Update property if it uses relative units as it might have been affected by a change in ancestor element style.
         if (preabsolutized_value && preabsolutized_value->is_length() && preabsolutized_value->as_length().length().is_font_relative()) {
             auto is_inherited = computed_properties->is_property_inherited(property_id);
@@ -805,7 +816,20 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_inherited_style()
         }
         if (!computed_properties->is_property_inherited(property_id))
             continue;
-        RefPtr new_value = CSS::StyleComputer::get_inherit_value(property_id, this);
+
+        RefPtr<CSS::StyleValue const> old_animated_value = computed_properties->animated_property_values().get(property_id).value_or({});
+        RefPtr<CSS::StyleValue const> new_animated_value = CSS::StyleComputer::get_animated_inherit_value(property_id, { *this })
+                                                               .map([&](auto& value) { return value.ptr(); })
+                                                               .value_or({});
+
+        invalidation |= CSS::compute_property_invalidation(property_id, old_animated_value, new_animated_value);
+
+        if (new_animated_value)
+            computed_properties->set_animated_property(property_id, new_animated_value.release_nonnull(), CSS::ComputedProperties::Inherited::Yes);
+        else if (old_animated_value && computed_properties->is_animated_property_inherited(property_id))
+            computed_properties->remove_animated_property(property_id);
+
+        RefPtr new_value = CSS::StyleComputer::get_inherit_value(property_id, { *this });
         computed_properties->set_property(property_id, *new_value, CSS::ComputedProperties::Inherited::Yes);
         invalidation |= CSS::compute_property_invalidation(property_id, old_value, new_value);
     }
@@ -813,11 +837,11 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_inherited_style()
     if (invalidation.is_none() && old_values_with_relative_units.is_empty())
         return invalidation;
 
-    document().style_computer().compute_font(*computed_properties, this, {});
-    document().style_computer().absolutize_values(*computed_properties, this);
+    document().style_computer().compute_font(*computed_properties, AbstractElement { *this });
+    document().style_computer().compute_property_values(*computed_properties);
 
     for (auto [property_id, old_value] : old_values_with_relative_units) {
-        auto new_value = computed_properties->maybe_null_property(static_cast<CSS::PropertyID>(property_id));
+        auto const& new_value = computed_properties->property(static_cast<CSS::PropertyID>(property_id));
         invalidation |= CSS::compute_property_invalidation(static_cast<CSS::PropertyID>(property_id), old_value, new_value);
     }
 
@@ -826,22 +850,6 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_inherited_style()
 
     layout_node()->apply_style(*computed_properties);
     return invalidation;
-}
-
-GC::Ref<CSS::ComputedProperties> Element::resolved_css_values(Optional<CSS::PseudoElement> type)
-{
-    auto element_computed_style = CSS::CSSStyleProperties::create_resolved_style(realm(), AbstractElement { *this, type });
-    auto properties = heap().allocate<CSS::ComputedProperties>();
-
-    for (auto i = to_underlying(CSS::first_property_id); i <= to_underlying(CSS::last_property_id); ++i) {
-        auto property_id = (CSS::PropertyID)i;
-        auto maybe_value = element_computed_style->property(property_id);
-        if (!maybe_value.has_value())
-            continue;
-        properties->set_property(property_id, maybe_value.release_value().value);
-    }
-
-    return properties;
 }
 
 DOMTokenList* Element::class_list()
@@ -869,11 +877,11 @@ WebIDL::ExceptionOr<void> Element::attach_a_shadow_root(Bindings::ShadowRootMode
 {
     // 1. If element’s namespace is not the HTML namespace, then throw a "NotSupportedError" DOMException.
     if (namespace_uri() != Namespace::HTML)
-        return WebIDL::NotSupportedError::create(realm(), "Element's namespace is not the HTML namespace"_string);
+        return WebIDL::NotSupportedError::create(realm(), "Element's namespace is not the HTML namespace"_utf16);
 
     // 2. If element’s local name is not a valid shadow host name, then throw a "NotSupportedError" DOMException.
     if (!is_valid_shadow_host_name(local_name()))
-        return WebIDL::NotSupportedError::create(realm(), "Element's local name is not a valid shadow host name"_string);
+        return WebIDL::NotSupportedError::create(realm(), "Element's local name is not a valid shadow host name"_utf16);
 
     // 3. If element’s local name is a valid custom element name, or element’s is value is not null, then:
     if (HTML::is_valid_custom_element_name(local_name()) || m_is_value.has_value()) {
@@ -882,7 +890,7 @@ WebIDL::ExceptionOr<void> Element::attach_a_shadow_root(Bindings::ShadowRootMode
 
         // 2. If definition is not null and definition’s disable shadow is true, then throw a "NotSupportedError" DOMException.
         if (definition && definition->disable_shadow())
-            return WebIDL::NotSupportedError::create(realm(), "Cannot attach a shadow root to a custom element that has disabled shadow roots"_string);
+            return WebIDL::NotSupportedError::create(realm(), "Cannot attach a shadow root to a custom element that has disabled shadow roots"_utf16);
     }
 
     // 4. If element is a shadow host, then:
@@ -895,7 +903,7 @@ WebIDL::ExceptionOr<void> Element::attach_a_shadow_root(Bindings::ShadowRootMode
         // - currentShadowRoot’s mode is not mode,
         // then throw a "NotSupportedError" DOMException.
         if (!current_shadow_root->declarative() || current_shadow_root->mode() != mode) {
-            return WebIDL::NotSupportedError::create(realm(), "Element already is a shadow host"_string);
+            return WebIDL::NotSupportedError::create(realm(), "Element already is a shadow host"_utf16);
         }
 
         // 3. Otherwise:
@@ -968,7 +976,7 @@ WebIDL::ExceptionOr<bool> Element::matches(StringView selectors) const
 
     // 2. If s is failure, then throw a "SyntaxError" DOMException.
     if (!maybe_selectors.has_value())
-        return WebIDL::SyntaxError::create(realm(), "Failed to parse selector"_string);
+        return WebIDL::SyntaxError::create(realm(), "Failed to parse selector"_utf16);
 
     // 3. If the result of match a selector against an element, using s, this, and scoping root this, returns success, then return true; otherwise, return false.
     auto sel = maybe_selectors.value();
@@ -988,7 +996,7 @@ WebIDL::ExceptionOr<DOM::Element const*> Element::closest(StringView selectors) 
 
     // 2. If s is failure, then throw a "SyntaxError" DOMException.
     if (!maybe_selectors.has_value())
-        return WebIDL::SyntaxError::create(realm(), "Failed to parse selector"_string);
+        return WebIDL::SyntaxError::create(realm(), "Failed to parse selector"_utf16);
 
     auto matches_selectors = [this](CSS::SelectorList const& selector_list, Element const* element) {
         // 4. For each element in elements, if match a selector against an element, using s, element, and scoping root this, returns success, return element.
@@ -1026,14 +1034,15 @@ WebIDL::ExceptionOr<void> Element::set_inner_html(StringView value)
     auto fragment = TRY(as<Element>(*context).parse_fragment(value));
 
     // 4. If context is a template element, then set context to the template element's template contents (a DocumentFragment).
-    if (is<HTML::HTMLTemplateElement>(*context))
-        context = as<HTML::HTMLTemplateElement>(*context).content();
+    auto* template_element = as_if<HTML::HTMLTemplateElement>(*context);
+    if (template_element)
+        context = template_element->content();
 
     // 5. Replace all with fragment within context.
     context->replace_all(fragment);
 
     // NOTE: We don't invalidate style & layout for <template> elements since they don't affect rendering.
-    if (!is<HTML::HTMLTemplateElement>(*context)) {
+    if (!template_element) {
         context->set_needs_style_update(true);
 
         if (context->is_connected()) {
@@ -1053,7 +1062,7 @@ WebIDL::ExceptionOr<String> Element::inner_html() const
 
 bool Element::is_focused() const
 {
-    return document().focused_element() == this;
+    return document().focused_area() == this;
 }
 
 bool Element::is_active() const
@@ -1099,9 +1108,18 @@ GC::Ref<CSS::CSSStyleProperties> Element::style_for_bindings()
     return *m_inline_style;
 }
 
+GC::Ref<CSS::StylePropertyMap> Element::attribute_style_map()
+{
+    if (!m_attribute_style_map)
+        m_attribute_style_map = CSS::StylePropertyMap::create(realm(), style_for_bindings());
+    return *m_attribute_style_map;
+}
+
 void Element::set_inline_style(GC::Ptr<CSS::CSSStyleProperties> style)
 {
     m_inline_style = style;
+    if (m_attribute_style_map)
+        m_attribute_style_map = nullptr;
     set_needs_style_update(true);
 }
 
@@ -1355,6 +1373,7 @@ void Element::removed_from(Node* old_parent, Node& old_root)
     }
 
     play_or_cancel_animations_after_display_property_change();
+    remove_animations_from_timeline();
 }
 
 void Element::moved_from(GC::Ptr<Node> old_parent)
@@ -1425,9 +1444,8 @@ bool Element::matches_checked_pseudo_class() const
     // The :checked pseudo-class must match any element falling into one of the following categories:
     // - input elements whose type attribute is in the Checkbox state and whose checkedness state is true
     // - input elements whose type attribute is in the Radio Button state and whose checkedness state is true
-    if (is<HTML::HTMLInputElement>(*this)) {
-        auto const& input_element = static_cast<HTML::HTMLInputElement const&>(*this);
-        switch (input_element.type_state()) {
+    if (auto* input_element = as_if<HTML::HTMLInputElement>(*this)) {
+        switch (input_element->type_state()) {
         case HTML::HTMLInputElement::TypeAttributeState::Checkbox:
         case HTML::HTMLInputElement::TypeAttributeState::RadioButton:
             return static_cast<HTML::HTMLInputElement const&>(*this).checked();
@@ -1437,8 +1455,27 @@ bool Element::matches_checked_pseudo_class() const
     }
 
     // - option elements whose selectedness is true
-    if (is<HTML::HTMLOptionElement>(*this)) {
-        return static_cast<HTML::HTMLOptionElement const&>(*this).selected();
+    if (auto* option_element = as_if<HTML::HTMLOptionElement>(*this)) {
+        return option_element->selected();
+    }
+    return false;
+}
+
+bool Element::matches_unchecked_pseudo_class() const
+{
+    // AD-HOC: There is no spec for this yet, so it's based on the spec for :checked, assuming that :unchecked applies to the same cases but with a `false` value.
+    if (auto* input_element = as_if<HTML::HTMLInputElement>(*this)) {
+        switch (input_element->type_state()) {
+        case HTML::HTMLInputElement::TypeAttributeState::Checkbox:
+        case HTML::HTMLInputElement::TypeAttributeState::RadioButton:
+            return !static_cast<HTML::HTMLInputElement const&>(*this).checked();
+        default:
+            return false;
+        }
+    }
+
+    if (auto* option_element = as_if<HTML::HTMLOptionElement>(*this)) {
+        return !option_element->selected();
     }
     return false;
 }
@@ -1972,10 +2009,8 @@ bool Element::is_actually_disabled() const
     // - a select element that is disabled
     // - a textarea element that is disabled
     if (is<HTML::HTMLButtonElement>(this) || is<HTML::HTMLInputElement>(this) || is<HTML::HTMLSelectElement>(this) || is<HTML::HTMLTextAreaElement>(this)) {
-        auto const* form_associated_element = dynamic_cast<HTML::FormAssociatedElement const*>(this);
-        VERIFY(form_associated_element);
-
-        return !form_associated_element->enabled();
+        auto const& form_associated_element = as<HTML::FormAssociatedElement>(*this);
+        return !form_associated_element.enabled();
     }
 
     // - an optgroup element that has a disabled attribute
@@ -2039,7 +2074,7 @@ WebIDL::ExceptionOr<void> Element::set_outer_html(String const& value)
 
     // 4. If parent is a Document, throw a "NoModificationAllowedError" DOMException.
     if (parent->is_document())
-        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot set outer HTML on document"_string);
+        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot set outer HTML on document"_utf16);
 
     // 5. If parent is a DocumentFragment, set parent to the result of creating an element given this's node document, "body", and the HTML namespace.
     if (parent->is_document_fragment())
@@ -2070,7 +2105,7 @@ WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, 
 
         // 2. If context is null or a Document, throw a "NoModificationAllowedError" DOMException.
         if (!context || context->is_document())
-            return WebIDL::NoModificationAllowedError::create(realm(), "insertAdjacentHTML: context is null or a Document"_string);
+            return WebIDL::NoModificationAllowedError::create(realm(), "insertAdjacentHTML: context is null or a Document"_utf16);
     }
     // - If position is an ASCII case-insensitive match for the string "afterbegin"
     // - If position is an ASCII case-insensitive match for the string "beforeend"
@@ -2082,7 +2117,7 @@ WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, 
     // Otherwise
     else {
         // Throw a "SyntaxError" DOMException.
-        return WebIDL::SyntaxError::create(realm(), "insertAdjacentHTML: invalid position argument"_string);
+        return WebIDL::SyntaxError::create(realm(), "insertAdjacentHTML: invalid position argument"_utf16);
     }
 
     // 3. If context is not an Element or the following are all true:
@@ -2166,7 +2201,7 @@ WebIDL::ExceptionOr<GC::Ptr<Node>> Element::insert_adjacent(StringView where, GC
 
     // -> Otherwise
     // Throw a "SyntaxError" DOMException.
-    return WebIDL::SyntaxError::create(realm(), MUST(String::formatted("Unknown position '{}'. Must be one of 'beforebegin', 'afterbegin', 'beforeend' or 'afterend'", where)));
+    return WebIDL::SyntaxError::create(realm(), Utf16String::formatted("Unknown position '{}'. Must be one of 'beforebegin', 'afterbegin', 'beforeend' or 'afterend'", where));
 }
 
 // https://dom.spec.whatwg.org/#dom-element-insertadjacentelement
@@ -2180,7 +2215,7 @@ WebIDL::ExceptionOr<GC::Ptr<Element>> Element::insert_adjacent_element(String co
 }
 
 // https://dom.spec.whatwg.org/#dom-element-insertadjacenttext
-WebIDL::ExceptionOr<void> Element::insert_adjacent_text(String const& where, String const& data)
+WebIDL::ExceptionOr<void> Element::insert_adjacent_text(String const& where, Utf16String const& data)
 {
     // 1. Let text be a new Text node whose data is data and node document is this’s node document.
     auto text = realm().create<DOM::Text>(document(), data);
@@ -2446,24 +2481,13 @@ void Element::invalidate_style_after_attribute_change(FlyString const& attribute
 {
     Vector<CSS::InvalidationSet::Property, 1> changed_properties;
     StyleInvalidationOptions style_invalidation_options;
-    if (is_presentational_hint(attribute_name)) {
+    if (is_presentational_hint(attribute_name) || style_uses_attr_css_function()) {
         style_invalidation_options.invalidate_self = true;
-    }
-
-    if (style_uses_css_custom_properties()) {
-        // A css custom property can be hooked on to this element by any attribute
-        // so invalidate elements and rerender them in that scenario
-        style_invalidation_options.invalidate_elements_that_use_css_custom_properties = true;
     }
 
     if (attribute_name == HTML::AttributeNames::style) {
         style_invalidation_options.invalidate_self = true;
-        // even if we don't have custom properties, the new "style" attribute could add one
-        style_invalidation_options.invalidate_elements_that_use_css_custom_properties = true;
     } else if (attribute_name == HTML::AttributeNames::class_) {
-        // adding or removing classes can add new custom properties to this element
-        style_invalidation_options.invalidate_elements_that_use_css_custom_properties = true;
-
         Vector<StringView> old_classes;
         Vector<StringView> new_classes;
         if (old_value.has_value())
@@ -2695,7 +2719,7 @@ void Element::enqueue_a_custom_element_callback_reaction(FlyString const& callba
             if (connected_callback)
                 (void)WebIDL::invoke_callback(*connected_callback, this, WebIDL::ExceptionBehavior::Report, no_arguments);
 
-            return JS::js_undefined(); }, 0, FlyString {}, &realm());
+            return JS::js_undefined(); }, 0, Utf16FlyString {}, &realm());
         callback = realm().heap().allocate<WebIDL::CallbackType>(steps, realm());
     }
 
@@ -2772,7 +2796,7 @@ JS::ThrowCompletionOr<void> Element::upgrade_element(GC::Ref<HTML::CustomElement
     auto attempt_to_construct_custom_element = [&]() -> JS::ThrowCompletionOr<void> {
         // 1. If definition's disable shadow is true and element's shadow root is non-null, then throw a "NotSupportedError" DOMException.
         if (custom_element_definition->disable_shadow() && shadow_root())
-            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Custom element definition disables shadow DOM and the custom element has a shadow root"_string));
+            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Custom element definition disables shadow DOM and the custom element has a shadow root"_utf16));
 
         // 2. Set element's custom element state to "precustomized".
         set_custom_element_state(CustomElementState::Precustomized);
@@ -2951,29 +2975,36 @@ void Element::set_cascaded_properties(Optional<CSS::PseudoElement> pseudo_elemen
     }
 }
 
-void Element::set_computed_properties(GC::Ptr<CSS::ComputedProperties> style)
+GC::Ptr<CSS::ComputedProperties> Element::computed_properties(Optional<CSS::PseudoElement> pseudo_element_type)
 {
+    if (pseudo_element_type.has_value()) {
+        if (auto pseudo_element = get_pseudo_element(*pseudo_element_type); pseudo_element.has_value())
+            return pseudo_element->computed_properties();
+        return {};
+    }
+    return m_computed_properties;
+}
+
+GC::Ptr<CSS::ComputedProperties const> Element::computed_properties(Optional<CSS::PseudoElement> pseudo_element_type) const
+{
+    if (pseudo_element_type.has_value()) {
+        if (auto pseudo_element = get_pseudo_element(*pseudo_element_type); pseudo_element.has_value())
+            return pseudo_element->computed_properties();
+        return {};
+    }
+    return m_computed_properties;
+}
+
+void Element::set_computed_properties(Optional<CSS::PseudoElement> pseudo_element_type, GC::Ptr<CSS::ComputedProperties> style)
+{
+    if (pseudo_element_type.has_value()) {
+        if (!CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(*pseudo_element_type))
+            return;
+        ensure_pseudo_element(*pseudo_element_type).set_computed_properties(style);
+        return;
+    }
     m_computed_properties = style;
     computed_properties_changed();
-}
-
-void Element::set_pseudo_element_computed_properties(CSS::PseudoElement pseudo_element, GC::Ptr<CSS::ComputedProperties> style)
-{
-    if (!m_pseudo_element_data && !style)
-        return;
-
-    if (!CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(pseudo_element))
-        return;
-
-    ensure_pseudo_element(pseudo_element).set_computed_properties(style);
-}
-
-GC::Ptr<CSS::ComputedProperties> Element::pseudo_element_computed_properties(CSS::PseudoElement type)
-{
-    auto pseudo_element = get_pseudo_element(type);
-    if (pseudo_element.has_value())
-        return pseudo_element->computed_properties();
-    return {};
 }
 
 Optional<PseudoElement&> Element::get_pseudo_element(CSS::PseudoElement type) const
@@ -3245,28 +3276,32 @@ bool Element::is_relevant_to_the_user()
         return true;
 
     // Either the element or its contents are focused, as described in the focus section of the HTML spec.
-    auto* focused_element = document().focused_element();
-    if (focused_element && is_inclusive_ancestor_of(*focused_element))
+    auto focused_area = document().focused_area();
+    if (focused_area && is_inclusive_ancestor_of(*focused_area))
         return true;
 
     // Either the element or its contents are selected, where selection is described in the selection API.
     if (document().get_selection()->contains_node(*this, true))
         return true;
 
-    // Either the element or its contents are placed in the top layer.
-    bool is_in_top_layer = false;
+    bool has_relevant_contents = false;
     for_each_in_inclusive_subtree_of_type<Element>([&](auto& element) {
+        // Either the element or its contents are placed in the top layer.
         if (element.in_top_layer()) {
-            is_in_top_layer = true;
+            has_relevant_contents = true;
+            return TraversalDecision::Break;
+        }
+
+        // The element has a flat tree descendant that is captured in a view transition.
+        if (&element != this && element.captured_in_a_view_transition()) {
+            has_relevant_contents = true;
             return TraversalDecision::Break;
         }
 
         return TraversalDecision::Continue;
     });
-    if (is_in_top_layer)
+    if (has_relevant_contents)
         return true;
-
-    // FIXME: The element has a flat tree descendant that is captured in a view transition.
 
     // NOTE: none of the above conditions are true, so the element is not relevant to the user.
     return false;
@@ -3370,7 +3405,7 @@ i32 Element::ordinal_value()
     auto reversed = false;
 
     if (owner->is_html_olist_element()) {
-        auto const* ol_element = static_cast<const HTML::HTMLOListElement*>(owner);
+        auto const* ol_element = static_cast<HTML::HTMLOListElement const*>(owner);
         numbering = ol_element->starting_value().value();
         reversed = ol_element->has_attribute(HTML::AttributeNames::reversed);
     }
@@ -3561,13 +3596,12 @@ Optional<Element::Directionality> Element::auto_directionality() const
 {
     // 1. If element is an auto-directionality form-associated element:
     if (is_auto_directionality_form_associated_element()) {
-        auto const* form_associated_element = dynamic_cast<HTML::FormAssociatedElement const*>(this);
-        VERIFY(form_associated_element);
-        auto const& value = form_associated_element->value();
+        auto const& form_associated_element = as<HTML::FormAssociatedElement>(*this);
+        auto const& value = form_associated_element.value();
 
         // 1. If element's value contains a character of bidirectional character type AL or R,
         //    and there is no character of bidirectional character type L anywhere before it in the element's value, then return 'rtl'.
-        for (auto code_point : Utf8View(value)) {
+        for (auto code_point : value) {
             auto bidi_class = Unicode::bidirectional_class(code_point);
             if (bidi_class == Unicode::BidiClass::LeftToRight)
                 break;
@@ -3639,7 +3673,7 @@ Optional<Element::Directionality> Element::contained_text_auto_directionality(bo
         //    - an element whose dir attribute is not in the undefined state
         //    then continue.
         // NOTE: "any ancestor element of descendant that is a descendant of element" will be iterated already.
-        auto is_one_of_the_filtered_elements = [](auto& descendant) -> bool {
+        auto is_one_of_the_filtered_elements = [](DOM::Node const& descendant) -> bool {
             return is<HTML::HTMLScriptElement>(descendant)
                 || is<HTML::HTMLStyleElement>(descendant)
                 || is<HTML::HTMLTextAreaElement>(descendant)
@@ -3948,6 +3982,44 @@ Optional<String> Element::lang() const
     return maybe_lang.release_value();
 }
 
+// https://drafts.csswg.org/css-images-4/#element-not-rendered
+bool Element::not_rendered() const
+{
+    // An element is not rendered if it does not have an associated box.
+    if (!layout_node() || !paintable_box())
+        return true;
+
+    return false;
+}
+
+// https://drafts.csswg.org/css-view-transitions-1/#document-scoped-view-transition-name
+Optional<FlyString> Element::document_scoped_view_transition_name()
+{
+    // To get the document-scoped view transition name for an Element element:
+
+    // 1. Let scopedViewTransitionName be the computed value of view-transition-name for element.
+    auto scoped_view_transition_name = computed_properties()->view_transition_name();
+
+    // 2. If scopedViewTransitionName is associated with element’s node document, then return
+    //    scopedViewTransitionName.
+    // FIXME: Properly handle tree-scoping of the name here.
+    //        (see https://drafts.csswg.org/css-view-transitions-1/#propdef-view-transition-name , "Each view transition name is a tree-scoped name.")
+    if (true) {
+        return scoped_view_transition_name;
+    }
+
+    // 3. Otherwise, return none.
+    return {};
+}
+
+// https://drafts.csswg.org/css-view-transitions-1/#capture-the-image
+// To capture the image given an element element, perform the following steps. They return an image.
+RefPtr<Gfx::ImmutableBitmap> Element::capture_the_image()
+{
+    // FIXME: Actually implement this.
+    return Gfx::ImmutableBitmap::create(MUST(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, Gfx::IntSize(1, 1))));
+}
+
 void Element::set_pointer_capture(WebIDL::Long pointer_id)
 {
     (void)pointer_id;
@@ -4042,7 +4114,7 @@ bool Element::should_indicate_focus() const
 
     // * If the element which supports keyboard input (such as an input element, or any other element that would
     //   triggers a virtual keyboard to be shown on focus if a physical keyboard were not present), indicate focus.
-    if (is<HTML::FormAssociatedElement>(this))
+    if (is<HTML::FormAssociatedTextControlElement>(this) || is_editable_or_editing_host())
         return true;
 
     // * If the user interacts with the page via keyboard or some other non-pointing device, indicate focus. (This means
@@ -4070,6 +4142,42 @@ bool Element::should_indicate_focus() const
 void Element::set_had_duplicate_attribute_during_tokenization(Badge<HTML::HTMLParser>)
 {
     m_had_duplicate_attribute_during_tokenization = true;
+}
+
+// https://drafts.css-houdini.org/css-typed-om-1/#dom-element-computedstylemap
+GC::Ref<CSS::StylePropertyMapReadOnly> Element::computed_style_map()
+{
+    // The computedStyleMap() method must, when called on an Element this, perform the following steps:
+
+    // 1. If this’s [[computedStyleMapCache]] internal slot is set to null, set its value to a new
+    //    StylePropertyMapReadOnly object, whose [[declarations]] internal slot are the name and computed value of
+    //    every longhand CSS property supported by the User Agent, every registered custom property, and every
+    //    non-registered custom property which is not set to its initial value on this, in the standard order.
+    //
+    //    The computed values in the [[declarations]] of this object must remain up-to-date, changing as style
+    //    resolution changes the properties on this and how they’re computed.
+    //
+    // NOTE: In practice, since the values are "hidden" behind a .get() method call, UAs can delay computing anything
+    //    until a given property is actually requested.
+    if (m_computed_style_map_cache == nullptr) {
+        m_computed_style_map_cache = CSS::StylePropertyMapReadOnly::create_computed_style(realm(), AbstractElement { *this });
+    }
+
+    // 2. Return this’s [[computedStyleMapCache]] internal slot.
+    return *m_computed_style_map_cache;
+}
+
+// The element to inherit style from.
+// If a pseudo-element is specified, this will return the element itself.
+// Otherwise, if this element is slotted somewhere, it will return the slot's element to inherit style from.
+// Otherwise, it will return the parent or shadow host element of this element.
+GC::Ptr<Element const> Element::element_to_inherit_style_from(Optional<CSS::PseudoElement> pseudo_element) const
+{
+    if (pseudo_element.has_value())
+        return this;
+    while (auto const slot = assigned_slot_internal())
+        return slot->element_to_inherit_style_from({});
+    return parent_or_shadow_host_element();
 }
 
 }

@@ -12,6 +12,7 @@
 #include <AK/FlyString.h>
 #include <AK/GenericLexer.h>
 #include <AK/String.h>
+#include <AK/Utf16String.h>
 #include <AK/Utf16View.h>
 #include <AK/Utf8View.h>
 #include <LibWeb/Infra/CharacterTypes.h>
@@ -42,6 +43,30 @@ String normalize_newlines(String const& string)
     return MUST(builder.to_string());
 }
 
+// https://infra.spec.whatwg.org/#normalize-newlines
+Utf16String normalize_newlines(Utf16String const& string)
+{
+    // To normalize newlines in a string, replace every U+000D CR U+000A LF code point pair with a single U+000A LF
+    // code point, and then replace every remaining U+000D CR code point with a U+000A LF code point.
+    if (!string.contains('\r'))
+        return string;
+
+    // FIXME: Implement a UTF-16 GenericLexer.
+    StringBuilder builder(StringBuilder::Mode::UTF16, string.length_in_code_units());
+
+    for (size_t i = 0; i < string.length_in_code_units(); ++i) {
+        if (auto code_unit = string.code_unit_at(i); code_unit == '\r') {
+            if (i + 1 < string.length_in_code_units() && string.code_unit_at(i + 1) == '\n')
+                ++i;
+            builder.append('\n');
+        } else {
+            builder.append_code_unit(code_unit);
+        }
+    }
+
+    return builder.to_utf16_string();
+}
+
 // https://infra.spec.whatwg.org/#strip-and-collapse-ascii-whitespace
 ErrorOr<String> strip_and_collapse_whitespace(StringView string)
 {
@@ -60,13 +85,34 @@ ErrorOr<String> strip_and_collapse_whitespace(StringView string)
     return String::from_utf8(builder.string_view().trim(Infra::ASCII_WHITESPACE));
 }
 
+// https://infra.spec.whatwg.org/#strip-and-collapse-ascii-whitespace
+Utf16String strip_and_collapse_whitespace(Utf16String const& string)
+{
+    // Replace any sequence of one or more consecutive code points that are ASCII whitespace in the string with a single U+0020 SPACE code point.
+    if (!string.contains_any_of(Infra::ASCII_WHITESPACE_CODE_POINTS))
+        return string;
+
+    StringBuilder builder(StringBuilder::Mode::UTF16);
+
+    for (auto code_point : string) {
+        if (Infra::is_ascii_whitespace(code_point)) {
+            if (!builder.utf16_string_view().ends_with(' '))
+                builder.append(' ');
+            continue;
+        }
+
+        builder.append_code_point(code_point);
+    }
+
+    // ...and then remove any leading and trailing ASCII whitespace from that string.
+    return builder.to_utf16_string().trim(Infra::ASCII_WHITESPACE);
+}
+
 // https://infra.spec.whatwg.org/#code-unit-prefix
 bool is_code_unit_prefix(StringView potential_prefix_utf8, StringView input_utf8)
 {
-    auto potential_prefix_utf16_bytes = MUST(utf8_to_utf16(potential_prefix_utf8));
-    auto input_utf16_bytes = MUST(utf8_to_utf16(input_utf8));
-    Utf16View potential_prefix { potential_prefix_utf16_bytes };
-    Utf16View input { input_utf16_bytes };
+    auto potential_prefix = Utf16String::from_utf8(potential_prefix_utf8);
+    auto input = Utf16String::from_utf8(input_utf8);
 
     // 1. Let i be 0.
     size_t i = 0;
@@ -148,9 +194,10 @@ bool code_unit_less_than(StringView a, StringView b)
     if (a.is_ascii() && b.is_ascii())
         return a < b;
 
-    auto a_utf16 = MUST(utf8_to_utf16(a));
-    auto b_utf16 = MUST(utf8_to_utf16(b));
-    return Utf16View { a_utf16 }.is_code_unit_less_than(Utf16View { b_utf16 });
+    auto a_utf16 = Utf16String::from_utf8(a);
+    auto b_utf16 = Utf16String::from_utf8(b);
+
+    return a_utf16.utf16_view().is_code_unit_less_than(b_utf16);
 }
 
 }

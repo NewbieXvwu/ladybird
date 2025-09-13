@@ -83,6 +83,9 @@
   "-webkit-box-sizing": {
     "legacy-alias-for": "box-sizing"
   },
+  "-webkit-filter": {
+    "legacy-alias-for": "filter"
+  },
   "-webkit-flex": {
     "legacy-alias-for": "flex"
   },
@@ -351,7 +354,7 @@
     ]
   },
   "background-blend-mode": {
-    "animation-type": "none",
+    "animation-type": "discrete",
     "inherited": false,
     "initial": "normal",
     "valid-types": [
@@ -456,7 +459,7 @@
     "initial": "repeat",
     "max-values": 2,
     "valid-types": [
-      "repeat"
+      "repetition"
     ],
     "valid-identifiers": [
       "repeat-x",
@@ -486,7 +489,8 @@
       "mapping": "block-size"
     },
     "initial": "auto",
-    "max-values": 1
+    "max-values": 1,
+    "needs-layout-for-getcomputedstyle": true
   },
   "border": {
     "inherited": false,
@@ -495,7 +499,8 @@
       "border-width",
       "border-style",
       "border-color"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-block": {
     "inherited": false,
@@ -504,16 +509,17 @@
       "border-block-width",
       "border-block-style",
       "border-block-color"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-block-color": {
     "inherited": false,
     "initial": "currentcolor",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "border-block-start-color",
       "border-block-end-color"
     ],
-    "max-values": 2,
     "valid-types": [
       "color"
     ]
@@ -525,7 +531,8 @@
       "border-block-end-width",
       "border-block-end-style",
       "border-block-end-color"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-block-end-color": {
     "logical-alias-for": {
@@ -546,7 +553,8 @@
       "group": "border-width",
       "mapping": "block-end"
     },
-    "max-values": 1
+    "max-values": 1,
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-block-start": {
     "inherited": false,
@@ -555,7 +563,8 @@
       "border-block-start-width",
       "border-block-start-style",
       "border-block-start-color"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-block-start-color": {
     "logical-alias-for": {
@@ -576,16 +585,17 @@
       "group": "border-width",
       "mapping": "block-start"
     },
-    "max-values": 1
+    "max-values": 1,
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-block-style": {
     "inherited": false,
     "initial": "none",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "border-block-start-style",
       "border-block-end-style"
     ],
-    "max-values": 2,
     "valid-types": [
       "line-style"
     ]
@@ -593,15 +603,16 @@
   "border-block-width": {
     "inherited": false,
     "initial": "medium",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "border-block-start-width",
       "border-block-end-width"
     ],
-    "max-values": 2,
     "valid-types": [
       "length [0,∞]",
       "line-width"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-bottom": {
     "inherited": false,
@@ -610,7 +621,8 @@
       "border-bottom-width",
       "border-bottom-style",
       "border-bottom-color"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-bottom-color": {
     "affects-layout": false,
@@ -666,7 +678,8 @@
     ],
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-collapse": {
     "animation-type": "discrete",
@@ -679,13 +692,13 @@
   "border-color": {
     "affects-layout": false,
     "initial": "currentcolor",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "border-top-color",
       "border-right-color",
       "border-bottom-color",
       "border-left-color"
     ],
-    "max-values": 4,
     "valid-types": [
       "color"
     ],
@@ -750,7 +763,8 @@
     "valid-types": [
       "number [0,∞]",
       "percentage [0,∞]"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-image-source": {
     "affects-layout": false,
@@ -777,7 +791,9 @@
     ],
     "valid-identifiers": [
       "auto"
-    ]
+    ],
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-inline": {
     "inherited": false,
@@ -786,16 +802,17 @@
       "border-inline-width",
       "border-inline-style",
       "border-inline-color"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-inline-color": {
     "inherited": false,
     "initial": "currentcolor",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "border-inline-start-color",
       "border-inline-end-color"
     ],
-    "max-values": 2,
     "valid-types": [
       "color"
     ]
@@ -807,7 +824,8 @@
       "border-inline-end-width",
       "border-inline-end-style",
       "border-inline-end-color"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "border-inline-end-color": {
     "logical-alias-for": {
@@ -863,11 +881,11 @@
   "border-inline-style": {
     "inherited": false,
     "initial": "none",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "border-inline-start-style",
       "border-inline-end-style"
     ],
-    "max-values": 2,
     "valid-types": [
       "line-style"
     ]
@@ -875,11 +893,11 @@
   "border-inline-width": {
     "inherited": false,
     "initial": "medium",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "border-inline-start-width",
       "border-inline-end-width"
     ],
-    "max-values": 2,
     "valid-types": [
       "length [0,∞]",
       "line-width"
@@ -984,7 +1002,8 @@
     ]
   },
   "border-spacing": {
-    "animation-type": "discrete",
+    "_comment": "Follows the newer definition from: https://drafts.csswg.org/css-tables-3/#border-spacing-property",
+    "animation-type": "by-computed-value",
     "inherited": true,
     "initial": "0",
     "max-values": 2,
@@ -1011,13 +1030,13 @@
   },
   "border-style": {
     "initial": "none",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "border-top-style",
       "border-right-style",
       "border-bottom-style",
       "border-left-style"
     ],
-    "max-values": 4,
     "valid-types": [
       "line-style"
     ]
@@ -1089,13 +1108,13 @@
   },
   "border-width": {
     "initial": "medium",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "border-top-width",
       "border-right-width",
       "border-bottom-width",
       "border-left-width"
     ],
-    "max-values": 4,
     "valid-types": [
       "length [0,∞]",
       "line-width"
@@ -1110,7 +1129,8 @@
     "initial": "auto",
     "valid-types": [
       "length [-∞,∞]",
-      "percentage [-∞,∞]"
+      "percentage [-∞,∞]",
+      "anchor"
     ],
     "valid-identifiers": [
       "auto"
@@ -1118,7 +1138,8 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "box-shadow": {
     "affects-layout": false,
@@ -1215,6 +1236,15 @@
       "hashless-hex-color"
     ]
   },
+  "color-interpolation": {
+    "affects-layout": false,
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "srgb",
+    "valid-types": [
+      "color-interpolation"
+    ]
+  },
   "color-scheme": {
     "affects-layout": false,
     "animation-type": "discrete",
@@ -1253,6 +1283,17 @@
     ],
     "percentages-resolve-to": "length"
   },
+  "column-height": {
+    "animation-type": "by-computed-value",
+    "inherited": false,
+    "initial": "auto",
+    "valid-types": [
+      "length [0,∞]"
+    ],
+    "valid-identifiers": [
+      "auto"
+    ]
+  },
   "column-span": {
     "animation-type": "discrete",
     "inherited": false,
@@ -1274,10 +1315,11 @@
   },
   "columns": {
     "inherited": false,
-    "initial": "auto auto",
+    "initial": "auto auto / auto",
     "longhands": [
       "column-width",
-      "column-count"
+      "column-count",
+      "column-height"
     ]
   },
   "contain": {
@@ -1296,6 +1338,7 @@
     "__comment": "FIXME: This accepts a whole lot of other types and identifiers!",
     "valid-types": [
       "counter",
+      "image",
       "string"
     ],
     "valid-identifiers": [
@@ -1424,7 +1467,7 @@
   },
   "fill": {
     "affects-layout": false,
-    "animation-type": "none",
+    "animation-type": "by-computed-value",
     "inherited": true,
     "initial": "black",
     "valid-types": [
@@ -1452,6 +1495,7 @@
   },
   "filter": {
     "affects-layout": false,
+    "affects-stacking-context": true,
     "animation-type": "custom",
     "inherited": false,
     "initial": "none",
@@ -1552,7 +1596,8 @@
     "inherited": false,
     "initial": "1",
     "valid-types": [
-      "number [0,1]"
+      "number [-∞,∞]",
+      "percentage [-∞,∞]"
     ]
   },
   "font": {
@@ -1762,11 +1807,11 @@
       "length [0,∞]",
       "percentage [0,∞]"
     ],
-    "max-values": 2,
     "valid-identifiers": [
       "normal"
     ],
     "percentages-resolve-to": "length",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "row-gap",
       "column-gap"
@@ -1936,7 +1981,8 @@
       "grid-template-areas",
       "grid-template-rows",
       "grid-template-columns"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "grid-template-areas": {
     "animation-type": "discrete",
@@ -1962,7 +2008,8 @@
       "percentage",
       "string"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "grid-template-rows": {
     "animation-type": "custom",
@@ -1977,7 +2024,8 @@
       "percentage",
       "string"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "height": {
     "animation-type": "by-computed-value",
@@ -1996,7 +2044,8 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "image-rendering": {
     "animation-type": "discrete",
@@ -2013,18 +2062,19 @@
       "mapping": "inline-size"
     },
     "initial": "auto",
-    "max-values": 1
+    "max-values": 1,
+    "needs-layout-for-getcomputedstyle": true
   },
   "inset": {
     "inherited": false,
     "initial": "auto",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "top",
       "right",
       "bottom",
       "left"
     ],
-    "max-values": 4,
     "valid-types": [
       "length [-∞,∞]",
       "percentage [-∞,∞]"
@@ -2032,15 +2082,16 @@
     "valid-identifiers": [
       "auto"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "inset-block": {
     "initial": "auto",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "inset-block-start",
       "inset-block-end"
     ],
-    "max-values": 2,
     "valid-types": [
       "length [-∞,∞]",
       "percentage [-∞,∞]"
@@ -2048,29 +2099,32 @@
     "valid-identifiers": [
       "auto"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "inset-block-end": {
     "logical-alias-for": {
       "group": "inset",
       "mapping": "block-end"
     },
-    "max-values": 1
+    "max-values": 1,
+    "needs-layout-for-getcomputedstyle": true
   },
   "inset-block-start": {
     "logical-alias-for": {
       "group": "inset",
       "mapping": "block-start"
     },
-    "max-values": 1
+    "max-values": 1,
+    "needs-layout-for-getcomputedstyle": true
   },
   "inset-inline": {
     "initial": "auto",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "inset-inline-start",
       "inset-inline-end"
     ],
-    "max-values": 2,
     "valid-types": [
       "length [-∞,∞]",
       "percentage [-∞,∞]"
@@ -2078,24 +2132,27 @@
     "valid-identifiers": [
       "auto"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "inset-inline-end": {
     "logical-alias-for": {
       "group": "inset",
       "mapping": "inline-end"
     },
-    "max-values": 1
+    "max-values": 1,
+    "needs-layout-for-getcomputedstyle": true
   },
   "inset-inline-start": {
     "logical-alias-for": {
       "group": "inset",
       "mapping": "inline-start"
     },
-    "max-values": 1
+    "max-values": 1,
+    "needs-layout-for-getcomputedstyle": true
   },
   "isolation": {
-    "animation-type": "none",
+    "animation-type": "discrete",
     "inherited": false,
     "initial": "auto",
     "valid-types": [
@@ -2132,7 +2189,8 @@
     "initial": "auto",
     "valid-types": [
       "length [-∞,∞]",
-      "percentage [-∞,∞]"
+      "percentage [-∞,∞]",
+      "anchor"
     ],
     "valid-identifiers": [
       "auto"
@@ -2140,7 +2198,8 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "letter-spacing": {
     "animation-type": "by-computed-value",
@@ -2170,7 +2229,8 @@
     "valid-identifiers": [
       "normal"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "list-style": {
     "inherited": true,
@@ -2212,13 +2272,13 @@
   "margin": {
     "inherited": false,
     "initial": "0",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "margin-top",
       "margin-right",
       "margin-bottom",
       "margin-left"
     ],
-    "max-values": 4,
     "valid-types": [
       "length [-∞,∞]",
       "percentage [-∞,∞]"
@@ -2229,15 +2289,16 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-block": {
     "initial": "0",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "margin-block-start",
       "margin-block-end"
     ],
-    "max-values": 2,
     "valid-types": [
       "length [-∞,∞]",
       "percentage [-∞,∞]"
@@ -2245,19 +2306,22 @@
     "valid-identifiers": [
       "auto"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-block-end": {
     "logical-alias-for": {
       "group": "margin",
       "mapping": "block-end"
-    }
+    },
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-block-start": {
     "logical-alias-for": {
       "group": "margin",
       "mapping": "block-start"
-    }
+    },
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-bottom": {
     "animation-type": "by-computed-value",
@@ -2273,15 +2337,16 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-inline": {
     "initial": "0",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "margin-inline-start",
       "margin-inline-end"
     ],
-    "max-values": 2,
     "valid-types": [
       "length [-∞,∞]",
       "percentage [-∞,∞]"
@@ -2289,19 +2354,22 @@
     "valid-identifiers": [
       "auto"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-inline-end": {
     "logical-alias-for": {
       "group": "margin",
       "mapping": "inline-end"
-    }
+    },
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-inline-start": {
     "logical-alias-for": {
       "group": "margin",
       "mapping": "inline-start"
-    }
+    },
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-left": {
     "animation-type": "by-computed-value",
@@ -2317,7 +2385,8 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-right": {
     "animation-type": "by-computed-value",
@@ -2333,7 +2402,8 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "margin-top": {
     "animation-type": "by-computed-value",
@@ -2349,15 +2419,45 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "mask": {
+    "__comment": "FIXME: reset mask-border",
     "inherited": false,
-    "__comment": "FIXME: add longhands mask-clip, mask-composite, mask-mode, mask-origin, mask-position, mask-repeat, mask-size; also reset mask-border",
+    "affects-layout": false,
     "initial": "none",
     "longhands": [
-      "mask-image"
+      "mask-clip",
+      "mask-composite",
+      "mask-image",
+      "mask-mode",
+      "mask-origin",
+      "mask-position",
+      "mask-repeat",
+      "mask-size"
     ]
+  },
+  "mask-clip": {
+    "animation-type": "discrete",
+    "inherited": false,
+    "affects-layout": false,
+    "valid-types": [
+      "coord-box"
+    ],
+    "valid-identifiers": [
+      "no-clip"
+    ],
+    "initial": "border-box"
+  },
+  "mask-composite": {
+    "animation-type": "discrete",
+    "inherited": false,
+    "affects-layout": false,
+    "valid-types": [
+      "compositing-operator"
+    ],
+    "initial": "add"
   },
   "mask-image": {
     "animation-type": "discrete",
@@ -2372,6 +2472,65 @@
       "none"
     ],
     "initial": "none"
+  },
+  "mask-mode": {
+    "animation-type": "discrete",
+    "inherited": false,
+    "affects-layout": false,
+    "valid-types": [
+      "masking-mode"
+    ],
+    "initial": "match-source"
+  },
+  "mask-origin": {
+    "animation-type": "discrete",
+    "inherited": false,
+    "affects-layout": false,
+    "valid-types": [
+      "coord-box"
+    ],
+    "initial": "border-box"
+  },
+  "mask-position": {
+    "animation-type": "repeatable-list",
+    "affects-layout": false,
+    "inherited": false,
+    "initial": "0% 0%",
+    "valid-types": [
+      "position"
+    ],
+    "percentages-resolve-to": "length"
+  },
+  "mask-repeat": {
+    "affects-layout": false,
+    "animation-type": "discrete",
+    "inherited": false,
+    "initial": "repeat",
+    "max-values": 2,
+    "valid-types": [
+      "repetition"
+    ],
+    "valid-identifiers": [
+      "repeat-x",
+      "repeat-y"
+    ]
+  },
+  "mask-size": {
+    "affects-layout": false,
+    "animation-type": "repeatable-list",
+    "inherited": false,
+    "initial": "auto",
+    "max-values": 2,
+    "valid-types": [
+      "length [0,∞]",
+      "percentage [0,∞]"
+    ],
+    "valid-identifiers": [
+      "auto",
+      "cover",
+      "contain"
+    ],
+    "percentages-resolve-to": "length"
   },
   "mask-type": {
     "animation-type": "discrete",
@@ -2515,7 +2674,7 @@
     ]
   },
   "mix-blend-mode": {
-    "animation-type": "none",
+    "animation-type": "discrete",
     "inherited": false,
     "initial": "normal",
     "valid-types": [
@@ -2613,9 +2772,9 @@
       "overflow-x",
       "overflow-y"
     ],
+    "positional-value-list-shorthand": true,
     "inherited": false,
     "initial": "visible",
-    "max-values": 2,
     "valid-types": [
       "overflow"
     ]
@@ -2626,6 +2785,9 @@
     "initial": "visible",
     "valid-types": [
       "overflow"
+    ],
+    "valid-identifiers": [
+      "overlay>auto"
     ]
   },
   "overflow-y": {
@@ -2634,18 +2796,21 @@
     "initial": "visible",
     "valid-types": [
       "overflow"
+    ],
+    "valid-identifiers": [
+      "overlay>auto"
     ]
   },
   "padding": {
     "inherited": false,
     "initial": "0",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "padding-top",
       "padding-right",
       "padding-bottom",
       "padding-left"
     ],
-    "max-values": 4,
     "valid-types": [
       "length [0,∞]",
       "percentage [0,∞]"
@@ -2653,32 +2818,36 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "padding-block": {
     "initial": "0",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "padding-block-start",
       "padding-block-end"
     ],
-    "max-values": 2,
     "valid-types": [
       "length [0,∞]",
       "percentage [0,∞]"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "padding-block-end": {
     "logical-alias-for": {
       "group": "padding",
       "mapping": "block-end"
-    }
+    },
+    "needs-layout-for-getcomputedstyle": true
   },
   "padding-block-start": {
     "logical-alias-for": {
       "group": "padding",
       "mapping": "block-start"
-    }
+    },
+    "needs-layout-for-getcomputedstyle": true
   },
   "padding-bottom": {
     "animation-type": "by-computed-value",
@@ -2691,20 +2860,22 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "padding-inline": {
     "initial": "0",
+    "positional-value-list-shorthand": true,
     "longhands": [
       "padding-inline-start",
       "padding-inline-end"
     ],
-    "max-values": 2,
     "valid-types": [
       "length [0,∞]",
       "percentage [0,∞]"
     ],
-    "percentages-resolve-to": "length"
+    "percentages-resolve-to": "length",
+    "needs-layout-for-getcomputedstyle": true
   },
   "padding-inline-end": {
     "logical-alias-for": {
@@ -2716,7 +2887,8 @@
     "logical-alias-for": {
       "group": "padding",
       "mapping": "inline-start"
-    }
+    },
+    "needs-layout-for-getcomputedstyle": true
   },
   "padding-left": {
     "animation-type": "by-computed-value",
@@ -2729,7 +2901,8 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "padding-right": {
     "animation-type": "by-computed-value",
@@ -2742,7 +2915,8 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "padding-top": {
     "animation-type": "by-computed-value",
@@ -2755,6 +2929,18 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
+    ],
+    "needs-layout-for-getcomputedstyle": true
+  },
+  "paint-order": {
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "normal",
+    "valid-identifiers": [
+      "normal"
+    ],
+    "valid-types": [
+      "paint-order"
     ]
   },
   "place-content": {
@@ -2830,7 +3016,8 @@
     "initial": "auto",
     "valid-types": [
       "length [-∞,∞]",
-      "percentage [-∞,∞]"
+      "percentage [-∞,∞]",
+      "anchor"
     ],
     "valid-identifiers": [
       "auto"
@@ -2838,7 +3025,8 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "rotate": {
     "animation-type": "custom",
@@ -2928,6 +3116,15 @@
       "none"
     ]
   },
+  "shape-rendering": {
+    "affects-layout": true,
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "auto",
+    "valid-types": [
+      "shape-rendering"
+    ]
+  },
   "stop-color": {
     "affects-layout": false,
     "animation-type": "by-computed-value",
@@ -2967,7 +3164,7 @@
     "affects-layout": false,
     "animation-type": "by-computed-value",
     "inherited": true,
-    "initial": "0",
+    "initial": "0px",
     "valid-types": [
       "length [0,∞]",
       "number [0,∞]",
@@ -3131,6 +3328,9 @@
     "initial": "auto",
     "valid-types": [
       "text-justify"
+    ],
+    "valid-identifiers": [
+      "distribute>inter-character"
     ]
   },
   "text-overflow": {
@@ -3169,6 +3369,19 @@
       "text-transform"
     ]
   },
+  "text-underline-offset": {
+    "animation-type": "by-computed-value",
+    "inherited": true,
+    "initial": "auto",
+    "valid-identifiers": [
+      "auto"
+    ],
+    "valid-types": [
+      "length [-∞,∞]",
+      "percentage [-∞,∞]"
+    ],
+    "percentages-resolve-to": "length"
+  },
   "text-wrap": {
     "inherited": true,
     "initial": "wrap",
@@ -3199,7 +3412,8 @@
     "initial": "auto",
     "valid-types": [
       "length [-∞,∞]",
-      "percentage [-∞,∞]"
+      "percentage [-∞,∞]",
+      "anchor"
     ],
     "valid-identifiers": [
       "auto"
@@ -3207,7 +3421,8 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
-    ]
+    ],
+    "needs-layout-for-getcomputedstyle": true
   },
   "touch-action": {
     "animation-type": "discrete",
@@ -3320,7 +3535,12 @@
     "inherited": false,
     "initial": "none",
     "affects-layout": false,
-    "affects-stacking-context": true
+    "affects-stacking-context": true,
+    "valid-types": [
+      "length [-∞,∞]",
+      "percentage [-∞,∞]"
+    ],
+    "percentages-resolve-to": "length"
   },
   "unicode-bidi": {
     "animation-type": "none",
@@ -3422,6 +3642,22 @@
     "percentages-resolve-to": "length",
     "quirks": [
       "unitless-length"
+    ],
+    "needs-layout-for-getcomputedstyle": true
+  },
+  "will-change": {
+    "affects-layout": false,
+    "affects-stacking-context": true,
+    "animation-type": "none",
+    "inherited": false,
+    "initial": "auto",
+    "valid-types": [
+      "custom-ident ![all,auto,contents,none,scroll-position,will-change]"
+    ],
+    "valid-identifiers": [
+      "auto",
+      "scroll-position",
+      "contents"
     ]
   },
   "word-break": {

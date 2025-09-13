@@ -26,13 +26,13 @@ interface HTMLButtonElement : HTMLElement {
     [CEReactions, Reflect=formtarget] attribute DOMString formTarget;
     [CEReactions, Reflect] attribute DOMString name;
     [CEReactions, ImplementedAs=type_for_bindings, Enumerated=ButtonTypeState] attribute DOMString type;
-    [CEReactions, Reflect] attribute DOMString value;
+    [CEReactions, Reflect] attribute Utf16DOMString value;
 
     readonly attribute boolean willValidate;
     readonly attribute ValidityState validity;
-    [FIXME] readonly attribute DOMString validationMessage;
-    [FIXME] boolean checkValidity();
-    [FIXME] boolean reportValidity();
+    readonly attribute Utf16DOMString validationMessage;
+    boolean checkValidity();
+    boolean reportValidity();
     undefined setCustomValidity(DOMString error);
 
     readonly attribute NodeList labels;

@@ -80,7 +80,7 @@ GC::Ref<FontFace> FontFace::construct_impl(JS::Realm& realm, String family, Font
     auto try_parse_descriptor = [&parsing_params, &font_face, &realm](DescriptorID descriptor_id, String const& string) -> String {
         auto result = parse_css_descriptor(parsing_params, AtRuleID::FontFace, descriptor_id, string);
         if (!result) {
-            font_face->reject_status_promise(WebIDL::SyntaxError::create(realm, MUST(String::formatted("FontFace constructor: Invalid {}", to_string(descriptor_id)))));
+            font_face->reject_status_promise(WebIDL::SyntaxError::create(realm, Utf16String::formatted("FontFace constructor: Invalid {}", to_string(descriptor_id))));
             return {};
         }
         return result->to_string(SerializationMode::Normal);
@@ -96,11 +96,11 @@ GC::Ref<FontFace> FontFace::construct_impl(JS::Realm& realm, String family, Font
     font_face->m_ascent_override = try_parse_descriptor(DescriptorID::AscentOverride, descriptors.ascent_override);
     font_face->m_descent_override = try_parse_descriptor(DescriptorID::DescentOverride, descriptors.descent_override);
     font_face->m_line_gap_override = try_parse_descriptor(DescriptorID::LineGapOverride, descriptors.line_gap_override);
-    RefPtr<CSSStyleValue const> parsed_source;
+    RefPtr<StyleValue const> parsed_source;
     if (auto* source_string = source.get_pointer<String>()) {
         parsed_source = parse_css_descriptor(parsing_params, AtRuleID::FontFace, DescriptorID::Src, *source_string);
         if (!parsed_source) {
-            font_face->reject_status_promise(WebIDL::SyntaxError::create(realm, MUST(String::formatted("FontFace constructor: Invalid {}", to_string(DescriptorID::Src)))));
+            font_face->reject_status_promise(WebIDL::SyntaxError::create(realm, Utf16String::formatted("FontFace constructor: Invalid {}", to_string(DescriptorID::Src))));
         }
     }
     //    Return font face. If font face’s status is "error", terminate this algorithm;
@@ -126,7 +126,7 @@ GC::Ref<FontFace> FontFace::construct_impl(JS::Realm& realm, String family, Font
     }
 
     if (font_face->m_binary_data.is_empty() && font_face->m_urls.is_empty())
-        font_face->reject_status_promise(WebIDL::SyntaxError::create(realm, "FontFace constructor: Invalid font source"_string));
+        font_face->reject_status_promise(WebIDL::SyntaxError::create(realm, "FontFace constructor: Invalid font source"_utf16));
 
     // 3. If font face’s [[Data]] slot is not null, queue a task to run the following steps synchronously:
     if (font_face->m_binary_data.is_empty())
@@ -164,7 +164,7 @@ GC::Ref<FontFace> FontFace::construct_impl(JS::Realm& realm, String family, Font
                 HTML::TemporaryExecutionContext context(font->realm(), HTML::TemporaryExecutionContext::CallbacksEnabled::Yes);
                 // 2. Otherwise, reject font face’s [[FontStatusPromise]] with a DOMException named "SyntaxError"
                 //    and set font face’s status attribute to "error".
-                font->reject_status_promise(WebIDL::SyntaxError::create(font->realm(), MUST(String::formatted("Failed to load font: {}", error))));
+                font->reject_status_promise(WebIDL::SyntaxError::create(font->realm(), Utf16String::formatted("Failed to load font: {}", error)));
 
                 // FIXME: For each FontFaceSet font face is in:
 
@@ -219,7 +219,7 @@ WebIDL::ExceptionOr<void> FontFace::set_family(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::FontFamily, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.family setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.family setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-family property
@@ -239,7 +239,7 @@ WebIDL::ExceptionOr<void> FontFace::set_style(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::FontStyle, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.style setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.style setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-style property
@@ -259,7 +259,7 @@ WebIDL::ExceptionOr<void> FontFace::set_weight(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::FontWeight, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.weight setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.weight setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-weight property
@@ -280,7 +280,7 @@ WebIDL::ExceptionOr<void> FontFace::set_stretch(String const& string)
     // NOTE: font-stretch is now an alias for font-width
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::FontWidth, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.stretch setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.stretch setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-width property
@@ -300,7 +300,7 @@ WebIDL::ExceptionOr<void> FontFace::set_unicode_range(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::UnicodeRange, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.unicodeRange setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.unicodeRange setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-width property
@@ -320,7 +320,7 @@ WebIDL::ExceptionOr<void> FontFace::set_feature_settings(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::FontFeatureSettings, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.featureSettings setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.featureSettings setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-width property
@@ -340,7 +340,7 @@ WebIDL::ExceptionOr<void> FontFace::set_variation_settings(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::FontVariationSettings, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.variationSettings setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.variationSettings setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-width property
@@ -360,7 +360,7 @@ WebIDL::ExceptionOr<void> FontFace::set_display(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::FontDisplay, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.display setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.display setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-width property
@@ -380,7 +380,7 @@ WebIDL::ExceptionOr<void> FontFace::set_ascent_override(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::AscentOverride, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.ascentOverride setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.ascentOverride setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-width property
@@ -400,7 +400,7 @@ WebIDL::ExceptionOr<void> FontFace::set_descent_override(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::DescentOverride, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.descentOverride setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.descentOverride setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-width property
@@ -420,7 +420,7 @@ WebIDL::ExceptionOr<void> FontFace::set_line_gap_override(String const& string)
 
     auto property = parse_css_descriptor(Parser::ParsingParams(), AtRuleID::FontFace, DescriptorID::LineGapOverride, string);
     if (!property)
-        return WebIDL::SyntaxError::create(realm(), "FontFace.lineGapOverride setter: Invalid descriptor value"_string);
+        return WebIDL::SyntaxError::create(realm(), "FontFace.lineGapOverride setter: Invalid descriptor value"_utf16);
 
     if (m_is_css_connected) {
         // FIXME: Propagate to the CSSFontFaceRule and update the font-width property
@@ -458,7 +458,7 @@ GC::Ref<WebIDL::Promise> FontFace::load()
                 //    is "NetworkError" and set font face’s status attribute to "error".
                 if (!maybe_typeface) {
                     font->m_status = Bindings::FontFaceLoadStatus::Error;
-                    WebIDL::reject_promise(font->realm(), font->m_font_status_promise, WebIDL::NetworkError::create(font->realm(), "Failed to load font"_string));
+                    WebIDL::reject_promise(font->realm(), font->m_font_status_promise, WebIDL::NetworkError::create(font->realm(), "Failed to load font"_utf16));
 
                     // FIXME: For each FontFaceSet font face is in:
                 }
@@ -477,9 +477,8 @@ GC::Ref<WebIDL::Promise> FontFace::load()
 
         // FIXME: We should probably put the 'font cache' on the WindowOrWorkerGlobalScope instead of tying it to the document's style computer
         auto& global = HTML::relevant_global_object(*font);
-        if (is<HTML::Window>(global)) {
-            auto& window = static_cast<HTML::Window&>(global);
-            auto& style_computer = const_cast<StyleComputer&>(window.document()->style_computer());
+        if (auto* window = as_if<HTML::Window>(global)) {
+            auto& style_computer = const_cast<StyleComputer&>(window->document()->style_computer());
 
             // FIXME: The ParsedFontFace is kind of expensive to create. We should be using a shared sub-object for the data
             ParsedFontFace parsed_font_face {
@@ -499,7 +498,7 @@ GC::Ref<WebIDL::Promise> FontFace::load()
                 {},                // FIXME: feature_settings
                 {},                // FIXME: variation_settings
             };
-            if (auto loader = style_computer.load_font_face(parsed_font_face, move(on_load)); loader.has_value())
+            if (auto loader = style_computer.load_font_face(parsed_font_face, move(on_load)))
                 loader->start_loading_next_url();
         } else {
             // FIXME: Don't know how to load fonts in workers! They don't have a StyleComputer

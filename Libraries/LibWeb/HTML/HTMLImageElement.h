@@ -38,7 +38,7 @@ class HTMLImageElement final
 public:
     virtual ~HTMLImageElement() override;
 
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const&) override;
+    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
     Optional<String> alternative_text() const override
     {
@@ -48,9 +48,9 @@ public:
     }
 
     String alt() const { return get_attribute_value(HTML::AttributeNames::alt); }
-    String src() const { return get_attribute_value(HTML::AttributeNames::src); }
 
     RefPtr<Gfx::ImmutableBitmap> immutable_bitmap() const;
+    RefPtr<Gfx::ImmutableBitmap> default_image_bitmap_sized(Gfx::IntSize) const;
 
     WebIDL::UnsignedLong width() const;
     WebIDL::ExceptionOr<void> set_width(WebIDL::UnsignedLong);
@@ -105,9 +105,9 @@ public:
     virtual Optional<CSSPixels> intrinsic_width() const override;
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap(Gfx::IntSize = {}) const override;
+    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap_sized(Gfx::IntSize) const override;
     virtual void set_visible_in_viewport(bool) override;
-    virtual GC::Ref<DOM::Element const> to_html_element() const override { return *this; }
+    virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
 
     virtual void visit_edges(Cell::Visitor&) override;
 

@@ -26,12 +26,17 @@ public:
     virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
     virtual void adjust_computed_style(CSS::ComputedProperties&) override;
 
+    // ^EventTarget
+    virtual bool is_focusable() const override { return true; }
+
     void set_current_navigation_was_lazy_loaded(bool value);
 
     Optional<HighResolutionTime::DOMHighResTimeStamp> const& pending_resource_start_time() const { return m_pending_resource_start_time; }
     void set_pending_resource_start_time(Optional<HighResolutionTime::DOMHighResTimeStamp> time) { m_pending_resource_start_time = time; }
 
     GC::Ref<DOM::DOMTokenList> sandbox();
+
+    SandboxingFlagSet iframe_sandboxing_flag_set() const { return m_iframe_sandboxing_flag_set; }
 
     virtual void visit_edges(Cell::Visitor&) override;
 
@@ -64,6 +69,9 @@ private:
     Optional<HighResolutionTime::DOMHighResTimeStamp> m_pending_resource_start_time = {};
 
     GC::Ptr<DOM::DOMTokenList> m_sandbox;
+
+    // https://html.spec.whatwg.org/multipage/browsers.html#iframe-sandboxing-flag-set
+    SandboxingFlagSet m_iframe_sandboxing_flag_set {};
 };
 
 void run_iframe_load_event_steps(HTML::HTMLIFrameElement&);

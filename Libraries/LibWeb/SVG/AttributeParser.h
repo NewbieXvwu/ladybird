@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2020, Matthew Olsson <mattco@serenityos.org>
- * Copyright (c) 2022, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2022-2025, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2024, Tim Ledbetter <timledbetter@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -12,28 +12,10 @@
 #include <AK/Variant.h>
 #include <AK/Vector.h>
 #include <LibGfx/Point.h>
+#include <LibWeb/Export.h>
+#include <LibWeb/SVG/Path.h>
 
 namespace Web::SVG {
-
-enum class PathInstructionType {
-    Move,
-    ClosePath,
-    Line,
-    HorizontalLine,
-    VerticalLine,
-    Curve,
-    SmoothCurve,
-    QuadraticBezierCurve,
-    SmoothQuadraticBezierCurve,
-    EllipticalArc,
-    Invalid,
-};
-
-struct PathInstruction {
-    PathInstructionType type;
-    bool absolute;
-    Vector<float> data;
-};
 
 struct Transform {
     struct Translate {
@@ -94,6 +76,13 @@ enum class SVGUnits {
     UserSpaceOnUse
 };
 
+struct ViewBox {
+    double min_x { 0 };
+    double min_y { 0 };
+    double width { 0 };
+    double height { 0 };
+};
+
 using GradientUnits = SVGUnits;
 using MaskUnits = SVGUnits;
 using MaskContentUnits = SVGUnits;
@@ -105,7 +94,7 @@ enum class SpreadMethod {
     Reflect
 };
 
-class NumberPercentage {
+class WEB_API NumberPercentage {
 public:
     NumberPercentage(float value, bool is_percentage)
         : m_value(is_percentage ? value / 100 : value)
@@ -145,7 +134,7 @@ enum class TextAnchor {
     End
 };
 
-class AttributeParser final {
+class WEB_API AttributeParser final {
 public:
     ~AttributeParser() = default;
 
@@ -154,11 +143,12 @@ public:
     static Optional<NumberPercentage> parse_number_percentage(StringView input);
     static Optional<float> parse_positive_length(StringView input);
     static Vector<Gfx::FloatPoint> parse_points(StringView input);
-    static Vector<PathInstruction> parse_path_data(StringView input);
+    static Path parse_path_data(StringView input);
     static Optional<Vector<Transform>> parse_transform(StringView input);
     static Optional<PreserveAspectRatio> parse_preserve_aspect_ratio(StringView input);
     static Optional<SVGUnits> parse_units(StringView input);
     static Optional<SpreadMethod> parse_spread_method(StringView input);
+    static Optional<ViewBox> parse_viewbox(StringView input);
 
 private:
     AttributeParser(StringView source);

@@ -12,8 +12,9 @@
 #include <LibJS/Heap/Cell.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
-#include <LibWeb/Painting/PaintContext.h>
+#include <LibWeb/Painting/DisplayListRecordingContext.h>
 #include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/TreeNode.h>
 
@@ -30,7 +31,7 @@ enum class LayoutMode {
     IntrinsicSizing,
 };
 
-class Node
+class WEB_API Node
     : public JS::Cell
     , public TreeNode<Node> {
     GC_CELL(Node, JS::Cell);
@@ -94,6 +95,8 @@ public:
     bool is_inline_block() const;
     bool is_inline_table() const;
 
+    bool is_atomic_inline() const;
+
     bool is_out_of_flow(FormattingContext const&) const;
 
     // These are used to optimize hot is<T> variants for some classes where dynamic_cast is too slow.
@@ -152,7 +155,7 @@ public:
     bool can_contain_boxes_with_position_absolute() const;
 
     Gfx::Font const& first_available_font() const;
-    Gfx::Font const& font(PaintContext&) const;
+    Gfx::Font const& font(DisplayListRecordingContext&) const;
     Gfx::Font const& font(float scale_factor) const;
 
     CSS::ImmutableComputedValues const& computed_values() const;
@@ -231,7 +234,7 @@ private:
     u32 m_initial_quote_nesting_level { 0 };
 };
 
-class NodeWithStyle : public Node {
+class WEB_API NodeWithStyle : public Node {
     GC_CELL(NodeWithStyle, Node);
 
 public:
@@ -244,7 +247,7 @@ public:
 
     Gfx::Font const& first_available_font() const;
     Vector<CSS::BackgroundLayerData> const& background_layers() const { return computed_values().background_layers(); }
-    const CSS::AbstractImageStyleValue* list_style_image() const { return m_list_style_image; }
+    CSS::AbstractImageStyleValue const* list_style_image() const { return m_list_style_image; }
 
     GC::Ref<NodeWithStyle> create_anonymous_wrapper() const;
 
@@ -320,7 +323,7 @@ inline Gfx::Font const& Node::first_available_font() const
     return parent()->first_available_font();
 }
 
-inline Gfx::Font const& Node::font(PaintContext& context) const
+inline Gfx::Font const& Node::font(DisplayListRecordingContext& context) const
 {
     return font(context.device_pixels_per_css_pixel());
 }
@@ -331,7 +334,7 @@ inline Gfx::Font const& Node::font(float scale_factor) const
     return font.with_size(font.point_size() * scale_factor);
 }
 
-inline const CSS::ImmutableComputedValues& Node::computed_values() const
+inline CSS::ImmutableComputedValues const& Node::computed_values() const
 {
     VERIFY(has_style_or_parent_with_style());
 

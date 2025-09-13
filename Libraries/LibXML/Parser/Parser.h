@@ -17,6 +17,7 @@
 #include <LibXML/DOM/Document.h>
 #include <LibXML/DOM/DocumentTypeDeclaration.h>
 #include <LibXML/DOM/Node.h>
+#include <LibXML/Export.h>
 #include <LibXML/Forward.h>
 
 namespace XML {
@@ -37,14 +38,16 @@ struct Listener {
     virtual void set_doctype(XML::Doctype) { }
     virtual void document_start() { }
     virtual void document_end() { }
-    virtual void element_start(Name const&, HashMap<Name, ByteString> const&) { }
+    virtual void element_start(Name const&, OrderedHashMap<Name, ByteString> const&) { }
     virtual void element_end(Name const&) { }
     virtual void text(StringView) { }
+    virtual void cdata_section(StringView) { }
+    virtual void processing_instruction(StringView, StringView) { }
     virtual void comment(StringView) { }
     virtual void error(ParseError const&) { }
 };
 
-class Parser {
+class XML_API Parser {
 public:
     struct Options {
         bool preserve_cdata { true };
@@ -82,6 +85,8 @@ private:
     void append_node(NonnullOwnPtr<Node>);
     void append_text(StringView, LineTrackingLexer::Position);
     void append_comment(StringView, LineTrackingLexer::Position);
+    void append_cdata_section(StringView, LineTrackingLexer::Position);
+    void append_processing_instruction(StringView target, StringView data);
     void enter_node(Node&);
     void leave_node();
 

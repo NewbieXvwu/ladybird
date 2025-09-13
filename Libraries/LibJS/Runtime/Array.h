@@ -12,6 +12,7 @@
 #include <AK/Function.h>
 #include <AK/Span.h>
 #include <AK/Vector.h>
+#include <LibJS/Export.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/Object.h>
@@ -56,7 +57,10 @@ public:
 
     [[nodiscard]] bool length_is_writable() const { return m_length_writable; }
 
+    bool is_proxy_target() const { return m_is_proxy_target; }
     void set_is_proxy_target(bool is_proxy_target) { m_is_proxy_target = is_proxy_target; }
+
+    bool default_prototype_chain_intact() const;
 
     virtual void visit_edges(Cell::Visitor& visitor) override;
 
@@ -81,7 +85,7 @@ enum class Holes {
     ReadThroughHoles,
 };
 
-JS_API ThrowCompletionOr<GC::RootVector<Value>> sort_indexed_properties(VM&, Object const&, size_t length, Function<ThrowCompletionOr<double>(Value, Value)> const& sort_compare, Holes holes);
-JS_API ThrowCompletionOr<double> compare_array_elements(VM&, Value x, Value y, FunctionObject* comparefn);
+ThrowCompletionOr<GC::RootVector<Value>> sort_indexed_properties(VM&, Object const&, size_t length, Function<ThrowCompletionOr<double>(Value, Value)> const& sort_compare, Holes holes);
+ThrowCompletionOr<double> compare_array_elements(VM&, Value x, Value y, FunctionObject* comparefn);
 
 }

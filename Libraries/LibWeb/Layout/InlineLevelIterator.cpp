@@ -35,21 +35,21 @@ void InlineLevelIterator::enter_node_with_box_model_metrics(Layout::NodeWithStyl
     auto& used_values = m_layout_state.get_mutable(node);
     auto const& computed_values = node.computed_values();
 
-    used_values.margin_top = computed_values.margin().top().to_px(node, m_containing_block_used_values.content_width());
-    used_values.margin_bottom = computed_values.margin().bottom().to_px(node, m_containing_block_used_values.content_width());
+    used_values.margin_top = computed_values.margin().top().to_px_or_zero(node, m_containing_block_used_values.content_width());
+    used_values.margin_bottom = computed_values.margin().bottom().to_px_or_zero(node, m_containing_block_used_values.content_width());
 
-    used_values.margin_left = computed_values.margin().left().to_px(node, m_containing_block_used_values.content_width());
+    used_values.margin_left = computed_values.margin().left().to_px_or_zero(node, m_containing_block_used_values.content_width());
     used_values.border_left = computed_values.border_left().width;
-    used_values.padding_left = computed_values.padding().left().to_px(node, m_containing_block_used_values.content_width());
+    used_values.padding_left = computed_values.padding().left().to_px_or_zero(node, m_containing_block_used_values.content_width());
 
-    used_values.margin_right = computed_values.margin().right().to_px(node, m_containing_block_used_values.content_width());
+    used_values.margin_right = computed_values.margin().right().to_px_or_zero(node, m_containing_block_used_values.content_width());
     used_values.border_right = computed_values.border_right().width;
-    used_values.padding_right = computed_values.padding().right().to_px(node, m_containing_block_used_values.content_width());
+    used_values.padding_right = computed_values.padding().right().to_px_or_zero(node, m_containing_block_used_values.content_width());
 
     used_values.border_top = computed_values.border_top().width;
     used_values.border_bottom = computed_values.border_bottom().width;
-    used_values.padding_bottom = computed_values.padding().bottom().to_px(node, m_containing_block_used_values.content_width());
-    used_values.padding_top = computed_values.padding().top().to_px(node, m_containing_block_used_values.content_width());
+    used_values.padding_bottom = computed_values.padding().bottom().to_px_or_zero(node, m_containing_block_used_values.content_width());
+    used_values.padding_top = computed_values.padding().top().to_px_or_zero(node, m_containing_block_used_values.content_width());
 
     m_extra_leading_metrics->margin += used_values.margin_left;
     m_extra_leading_metrics->border += used_values.border_left;
@@ -161,8 +161,8 @@ CSSPixels InlineLevelIterator::next_non_whitespace_sequence_width()
             if (next_item.is_collapsible_whitespace)
                 break;
             auto& next_text_node = as<Layout::TextNode>(*(next_item.node));
-            auto next_view = next_text_node.text_for_rendering().bytes_as_string_view().substring_view(next_item.offset_in_node, next_item.length_in_node);
-            if (next_view.is_whitespace())
+            auto next_view = next_text_node.text_for_rendering().substring_view(next_item.offset_in_node, next_item.length_in_node);
+            if (next_view.is_ascii_whitespace())
                 break;
         }
         next_width += next_item.border_box_width();
@@ -461,9 +461,7 @@ Gfx::ShapeFeatures InlineLevelIterator::create_and_merge_font_features() const
     // FIXME 2. If the font is defined via an @font-face rule, the font features implied by the font-feature-settings descriptor in the @font-face rule.
 
     // 3. Font features implied by the value of the ‘font-variant’ property, the related ‘font-variant’ subproperties and any other CSS property that uses OpenType features (e.g. the ‘font-kerning’ property).
-    for (auto& it : shape_features_map()) {
-        merged_features.set(it.key, it.value);
-    }
+    merged_features.update(shape_features_map());
 
     // FIXME 4. Feature settings determined by properties other than ‘font-variant’ or ‘font-feature-settings’. For example, setting a non-default value for the ‘letter-spacing’ property disables common ligatures.
 
@@ -492,11 +490,9 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
     if (!m_current_node)
         return {};
 
-    if (is<Layout::TextNode>(*m_current_node)) {
-        auto& text_node = static_cast<Layout::TextNode const&>(*m_current_node);
-
+    if (auto* text_node = as_if<Layout::TextNode>(*m_current_node)) {
         if (!m_text_node_context.has_value())
-            enter_text_node(text_node);
+            enter_text_node(*text_node);
 
         auto chunk_opt = m_text_node_context->chunk_iterator.next();
         if (!chunk_opt.has_value()) {
@@ -513,7 +509,8 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
         if (text_type == Gfx::GlyphRun::TextType::Ltr || text_type == Gfx::GlyphRun::TextType::Rtl)
             m_text_node_context->last_known_direction = text_type;
 
-        if (m_text_node_context->do_respect_linebreaks && chunk.has_breaking_newline) {
+        auto do_respect_linebreak = m_text_node_context->chunk_iterator.should_respect_linebreaks();
+        if (do_respect_linebreak && chunk.has_breaking_newline) {
             m_text_node_context->is_last_chunk = true;
             if (chunk.is_all_whitespace)
                 text_type = Gfx::GlyphRun::TextType::EndPadding;
@@ -522,15 +519,12 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
         if (text_type == Gfx::GlyphRun::TextType::ContextDependent)
             text_type = resolve_text_direction_from_context();
 
-        if (m_text_node_context->do_respect_linebreaks && chunk.has_breaking_newline) {
-            return Item {
-                .type = Item::Type::ForcedBreak,
-            };
-        }
+        if (do_respect_linebreak && chunk.has_breaking_newline)
+            return Item { .type = Item::Type::ForcedBreak };
 
-        CSS::CalculationResolutionContext calculation_context { .length_resolution_context = CSS::Length::ResolutionContext::for_layout_node(text_node) };
-        auto letter_spacing = text_node.computed_values().letter_spacing().resolved(calculation_context).map([&](auto& it) { return it.to_px(text_node); }).value_or(0);
-        auto word_spacing = text_node.computed_values().word_spacing().resolved(calculation_context).map([&](auto& it) { return it.to_px(text_node); }).value_or(0);
+        auto letter_spacing = text_node->computed_values().letter_spacing();
+        // FIXME: We should apply word spacing to all word-separator characters not just breaking tabs
+        auto word_spacing = text_node->computed_values().word_spacing();
 
         auto x = 0.0f;
         if (chunk.has_breaking_tab) {
@@ -543,12 +537,13 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
             }
 
             // https://drafts.csswg.org/css-text/#tab-size-property
-            auto tab_size = text_node.computed_values().tab_size();
+            CSS::CalculationResolutionContext calculation_context { .length_resolution_context = CSS::Length::ResolutionContext::for_layout_node(*text_node) };
+            auto tab_size = text_node->computed_values().tab_size();
             CSSPixels tab_width;
             tab_width = tab_size.visit(
                 [&](CSS::LengthOrCalculated const& t) -> CSSPixels {
                     return t.resolved(calculation_context)
-                        .map([&](auto& it) { return it.to_px(text_node); })
+                        .map([&](auto& it) { return it.to_px(*text_node); })
                         .value_or(0);
                 },
                 [&](CSS::NumberOrCalculated const& n) -> CSSPixels {
@@ -586,16 +581,17 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
         CSSPixels chunk_width = CSSPixels::nearest_value_for(glyph_run->width() + x);
 
         // NOTE: We never consider `content: ""` to be collapsible whitespace.
-        bool is_generated_empty_string = text_node.is_generated() && chunk.length == 0;
+        bool is_generated_empty_string = text_node->is_generated() && chunk.length == 0;
+        auto collapse_whitespace = m_text_node_context->chunk_iterator.should_collapse_whitespace();
 
         Item item {
             .type = Item::Type::Text,
-            .node = &text_node,
+            .node = text_node,
             .glyph_run = move(glyph_run),
             .offset_in_node = chunk.start,
             .length_in_node = chunk.length,
             .width = chunk_width,
-            .is_collapsible_whitespace = m_text_node_context->do_collapse && chunk.is_all_whitespace && !is_generated_empty_string,
+            .is_collapsible_whitespace = collapse_whitespace && chunk.is_all_whitespace && !is_generated_empty_string,
         };
 
         add_extra_box_model_metrics_to_item(item, m_text_node_context->is_first_chunk, m_text_node_context->is_last_chunk);
@@ -672,17 +668,11 @@ void InlineLevelIterator::enter_text_node(Layout::TextNode const& text_node)
     auto white_space_collapse = text_node.computed_values().white_space_collapse();
     auto text_wrap_mode = text_node.computed_values().text_wrap_mode();
 
-    bool do_collapse = white_space_collapse == CSS::WhiteSpaceCollapse::Collapse || white_space_collapse == CSS::WhiteSpaceCollapse::PreserveBreaks;
+    // https://drafts.csswg.org/css-text-4/#collapse
     bool do_wrap_lines = text_wrap_mode == CSS::TextWrapMode::Wrap;
-    bool do_respect_linebreaks = white_space_collapse == CSS::WhiteSpaceCollapse::Preserve || white_space_collapse == CSS::WhiteSpaceCollapse::PreserveBreaks || white_space_collapse == CSS::WhiteSpaceCollapse::BreakSpaces;
-
-    if (text_node.dom_node().is_editable() && !text_node.dom_node().is_uninteresting_whitespace_node())
-        do_collapse = false;
+    bool do_respect_linebreaks = first_is_one_of(white_space_collapse, CSS::WhiteSpaceCollapse::Preserve, CSS::WhiteSpaceCollapse::PreserveBreaks, CSS::WhiteSpaceCollapse::BreakSpaces);
 
     m_text_node_context = TextNodeContext {
-        .do_collapse = do_collapse,
-        .do_wrap_lines = do_wrap_lines,
-        .do_respect_linebreaks = do_respect_linebreaks,
         .is_first_chunk = true,
         .is_last_chunk = false,
         .chunk_iterator = TextNode::ChunkIterator { text_node, do_wrap_lines, do_respect_linebreaks },

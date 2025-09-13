@@ -11,6 +11,8 @@
 #include <LibJS/Forward.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
+#include <LibWeb/Export.h>
+#include <LibWeb/Fetch/Infrastructure/FetchRecord.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/Scripting/ModuleMap.h>
@@ -20,7 +22,7 @@
 namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#environment
-struct Environment : public JS::Cell {
+struct WEB_API Environment : public JS::Cell {
     GC_CELL(Environment, JS::Cell);
 
 public:
@@ -72,7 +74,7 @@ enum class RunScriptDecision {
 };
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#environment-settings-object
-struct EnvironmentSettingsObject : public Environment {
+struct WEB_API EnvironmentSettingsObject : public Environment {
     GC_CELL(EnvironmentSettingsObject, Environment);
 
 public:
@@ -98,6 +100,9 @@ public:
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-settings-object-origin
     virtual URL::Origin origin() const = 0;
 
+    // https://html.spec.whatwg.org/multipage/webappapis.html#concept-settings-object-has-cross-site-ancestor
+    virtual bool has_cross_site_ancestor() const = 0;
+
     // A policy container https://html.spec.whatwg.org/multipage/webappapis.html#concept-settings-object-policy-container
     virtual GC::Ref<PolicyContainer> policy_container() const = 0;
 
@@ -116,7 +121,7 @@ public:
     EventLoop& responsible_event_loop();
 
     // https://fetch.spec.whatwg.org/#concept-fetch-group
-    Vector<GC::Ref<Fetch::Infrastructure::FetchRecord>>& fetch_group() { return m_fetch_group; }
+    auto& fetch_group() { return m_fetch_group; }
 
     SerializedEnvironmentSettingsObject serialize();
 
@@ -146,7 +151,7 @@ private:
 
     // https://fetch.spec.whatwg.org/#concept-fetch-record
     // A fetch group holds an ordered list of fetch records
-    Vector<GC::Ref<Fetch::Infrastructure::FetchRecord>> m_fetch_group;
+    Fetch::Infrastructure::FetchRecord::List m_fetch_group;
 
     // https://storage.spec.whatwg.org/#api
     // Each environment settings object has an associated StorageManager object.
@@ -175,38 +180,38 @@ bool is_scripting_enabled(JS::Realm const&);
 bool is_scripting_disabled(JS::Realm const&);
 void prepare_to_run_script(JS::Realm&);
 void clean_up_after_running_script(JS::Realm const&);
-void prepare_to_run_callback(JS::Realm&);
-void clean_up_after_running_callback(JS::Realm const&);
-ModuleMap& module_map_of_realm(JS::Realm&);
-bool module_type_allowed(JS::Realm const&, StringView module_type);
+WEB_API void prepare_to_run_callback(JS::Realm&);
+WEB_API void clean_up_after_running_callback(JS::Realm const&);
+WEB_API ModuleMap& module_map_of_realm(JS::Realm&);
+WEB_API bool module_type_allowed(JS::Realm const&, StringView module_type);
 
-void add_module_to_resolved_module_set(JS::Realm&, String const& serialized_base_url, String const& normalized_specifier, Optional<URL::URL> const& as_url);
+WEB_API void add_module_to_resolved_module_set(JS::Realm&, String const& serialized_base_url, String const& normalized_specifier, Optional<URL::URL> const& as_url);
 
 EnvironmentSettingsObject& incumbent_settings_object();
-JS::Realm& incumbent_realm();
+WEB_API JS::Realm& incumbent_realm();
 JS::Object& incumbent_global_object();
 
 JS::Realm& current_principal_realm();
 EnvironmentSettingsObject& principal_realm_settings_object(JS::Realm&);
 EnvironmentSettingsObject& current_principal_settings_object();
 
-JS::Realm& principal_realm(GC::Ref<JS::Realm>);
-JS::Object& current_principal_global_object();
+WEB_API JS::Realm& principal_realm(GC::Ref<JS::Realm>);
+WEB_API JS::Object& current_principal_global_object();
 
-JS::Realm& relevant_realm(JS::Object const&);
+WEB_API JS::Realm& relevant_realm(JS::Object const&);
 JS::Realm& relevant_principal_realm(JS::Object const&);
 
-EnvironmentSettingsObject& relevant_settings_object(JS::Object const&);
+WEB_API EnvironmentSettingsObject& relevant_settings_object(JS::Object const&);
 EnvironmentSettingsObject& relevant_settings_object(DOM::Node const&);
-EnvironmentSettingsObject& relevant_principal_settings_object(JS::Object const&);
+WEB_API EnvironmentSettingsObject& relevant_principal_settings_object(JS::Object const&);
 
-JS::Object& relevant_global_object(JS::Object const&);
-JS::Object& relevant_principal_global_object(JS::Object const&);
+WEB_API JS::Object& relevant_global_object(JS::Object const&);
+WEB_API JS::Object& relevant_principal_global_object(JS::Object const&);
 
 JS::Realm& entry_realm();
 EnvironmentSettingsObject& entry_settings_object();
 JS::Object& entry_global_object();
-[[nodiscard]] bool is_secure_context(Environment const&);
+[[nodiscard]] WEB_API bool is_secure_context(Environment const&);
 [[nodiscard]] bool is_non_secure_context(Environment const&);
 
 }

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibWeb/Export.h>
 #include <LibWeb/Painting/BorderPainting.h>
 
 namespace Web::Painting {
@@ -15,8 +16,8 @@ enum class CornerClip {
     Inside
 };
 
-struct ScopedCornerRadiusClip {
-    ScopedCornerRadiusClip(PaintContext& context, DevicePixelRect const& border_rect, BorderRadiiData const& border_radii, CornerClip corner_clip = CornerClip::Outside, bool do_apply = true);
+struct WEB_API ScopedCornerRadiusClip {
+    ScopedCornerRadiusClip(DisplayListRecordingContext& context, DevicePixelRect const& border_rect, BorderRadiiData const& border_radii, CornerClip corner_clip = CornerClip::Outside, bool do_apply = true);
 
     ~ScopedCornerRadiusClip();
 
@@ -24,7 +25,7 @@ struct ScopedCornerRadiusClip {
     AK_MAKE_NONCOPYABLE(ScopedCornerRadiusClip);
 
 private:
-    PaintContext& m_context;
+    DisplayListRecordingContext& m_context;
     bool m_has_radius { false };
     bool m_do_apply;
 };

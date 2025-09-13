@@ -6,12 +6,13 @@
 
 #pragma once
 
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/Navigable.h>
 
 namespace Web::HTML {
 
-class NavigableContainer : public HTMLElement {
+class WEB_API NavigableContainer : public HTMLElement {
     WEB_PLATFORM_OBJECT(NavigableContainer, HTMLElement);
 
 public:
@@ -24,7 +25,7 @@ public:
     GC::Ptr<Navigable> content_navigable() { return m_content_navigable; }
     GC::Ptr<Navigable const> content_navigable() const { return m_content_navigable.ptr(); }
 
-    const DOM::Document* content_document() const;
+    DOM::Document const* content_document() const;
     DOM::Document const* content_document_without_origin_check() const;
 
     HTML::WindowProxy* content_window();

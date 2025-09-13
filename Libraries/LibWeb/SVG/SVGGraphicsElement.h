@@ -10,12 +10,13 @@
 #include <LibGfx/PaintStyle.h>
 #include <LibWeb/CSS/URL.h>
 #include <LibWeb/DOM/Node.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/SVG/AttributeParser.h>
 #include <LibWeb/SVG/SVGAnimatedTransformList.h>
 #include <LibWeb/SVG/SVGElement.h>
+#include <LibWeb/SVG/SVGFitToViewBox.h>
 #include <LibWeb/SVG/SVGGradientElement.h>
 #include <LibWeb/SVG/TagNames.h>
-#include <LibWeb/SVG/ViewBox.h>
 
 namespace Web::SVG {
 
@@ -26,7 +27,7 @@ struct SVGBoundingBoxOptions {
     bool clipped { false };
 };
 
-class SVGGraphicsElement : public SVGElement {
+class WEB_API SVGGraphicsElement : public SVGElement {
     WEB_PLATFORM_OBJECT(SVGGraphicsElement, SVGElement);
 
 public:
@@ -38,12 +39,20 @@ public:
     Optional<float> stroke_dashoffset() const;
     Optional<float> stroke_width() const;
     Optional<float> fill_opacity() const;
+    CSS::PaintOrderList paint_order() const;
     Optional<CSS::StrokeLinecap> stroke_linecap() const;
     Optional<CSS::StrokeLinejoin> stroke_linejoin() const;
     Optional<CSS::NumberOrCalculated> stroke_miterlimit() const;
     Optional<float> stroke_opacity() const;
     Optional<FillRule> fill_rule() const;
     Optional<ClipRule> clip_rule() const;
+
+    virtual Optional<ViewBox> active_view_box() const
+    {
+        if (auto* svg_fit_to_view_box = as_if<SVGFitToViewBox>(*this))
+            return svg_fit_to_view_box->view_box();
+        return {};
+    }
 
     float visible_stroke_width() const
     {

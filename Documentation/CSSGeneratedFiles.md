@@ -19,21 +19,23 @@ Each property will have some set of these fields on it:
 
 (Note that required fields are not required on properties with `legacy-alias-for` or `logical-alias-for` set.)
 
-| Field                      | Required | Default | Description                                                                                                                               | Generated functions                                                                                                                                                                         |
-|----------------------------|----------|---------|-------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `affects-layout`           | No       | `true`  | Boolean. Whether changing this property will invalidate the element's layout.                                                             | `bool property_affects_layout(PropertyID)`                                                                                                                                                  |
-| `affects-stacking-context` | No       | `false` | Boolean. Whether this property can cause a new stacking context for the element.                                                          | `bool property_affects_stacking_context(PropertyID)`                                                                                                                                        |
-| `animation-type`           | Yes      |         | String. How the property should be animated. Defined by the spec. See below.                                                              | `AnimationType animation_type_from_longhand_property(PropertyID)`                                                                                                                           |
-| `inherited`                | Yes      |         | Boolean. Whether the property is inherited by its child elements.                                                                         | `bool is_inherited_property(PropertyID)`                                                                                                                                                    |
-| `initial`                  | Yes      |         | String. The property's initial value if it is not specified.                                                                              | `NonnullRefPtr<CSSStyleValue const> property_initial_value(PropertyID)`                                                                                                                     |
-| `legacy-alias-for`         | No       | Nothing | String. The name of a property this is an alias for. See below.                                                                           |                                                                                                                                                                                             |
-| `logical-alias-for`        | No       | Nothing | An object. See below.                                                                                                                     | `bool property_is_logical_alias(PropertyID);`<br/>`PropertyID map_logical_alias_to_physical_property(PropertyID, LogicalAliasMappingContext const&)`                                        |
-| `longhands`                | No       | `[]`    | Array of strings. If this is a shorthand, these are the property names that it expands out into.                                          | `Vector<PropertyID> longhands_for_shorthand(PropertyID)`<br/>`Vector<PropertyID> expanded_longhands_for_shorthand(PropertyID)`<br/>`Vector<PropertyID> shorthands_for_longhand(PropertyID)` |
-| `max-values`               | No       | `1`     | Integer. How many values can be parsed for this property. eg, `margin` can have up to 4 values.                                           | `size_t property_maximum_value_count(PropertyID)`                                                                                                                                           |
-| `percentages-resolve-to`   | No       | Nothing | String. What type percentages get resolved to. eg, for `width` percentages are resolved to `length` values.                               | `Optional<ValueType> property_resolves_percentages_relative_to(PropertyID)`                                                                                                                 |
-| `quirks`                   | No       | `[]`    | Array of strings. Some properties have special behavior in "quirks mode", which are listed here. See below.                               | `bool property_has_quirk(PropertyID, Quirk)`                                                                                                                                                |
-| `valid-identifiers`        | No       | `[]`    | Array of strings. Which keywords the property accepts. Consider defining an enum instead and putting its name in the `valid-types` array. | `bool property_accepts_keyword(PropertyID, Keyword)`                                                                                                                                        |
-| `valid-types`              | No       | `[]`    | Array of strings. Which value types the property accepts. See below.                                                                      | `bool property_accepts_type(PropertyID, ValueType)`                                                                                                                                         |
+| Field                             | Required | Default | Description                                                                                                 | Generated functions                                                                                                                                                                         |
+|-----------------------------------|----------|---------|-------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `affects-layout`                  | No       | `true`  | Boolean. Whether changing this property will invalidate the element's layout.                               | `bool property_affects_layout(PropertyID)`                                                                                                                                                  |
+| `affects-stacking-context`        | No       | `false` | Boolean. Whether this property can cause a new stacking context for the element.                            | `bool property_affects_stacking_context(PropertyID)`                                                                                                                                        |
+| `animation-type`                  | Yes      |         | String. How the property should be animated. Defined by the spec. See below.                                | `AnimationType animation_type_from_longhand_property(PropertyID)`                                                                                                                           |
+| `inherited`                       | Yes      |         | Boolean. Whether the property is inherited by its child elements.                                           | `bool is_inherited_property(PropertyID)`                                                                                                                                                    |
+| `initial`                         | Yes      |         | String. The property's initial value if it is not specified.                                                | `NonnullRefPtr<StyleValue const> property_initial_value(PropertyID)`                                                                                                                     |
+| `legacy-alias-for`                | No       | Nothing | String. The name of a property this is an alias for. See below.                                             |                                                                                                                                                                                             |
+| `logical-alias-for`               | No       | Nothing | An object. See below.                                                                                       | `bool property_is_logical_alias(PropertyID);`<br/>`PropertyID map_logical_alias_to_physical_property(PropertyID, LogicalAliasMappingContext const&)`                                        |
+| `longhands`                       | No       | `[]`    | Array of strings. If this is a shorthand, these are the property names that it expands out into.            | `Vector<PropertyID> longhands_for_shorthand(PropertyID)`<br/>`Vector<PropertyID> expanded_longhands_for_shorthand(PropertyID)`<br/>`Vector<PropertyID> shorthands_for_longhand(PropertyID)` |
+| `max-values`                      | No       | `1`     | Integer. How many values can be parsed for this property. eg, `margin` can have up to 4 values.             | `size_t property_maximum_value_count(PropertyID)`                                                                                                                                           |
+| `percentages-resolve-to`          | No       | Nothing | String. What type percentages get resolved to. eg, for `width` percentages are resolved to `length` values. | `Optional<ValueType> property_resolves_percentages_relative_to(PropertyID)`                                                                                                                 |
+| `positional-value-list-shorthand` | No       | `false` | Boolean. Whether this property is a "positional value list shorthand". See below.                           | `bool property_is_positional_value_list_shorthand(PropertyID)`                                                                                                                              |
+| `quirks`                          | No       | `[]`    | Array of strings. Some properties have special behavior in "quirks mode", which are listed here. See below. | `bool property_has_quirk(PropertyID, Quirk)`                                                                                                                                                |
+| `valid-identifiers`               | No       | `[]`    | Array of strings. Which keywords the property accepts. See below.                                           | `bool property_accepts_keyword(PropertyID, Keyword)`<br/>`Optional<Keyword> resolve_legacy_value_alias(PropertyID, Keyword)`                                                                |
+| `valid-types`                     | No       | `[]`    | Array of strings. Which value types the property accepts. See below.                                        | `bool property_accepts_type(PropertyID, ValueType)`                                                                                                                                         |
+| `needs-layout-for-getcomputedstyle`                     | No       | `false`    | Boolean. Whether this property requires up-to-date layout before it could be queried by getComputedStyle() | `bool property_needs_layout_for_getcomputedstyle(PropertyID)`                                                                                                                                         |
 
 ### `animation-type`
 
@@ -67,6 +69,13 @@ Logical aliases are properties like `margin-block-start`, which may assign a val
 | `group`   | String. Name of the logical property group this is associated with. (See [LogicalPropertyGroups.json](#logicalpropertygroupsjson).) |
 | `mapping` | String. How this relates to the group. eg, if it's the block end value, `block-end`.                                                |
 
+### `positional-value-list-shorthand`
+Some shorthand properties work differently to normal in that mapping of provided values to longhands isn't necessarily
+1-to-1 and instead depends on the number of values provided, for example `margin`, `border-width`, `gap`, etc.
+
+These properties have distinct behaviors in how they are parsed and serialized, having them marked allows us to
+implement this behavior in a generic way.
+
 ### `quirks`
 
 The [Quirks spec](https://quirks.spec.whatwg.org/#css) defines these.
@@ -75,6 +84,14 @@ The [Quirks spec](https://quirks.spec.whatwg.org/#css) defines these.
 |------------------------------|----------------------|
 | The hashless hex color quirk | `hashless-hex-color` |
 | The unitless length quirk    | `unitless-length`    |
+
+### `valid-identifiers`
+
+A list of CSS keyword names, that the property accepts. Consider defining an enum instead and putting its name in the
+`valid-types` array, especially if the spec provides a name to a set of such keywords.
+
+Some properties have [legacy value aliases](https://drafts.csswg.org/css-cascade-5/#css-legacy-value-alias), where one
+keyword is parsed as another. These are supported as `"foo>bar"`, to make `foo` an alias for `bar`.
 
 ### `valid-types`
 
@@ -113,7 +130,7 @@ The generated code provides:
   it exists in that at-rule.
 - `FlyString to_string(DescriptorID)` for serializing descriptor names.
 - `bool at_rule_supports_descriptor(AtRuleID, DescriptorID)` to query if the given at-rule allows the descriptor.
-- `RefPtr<CSSStyleValue const> descriptor_initial_value(AtRuleID, DescriptorID)` for getting a descriptor's initial value.
+- `RefPtr<StyleValue const> descriptor_initial_value(AtRuleID, DescriptorID)` for getting a descriptor's initial value.
 - `DescriptorMetadata get_descriptor_metadata(AtRuleID, DescriptorID)` returns data used for parsing the descriptor.
 
 ### At-rule fields
@@ -143,7 +160,7 @@ This generates `Keyword.h` and `Keyword.cpp`.
 All keyword values used by any property or media-feature need to be defined here.
 
 The generated code provides:
-- A `Keyword` enum as used by `CSSKeywordValue`
+- A `Keyword` enum as used by `KeywordStyleValue`
 - `Optional<Keyword> keyword_from_string(StringView)` to attempt to convert a string into a Keyword
 - `StringView string_from_keyword(Keyword)` to convert a Keyword back into a string
 - `bool is_css_wide_keyword(StringView)` which returns whether the string is one of the special "CSS-wide keywords"
@@ -182,10 +199,10 @@ The generated code provides:
 - The `PseudoClassMetadata` struct which holds a representation of the data from the JSON file
 - `PseudoClassMetadata pseudo_class_metadata(PseudoClass)` to retrieve that data
 
-## PsuedoElements.json
+## PseudoElements.json
 
 This is a single JSON object, with pseudo-element names as keys and the values being objects with fields for the pseudo-element.
-This generated `PsuedoElement.h` and `PseudoElement.cpp`.
+This generated `PseudoElement.h` and `PseudoElement.cpp`.
 
 Each entry has the following properties:
 
@@ -194,7 +211,7 @@ Each entry has the following properties:
 | `alias-for`          | No       | Nothing        | Use to specify that this should be treated as an alias for the named pseudo-element.                                                                                   |
 | `function-syntax`    | No       | Nothing        | Syntax for the function arguments if this is a function-type pseudo-element. Copied directly from the spec.                                                            |
 | `is-allowed-in-has`  | No       | `false`        | Whether this is a [`:has`-allowed pseudo-element](https://drafts.csswg.org/selectors/#has-allowed-pseudo-element).                                                     |
-| `is-pseudo-root`     | No       | `false` | Whether this is a [pseudo-element root](https://drafts.csswg.org/css-view-transitions/#pseudo-element-root).                                                                  |
+| `is-pseudo-root`     | No       | `false`        | Whether this is a [pseudo-element root](https://drafts.csswg.org/css-view-transitions/#pseudo-element-root).                                                           |
 | `property-whitelist` | No       | Nothing        | Some pseudo-elements only permit certain properties. If so, name them in an array here. Some special values are allowed here for categories of properties - see below. |
 | `spec`               | No       | Nothing        | Link to the spec definition, for reference. Not used in generated code.                                                                                                |
 | `type`               | No       | `"identifier"` | What type of pseudo-element is this. Either "identifier", "function", or "both".                                                                                       |
@@ -296,3 +313,50 @@ The generated code provides:
 - `Optional<TransformFunction> transform_function_from_string(StringView)` to parse a string as a `TransformFunction`
 - `StringView to_string(TransformFunction)` to convert a `TransformFunction` back to a string
 - `TransformFunctionMetadata transform_function_metadata(TransformFunction)` to obtain metadata about the transform function, such as its parameter list
+
+## EnvironmentVariables.json
+
+This is a single JSON object, describing each [CSS environment variable](https://drafts.csswg.org/css-env/#css-environment-variable),
+with the keys being the environment variable names, and the values being objects describing the variable's properties.
+This generates `EnvironmentVariable.h` and `EnvironmentVariable.cpp`.
+
+Each entry has 3 properties, all taken from the spec:
+
+| Field        | Description                                                         |
+|--------------|---------------------------------------------------------------------|
+| `spec`       | String. URL to the spec definition for this environment variable.   |
+| `type`       | String. CSS value type of the variable, eg `<length>`.              |
+| `dimensions` | Integer. Number of dimensions for the variable, or `0` for scalars. |
+
+The generated code provides:
+- An `EnvironmentVariable` enum listing the environment variables
+- `Optional<EnvironmentVariable> environment_variable_from_string(StringView)` to parse a string as an `EnvironmentVariable`
+- `StringView to_string(EnvironmentVariable)` to convert the `EnvironmentVariable` back to a string
+- `ValueType environment_variable_type(EnvironmentVariable)` to get the variable's value type
+- `u32 environment_variable_dimension_count(EnvironmentVariable)` to get its dimension count
+
+## Units.json
+
+This is a JSON object with the keys being dimension type names, and the values being objects. Those objects' keys are
+unit names, and their values are data about each unit.
+It generates `Units.h` and `Units.cpp`.
+
+Each unit has the following properties:
+
+| Field                      | Description                                                                                                                        |
+|----------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| `is-canonical-unit`        | Boolean, default `false`. Each dimension has one canonical unit.                                                                   |
+| `number-of-canonical-unit` | Number. How many of the canonical units 1 of this is equivalent to. Ignore this for relative units, and the canonical unit itself. |
+| `is-relative-to`           | String. Some length units are relative to the font or viewport. Set this to `"font"` or `"viewport"` for those.                    |
+
+The generated code provides:
+- A `DimensionType` enum, listing each type of dimension that has units defined.
+- `Optional<DimensionType> dimension_for_unit(StringView)` for querying which dimension a unit applies to, if any.
+- A `FooUnit` enum for each dimension "foo", which lists all the units of that dimension.
+- For each of those...
+  - `constexpr FooUnit canonical_foo_unit()` which is the canonical unit for that type.
+  - `Optional<FooUnit> string_to_foo_unit(StringView)` for parsing a unit from a string.
+  - `StringView to_string(FooUnit)` for serializing those units.
+  - `bool units_are_compatible(FooUnit, FooUnit)` which returns whether these are compatible - basically whether you can convert from one to the other.
+  - `double ratio_between_units(FooUnit, FooUnit)` to get a multiplier for converting the first unit into the second.
+- `bool is_absolute(LengthUnit)`, `bool is_font_relative(LengthUnit)`, `bool is_viewport_relative(LengthUnit)`, and `bool is_relative(LengthUnit)` for checking the category of length units.

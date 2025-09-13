@@ -10,9 +10,17 @@
 #include <LibGfx/Color.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Enums.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/PixelUnits.h>
 
 namespace Web::Painting {
+
+enum class BorderEdge : u8 {
+    Top,
+    Right,
+    Bottom,
+    Left,
+};
 
 struct BorderDataDevicePixels {
 public:
@@ -26,15 +34,34 @@ struct BordersDataDevicePixels {
     BorderDataDevicePixels right;
     BorderDataDevicePixels bottom;
     BorderDataDevicePixels left;
+
+    BorderDataDevicePixels& for_edge(BorderEdge edge)
+    {
+        switch (edge) {
+        case BorderEdge::Top:
+            return top;
+        case BorderEdge::Right:
+            return right;
+        case BorderEdge::Bottom:
+            return bottom;
+        default: // BorderEdge::Left:
+            return left;
+        }
+    }
+
+    BorderDataDevicePixels const& for_edge(BorderEdge edge) const
+    {
+        return const_cast<BordersDataDevicePixels&>(*this).for_edge(edge);
+    }
 };
 
-struct BordersData {
+struct WEB_API BordersData {
     CSS::BorderData top;
     CSS::BorderData right;
     CSS::BorderData bottom;
     CSS::BorderData left;
 
-    BordersDataDevicePixels to_device_pixels(PaintContext const& context) const;
+    BordersDataDevicePixels to_device_pixels(DisplayListRecordingContext const& context) const;
 };
 
 }

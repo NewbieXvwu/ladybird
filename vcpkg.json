@@ -1,16 +1,16 @@
 {
-  "builtin-baseline": "a7ef72790b3f4a6c1f940503e418f71380ac94a7",
+  "builtin-baseline": "120deac3062162151622ca4860575a33844ba10b",
   "dependencies": [
     {
       "name": "angle",
       "platform": "osx",
       "features": [
-          "metal"
+        "metal"
       ]
     },
     {
       "name": "angle",
-      "platform": "linux | windows | android"
+      "platform": "linux | windows | android | freebsd"
     },
     {
       "name": "curl",
@@ -24,6 +24,11 @@
         "websockets",
         "zstd"
       ]
+    },
+    {
+      "name": "dbus",
+      "default-features": false,
+      "platform": "linux"
     },
     {
       "name": "dirent",
@@ -76,7 +81,7 @@
     },
     {
       "name": "libproxy",
-      "platform": "!android"
+      "platform": "!(android | freebsd)"
     },
     {
       "name": "libavif",
@@ -99,8 +104,61 @@
     },
     "openssl",
     {
+      "name": "qtbase",
+      "platform": "freebsd",
+      "default-features": false,
+      "features": [
+        "doubleconversion",
+        "fontconfig",
+        "freetype",
+        "gui",
+        "icu",
+        "jpeg",
+        "network",
+        "opengl",
+        "pcre2",
+        "png",
+        "thread",
+        "vulkan",
+        "widgets",
+        "xcb",
+        "xcb-xlib",
+        "xlib",
+        "xrender",
+        "zstd"
+      ]
+    },
+    {
+      "name": "qtbase",
+      "platform": "windows",
+      "default-features": false,
+      "features": [
+        "doubleconversion",
+        "freetype",
+        "gui",
+        "icu",
+        "jpeg",
+        "network",
+        "opengl",
+        "pcre2",
+        "png",
+        "thread",
+        "vulkan",
+        "widgets",
+        "zstd"
+      ]
+    },
+    {
+      "name": "qtmultimedia",
+      "platform": "windows | freebsd"
+    },
+    {
       "name": "pthread",
       "platform": "windows"
+    },
+    {
+      "name": "sdl3",
+      "default-features": false
     },
     "simdutf",
     {
@@ -150,11 +208,15 @@
     },
     {
       "name": "curl",
-      "version": "8.14.1#0"
+      "version": "8.15.0#1"
+    },
+    {
+      "name": "dbus",
+      "version": "1.16.2#1"
     },
     {
       "name": "dirent",
-      "version": "1.24#0"
+      "version": "1.25#0"
     },
     {
       "name": "fast-float",
@@ -162,7 +224,7 @@
     },
     {
       "name": "ffmpeg",
-      "version": "7.1.1#2"
+      "version": "7.1.1#4"
     },
     {
       "name": "fontconfig",
@@ -178,7 +240,7 @@
     },
     {
       "name": "libjpeg-turbo",
-      "version": "3.1.0#0"
+      "version": "3.1.1#0"
     },
     {
       "name": "libjxl",
@@ -186,7 +248,7 @@
     },
     {
       "name": "libpng",
-      "version": "1.6.47"
+      "version": "1.6.50#0"
     },
     {
       "name": "libproxy",
@@ -202,7 +264,7 @@
     },
     {
       "name": "libwebp",
-      "version": "1.5.0#1"
+      "version": "1.6.0#0"
     },
     {
       "name": "mman",
@@ -210,11 +272,23 @@
     },
     {
       "name": "openssl",
-      "version": "3.5.0#1"
+      "version": "3.5.2#0"
+    },
+    {
+      "name": "qtbase",
+      "version": "6.8.3#2"
+    },
+    {
+      "name": "qtmultimedia",
+      "version": "6.8.3#0"
+    },
+    {
+      "name": "sdl3",
+      "version": "3.2.20#0"
     },
     {
       "name": "simdutf",
-      "version": "7.3.0#0"
+      "version": "7.4.0#0"
     },
     {
       "name": "skia",
@@ -222,7 +296,7 @@
     },
     {
       "name": "sqlite3",
-      "version": "3.49.2#0"
+      "version": "3.50.4#0"
     },
     {
       "name": "woff2",

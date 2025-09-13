@@ -11,17 +11,36 @@
 
 namespace Web::CSS {
 
-BackgroundSizeStyleValue::BackgroundSizeStyleValue(LengthPercentage size_x, LengthPercentage size_y)
+BackgroundSizeStyleValue::BackgroundSizeStyleValue(LengthPercentageOrAuto size_x, LengthPercentageOrAuto size_y)
     : StyleValueWithDefaultOperators(Type::BackgroundSize)
-    , m_properties { .size_x = size_x, .size_y = size_y }
+    , m_properties { .size_x = move(size_x), .size_y = move(size_y) }
 {
 }
 
 BackgroundSizeStyleValue::~BackgroundSizeStyleValue() = default;
 
-String BackgroundSizeStyleValue::to_string(SerializationMode) const
+String BackgroundSizeStyleValue::to_string(SerializationMode mode) const
 {
-    return MUST(String::formatted("{} {}", m_properties.size_x.to_string(), m_properties.size_y.to_string()));
+    if (m_properties.size_x.is_auto() && m_properties.size_y.is_auto())
+        return "auto"_string;
+    return MUST(String::formatted("{} {}", m_properties.size_x.to_string(mode), m_properties.size_y.to_string(mode)));
+}
+
+ValueComparingNonnullRefPtr<StyleValue const> BackgroundSizeStyleValue::absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const
+{
+    auto absolutize = [&](auto& size) -> LengthPercentageOrAuto {
+        if (size.is_auto())
+            return size;
+        return size.length_percentage().absolutized(viewport_rect, font_metrics, root_font_metrics);
+    };
+
+    auto absolutized_size_x = absolutize(m_properties.size_x);
+    auto absolutized_size_y = absolutize(m_properties.size_y);
+
+    if (absolutized_size_x == m_properties.size_x && absolutized_size_y == m_properties.size_y)
+        return *this;
+
+    return BackgroundSizeStyleValue::create(absolutized_size_x, absolutized_size_y);
 }
 
 }

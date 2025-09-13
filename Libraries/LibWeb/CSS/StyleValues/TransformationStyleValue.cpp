@@ -10,6 +10,7 @@
 
 #include "TransformationStyleValue.h"
 #include <AK/StringBuilder.h>
+#include <LibWeb/CSS/Serialize.h>
 #include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
@@ -64,11 +65,11 @@ String TransformationStyleValue::to_string(SerializationMode mode) const
 {
     // https://drafts.csswg.org/css-transforms-2/#individual-transform-serialization
     if (m_properties.property == PropertyID::Rotate) {
-        auto resolve_to_number = [](ValueComparingNonnullRefPtr<CSSStyleValue const> const& value) -> Optional<double> {
+        auto resolve_to_number = [](ValueComparingNonnullRefPtr<StyleValue const> const& value) -> Optional<double> {
             if (value->is_number())
                 return value->as_number().number();
             if (value->is_calculated() && value->as_calculated().resolves_to_number())
-                return value->as_calculated().resolve_number({});
+                return value->as_calculated().resolve_number_deprecated({});
 
             VERIFY_NOT_REACHED();
         };
@@ -117,14 +118,28 @@ String TransformationStyleValue::to_string(SerializationMode mode) const
         return MUST(String::formatted("{} {} {} {}", rotation_x->to_string(mode), rotation_y->to_string(mode), rotation_z->to_string(mode), angle->to_string(mode)));
     }
     if (m_properties.property == PropertyID::Scale) {
-        auto resolve_to_string = [mode](CSSStyleValue const& value) -> String {
-            if (value.is_number()) {
-                return MUST(String::formatted("{}", value.as_number().number()));
+        auto resolve_to_string = [mode](StyleValue const& value) -> String {
+            Optional<double> raw_value;
+
+            if (value.is_number())
+                raw_value = value.as_number().number();
+            if (value.is_percentage())
+                raw_value = value.as_percentage().percentage().as_fraction();
+            if (value.is_calculated()) {
+                if (value.as_calculated().resolves_to_number()) {
+                    if (auto resolved = value.as_calculated().resolve_number({}); resolved.has_value())
+                        raw_value = *resolved;
+                }
+                if (value.as_calculated().resolves_to_percentage()) {
+                    if (auto resolved = value.as_calculated().resolve_percentage({}); resolved.has_value())
+                        raw_value = resolved->as_fraction();
+                }
             }
-            if (value.is_percentage()) {
-                return MUST(String::formatted("{}", value.as_percentage().percentage().as_fraction()));
-            }
-            return value.to_string(mode);
+
+            if (!raw_value.has_value())
+                return value.to_string(mode);
+
+            return serialize_a_number(*raw_value);
         };
 
         auto x_value = resolve_to_string(m_properties.values[0]);
@@ -135,23 +150,24 @@ String TransformationStyleValue::to_string(SerializationMode mode) const
 
         StringBuilder builder;
         builder.append(x_value);
-        if (x_value != y_value || z_value.has_value()) {
+        if (x_value != y_value || (z_value.has_value() && *z_value != "1"sv)) {
             builder.append(" "sv);
             builder.append(y_value);
         }
-        if (z_value.has_value()) {
+        if (z_value.has_value() && *z_value != "1"sv) {
             builder.append(" "sv);
             builder.append(z_value.value());
         }
         return builder.to_string_without_validation();
     }
     if (m_properties.property == PropertyID::Translate) {
-        auto resolve_to_string = [mode](CSSStyleValue const& value) -> Optional<String> {
-            if (value.is_length()) {
-                if (value.as_length().length().raw_value() == 0 && value.as_length().length().type() == Length::Type::Px)
-                    return {};
-            }
-            return value.to_string(mode);
+        auto resolve_to_string = [mode](StyleValue const& value) -> Optional<String> {
+            auto string_value = value.to_string(mode);
+
+            if (string_value == "0px"_string)
+                return {};
+
+            return string_value;
         };
 
         auto x_value = resolve_to_string(m_properties.values[0]);

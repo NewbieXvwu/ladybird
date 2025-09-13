@@ -13,6 +13,7 @@
 #include <LibJS/Forward.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibJS/Runtime/VM.h>
+#include <LibWeb/Export.h>
 
 #define WEB_SET_PROTOTYPE_FOR_INTERFACE_WITH_CUSTOM_NAME(interface_class, interface_name)                      \
     do {                                                                                                       \
@@ -66,7 +67,8 @@ public:
         return *m_constructors.find(class_name)->value;
     }
 
-    bool is_exposed(StringView name) const;
+    template<typename PrototypeType>
+    bool is_interface_exposed(JS::Realm&) const;
 
 private:
     virtual void visit_edges(JS::Cell::Visitor&) override;
@@ -83,7 +85,7 @@ private:
     GC::Ref<JS::Realm> m_realm;
 };
 
-Intrinsics& host_defined_intrinsics(JS::Realm& realm);
+WEB_API Intrinsics& host_defined_intrinsics(JS::Realm& realm);
 
 template<typename T>
 [[nodiscard]] JS::Object& ensure_web_namespace(JS::Realm& realm, FlyString const& namespace_name)

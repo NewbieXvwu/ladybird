@@ -12,6 +12,7 @@
 #include <LibRegex/Regex.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/FileAPI/FileList.h>
 #include <LibWeb/HTML/AutocompleteElement.h>
 #include <LibWeb/HTML/ColorPickerUpdateState.h>
@@ -50,7 +51,7 @@ namespace Web::HTML {
     __ENUMERATE_HTML_INPUT_TYPE_ATTRIBUTE("reset", ResetButton)               \
     __ENUMERATE_HTML_INPUT_TYPE_ATTRIBUTE("button", Button)
 
-class HTMLInputElement final
+class WEB_API HTMLInputElement final
     : public HTMLElement
     , public FormAssociatedTextControlElement
     , public Layout::ImageProvider
@@ -79,13 +80,13 @@ public:
 
     String default_value() const { return get_attribute_value(HTML::AttributeNames::value); }
 
-    virtual String value() const override;
+    virtual Utf16String value() const override;
     virtual Optional<String> optional_value() const override;
-    WebIDL::ExceptionOr<void> set_value(String const&);
+    WebIDL::ExceptionOr<void> set_value(Utf16String const&);
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-textarea/input-relevant-value
-    virtual String relevant_value() override { return value(); }
-    WebIDL::ExceptionOr<void> set_relevant_value(String const& value) override { return set_value(value); }
+    virtual Utf16String relevant_value() override { return value(); }
+    WebIDL::ExceptionOr<void> set_relevant_value(Utf16String const& value) override { return set_value(value); }
 
     virtual void set_dirty_value_flag(bool flag) override { m_dirty_value = flag; }
 
@@ -158,10 +159,6 @@ public:
     WebIDL::ExceptionOr<void> step_up(WebIDL::Long n = 1);
     WebIDL::ExceptionOr<void> step_down(WebIDL::Long n = 1);
 
-    bool will_validate();
-    WebIDL::ExceptionOr<bool> check_validity();
-    WebIDL::ExceptionOr<bool> report_validity();
-
     WebIDL::ExceptionOr<void> show_picker();
 
     // ^EventTarget
@@ -181,7 +178,7 @@ public:
     virtual bool is_resettable() const override { return true; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-autocapitalize
-    virtual bool is_auto_capitalize_inheriting() const override { return true; }
+    virtual bool is_autocapitalize_and_autocorrect_inheriting() const override { return true; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#concept-button
     virtual bool is_button() const override;
@@ -195,7 +192,7 @@ public:
     virtual void clear_algorithm() override;
 
     virtual void form_associated_element_was_inserted() override;
-    virtual void form_associated_element_attribute_changed(FlyString const&, Optional<String> const&, Optional<FlyString> const&) override;
+    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
     virtual WebIDL::ExceptionOr<void> cloned(Node&, bool) const override;
 
@@ -252,6 +249,9 @@ public:
     virtual bool suffering_from_a_step_mismatch() const override;
     virtual bool suffering_from_bad_input() const override;
 
+    virtual bool is_mutable() const override;
+    virtual bool uses_button_layout() const override;
+
 private:
     HTMLInputElement(DOM::Document&, DOM::QualifiedName);
 
@@ -281,19 +281,21 @@ private:
     virtual Optional<CSSPixels> intrinsic_width() const override;
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap(Gfx::IntSize = {}) const override;
+    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap_sized(Gfx::IntSize) const override;
     virtual void set_visible_in_viewport(bool) override;
-    virtual GC::Ref<DOM::Element const> to_html_element() const override { return *this; }
+    virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
     Optional<double> convert_time_string_to_number(StringView input) const;
     Optional<double> convert_string_to_number(StringView input) const;
-    String convert_number_to_string(double input) const;
+    Optional<double> convert_string_to_number(Utf16String const& input) const;
+    Utf16String convert_number_to_string(double input) const;
 
     WebIDL::ExceptionOr<GC::Ptr<JS::Date>> convert_string_to_date(StringView input) const;
-    String convert_date_to_string(GC::Ref<JS::Date> input) const;
+    WebIDL::ExceptionOr<GC::Ptr<JS::Date>> convert_string_to_date(Utf16String const& input) const;
+    Utf16String convert_date_to_string(GC::Ref<JS::Date> input) const;
 
     Optional<double> min() const;
     Optional<double> max() const;
@@ -304,6 +306,9 @@ private:
     WebIDL::ExceptionOr<void> step_up_or_down(bool is_down, WebIDL::Long n);
 
     static TypeAttributeState parse_type_attribute(StringView);
+
+    Utf16String button_label() const;
+
     void create_shadow_tree_if_needed();
     void update_shadow_tree();
     void create_button_input_shadow_tree();
@@ -315,13 +320,12 @@ private:
     void set_checked_within_group();
 
     void handle_maxlength_attribute();
-    void handle_readonly_attribute(Optional<String> const& value);
     WebIDL::ExceptionOr<void> handle_src_attribute(String const& value);
 
     void user_interaction_did_change_input_value();
 
     // https://html.spec.whatwg.org/multipage/input.html#value-sanitization-algorithm
-    String value_sanitization_algorithm(String const&) const;
+    Utf16String value_sanitization_algorithm(Utf16String const&) const;
 
     enum class ValueAttributeMode {
         Value,
@@ -386,7 +390,7 @@ private:
     GC::Ptr<FileAPI::FileList> m_selected_files;
 
     TypeAttributeState m_type { TypeAttributeState::Text };
-    String m_value;
+    Utf16String m_value;
 
     String m_last_src_value;
 
@@ -395,6 +399,10 @@ private:
     bool m_is_open { false };
 
     void signal_a_type_change();
+
+    bool is_number_underflowing(double number) const;
+    bool is_number_overflowing(double number) const;
+    bool is_number_mismatching_step(double number) const;
 };
 
 }

@@ -11,6 +11,8 @@
 #include <AK/Optional.h>
 #include <AK/StringConversions.h>
 #include <AK/Swift.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <AK/Vector.h>
 #include <LibGfx/Color.h>
 #include <LibIPC/Decoder.h>
@@ -51,6 +53,11 @@ String Color::to_string(HTMLCompatibleSerialization html_compatible_serializatio
 String Color::to_string_without_alpha() const
 {
     return MUST(String::formatted("#{:02x}{:02x}{:02x}", red(), green(), blue()));
+}
+
+Utf16String Color::to_utf16_string_without_alpha() const
+{
+    return Utf16String::formatted("#{:02x}{:02x}{:02x}", red(), green(), blue());
 }
 
 ByteString Color::to_byte_string() const
@@ -365,6 +372,11 @@ Optional<Color> Color::from_string(StringView string)
         return color;
 
     return {};
+}
+
+Optional<Color> Color::from_utf16_string(Utf16View const& string)
+{
+    return from_string(string.to_utf8_but_should_be_ported_to_utf16());
 }
 
 Vector<Color> Color::shades(u32 steps, float max) const

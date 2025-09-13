@@ -18,10 +18,10 @@
 
 namespace Crypto {
 
-UnsignedBigInteger::UnsignedBigInteger(u8 const* ptr, size_t length)
+UnsignedBigInteger::UnsignedBigInteger(ReadonlyBytes data)
 {
     MP_MUST(mp_init(&m_mp));
-    MP_MUST(mp_from_ubin(&m_mp, ptr, length));
+    MP_MUST(mp_from_ubin(&m_mp, data.data(), data.size()));
 }
 
 UnsignedBigInteger::UnsignedBigInteger(Vector<u32> const& words)
@@ -50,16 +50,43 @@ UnsignedBigInteger::UnsignedBigInteger(u64 value)
 }
 
 UnsignedBigInteger::UnsignedBigInteger(UnsignedBigInteger const& other)
+    : m_hash(other.m_hash)
 {
     MP_MUST(mp_init_copy(&m_mp, &other.m_mp));
+}
+
+UnsignedBigInteger::UnsignedBigInteger(UnsignedBigInteger&& other)
+    : m_mp(other.m_mp)
+    , m_hash(other.m_hash)
+{
+    other.m_mp = {};
+    other.m_hash.clear();
 }
 
 UnsignedBigInteger& UnsignedBigInteger::operator=(UnsignedBigInteger const& other)
 {
     if (this == &other)
         return *this;
+
     mp_clear(&m_mp);
     MP_MUST(mp_init_copy(&m_mp, &other.m_mp));
+    m_hash = other.m_hash;
+
+    return *this;
+}
+
+UnsignedBigInteger& UnsignedBigInteger::operator=(UnsignedBigInteger&& other)
+{
+    if (this == &other)
+        return *this;
+
+    mp_clear(&m_mp);
+    m_mp = other.m_mp;
+    m_hash = other.m_hash;
+
+    other.m_mp = {};
+    other.m_hash.clear();
+
     return *this;
 }
 
@@ -73,11 +100,11 @@ UnsignedBigInteger::~UnsignedBigInteger()
     mp_clear(&m_mp);
 }
 
-size_t UnsignedBigInteger::export_data(Bytes data) const
+Bytes UnsignedBigInteger::export_data(Bytes data) const
 {
     size_t written = 0;
     MP_MUST(mp_to_ubin(&m_mp, data.data(), data.size(), &written));
-    return written;
+    return data.slice(0, written);
 }
 
 ErrorOr<UnsignedBigInteger> UnsignedBigInteger::from_base(u16 N, StringView str)
@@ -336,8 +363,8 @@ u32 UnsignedBigInteger::hash() const
         return *m_hash;
 
     auto buffer = MUST(ByteBuffer::create_zeroed(byte_length()));
-    auto length = export_data(buffer);
-    m_hash = string_hash(reinterpret_cast<char const*>(buffer.data()), length);
+    auto result = export_data(buffer);
+    m_hash = string_hash(reinterpret_cast<char const*>(result.data()), result.size());
     return *m_hash;
 }
 

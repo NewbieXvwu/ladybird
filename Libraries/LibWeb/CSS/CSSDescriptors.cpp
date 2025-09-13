@@ -7,7 +7,7 @@
 #include <LibWeb/CSS/CSSDescriptors.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/Serialize.h>
-#include <LibWeb/CSS/StyleValues/StyleValueList.h>
+#include <LibWeb/CSS/StyleValues/ShorthandStyleValue.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
@@ -33,6 +33,7 @@ size_t CSSDescriptors::length() const
 String CSSDescriptors::item(size_t index) const
 {
     // The item(index) method must return the property name of the CSS declaration at position index.
+    // If there is no indexth object in the collection, then the method must return the empty string.
     if (index >= length())
         return {};
 
@@ -40,7 +41,7 @@ String CSSDescriptors::item(size_t index) const
 }
 
 // https://drafts.csswg.org/cssom/#set-a-css-declaration
-bool CSSDescriptors::set_a_css_declaration(DescriptorID descriptor_id, NonnullRefPtr<CSSStyleValue const> value, Important)
+bool CSSDescriptors::set_a_css_declaration(DescriptorID descriptor_id, NonnullRefPtr<StyleValue const> value, Important)
 {
     VERIFY(!is_computed());
 
@@ -65,7 +66,7 @@ WebIDL::ExceptionOr<void> CSSDescriptors::set_property(StringView property, Stri
 {
     // 1. If the readonly flag is set, then throw a NoModificationAllowedError exception.
     if (is_readonly())
-        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot modify properties of readonly CSSStyleDeclaration"_string);
+        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot modify properties of readonly CSSStyleDeclaration"_utf16);
 
     // 2. If property is not a custom property, follow these substeps:
     Optional<DescriptorID> descriptor_id;
@@ -88,7 +89,7 @@ WebIDL::ExceptionOr<void> CSSDescriptors::set_property(StringView property, Stri
         return {};
 
     // 5. Let component value list be the result of parsing value for property property.
-    RefPtr<CSSStyleValue const> component_value_list = parse_css_descriptor(Parser::ParsingParams {}, m_at_rule_id, *descriptor_id, value);
+    RefPtr<StyleValue const> component_value_list = parse_css_descriptor(Parser::ParsingParams {}, m_at_rule_id, *descriptor_id, value);
 
     // 6. If component value list is null, then return.
     if (!component_value_list)
@@ -131,7 +132,7 @@ WebIDL::ExceptionOr<String> CSSDescriptors::remove_property(StringView property)
 {
     // 1. If the readonly flag is set, then throw a NoModificationAllowedError exception.
     if (is_readonly())
-        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot modify properties of readonly CSSStyleDeclaration"_string);
+        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot modify properties of readonly CSSStyleDeclaration"_utf16);
 
     // 2. If property is not a custom property, let property be property converted to ASCII lowercase.
     // AD-HOC: We compare names case-insensitively instead.
@@ -237,7 +238,7 @@ WebIDL::ExceptionOr<void> CSSDescriptors::set_css_text(StringView value)
 {
     // 1. If the readonly flag is set, then throw a NoModificationAllowedError exception.
     if (is_readonly())
-        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot modify properties of readonly CSSStyleDeclaration"_string);
+        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot modify properties of readonly CSSStyleDeclaration"_utf16);
 
     // 2. Empty the declarations.
     m_descriptors.clear();
@@ -262,7 +263,7 @@ void CSSDescriptors::visit_edges(Visitor& visitor)
     }
 }
 
-RefPtr<CSSStyleValue const> CSSDescriptors::descriptor(DescriptorID descriptor_id) const
+RefPtr<StyleValue const> CSSDescriptors::descriptor(DescriptorID descriptor_id) const
 {
     auto match = m_descriptors.first_matching([descriptor_id](Descriptor const& descriptor) {
         return descriptor.descriptor_id == descriptor_id;
@@ -272,12 +273,28 @@ RefPtr<CSSStyleValue const> CSSDescriptors::descriptor(DescriptorID descriptor_i
     return nullptr;
 }
 
-RefPtr<CSSStyleValue const> CSSDescriptors::descriptor_or_initial_value(DescriptorID descriptor_id) const
+RefPtr<StyleValue const> CSSDescriptors::descriptor_or_initial_value(DescriptorID descriptor_id) const
 {
     if (auto value = descriptor(descriptor_id))
         return value.release_nonnull();
 
     return descriptor_initial_value(m_at_rule_id, descriptor_id);
+}
+
+bool CSSDescriptors::has_property(StringView property_name) const
+{
+    auto descriptor_id = descriptor_id_from_string(m_at_rule_id, property_name);
+    if (!descriptor_id.has_value())
+        return false;
+    return descriptor(*descriptor_id) != nullptr;
+}
+
+RefPtr<StyleValue const> CSSDescriptors::get_property_style_value(StringView property_name) const
+{
+    auto descriptor_id = descriptor_id_from_string(m_at_rule_id, property_name);
+    if (!descriptor_id.has_value())
+        return nullptr;
+    return descriptor(*descriptor_id);
 }
 
 bool is_shorthand(AtRuleID at_rule, DescriptorID descriptor)
@@ -288,7 +305,7 @@ bool is_shorthand(AtRuleID at_rule, DescriptorID descriptor)
     return false;
 }
 
-void for_each_expanded_longhand(AtRuleID at_rule, DescriptorID descriptor, RefPtr<CSSStyleValue const> value, Function<void(DescriptorID, RefPtr<CSSStyleValue const>)> callback)
+void for_each_expanded_longhand(AtRuleID at_rule, DescriptorID descriptor, RefPtr<StyleValue const> value, Function<void(DescriptorID, RefPtr<StyleValue const>)> callback)
 {
     if (at_rule == AtRuleID::Page && descriptor == DescriptorID::Margin) {
         if (!value) {
@@ -299,36 +316,12 @@ void for_each_expanded_longhand(AtRuleID at_rule, DescriptorID descriptor, RefPt
             return;
         }
 
-        if (value->is_value_list()) {
-            auto& values = value->as_value_list().values();
-            if (values.size() == 4) {
-                callback(DescriptorID::MarginTop, values[0]);
-                callback(DescriptorID::MarginRight, values[1]);
-                callback(DescriptorID::MarginBottom, values[2]);
-                callback(DescriptorID::MarginLeft, values[3]);
-            } else if (values.size() == 3) {
-                callback(DescriptorID::MarginTop, values[0]);
-                callback(DescriptorID::MarginRight, values[1]);
-                callback(DescriptorID::MarginBottom, values[2]);
-                callback(DescriptorID::MarginLeft, values[1]);
-            } else if (values.size() == 2) {
-                callback(DescriptorID::MarginTop, values[0]);
-                callback(DescriptorID::MarginRight, values[1]);
-                callback(DescriptorID::MarginBottom, values[0]);
-                callback(DescriptorID::MarginLeft, values[1]);
-            } else if (values.size() == 1) {
-                callback(DescriptorID::MarginTop, values[0]);
-                callback(DescriptorID::MarginRight, values[0]);
-                callback(DescriptorID::MarginBottom, values[0]);
-                callback(DescriptorID::MarginLeft, values[0]);
-            }
+        auto const& shorthand_value = value->as_shorthand();
 
-        } else {
-            callback(DescriptorID::MarginTop, *value);
-            callback(DescriptorID::MarginRight, *value);
-            callback(DescriptorID::MarginBottom, *value);
-            callback(DescriptorID::MarginLeft, *value);
-        }
+        callback(DescriptorID::MarginTop, shorthand_value.longhand(PropertyID::MarginTop));
+        callback(DescriptorID::MarginRight, shorthand_value.longhand(PropertyID::MarginRight));
+        callback(DescriptorID::MarginBottom, shorthand_value.longhand(PropertyID::MarginBottom));
+        callback(DescriptorID::MarginLeft, shorthand_value.longhand(PropertyID::MarginLeft));
     }
 }
 

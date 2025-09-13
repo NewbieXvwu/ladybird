@@ -16,9 +16,9 @@
 #include <LibCore/File.h>
 #include <LibJS/Runtime/Value.h>
 #include <LibURL/Parser.h>
-#include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/Cookie/Cookie.h>
 #include <LibWeb/Cookie/ParsedCookie.h>
 #include <LibWeb/Crypto/Crypto.h>
@@ -89,7 +89,8 @@ static JsonValue serialize_cookie(Web::Cookie::Cookie const& cookie)
     serialized_cookie.set("domain"sv, cookie.domain);
     serialized_cookie.set("secure"sv, cookie.secure);
     serialized_cookie.set("httpOnly"sv, cookie.http_only);
-    serialized_cookie.set("expiry"sv, cookie.expiry_time.seconds_since_epoch());
+    if (cookie.persistent)
+        serialized_cookie.set("expiry"sv, cookie.expiry_time.seconds_since_epoch()); // Must not be set if omitted when adding a cookie.
     serialized_cookie.set("sameSite"sv, Web::Cookie::same_site_to_string(cookie.same_site));
 
     return serialized_cookie;
@@ -121,6 +122,9 @@ static void scroll_element_into_view(Web::DOM::Element& element)
 {
     // 1. Let options be the following ScrollIntoViewOptions:
     Web::DOM::ScrollIntoViewOptions options {};
+    // "behavior"
+    //     "instant"
+    options.behavior = Web::Bindings::ScrollBehavior::Instant;
     // Logical scroll position "block"
     //     "end"
     options.block = Web::Bindings::ScrollLogicalPosition::End;
@@ -522,7 +526,7 @@ Messages::WebDriverClient::GetTitleResponse WebDriverConnection::get_title()
     // 2. Handle any user prompts and return its value if it is an error.
     handle_any_user_prompts([this]() {
         // 3. Let title be the initial value of the title IDL attribute of the current top-level browsing context's active document.
-        auto title = current_top_level_browsing_context()->active_document()->title();
+        auto title = current_top_level_browsing_context()->active_document()->title().to_utf8();
 
         // 4. Return success with data title.
         async_driver_execution_complete({ move(title) });
@@ -1342,7 +1346,7 @@ Messages::WebDriverClient::GetElementPropertyResponse WebDriverConnection::get_e
         // 5. Let property be the result of calling the Object.[[GetProperty]](name) on element.
         Web::HTML::TemporaryExecutionContext execution_context { current_browsing_context().active_document()->realm() };
 
-        if (auto property_or_error = element->get(name); !property_or_error.is_throw_completion()) {
+        if (auto property_or_error = element->get(Utf16FlyString::from_utf8(name)); !property_or_error.is_throw_completion()) {
             auto property = property_or_error.release_value();
 
             // 6. Let result be the value of property if not undefined, or null.
@@ -1485,9 +1489,8 @@ Messages::WebDriverClient::IsElementEnabledResponse WebDriverConnection::is_elem
         bool enabled = !current_browsing_context().active_document()->is_xml_document();
 
         // 6. Set enabled to false if a form control is disabled.
-        if (enabled && is<Web::HTML::FormAssociatedElement>(*element)) {
-            auto& form_associated_element = dynamic_cast<Web::HTML::FormAssociatedElement&>(*element);
-            enabled = form_associated_element.enabled();
+        if (auto* form_associated_element = as_if<Web::HTML::FormAssociatedElement>(*element); form_associated_element && enabled) {
+            enabled = form_associated_element->enabled();
         }
 
         // 7. Return success with data enabled.
@@ -1757,8 +1760,7 @@ Web::WebDriver::Response WebDriverConnection::element_clear_impl(StringView elem
 
     // https://w3c.github.io/webdriver/#dfn-clear-a-resettable-element
     auto clear_resettable_element = [&](Web::DOM::Element& element) {
-        VERIFY(is<Web::HTML::FormAssociatedElement>(element));
-        auto& form_associated_element = dynamic_cast<Web::HTML::FormAssociatedElement&>(element);
+        auto& form_associated_element = as<Web::HTML::FormAssociatedElement>(element);
 
         // 1. Let empty be the result of the first matching condition:
         auto empty = [&]() {
@@ -1951,7 +1953,7 @@ Web::WebDriver::Response WebDriverConnection::element_send_keys_impl(StringView 
             return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::ElementNotInteractable, "Element is immutable"sv);
 
         // 3. Set a property value to text on element.
-        MUST(input_element.set_value(text));
+        MUST(input_element.set_value(Utf16String::from_utf8(text)));
 
         // FIXME: 4. If element is suffering from bad input return an error with error code invalid argument.
 
@@ -1963,7 +1965,7 @@ Web::WebDriver::Response WebDriverConnection::element_send_keys_impl(StringView 
     else if (is<Web::HTML::HTMLElement>(*element) && static_cast<Web::HTML::HTMLElement&>(*element).is_content_editable()) {
         // If element does not currently have focus, set the text insertion caret after any child content.
         auto* document = current_browsing_context().active_document();
-        document->set_focused_element(element);
+        document->set_focused_area(element);
     }
     // -> otherwise
     else if (is<Web::HTML::FormAssociatedTextControlElement>(*element)) {
@@ -1978,14 +1980,8 @@ Web::WebDriver::Response WebDriverConnection::element_send_keys_impl(StringView 
         if (target.has_value()) {
             // 1. If element does not currently have focus, let current text length be the length of element's API value.
             Optional<Web::WebIDL::UnsignedLong> current_text_length;
-
-            if (element->is_focused()) {
-                auto api_value = target->relevant_value();
-
-                // FIXME: This should be a UTF-16 code unit length, but `set_the_selection_range` is also currently
-                //        implemented in terms of code point length.
-                current_text_length = api_value.code_points().length();
-            }
+            if (!element->is_focused())
+                current_text_length = target->relevant_value().length_in_code_units();
 
             // 2. Set the text insertion caret using set selection range using current text length for both the start
             //    and end parameters.
@@ -2154,7 +2150,7 @@ Messages::WebDriverClient::GetAllCookiesResponse WebDriverConnection::get_all_co
         // 4. For each cookie in all associated cookies of the current browsing context’s active document:
         auto* document = current_browsing_context().active_document();
 
-        for (auto const& cookie : current_browsing_context().page().client().page_did_request_all_cookies(document->url())) {
+        for (auto const& cookie : current_browsing_context().page().client().page_did_request_all_cookies_webdriver(document->url())) {
             // 1. Let serialized cookie be the result of serializing cookie.
             auto serialized_cookie = serialize_cookie(cookie);
 
@@ -3076,7 +3072,7 @@ void WebDriverConnection::delete_cookies(Optional<StringView> const& name)
     // For each cookie among all associated cookies of the current browsing context’s active document, un the substeps of the first matching condition:
     auto* document = current_browsing_context().active_document();
 
-    for (auto& cookie : current_browsing_context().page().client().page_did_request_all_cookies(document->url())) {
+    for (auto& cookie : current_browsing_context().page().client().page_did_request_all_cookies_webdriver(document->url())) {
         // -> name is undefined
         // -> name is equal to cookie name
         if (!name.has_value() || name.value() == cookie.name) {

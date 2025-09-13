@@ -47,7 +47,7 @@ TraversalDecision traverse_preorder(T root, Callback callback)
 }
 
 template<typename T>
-class TreeNode {
+class WEB_API TreeNode {
 public:
     T* parent() { return m_parent; }
     T const* parent() const { return m_parent; }
@@ -181,13 +181,14 @@ public:
             return first_child();
 
         T* node = static_cast<T*>(this);
-        T* next = nullptr;
-        while (!(next = node->next_sibling())) {
-            node = node->parent();
-            if (!node || node == stay_within)
+        while (node) {
+            if (node == stay_within)
                 return nullptr;
+            if (T* next = node->next_sibling())
+                return next;
+            node = node->parent();
         }
-        return next;
+        return nullptr;
     }
 
     T const* next_in_pre_order() const

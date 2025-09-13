@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include <LibWeb/CSS/CSSStyleValue.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
 
@@ -28,6 +28,8 @@ public:
     virtual String to_string(SerializationMode) const override;
 
     bool properties_equal(ContentStyleValue const& other) const { return m_properties == other.m_properties; }
+
+    virtual void set_style_sheet(GC::Ptr<CSSStyleSheet>) override;
 
 private:
     ContentStyleValue(ValueComparingNonnullRefPtr<StyleValueList const> content, ValueComparingRefPtr<StyleValueList const> alt_text)

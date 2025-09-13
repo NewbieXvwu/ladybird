@@ -7,12 +7,13 @@
 
 #pragma once
 
+#include <LibWeb/Export.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/ScrollState.h>
 
 namespace Web::Painting {
 
-class ViewportPaintable final : public PaintableWithLines {
+class WEB_API ViewportPaintable final : public PaintableWithLines {
     GC_CELL(ViewportPaintable, PaintableWithLines);
     GC_DECLARE_ALLOCATOR(ViewportPaintable);
 
@@ -20,7 +21,7 @@ public:
     static GC::Ref<ViewportPaintable> create(Layout::Viewport const&);
     virtual ~ViewportPaintable() override;
 
-    void paint_all_phases(PaintContext&);
+    void paint_all_phases(DisplayListRecordingContext&);
     void build_stacking_context_tree_if_needed();
 
     void assign_scroll_frames();

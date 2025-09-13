@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/TypeCasts.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/PixelUnits.h>
 #include <LibWeb/UIEvents/EventModifier.h>
 #include <LibWeb/UIEvents/UIEvent.h>
@@ -25,13 +26,13 @@ struct MouseEventInit : public EventModifierInit {
     GC::Ptr<DOM::EventTarget> related_target = nullptr;
 };
 
-class MouseEvent : public UIEvent {
+class WEB_API MouseEvent : public UIEvent {
     WEB_PLATFORM_OBJECT(MouseEvent, UIEvent);
     GC_DECLARE_ALLOCATOR(MouseEvent);
 
 public:
     [[nodiscard]] static GC::Ref<MouseEvent> create(JS::Realm&, FlyString const& event_name, MouseEventInit const& = {}, double page_x = 0, double page_y = 0, double offset_x = 0, double offset_y = 0);
-    static WebIDL::ExceptionOr<GC::Ref<MouseEvent>> create_from_platform_event(JS::Realm&, FlyString const& event_name, CSSPixelPoint screen, CSSPixelPoint page, CSSPixelPoint client, CSSPixelPoint offset, Optional<CSSPixelPoint> movement, unsigned button, unsigned buttons, unsigned modifiers);
+    static WebIDL::ExceptionOr<GC::Ref<MouseEvent>> create_from_platform_event(JS::Realm&, GC::Ptr<HTML::WindowProxy>, FlyString const& event_name, CSSPixelPoint screen, CSSPixelPoint page, CSSPixelPoint client, CSSPixelPoint offset, Optional<CSSPixelPoint> movement, unsigned button, unsigned buttons, unsigned modifiers);
     static WebIDL::ExceptionOr<GC::Ref<MouseEvent>> construct_impl(JS::Realm&, FlyString const& event_name, MouseEventInit const&);
 
     virtual ~MouseEvent() override;

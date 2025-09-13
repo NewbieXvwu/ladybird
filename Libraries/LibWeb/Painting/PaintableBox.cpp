@@ -30,6 +30,7 @@
 #include <LibWeb/Painting/TextPaintable.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/Platform/FontPlugin.h>
+#include <LibWeb/SVG/SVGFilterElement.h>
 #include <LibWeb/Selection/Selection.h>
 
 namespace Web::Painting {
@@ -37,6 +38,11 @@ namespace Web::Painting {
 GC_DEFINE_ALLOCATOR(PaintableWithLines);
 
 bool g_paint_viewport_scrollbars = true;
+
+void set_paint_viewport_scrollbars(bool const enabled)
+{
+    g_paint_viewport_scrollbars = enabled;
+}
 
 GC::Ref<PaintableWithLines> PaintableWithLines::create(Layout::BlockContainer const& block_container)
 {
@@ -127,8 +133,8 @@ void PaintableBox::set_scroll_offset(CSSPixelPoint offset)
     auto& node = layout_node();
     if (auto pseudo_element = node.generated_for_pseudo_element(); pseudo_element.has_value()) {
         node.pseudo_element_generator()->set_scroll_offset(*pseudo_element, offset);
-    } else if (is<DOM::Element>(*dom_node())) {
-        static_cast<DOM::Element*>(dom_node())->set_scroll_offset({}, offset);
+    } else if (auto* element = as_if<DOM::Element>(dom_node())) {
+        element->set_scroll_offset({}, offset);
     } else {
         return;
     }
@@ -321,27 +327,27 @@ bool PaintableBox::wants_mouse_events() const
     return false;
 }
 
-void PaintableBox::before_paint(PaintContext& context, PaintPhase phase) const
+void PaintableBox::before_paint(DisplayListRecordingContext& context, PaintPhase phase) const
 {
     if (!is_visible())
         return;
 
     if (first_is_one_of(phase, PaintPhase::Background, PaintPhase::Foreground) && own_clip_frame()) {
-        apply_clip(context, own_clip_frame());
+        context.display_list_recorder().push_clip_frame(own_clip_frame());
     } else if (!has_css_transform()) {
         apply_clip_overflow_rect(context, phase);
     }
     apply_scroll_offset(context);
 }
 
-void PaintableBox::after_paint(PaintContext& context, PaintPhase phase) const
+void PaintableBox::after_paint(DisplayListRecordingContext& context, PaintPhase phase) const
 {
     if (!is_visible())
         return;
 
     reset_scroll_offset(context);
     if (first_is_one_of(phase, PaintPhase::Background, PaintPhase::Foreground) && own_clip_frame()) {
-        restore_clip(context, own_clip_frame());
+        context.display_list_recorder().pop_clip_frame();
     } else if (!has_css_transform()) {
         clear_clip_overflow_rect(context, phase);
     }
@@ -432,7 +438,7 @@ Optional<PaintableBox::ScrollbarData> PaintableBox::compute_scrollbar_data(Scrol
     return scrollbar_data;
 }
 
-void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
+void PaintableBox::paint(DisplayListRecordingContext& context, PaintPhase phase) const
 {
     if (!is_visible())
         return;
@@ -479,7 +485,7 @@ void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
             border_radius_data.inflate(outline_data->top.width + outline_offset_y, outline_data->right.width + outline_offset_x, outline_data->bottom.width + outline_offset_y, outline_data->left.width + outline_offset_x);
             borders_rect.inflate(outline_data->top.width + outline_offset_y, outline_data->right.width + outline_offset_x, outline_data->bottom.width + outline_offset_y, outline_data->left.width + outline_offset_x);
 
-            paint_all_borders(context.display_list_recorder(), context.rounded_device_rect(borders_rect), border_radius_data.as_corners(context), outline_data->to_device_pixels(context));
+            paint_all_borders(context.display_list_recorder(), context.rounded_device_rect(borders_rect), border_radius_data.as_corners(context.device_pixel_converter()), outline_data->to_device_pixels(context));
         }
     }
 
@@ -513,8 +519,8 @@ void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
 
         auto paint_inspector_rect = [&](CSSPixelRect const& rect, Color color) {
             auto device_rect = context.enclosing_device_rect(rect).to_type<int>();
-            context.display_list_recorder().fill_rect(device_rect, Color(color).with_alpha(100));
-            context.display_list_recorder().draw_rect(device_rect, Color(color));
+            context.display_list_recorder().fill_rect(device_rect, color.with_alpha(100));
+            context.display_list_recorder().draw_rect(device_rect, color);
         };
 
         paint_inspector_rect(margin_rect, Color::Yellow);
@@ -563,7 +569,7 @@ BordersData PaintableBox::remove_element_kind_from_borders_data(PaintableBox::Bo
     };
 }
 
-void PaintableBox::paint_border(PaintContext& context) const
+void PaintableBox::paint_border(DisplayListRecordingContext& context) const
 {
     auto borders_data = m_override_borders_data.has_value() ? remove_element_kind_from_borders_data(m_override_borders_data.value()) : BordersData {
         .top = box_model().border.top == 0 ? CSS::BorderData() : computed_values().border_top(),
@@ -571,23 +577,24 @@ void PaintableBox::paint_border(PaintContext& context) const
         .bottom = box_model().border.bottom == 0 ? CSS::BorderData() : computed_values().border_bottom(),
         .left = box_model().border.left == 0 ? CSS::BorderData() : computed_values().border_left(),
     };
-    paint_all_borders(context.display_list_recorder(), context.rounded_device_rect(absolute_border_box_rect()), normalized_border_radii_data().as_corners(context), borders_data.to_device_pixels(context));
+    paint_all_borders(context.display_list_recorder(), context.rounded_device_rect(absolute_border_box_rect()), normalized_border_radii_data().as_corners(context.device_pixel_converter()), borders_data.to_device_pixels(context));
 }
 
-void PaintableBox::paint_backdrop_filter(PaintContext& context) const
+void PaintableBox::paint_backdrop_filter(DisplayListRecordingContext& context) const
 {
     auto const& backdrop_filter = computed_values().backdrop_filter();
-    if (!backdrop_filter.has_value()) {
+    if (backdrop_filter.is_none()) {
         return;
     }
 
     auto backdrop_region = context.rounded_device_rect(absolute_border_box_rect());
     auto border_radii_data = normalized_border_radii_data();
     ScopedCornerRadiusClip corner_clipper { context, backdrop_region, border_radii_data };
-    context.display_list_recorder().apply_backdrop_filter(backdrop_region.to_type<int>(), border_radii_data, backdrop_filter.value());
+    if (auto resolved_backdrop_filter = resolve_filter(backdrop_filter); resolved_backdrop_filter.has_value())
+        context.display_list_recorder().apply_backdrop_filter(backdrop_region.to_type<int>(), border_radii_data, *resolved_backdrop_filter);
 }
 
-void PaintableBox::paint_background(PaintContext& context) const
+void PaintableBox::paint_background(DisplayListRecordingContext& context) const
 {
     // If the body's background properties were propagated to the root element, do no re-paint the body's background.
     if (layout_node_with_style_and_box_metrics().is_body() && document().html_element()->should_use_body_background_properties())
@@ -596,7 +603,7 @@ void PaintableBox::paint_background(PaintContext& context) const
     Painting::paint_background(context, *this, computed_values().image_rendering(), m_resolved_background, normalized_border_radii_data());
 }
 
-void PaintableBox::paint_box_shadow(PaintContext& context) const
+void PaintableBox::paint_box_shadow(DisplayListRecordingContext& context) const
 {
     auto const& resolved_box_shadow_data = box_shadow_data();
     if (resolved_box_shadow_data.is_empty())
@@ -647,54 +654,21 @@ Optional<CSSPixelRect> PaintableBox::clip_rect_for_hit_testing() const
     return {};
 }
 
-void PaintableBox::apply_clip(PaintContext& context, RefPtr<ClipFrame const> const& from_clip_frame)
-{
-    auto const& clip_rects = from_clip_frame->clip_rects();
-    if (clip_rects.is_empty())
-        return;
-
-    auto& display_list_recorder = context.display_list_recorder();
-    display_list_recorder.save();
-    for (auto const& clip_rect : clip_rects) {
-        Optional<i32> clip_scroll_frame_id;
-        if (clip_rect.enclosing_scroll_frame)
-            clip_scroll_frame_id = clip_rect.enclosing_scroll_frame->id();
-        display_list_recorder.push_scroll_frame_id(clip_scroll_frame_id);
-        auto rect = context.rounded_device_rect(clip_rect.rect).to_type<int>();
-        auto corner_radii = clip_rect.corner_radii.as_corners(context);
-        if (corner_radii.has_any_radius()) {
-            display_list_recorder.add_rounded_rect_clip(corner_radii, rect, CornerClip::Outside);
-        } else {
-            display_list_recorder.add_clip_rect(rect);
-        }
-        display_list_recorder.pop_scroll_frame_id();
-    }
-}
-
-void PaintableBox::restore_clip(PaintContext& context, RefPtr<ClipFrame const> const& from_clip_frame)
-{
-    auto const& clip_rects = from_clip_frame->clip_rects();
-    if (clip_rects.is_empty())
-        return;
-
-    context.display_list_recorder().restore();
-}
-
-void PaintableBox::apply_scroll_offset(PaintContext& context) const
+void PaintableBox::apply_scroll_offset(DisplayListRecordingContext& context) const
 {
     if (scroll_frame_id().has_value()) {
         context.display_list_recorder().push_scroll_frame_id(scroll_frame_id().value());
     }
 }
 
-void PaintableBox::reset_scroll_offset(PaintContext& context) const
+void PaintableBox::reset_scroll_offset(DisplayListRecordingContext& context) const
 {
     if (scroll_frame_id().has_value()) {
         context.display_list_recorder().pop_scroll_frame_id();
     }
 }
 
-void PaintableBox::apply_clip_overflow_rect(PaintContext& context, PaintPhase phase) const
+void PaintableBox::apply_clip_overflow_rect(DisplayListRecordingContext& context, PaintPhase phase) const
 {
     if (!enclosing_clip_frame())
         return;
@@ -702,10 +676,10 @@ void PaintableBox::apply_clip_overflow_rect(PaintContext& context, PaintPhase ph
     if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::TableCollapsedBorder, PaintPhase::Foreground, PaintPhase::Outline))
         return;
 
-    apply_clip(context, enclosing_clip_frame());
+    context.display_list_recorder().push_clip_frame(enclosing_clip_frame());
 }
 
-void PaintableBox::clear_clip_overflow_rect(PaintContext& context, PaintPhase phase) const
+void PaintableBox::clear_clip_overflow_rect(DisplayListRecordingContext& context, PaintPhase phase) const
 {
     if (!enclosing_clip_frame())
         return;
@@ -713,10 +687,10 @@ void PaintableBox::clear_clip_overflow_rect(PaintContext& context, PaintPhase ph
     if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::TableCollapsedBorder, PaintPhase::Foreground, PaintPhase::Outline))
         return;
 
-    restore_clip(context, enclosing_clip_frame());
+    context.display_list_recorder().pop_clip_frame();
 }
 
-void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintable, PaintableFragment const& fragment)
+void paint_cursor_if_needed(DisplayListRecordingContext& context, TextPaintable const& paintable, PaintableFragment const& fragment)
 {
     auto const& navigable = *paintable.navigable();
     auto const& document = paintable.document();
@@ -728,26 +702,20 @@ void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintabl
         return;
 
     auto cursor_position = document.cursor_position();
-    if (!cursor_position || !cursor_position->node())
+    if (!cursor_position)
         return;
 
     if (cursor_position->node() != paintable.dom_node())
         return;
 
     // NOTE: This checks if the cursor is before the start or after the end of the fragment. If it is at the end, after all text, it should still be painted.
-    size_t cursor_position_byte_offset = 0;
-    if (cursor_position->offset() == fragment.utf16_view().length_in_code_units()) {
-        cursor_position_byte_offset = fragment.utf8_view().byte_length();
-    } else {
-        auto cursor_position_code_point_offset = fragment.utf16_view().code_point_offset_of(cursor_position->offset());
-        cursor_position_byte_offset = fragment.utf8_view().byte_offset_of(cursor_position_code_point_offset);
-    }
-    if (cursor_position_byte_offset < fragment.start_byte_offset() || cursor_position_byte_offset > (fragment.start_byte_offset() + fragment.length_in_bytes()))
+    if (cursor_position->offset() < (unsigned)fragment.start_offset() || cursor_position->offset() > (unsigned)(fragment.start_offset() + fragment.length_in_code_units()))
         return;
 
     auto active_element = document.active_element();
-    auto active_element_is_editable = is<HTML::FormAssociatedTextControlElement>(active_element)
-        && dynamic_cast<HTML::FormAssociatedTextControlElement const&>(*active_element).is_mutable();
+    auto active_element_is_editable = false;
+    if (auto* text_control = as_if<HTML::FormAssociatedTextControlElement>(active_element); text_control && text_control->is_mutable())
+        active_element_is_editable = true;
 
     auto dom_node = fragment.layout_node().dom_node();
     if (!dom_node || (!dom_node->is_editable() && !active_element_is_editable))
@@ -758,26 +726,85 @@ void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintabl
         return;
 
     auto fragment_rect = fragment.absolute_rect();
+    auto text = fragment.text();
 
     auto const& font = fragment.glyph_run() ? fragment.glyph_run()->font() : fragment.layout_node().first_available_font();
-    auto utf8_text = fragment.utf8_view();
-    auto cursor_offset = font.width(utf8_text.substring_view(fragment.start_byte_offset(), cursor_position_byte_offset - fragment.start_byte_offset()));
+    auto cursor_offset = font.width(text.substring_view(0, cursor_position->offset() - fragment.start_offset()));
+
+    auto font_metrics = font.pixel_metrics();
+
+    auto cursor_height = font_metrics.ascent + font_metrics.descent;
 
     CSSPixelRect cursor_rect {
         fragment_rect.x() + CSSPixels::nearest_value_for(cursor_offset),
-        fragment_rect.top(),
+        fragment_rect.top() + fragment.baseline() - CSSPixels::nearest_value_for(font_metrics.ascent),
         1,
-        fragment_rect.height()
+        CSSPixels::nearest_value_for(cursor_height)
     };
-
     auto cursor_device_rect = context.rounded_device_rect(cursor_rect).to_type<int>();
 
-    context.display_list_recorder().draw_rect(cursor_device_rect, caret_color);
+    context.display_list_recorder().fill_rect(cursor_device_rect, caret_color);
 }
 
-void paint_text_decoration(PaintContext& context, TextPaintable const& paintable, PaintableFragment const& fragment)
+static Gfx::Path build_triangle_wave_path(Gfx::IntPoint from, Gfx::IntPoint to, float amplitude)
 {
-    auto& painter = context.display_list_recorder();
+    Gfx::Path path;
+    if (from.y() != to.y()) {
+        dbgln("FIXME: Support more than horizontal waves");
+        return path;
+    }
+
+    path.move_to(from.to_type<float>());
+
+    float const wavelength = amplitude * 2.0f;
+    float const half_wavelength = amplitude;
+    float const quarter_wavelength = amplitude / 2.0f;
+
+    auto position = from.to_type<float>();
+    auto remaining = abs(to.x() - position.x());
+    while (remaining > wavelength) {
+        // Draw a whole wave
+        path.line_to({ position.x() + quarter_wavelength, position.y() - quarter_wavelength });
+        path.line_to({ position.x() + quarter_wavelength + half_wavelength, position.y() + quarter_wavelength });
+        path.line_to({ position.x() + wavelength, (float)position.y() });
+        position.translate_by({ wavelength, 0 });
+        remaining = abs(to.x() - position.x());
+    }
+
+    // Up
+    if (remaining > quarter_wavelength) {
+        path.line_to({ position.x() + quarter_wavelength, position.y() - quarter_wavelength });
+        position.translate_by({ quarter_wavelength, 0 });
+        remaining = abs(to.x() - position.x());
+    } else if (remaining >= 1) {
+        auto fraction = remaining / quarter_wavelength;
+        path.line_to({ position.x() + (fraction * quarter_wavelength), position.y() - (fraction * quarter_wavelength) });
+        remaining = 0;
+    }
+
+    // Down
+    if (remaining > half_wavelength) {
+        path.line_to({ position.x() + half_wavelength, position.y() + quarter_wavelength });
+        position.translate_by(half_wavelength, 0);
+        remaining = abs(to.x() - position.x());
+    } else if (remaining >= 1) {
+        auto fraction = remaining / half_wavelength;
+        path.line_to({ position.x() + (fraction * half_wavelength), position.y() - quarter_wavelength + (fraction * half_wavelength) });
+        remaining = 0;
+    }
+
+    // Back to middle
+    if (remaining >= 1) {
+        auto fraction = remaining / quarter_wavelength;
+        path.line_to({ position.x() + (fraction * quarter_wavelength), position.y() + ((1 - fraction) * quarter_wavelength) });
+    }
+
+    return path;
+}
+
+void paint_text_decoration(DisplayListRecordingContext& context, TextPaintable const& paintable, PaintableFragment const& fragment)
+{
+    auto& recorder = context.display_list_recorder();
     auto& font = fragment.layout_node().first_available_font();
     auto fragment_box = fragment.absolute_rect();
     CSSPixels glyph_height = CSSPixels::nearest_value_for(font.pixel_size());
@@ -787,6 +814,7 @@ void paint_text_decoration(PaintContext& context, TextPaintable const& paintable
     auto line_style = paintable.computed_values().text_decoration_style();
     auto device_line_thickness = context.rounded_device_pixels(fragment.text_decoration_thickness());
     auto text_decoration_lines = paintable.computed_values().text_decoration_line();
+    auto text_underline_offset = paintable.computed_values().text_underline_offset();
     for (auto line : text_decoration_lines) {
         DevicePixelPoint line_start_point {};
         DevicePixelPoint line_end_point {};
@@ -799,6 +827,11 @@ void paint_text_decoration(PaintContext& context, TextPaintable const& paintable
             device_line_thickness = context.rounded_device_pixels(1);
             line_style = CSS::TextDecorationStyle::Wavy;
             line = CSS::TextDecorationLine::Underline;
+
+            // https://drafts.csswg.org/css-text-decor-4/#underline-offset
+            // When the value of the text-decoration-line property is either spelling-error or grammar-error, the UA
+            // must ignore the value of text-underline-position.
+            text_underline_offset = CSS::InitialValues::text_underline_offset();
         } else if (line == CSS::TextDecorationLine::GrammarError) {
             // https://drafts.csswg.org/css-text-decor-4/#valdef-text-decoration-line-grammar-error
             // This value indicates the type of text decoration used by the user agent to highlight grammar mistakes.
@@ -807,23 +840,28 @@ void paint_text_decoration(PaintContext& context, TextPaintable const& paintable
             device_line_thickness = context.rounded_device_pixels(1);
             line_style = CSS::TextDecorationStyle::Wavy;
             line = CSS::TextDecorationLine::Underline;
+
+            // https://drafts.csswg.org/css-text-decor-4/#underline-offset
+            // When the value of the text-decoration-line property is either spelling-error or grammar-error, the UA
+            // must ignore the value of text-underline-position.
+            text_underline_offset = CSS::InitialValues::text_underline_offset();
         }
 
         switch (line) {
         case CSS::TextDecorationLine::None:
             return;
         case CSS::TextDecorationLine::Underline:
-            line_start_point = context.rounded_device_point(fragment_box.top_left().translated(0, baseline + 2));
-            line_end_point = context.rounded_device_point(fragment_box.top_right().translated(-1, baseline + 2));
+            line_start_point = context.rounded_device_point(fragment_box.top_left().translated(0, baseline + text_underline_offset));
+            line_end_point = context.rounded_device_point(fragment_box.top_right().translated(0, baseline + text_underline_offset));
             break;
         case CSS::TextDecorationLine::Overline:
             line_start_point = context.rounded_device_point(fragment_box.top_left().translated(0, baseline - glyph_height));
-            line_end_point = context.rounded_device_point(fragment_box.top_right().translated(-1, baseline - glyph_height));
+            line_end_point = context.rounded_device_point(fragment_box.top_right().translated(0, baseline - glyph_height));
             break;
         case CSS::TextDecorationLine::LineThrough: {
             auto x_height = font.x_height();
             line_start_point = context.rounded_device_point(fragment_box.top_left().translated(0, baseline - x_height * CSSPixels(0.5f)));
-            line_end_point = context.rounded_device_point(fragment_box.top_right().translated(-1, baseline - x_height * CSSPixels(0.5f)));
+            line_end_point = context.rounded_device_point(fragment_box.top_right().translated(0, baseline - x_height * CSSPixels(0.5f)));
             break;
         }
         case CSS::TextDecorationLine::Blink:
@@ -837,7 +875,7 @@ void paint_text_decoration(PaintContext& context, TextPaintable const& paintable
 
         switch (line_style) {
         case CSS::TextDecorationStyle::Solid:
-            painter.draw_line(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, device_line_thickness.value(), Gfx::LineStyle::Solid);
+            recorder.draw_line(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, device_line_thickness.value(), Gfx::LineStyle::Solid);
             break;
         case CSS::TextDecorationStyle::Double:
             switch (line) {
@@ -855,14 +893,14 @@ void paint_text_decoration(PaintContext& context, TextPaintable const& paintable
                 VERIFY_NOT_REACHED();
             }
 
-            painter.draw_line(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, device_line_thickness.value());
-            painter.draw_line(line_start_point.translated(0, device_line_thickness + 1).to_type<int>(), line_end_point.translated(0, device_line_thickness + 1).to_type<int>(), line_color, device_line_thickness.value());
+            recorder.draw_line(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, device_line_thickness.value());
+            recorder.draw_line(line_start_point.translated(0, device_line_thickness + 1).to_type<int>(), line_end_point.translated(0, device_line_thickness + 1).to_type<int>(), line_color, device_line_thickness.value());
             break;
         case CSS::TextDecorationStyle::Dashed:
-            painter.draw_line(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, device_line_thickness.value(), Gfx::LineStyle::Dashed);
+            recorder.draw_line(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, device_line_thickness.value(), Gfx::LineStyle::Dashed);
             break;
         case CSS::TextDecorationStyle::Dotted:
-            painter.draw_line(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, device_line_thickness.value(), Gfx::LineStyle::Dotted);
+            recorder.draw_line(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, device_line_thickness.value(), Gfx::LineStyle::Dotted);
             break;
         case CSS::TextDecorationStyle::Wavy:
             auto amplitude = device_line_thickness.value() * 3;
@@ -882,13 +920,22 @@ void paint_text_decoration(PaintContext& context, TextPaintable const& paintable
             default:
                 VERIFY_NOT_REACHED();
             }
-            painter.draw_triangle_wave(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, amplitude, device_line_thickness.value());
+            recorder.stroke_path({
+                .cap_style = Gfx::Path::CapStyle::Round,
+                .join_style = Gfx::Path::JoinStyle::Round,
+                .miter_limit = 0,
+                .dash_array = {},
+                .dash_offset = 0,
+                .path = build_triangle_wave_path(line_start_point.to_type<int>(), line_end_point.to_type<int>(), amplitude),
+                .paint_style_or_color = line_color,
+                .thickness = static_cast<float>(device_line_thickness.value()),
+            });
             break;
         }
     }
 }
 
-void paint_text_fragment(PaintContext& context, TextPaintable const& paintable, PaintableFragment const& fragment, PaintPhase phase)
+void paint_text_fragment(DisplayListRecordingContext& context, TextPaintable const& paintable, PaintableFragment const& fragment, PaintPhase phase)
 {
     if (!paintable.is_visible())
         return;
@@ -897,38 +944,32 @@ void paint_text_fragment(PaintContext& context, TextPaintable const& paintable, 
 
     if (phase == PaintPhase::Foreground) {
         auto fragment_absolute_rect = fragment.absolute_rect();
-        auto fragment_absolute_device_rect = context.enclosing_device_rect(fragment_absolute_rect);
+        auto fragment_enclosing_device_rect = context.enclosing_device_rect(fragment_absolute_rect).to_type<int>();
 
         if (paintable.document().highlighted_layout_node() == &paintable.layout_node())
-            context.display_list_recorder().draw_rect(fragment_absolute_device_rect.to_type<int>(), Color::Magenta);
-
-        auto text = paintable.text_for_rendering();
+            context.display_list_recorder().draw_rect(fragment_enclosing_device_rect, Color::Magenta);
 
         auto glyph_run = fragment.glyph_run();
         if (!glyph_run)
             return;
+
+        auto selection_rect = context.enclosing_device_rect(fragment.selection_rect()).to_type<int>();
+        if (!selection_rect.is_empty())
+            painter.fill_rect(selection_rect, CSS::SystemColor::highlight(paintable.computed_values().color_scheme()));
 
         auto scale = context.device_pixels_per_css_pixel();
         auto baseline_start = Gfx::FloatPoint {
             fragment_absolute_rect.x().to_float(),
             fragment_absolute_rect.y().to_float() + fragment.baseline().to_float(),
         } * scale;
-        painter.draw_text_run(baseline_start, *glyph_run, paintable.computed_values().webkit_text_fill_color(), fragment_absolute_device_rect.to_type<int>(), scale, fragment.orientation());
-
-        auto selection_rect = context.enclosing_device_rect(fragment.selection_rect()).to_type<int>();
-        if (!selection_rect.is_empty()) {
-            painter.fill_rect(selection_rect, CSS::SystemColor::highlight(paintable.computed_values().color_scheme()));
-            DisplayListRecorderStateSaver saver(painter);
-            painter.add_clip_rect(selection_rect);
-            painter.draw_text_run(baseline_start, *glyph_run, CSS::SystemColor::highlight_text(paintable.computed_values().color_scheme()), fragment_absolute_device_rect.to_type<int>(), scale, fragment.orientation());
-        }
+        painter.draw_glyph_run(baseline_start, *glyph_run, paintable.computed_values().webkit_text_fill_color(), fragment_enclosing_device_rect, scale, fragment.orientation());
 
         paint_text_decoration(context, paintable, fragment);
         paint_cursor_if_needed(context, paintable, fragment);
     }
 }
 
-void PaintableWithLines::paint(PaintContext& context, PaintPhase phase) const
+void PaintableWithLines::paint(DisplayListRecordingContext& context, PaintPhase phase) const
 {
     if (!is_visible())
         return;
@@ -1021,6 +1062,24 @@ Paintable::DispatchEventOfSameName PaintableBox::handle_mousemove(Badge<EventHan
     return Paintable::DispatchEventOfSameName::Yes;
 }
 
+void PaintableBox::handle_mouseleave(Badge<EventHandler>)
+{
+    // FIXME: early return needed as MacOSX calls this even when user is pressing mouse button
+    // https://github.com/LadybirdBrowser/ladybird/issues/5844
+    if (m_scroll_thumb_dragging_direction.has_value())
+        return;
+
+    auto previous_draw_enlarged_horizontal_scrollbar = m_draw_enlarged_horizontal_scrollbar;
+    m_draw_enlarged_horizontal_scrollbar = false;
+    if (previous_draw_enlarged_horizontal_scrollbar != m_draw_enlarged_horizontal_scrollbar)
+        set_needs_display();
+
+    auto previous_draw_enlarged_vertical_scrollbar = m_draw_enlarged_vertical_scrollbar;
+    m_draw_enlarged_vertical_scrollbar = false;
+    if (previous_draw_enlarged_vertical_scrollbar != m_draw_enlarged_vertical_scrollbar)
+        set_needs_display();
+}
+
 bool PaintableBox::scrollbar_contains_mouse_position(ScrollDirection direction, CSSPixelPoint position)
 {
     TemporaryChange force_enlarged_horizontal_scrollbar { m_draw_enlarged_horizontal_scrollbar, true };
@@ -1084,16 +1143,6 @@ bool PaintableBox::handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigne
     return true;
 }
 
-Layout::NodeWithStyleAndBoxModelMetrics const& PaintableWithLines::layout_node_with_style_and_box_metrics() const
-{
-    return static_cast<Layout::NodeWithStyleAndBoxModelMetrics const&>(PaintableBox::layout_node_with_style_and_box_metrics());
-}
-
-Layout::NodeWithStyleAndBoxModelMetrics& PaintableWithLines::layout_node_with_style_and_box_metrics()
-{
-    return static_cast<Layout::NodeWithStyleAndBoxModelMetrics&>(PaintableBox::layout_node_with_style_and_box_metrics());
-}
-
 TraversalDecision PaintableBox::hit_test_scrollbars(CSSPixelPoint position, Function<TraversalDecision(HitTestResult)> const& callback) const
 {
     // FIXME: This const_cast is not great, but this method is invoked from overrides of virtual const methods.
@@ -1128,12 +1177,15 @@ TraversalDecision PaintableBox::hit_test(CSSPixelPoint position, HitTestType typ
     if (clip_rect_for_hit_testing().has_value() && !clip_rect_for_hit_testing()->contains(position))
         return TraversalDecision::Continue;
 
-    auto position_adjusted_by_scroll_offset = adjust_position_for_cumulative_scroll_offset(position);
-
     if (computed_values().visibility() != CSS::Visibility::Visible)
         return TraversalDecision::Continue;
 
-    if (hit_test_scrollbars(position_adjusted_by_scroll_offset, callback) == TraversalDecision::Break)
+    auto const inverse_transform = Gfx::extract_2d_affine_transform(transform()).inverse().value_or({});
+    // NOTE: This CSSPixels -> Float -> CSSPixels conversion is because we can't AffineTransform::map() a CSSPixelPoint.
+    auto const offset_position = position.translated(-transform_origin()).to_type<float>();
+    auto const transformed_position = inverse_transform.map(offset_position).to_type<CSSPixels>() + transform_origin();
+
+    if (hit_test_scrollbars(transformed_position, callback) == TraversalDecision::Break)
         return TraversalDecision::Break;
 
     if (is_viewport()) {
@@ -1141,16 +1193,21 @@ TraversalDecision PaintableBox::hit_test(CSSPixelPoint position, HitTestType typ
         viewport_paintable.build_stacking_context_tree_if_needed();
         viewport_paintable.document().update_paint_and_hit_testing_properties_if_needed();
         viewport_paintable.refresh_scroll_state();
-        return stacking_context()->hit_test(position, type, callback);
+        return stacking_context()->hit_test(transformed_position, type, callback);
     }
 
-    if (hit_test_children(position, type, callback) == TraversalDecision::Break)
+    if (stacking_context())
+        return TraversalDecision::Continue;
+
+    if (hit_test_children(transformed_position, type, callback) == TraversalDecision::Break)
         return TraversalDecision::Break;
 
     if (!visible_for_hit_testing())
         return TraversalDecision::Continue;
 
-    if (!absolute_border_box_rect().contains(position_adjusted_by_scroll_offset))
+    auto const offset_position_adjusted_by_scroll_offset = adjust_position_for_cumulative_scroll_offset(position).translated(-transform_origin()).to_type<float>();
+    auto const transformed_position_adjusted_by_scroll_offset = inverse_transform.map(offset_position_adjusted_by_scroll_offset).to_type<CSSPixels>() + transform_origin();
+    if (!absolute_border_box_rect().contains(transformed_position_adjusted_by_scroll_offset))
         return TraversalDecision::Continue;
 
     if (hit_test_continuation(callback) == TraversalDecision::Break)
@@ -1210,7 +1267,8 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
     if (clip_rect_for_hit_testing().has_value() && !clip_rect_for_hit_testing()->contains(position))
         return TraversalDecision::Continue;
 
-    auto position_adjusted_by_scroll_offset = adjust_position_for_cumulative_scroll_offset(position);
+    if (computed_values().visibility() != CSS::Visibility::Visible)
+        return TraversalDecision::Continue;
 
     // TextCursor hit testing mode should be able to place cursor in contenteditable elements even if they are empty
     if (m_fragments.is_empty()
@@ -1231,25 +1289,30 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
     if (!layout_node().children_are_inline())
         return PaintableBox::hit_test(position, type, callback);
 
+    auto const inverse_transform = Gfx::extract_2d_affine_transform(transform()).inverse().value_or({});
     // NOTE: This CSSPixels -> Float -> CSSPixels conversion is because we can't AffineTransform::map() a CSSPixelPoint.
-    auto offset_position = position_adjusted_by_scroll_offset.translated(-transform_origin()).to_type<float>();
-    auto transformed_position_adjusted_by_scroll_offset = combined_css_transform().inverse().value_or({}).map(offset_position).to_type<CSSPixels>() + transform_origin();
+    auto const offset_position = position.translated(-transform_origin()).to_type<float>();
+    auto const transformed_position = inverse_transform.map(offset_position).to_type<CSSPixels>() + transform_origin();
 
-    if (hit_test_scrollbars(transformed_position_adjusted_by_scroll_offset, callback) == TraversalDecision::Break)
+    if (hit_test_scrollbars(transformed_position, callback) == TraversalDecision::Break)
         return TraversalDecision::Break;
 
-    if (hit_test_children(position, type, callback) == TraversalDecision::Break)
+    if (hit_test_children(transformed_position, type, callback) == TraversalDecision::Break)
         return TraversalDecision::Break;
 
     if (!visible_for_hit_testing())
         return TraversalDecision::Continue;
+
+    // NOTE: This CSSPixels -> Float -> CSSPixels conversion is because we can't AffineTransform::map() a CSSPixelPoint.
+    auto const offset_position_adjusted_by_scroll_offset = adjust_position_for_cumulative_scroll_offset(position).translated(-transform_origin()).to_type<float>();
+    auto const transformed_position_adjusted_by_scroll_offset = inverse_transform.map(offset_position_adjusted_by_scroll_offset).to_type<CSSPixels>() + transform_origin();
 
     for (auto const& fragment : fragments()) {
         if (fragment.paintable().has_stacking_context() || !fragment.paintable().visible_for_hit_testing())
             continue;
         auto fragment_absolute_rect = fragment.absolute_rect();
         if (fragment_absolute_rect.contains(transformed_position_adjusted_by_scroll_offset)) {
-            if (fragment.paintable().hit_test(transformed_position_adjusted_by_scroll_offset, type, callback) == TraversalDecision::Break)
+            if (fragment.paintable().hit_test(transformed_position, type, callback) == TraversalDecision::Break)
                 return TraversalDecision::Break;
             HitTestResult hit_test_result { const_cast<Paintable&>(fragment.paintable()), fragment.index_in_node_for_point(transformed_position_adjusted_by_scroll_offset), 0, 0 };
             if (callback(hit_test_result) == TraversalDecision::Break)
@@ -1277,7 +1340,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
                 if (fragment_absolute_rect.bottom() - 1 <= transformed_position_adjusted_by_scroll_offset.y()) { // fully below the fragment
                     HitTestResult hit_test_result {
                         .paintable = const_cast<Paintable&>(fragment.paintable()),
-                        .index_in_node = fragment.index_in_node_for_byte_offset(fragment.start_byte_offset() + fragment.length_in_bytes()),
+                        .index_in_node = fragment.start_offset() + fragment.length_in_code_units(),
                         .vertical_distance = transformed_position_adjusted_by_scroll_offset.y() - fragment_absolute_rect.bottom(),
                     };
                     if (callback(hit_test_result) == TraversalDecision::Break)
@@ -1286,7 +1349,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
                     if (transformed_position_adjusted_by_scroll_offset.x() < fragment_absolute_rect.left()) {
                         HitTestResult hit_test_result {
                             .paintable = const_cast<Paintable&>(fragment.paintable()),
-                            .index_in_node = fragment.index_in_node_for_byte_offset(fragment.start_byte_offset()),
+                            .index_in_node = fragment.start_offset(),
                             .vertical_distance = 0,
                             .horizontal_distance = fragment_absolute_rect.left() - transformed_position_adjusted_by_scroll_offset.x(),
                         };
@@ -1295,7 +1358,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
                     } else if (transformed_position_adjusted_by_scroll_offset.x() > fragment_absolute_rect.right()) {
                         HitTestResult hit_test_result {
                             .paintable = const_cast<Paintable&>(fragment.paintable()),
-                            .index_in_node = fragment.index_in_node_for_byte_offset(fragment.start_byte_offset() + fragment.length_in_bytes()),
+                            .index_in_node = fragment.start_offset() + fragment.length_in_code_units(),
                             .vertical_distance = 0,
                             .horizontal_distance = transformed_position_adjusted_by_scroll_offset.x() - fragment_absolute_rect.right(),
                         };
@@ -1308,7 +1371,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
     }
 
     if (!stacking_context() && is_visible() && (!layout_node().is_anonymous() || layout_node().is_positioned())
-        && absolute_border_box_rect().contains(position_adjusted_by_scroll_offset)) {
+        && absolute_border_box_rect().contains(transformed_position_adjusted_by_scroll_offset)) {
         if (callback(HitTestResult { const_cast<PaintableWithLines&>(*this) }) == TraversalDecision::Break)
             return TraversalDecision::Break;
     }
@@ -1459,8 +1522,7 @@ void PaintableBox::resolve_paint_properties()
     set_transform_origin({ x, y });
 
     // Outlines
-    auto outline_width = computed_values.outline_width().to_px(layout_node);
-    auto outline_data = borders_data_for_outline(layout_node, computed_values.outline_color(), computed_values.outline_style(), outline_width);
+    auto outline_data = borders_data_for_outline(layout_node, computed_values.outline_color(), computed_values.outline_style(), computed_values.outline_width());
     auto outline_offset = computed_values.outline_offset().to_px(layout_node);
     set_outline_data(outline_data);
     set_outline_offset(outline_offset);
@@ -1476,7 +1538,8 @@ void PaintableBox::resolve_paint_properties()
 
         // Section 2.11.2: If the computed value of background-image on the root element is none and its background-color is transparent,
         // user agents must instead propagate the computed values of the background properties from that element’s first HTML BODY child element.
-        if (document().html_element()->should_use_body_background_properties()) {
+        auto& html_element = as<HTML::HTMLHtmlElement>(*layout_node_with_style_and_box_metrics().dom_node());
+        if (html_element.should_use_body_background_properties()) {
             background_layers = document().background_layers();
             background_color = document().background_color();
         }
@@ -1512,10 +1575,24 @@ void PaintableWithLines::resolve_paint_properties()
         auto const& font = fragment.m_layout_node->first_available_font();
         auto const glyph_height = CSSPixels::nearest_value_for(font.pixel_size());
         auto const css_line_thickness = [&] {
-            auto computed_thickness = text_node.computed_values().text_decoration_thickness().resolved(text_node, CSS::Length(1, CSS::Length::Type::Em).to_px(text_node));
-            if (computed_thickness.is_auto())
-                return max(glyph_height.scaled(0.1), 1);
-            return computed_thickness.to_px(*fragment.m_layout_node);
+            auto const& thickness = text_node.computed_values().text_decoration_thickness();
+            return thickness.value.visit(
+                [glyph_height](CSS::TextDecorationThickness::Auto) {
+                    // The UA chooses an appropriate thickness for text decoration lines; see below.
+                    // https://drafts.csswg.org/css-text-decor-4/#valdef-text-decoration-thickness-auto
+                    return max(glyph_height.scaled(0.1), 1);
+                },
+                [glyph_height](CSS::TextDecorationThickness::FromFont) {
+                    // If the first available font has metrics indicating a preferred underline width, use that width,
+                    // otherwise behaves as auto.
+                    // https://drafts.csswg.org/css-text-decor-4/#valdef-text-decoration-thickness-from-font
+                    // FIXME: Implement this properly.
+                    return max(glyph_height.scaled(0.1), 1);
+                },
+                [&](CSS::LengthPercentage const& length_percentage) {
+                    auto resolved_length = length_percentage.resolved(text_node, CSS::Length(1, CSS::LengthUnit::Em).to_px(text_node)).to_px(*fragment.m_layout_node);
+                    return max(resolved_length, 1);
+                });
         }();
         fragment.set_text_decoration_thickness(css_line_thickness);
 
@@ -1573,6 +1650,83 @@ PaintableBox const* PaintableBox::nearest_scrollable_ancestor() const
         paintable = paintable->containing_block();
     }
     return nullptr;
+}
+
+Optional<Gfx::Filter> PaintableBox::resolve_filter(CSS::Filter const& computed_filter) const
+{
+    Optional<Gfx::Filter> resolved_filter;
+    for (auto const& filter : computed_filter.filters()) {
+        filter.visit(
+            [&](CSS::FilterOperation::Blur const& blur) {
+                auto resolved_radius = blur.resolved_radius(layout_node_with_style_and_box_metrics());
+                auto new_filter = Gfx::Filter::blur(resolved_radius, resolved_radius);
+
+                resolved_filter = resolved_filter.has_value()
+                    ? Gfx::Filter::compose(new_filter, *resolved_filter)
+                    : new_filter;
+            },
+            [&](CSS::FilterOperation::DropShadow const& drop_shadow) {
+                CSS::CalculationResolutionContext context {
+                    .length_resolution_context = CSS::Length::ResolutionContext::for_layout_node(layout_node_with_style_and_box_metrics()),
+                };
+                auto to_px = [&](CSS::LengthOrCalculated const& length) {
+                    return static_cast<float>(length.resolved(context).map([&](auto& it) { return it.to_px(layout_node_with_style_and_box_metrics()).to_double(); }).value_or(0.0));
+                };
+                // The default value for omitted values is missing length values set to 0
+                // and the missing used color is taken from the color property.
+                auto new_filter = Gfx::Filter::drop_shadow(to_px(drop_shadow.offset_x),
+                    to_px(drop_shadow.offset_y),
+                    drop_shadow.radius.has_value() ? to_px(*drop_shadow.radius) : 0.0f, drop_shadow.color.has_value() ? *drop_shadow.color : this->computed_values().color());
+
+                resolved_filter = resolved_filter.has_value()
+                    ? Gfx::Filter::compose(new_filter, *resolved_filter)
+                    : new_filter;
+            },
+            [&](CSS::FilterOperation::Color const& color_operation) {
+                auto new_filter = Gfx::Filter::color(color_operation.operation, color_operation.resolved_amount());
+
+                resolved_filter = resolved_filter.has_value()
+                    ? Gfx::Filter::compose(new_filter, *resolved_filter)
+                    : new_filter;
+            },
+            [&](CSS::FilterOperation::HueRotate const& hue_rotate) {
+                auto new_filter = Gfx::Filter::hue_rotate(hue_rotate.angle_degrees(layout_node_with_style_and_box_metrics()));
+
+                resolved_filter = resolved_filter.has_value()
+                    ? Gfx::Filter::compose(new_filter, *resolved_filter)
+                    : new_filter;
+            },
+            [&](CSS::URL const& css_url) {
+                auto& url_string = css_url.url();
+
+                if (url_string.is_empty() || !url_string.starts_with('#'))
+                    return;
+
+                auto fragment_or_error = url_string.substring_from_byte_offset(1);
+
+                if (fragment_or_error.is_error())
+                    return;
+
+                // FIXME: Support urls that are not only composed of a fragment.
+                auto maybe_filter = document().get_element_by_id(fragment_or_error.value());
+
+                if (!maybe_filter)
+                    return;
+
+                if (auto* filter_element = as_if<SVG::SVGFilterElement>(*maybe_filter)) {
+                    auto& layout_node = layout_node_with_style_and_box_metrics();
+                    auto new_filter = filter_element->gfx_filter(layout_node);
+
+                    if (!new_filter.has_value())
+                        return;
+
+                    resolved_filter = resolved_filter.has_value()
+                        ? Gfx::Filter::compose(*new_filter, *resolved_filter)
+                        : new_filter;
+                }
+            });
+    }
+    return resolved_filter;
 }
 
 }

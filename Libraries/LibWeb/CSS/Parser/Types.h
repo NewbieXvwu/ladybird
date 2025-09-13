@@ -47,7 +47,7 @@ struct QualifiedRule {
     Vector<Declaration> declarations;
     Vector<RuleOrListOfDeclarations> child_rules;
 
-    void for_each_as_declaration_list(DeclarationVisitor&& visit) const;
+    void for_each_as_declaration_list(FlyString const& rule_name, DeclarationVisitor&& visit) const;
 };
 
 // https://drafts.csswg.org/css-syntax/#declaration
@@ -59,6 +59,14 @@ struct Declaration {
 
     // FIXME: Only needed by our janky @supports re-serialization-re-parse code.
     String to_string() const;
+};
+
+struct SubstitutionFunctionsPresence {
+    bool attr { false };
+    bool env { false };
+    bool var { false };
+
+    bool has_any() const { return attr || env || var; }
 };
 
 // https://drafts.csswg.org/css-syntax/#simple-block
@@ -73,7 +81,9 @@ struct SimpleBlock {
 
     String to_string() const;
     String original_source_text() const;
-    bool contains_arbitrary_substitution_function() const;
+    void contains_arbitrary_substitution_function(SubstitutionFunctionsPresence&) const;
+
+    bool operator==(SimpleBlock const& other) const { return token == other.token && value == other.value; }
 };
 
 // https://drafts.csswg.org/css-syntax/#function
@@ -85,7 +95,9 @@ struct Function {
 
     String to_string() const;
     String original_source_text() const;
-    bool contains_arbitrary_substitution_function() const;
+    void contains_arbitrary_substitution_function(SubstitutionFunctionsPresence&) const;
+
+    bool operator==(Function const& other) const { return name == other.name && value == other.value; }
 };
 
 // https://drafts.csswg.org/css-variables/#guaranteed-invalid-value
@@ -93,6 +105,8 @@ struct GuaranteedInvalidValue {
     GuaranteedInvalidValue() = default;
     String to_string() const { return {}; }
     String original_source_text() const { return {}; }
+
+    bool operator==(GuaranteedInvalidValue const&) const = default;
 };
 
 }

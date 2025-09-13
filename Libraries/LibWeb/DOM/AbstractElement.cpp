@@ -21,6 +21,11 @@ void AbstractElement::visit(GC::Cell::Visitor& visitor) const
     visitor.visit(m_element);
 }
 
+Document& AbstractElement::document() const
+{
+    return m_element->document();
+}
+
 GC::Ptr<Layout::NodeWithStyle> AbstractElement::layout_node()
 {
     if (m_pseudo_element.has_value())
@@ -33,6 +38,16 @@ GC::Ptr<Element const> AbstractElement::parent_element() const
     if (m_pseudo_element.has_value())
         return m_element;
     return m_element->parent_element();
+}
+
+Optional<AbstractElement> AbstractElement::element_to_inherit_style_from() const
+{
+    GC::Ptr<Element const> element = m_element->element_to_inherit_style_from(m_pseudo_element);
+
+    if (!element)
+        return OptionalNone {};
+
+    return AbstractElement { const_cast<DOM::Element&>(*element) };
 }
 
 Optional<AbstractElement> AbstractElement::walk_layout_tree(WalkMethod walk_method)
@@ -70,9 +85,7 @@ bool AbstractElement::is_before(AbstractElement const& other) const
 
 GC::Ptr<CSS::ComputedProperties const> AbstractElement::computed_properties() const
 {
-    if (m_pseudo_element.has_value())
-        return m_element->pseudo_element_computed_properties(*m_pseudo_element);
-    return m_element->computed_properties();
+    return m_element->computed_properties(m_pseudo_element);
 }
 
 HashMap<FlyString, CSS::StyleProperty> const& AbstractElement::custom_properties() const
@@ -85,7 +98,7 @@ void AbstractElement::set_custom_properties(HashMap<FlyString, CSS::StylePropert
     m_element->set_custom_properties(m_pseudo_element, move(custom_properties));
 }
 
-RefPtr<CSS::CSSStyleValue const> AbstractElement::get_custom_property(FlyString const& name) const
+RefPtr<CSS::StyleValue const> AbstractElement::get_custom_property(FlyString const& name) const
 {
     // FIXME: We should be producing computed values for custom properties, just like regular properties.
     if (m_pseudo_element.has_value()) {
@@ -102,6 +115,16 @@ RefPtr<CSS::CSSStyleValue const> AbstractElement::get_custom_property(FlyString 
         }
     }
     return nullptr;
+}
+
+GC::Ptr<CSS::CascadedProperties> AbstractElement::cascaded_properties() const
+{
+    return m_element->cascaded_properties(m_pseudo_element);
+}
+
+void AbstractElement::set_cascaded_properties(GC::Ptr<CSS::CascadedProperties> cascaded_properties)
+{
+    m_element->set_cascaded_properties(m_pseudo_element, cascaded_properties);
 }
 
 bool AbstractElement::has_non_empty_counters_set() const

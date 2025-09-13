@@ -256,7 +256,7 @@ JS::ThrowCompletionOr<NodeFilter::Result> TreeWalker::filter(Node& node)
 {
     // 1. If traverser’s active flag is set, then throw an "InvalidStateError" DOMException.
     if (m_active)
-        return throw_completion(WebIDL::InvalidStateError::create(realm(), "NodeIterator is already active"_string));
+        return throw_completion(WebIDL::InvalidStateError::create(realm(), "NodeIterator is already active"_utf16));
 
     // 2. Let n be node’s nodeType attribute value − 1.
     auto n = node.node_type() - 1;
@@ -274,7 +274,7 @@ JS::ThrowCompletionOr<NodeFilter::Result> TreeWalker::filter(Node& node)
 
     // 6. Let result be the return value of call a user object’s operation with traverser’s filter, "acceptNode", and « node ».
     //    If this throws an exception, then unset traverser’s active flag and rethrow the exception.
-    auto result = WebIDL::call_user_object_operation(m_filter->callback(), "acceptNode"_string, {}, { { &node } });
+    auto result = WebIDL::call_user_object_operation(m_filter->callback(), "acceptNode"_utf16_fly_string, {}, { { &node } });
     if (result.is_abrupt()) {
         m_active = false;
         return result;

@@ -13,16 +13,19 @@
 #include <LibCore/EventReceiver.h>
 #include <LibRequests/Forward.h>
 #include <LibURL/URL.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Loader/Resource.h>
 #include <LibWeb/Loader/UserAgent.h>
 
 namespace Web {
 
-class ResourceLoader : public Core::EventReceiver {
+class WEB_API ResourceLoader : public Core::EventReceiver {
     C_OBJECT_ABSTRACT(ResourceLoader)
 public:
     static void initialize(GC::Heap&, NonnullRefPtr<Requests::RequestClient>);
     static ResourceLoader& the();
+
+    void set_client(NonnullRefPtr<Requests::RequestClient>);
 
     RefPtr<Resource> load_resource(Resource::Type, LoadRequest&);
 
@@ -38,7 +41,7 @@ public:
 
     void load_unbuffered(LoadRequest&, GC::Root<OnHeadersReceived>, GC::Root<OnDataReceived>, GC::Root<OnComplete>);
 
-    Requests::RequestClient& request_client() { return *m_request_client; }
+    RefPtr<Requests::RequestClient>& request_client() { return m_request_client; }
 
     void prefetch_dns(URL::URL const&);
     void preconnect(URL::URL const&);
@@ -81,7 +84,7 @@ private:
     int m_pending_loads { 0 };
 
     GC::Heap& m_heap;
-    NonnullRefPtr<Requests::RequestClient> m_request_client;
+    RefPtr<Requests::RequestClient> m_request_client;
     HashTable<NonnullRefPtr<Requests::Request>> m_active_requests;
 
     String m_user_agent;

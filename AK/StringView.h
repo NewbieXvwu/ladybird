@@ -45,10 +45,10 @@ public:
     {
     }
 
-    StringView(ByteBuffer const&);
-    StringView(String const&);
-    StringView(FlyString const&);
-    StringView(ByteString const&);
+    StringView(LIFETIME_BOUND ByteBuffer const&);
+    StringView(LIFETIME_BOUND String const&);
+    StringView(LIFETIME_BOUND FlyString const&);
+    StringView(LIFETIME_BOUND ByteString const&);
 
     explicit StringView(ByteBuffer&&) = delete;
     explicit StringView(String&&) = delete;
@@ -153,8 +153,8 @@ public:
     template<typename Callback>
     auto for_each_split_view(char separator, SplitBehavior split_behavior, Callback callback) const
     {
-        StringView seperator_view { &separator, 1 };
-        return for_each_split_view(seperator_view, split_behavior, callback);
+        StringView separator_view { &separator, 1 };
+        return for_each_split_view(separator_view, split_behavior, callback);
     }
 
     template<typename Callback>
@@ -348,9 +348,9 @@ public:
     }
 
     template<Arithmetic T>
-    Optional<T> to_number(TrimWhitespace trim_whitespace = TrimWhitespace::Yes) const
+    Optional<T> to_number(TrimWhitespace trim_whitespace = TrimWhitespace::Yes, int base = 10) const
     {
-        return parse_number<T>(*this, trim_whitespace);
+        return parse_number<T>(*this, trim_whitespace, base);
     }
 
 private:

@@ -10,6 +10,16 @@
 #include "CalculatedStyleValue.h"
 #include <AK/QuickSort.h>
 #include <AK/TypeCasts.h>
+#include <LibJS/Runtime/Realm.h>
+#include <LibWeb/CSS/CSSMathClamp.h>
+#include <LibWeb/CSS/CSSMathInvert.h>
+#include <LibWeb/CSS/CSSMathMax.h>
+#include <LibWeb/CSS/CSSMathMin.h>
+#include <LibWeb/CSS/CSSMathNegate.h>
+#include <LibWeb/CSS/CSSMathProduct.h>
+#include <LibWeb/CSS/CSSMathSum.h>
+#include <LibWeb/CSS/CSSNumericArray.h>
+#include <LibWeb/CSS/CSSUnitValue.h>
 #include <LibWeb/CSS/Percentage.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
@@ -24,9 +34,9 @@
 
 namespace Web::CSS {
 
-static Optional<CSSNumericType> add_the_types(Vector<NonnullRefPtr<CalculationNode const>> const& nodes)
+static Optional<NumericType> add_the_types(Vector<NonnullRefPtr<CalculationNode const>> const& nodes)
 {
-    Optional<CSSNumericType> left_type;
+    Optional<NumericType> left_type;
     for (auto const& value : nodes) {
         auto right_type = value->numeric_type();
         if (!right_type.has_value())
@@ -45,7 +55,7 @@ static Optional<CSSNumericType> add_the_types(Vector<NonnullRefPtr<CalculationNo
     return left_type;
 }
 
-static Optional<CSSNumericType> add_the_types(CalculationNode const& a, CalculationNode const& b)
+static Optional<NumericType> add_the_types(CalculationNode const& a, CalculationNode const& b)
 {
     auto a_type = a.numeric_type();
     auto b_type = b.numeric_type();
@@ -54,7 +64,7 @@ static Optional<CSSNumericType> add_the_types(CalculationNode const& a, Calculat
     return a_type->added_to(*b_type);
 }
 
-static Optional<CSSNumericType> add_the_types(CalculationNode const& a, CalculationNode const& b, CalculationNode const& c)
+static Optional<NumericType> add_the_types(CalculationNode const& a, CalculationNode const& b, CalculationNode const& c)
 {
     auto a_type = a.numeric_type();
     auto b_type = b.numeric_type();
@@ -69,11 +79,11 @@ static Optional<CSSNumericType> add_the_types(CalculationNode const& a, Calculat
     return a_and_b_type->added_to(*c_type);
 }
 
-static Optional<CSSNumericType> multiply_the_types(Vector<NonnullRefPtr<CalculationNode const>> const& nodes)
+static Optional<NumericType> multiply_the_types(Vector<NonnullRefPtr<CalculationNode const>> const& nodes)
 {
     // At a * sub-expression, multiply the types of the left and right arguments.
     // The sub-expression’s type is the returned result.
-    Optional<CSSNumericType> left_type;
+    Optional<NumericType> left_type;
     for (auto const& value : nodes) {
         auto right_type = value->numeric_type();
         if (!right_type.has_value())
@@ -130,6 +140,78 @@ static NonnullRefPtr<CalculationNode const> simplify_2_children(T const& origina
     return original;
 }
 
+static CalculationNode::NumericValue clamp_and_censor_numeric_value(NumericCalculationNode const& node, CalculationContext const& context)
+{
+    auto value = node.value();
+
+    Optional<AcceptedTypeRange> accepted_range = value.visit(
+        [&](Number const&) { return context.resolve_numbers_as_integers ? context.accepted_type_ranges.get(ValueType::Integer) : context.accepted_type_ranges.get(ValueType::Number); },
+        [&](Angle const&) { return context.accepted_type_ranges.get(ValueType::Angle); },
+        [&](Flex const&) { return context.accepted_type_ranges.get(ValueType::Flex); },
+        [&](Frequency const&) { return context.accepted_type_ranges.get(ValueType::Frequency); },
+        [&](Length const&) { return context.accepted_type_ranges.get(ValueType::Length); },
+        [&](Percentage const&) { return context.accepted_type_ranges.get(ValueType::Percentage); },
+        [&](Resolution const&) { return context.accepted_type_ranges.get(ValueType::Resolution); },
+        [&](Time const&) { return context.accepted_type_ranges.get(ValueType::Time); });
+
+    if (!accepted_range.has_value()) {
+        dbgln_if(LIBWEB_CSS_DEBUG, "FIXME: Calculation context missing accepted type range {}", node.numeric_type());
+        // FIXME: Min and max values for Integer should be based on i32 rather than float
+        accepted_range = { AK::NumericLimits<float>::lowest(), AK::NumericLimits<float>::max() };
+    }
+
+    auto clamp_and_censor = [&](double value, double min, double max) {
+        // https://drafts.csswg.org/css-values/#calc-ieee
+        // NaN does not escape a top-level calculation; it’s censored into a zero value.
+        if (isnan(value))
+            value = 0;
+
+        // https://drafts.csswg.org/css-values/#calc-range
+        // the value resulting from a top-level calculation must be clamped to the range allowed in the target context.
+        // Clamping is performed on computed values to the extent possible, and also on used values if computation was
+        // unable to sufficiently simplify the expression to allow range-checking.
+        return clamp(value, min, max);
+    };
+
+    return value.visit(
+        [&](Number const& value) -> CalculationNode::NumericValue {
+            return Number { value.type(), clamp_and_censor(context.resolve_numbers_as_integers ? value.integer_value() : value.value(), accepted_range->min, accepted_range->max) };
+        },
+        [&](Angle const& value) -> CalculationNode::NumericValue {
+            return Angle { clamp_and_censor(value.raw_value(), accepted_range->min, accepted_range->max), value.unit() };
+        },
+        [&](Flex const& value) -> CalculationNode::NumericValue {
+            return Flex { clamp_and_censor(value.raw_value(), accepted_range->min, accepted_range->max), value.unit() };
+        },
+        [&](Frequency const& value) -> CalculationNode::NumericValue {
+            return Frequency { clamp_and_censor(value.raw_value(), accepted_range->min, accepted_range->max), value.unit() };
+        },
+        [&](Length const& value) -> CalculationNode::NumericValue {
+            return Length { clamp_and_censor(value.raw_value(), accepted_range->min, accepted_range->max), value.unit() };
+        },
+        [&](Percentage const& value) -> CalculationNode::NumericValue {
+            return Percentage { clamp_and_censor(value.value(), accepted_range->min, accepted_range->max) };
+        },
+        [&](Resolution const& value) -> CalculationNode::NumericValue {
+            return Resolution { clamp_and_censor(value.raw_value(), accepted_range->min, accepted_range->max), value.unit() };
+        },
+        [&](Time const& value) -> CalculationNode::NumericValue {
+            return Time { clamp_and_censor(value.raw_value(), accepted_range->min, accepted_range->max), value.unit() };
+        });
+}
+
+static GC::Ptr<CSSNumericArray> reify_children(JS::Realm& realm, ReadonlySpan<NonnullRefPtr<CalculationNode const>> children)
+{
+    GC::RootVector<GC::Ref<CSSNumericValue>> reified_children { realm.heap() };
+    for (auto const& child : children) {
+        auto reified_child = child->reify(realm);
+        if (!reified_child)
+            return nullptr;
+        reified_children.append(reified_child.as_nonnull());
+    }
+    return CSSNumericArray::create(realm, move(reified_children));
+}
+
 static String serialize_a_calculation_tree(CalculationNode const&, CalculationContext const&, SerializationMode);
 
 // https://drafts.csswg.org/css-values-4/#serialize-a-math-function
@@ -141,8 +223,9 @@ static String serialize_a_math_function(CalculationNode const& fn, CalculationCo
     //    the serialization being produced is of a computed value or later, then clamp the value to the range allowed
     //    for its context (if necessary), then serialize the value as normal and return the result.
     if (fn.type() == CalculationNode::Type::Numeric && serialization_mode == SerializationMode::ResolvedValue) {
-        // FIXME: Clamp the value. Note that we might have an infinite/nan value here.
-        return static_cast<NumericCalculationNode const&>(fn).value_to_string();
+        auto clamped_value = clamp_and_censor_numeric_value(static_cast<NumericCalculationNode const&>(fn), context);
+
+        return clamped_value.visit([&](auto const& value) { return value.to_string(serialization_mode); });
     }
 
     // 2. If fn represents an infinite or NaN value:
@@ -287,12 +370,12 @@ static Vector<NonnullRefPtr<CalculationNode const>> sort_a_calculations_children
     }
 
     quick_sort(dimensions, [](NonnullRefPtr<CalculationNode const> const& a, NonnullRefPtr<CalculationNode const> const& b) {
-        auto get_unit = [](NonnullRefPtr<CalculationNode const> const& node) -> StringView {
+        auto get_unit = [](NonnullRefPtr<CalculationNode const> const& node) -> FlyString {
             auto const& numeric_node = static_cast<NumericCalculationNode const&>(*node);
             return numeric_node.value().visit(
-                [](Number const&) -> StringView { VERIFY_NOT_REACHED(); },
-                [](Percentage const&) -> StringView { VERIFY_NOT_REACHED(); },
-                [](auto const& dimension) -> StringView { return dimension.unit_name(); });
+                [](Number const&) -> FlyString { VERIFY_NOT_REACHED(); },
+                [](Percentage const&) -> FlyString { VERIFY_NOT_REACHED(); },
+                [](auto const& dimension) -> FlyString { return dimension.unit_name(); });
         };
 
         auto a_unit = get_unit(a);
@@ -430,7 +513,7 @@ static String serialize_a_calculation_tree(CalculationNode const& root, Calculat
     VERIFY_NOT_REACHED();
 }
 
-CalculationNode::CalculationNode(Type type, Optional<CSSNumericType> numeric_type)
+CalculationNode::CalculationNode(Type type, Optional<NumericType> numeric_type)
     : m_type(type)
     , m_numeric_type(move(numeric_type))
 {
@@ -491,7 +574,7 @@ StringView CalculationNode::name() const
     VERIFY_NOT_REACHED();
 }
 
-static CSSNumericType numeric_type_from_calculated_style_value(CalculatedStyleValue::CalculationResult::Value const& value, CalculationContext const& context)
+static NumericType numeric_type_from_calculated_style_value(CalculatedStyleValue::CalculationResult::Value const& value, CalculationContext const& context)
 {
     // https://drafts.csswg.org/css-values-4/#determine-the-type-of-a-calculation
     // Anything else is a terminal value, whose type is determined based on its CSS type.
@@ -501,37 +584,37 @@ static CSSNumericType numeric_type_from_calculated_style_value(CalculatedStyleVa
             // -> <number>
             // -> <integer>
             //    the type is «[ ]» (empty map)
-            return CSSNumericType {};
+            return NumericType {};
         },
         [](Length const&) {
             // -> <length>
             //    the type is «[ "length" → 1 ]»
-            return CSSNumericType { CSSNumericType::BaseType::Length, 1 };
+            return NumericType { NumericType::BaseType::Length, 1 };
         },
         [](Angle const&) {
             // -> <angle>
             //    the type is «[ "angle" → 1 ]»
-            return CSSNumericType { CSSNumericType::BaseType::Angle, 1 };
+            return NumericType { NumericType::BaseType::Angle, 1 };
         },
         [](Time const&) {
             // -> <time>
             //    the type is «[ "time" → 1 ]»
-            return CSSNumericType { CSSNumericType::BaseType::Time, 1 };
+            return NumericType { NumericType::BaseType::Time, 1 };
         },
         [](Frequency const&) {
             // -> <frequency>
             //    the type is «[ "frequency" → 1 ]»
-            return CSSNumericType { CSSNumericType::BaseType::Frequency, 1 };
+            return NumericType { NumericType::BaseType::Frequency, 1 };
         },
         [](Resolution const&) {
             // -> <resolution>
             //    the type is «[ "resolution" → 1 ]»
-            return CSSNumericType { CSSNumericType::BaseType::Resolution, 1 };
+            return NumericType { NumericType::BaseType::Resolution, 1 };
         },
         [](Flex const&) {
             // -> <flex>
             //    the type is «[ "flex" → 1 ]»
-            return CSSNumericType { CSSNumericType::BaseType::Flex, 1 };
+            return NumericType { NumericType::BaseType::Flex, 1 };
         },
         // NOTE: <calc-constant> is a separate node type. (FIXME: Should it be?)
         [&context](Percentage const&) {
@@ -541,17 +624,17 @@ static CSSNumericType numeric_type_from_calculated_style_value(CalculatedStyleVa
             //    where <percentage> is resolved against a <length>), and that other type is not <number>,
             //    the type is determined as the other type, but with a percent hint set to that other type.
             if (context.percentages_resolve_as.has_value() && context.percentages_resolve_as != ValueType::Number && context.percentages_resolve_as != ValueType::Percentage) {
-                auto base_type = CSSNumericType::base_type_from_value_type(*context.percentages_resolve_as);
+                auto base_type = NumericType::base_type_from_value_type(*context.percentages_resolve_as);
                 VERIFY(base_type.has_value());
-                auto result = CSSNumericType { base_type.value(), 1 };
+                auto result = NumericType { base_type.value(), 1 };
                 result.set_percent_hint(base_type);
                 return result;
             }
 
             //    Otherwise, the type is «[ "percent" → 1 ]», with a percent hint of "percent".
-            auto result = CSSNumericType { CSSNumericType::BaseType::Percent, 1 };
+            auto result = NumericType { NumericType::BaseType::Percent, 1 };
             // FIXME: Setting the percent hint to "percent" causes us to fail tests.
-            // result.set_percent_hint(CSSNumericType::BaseType::Percent);
+            // result.set_percent_hint(NumericType::BaseType::Percent);
             return result;
         });
 }
@@ -585,7 +668,7 @@ RefPtr<NumericCalculationNode const> NumericCalculationNode::from_keyword(Keywor
     }
 }
 
-NumericCalculationNode::NumericCalculationNode(NumericValue value, CSSNumericType numeric_type)
+NumericCalculationNode::NumericCalculationNode(NumericValue value, NumericType numeric_type)
     : CalculationNode(Type::Numeric, move(numeric_type))
     , m_value(move(value))
 {
@@ -606,14 +689,14 @@ bool NumericCalculationNode::contains_percentage() const
 bool NumericCalculationNode::is_in_canonical_unit() const
 {
     return m_value.visit(
-        [](Angle const& angle) { return angle.type() == Angle::Type::Deg; },
-        [](Flex const& flex) { return flex.type() == Flex::Type::Fr; },
-        [](Frequency const& frequency) { return frequency.type() == Frequency::Type::Hz; },
-        [](Length const& length) { return length.type() == Length::Type::Px; },
+        [](Angle const& angle) { return angle.unit() == AngleUnit::Deg; },
+        [](Flex const& flex) { return flex.unit() == FlexUnit::Fr; },
+        [](Frequency const& frequency) { return frequency.unit() == FrequencyUnit::Hz; },
+        [](Length const& length) { return length.unit() == LengthUnit::Px; },
         [](Number const&) { return true; },
         [](Percentage const&) { return true; },
-        [](Resolution const& resolution) { return resolution.type() == Resolution::Type::Dppx; },
-        [](Time const& time) { return time.type() == Time::Type::S; });
+        [](Resolution const& resolution) { return resolution.unit() == ResolutionUnit::Dppx; },
+        [](Time const& time) { return time.unit() == TimeUnit::S; });
 }
 
 static Optional<CalculatedStyleValue::CalculationResult> try_get_value_with_canonical_unit(CalculationNode const& child, CalculationContext const& context, CalculationResolutionContext const& resolution_context)
@@ -664,11 +747,11 @@ CalculatedStyleValue::CalculationResult NumericCalculationNode::resolve(Calculat
     return CalculatedStyleValue::CalculationResult::from_value(m_value, context, numeric_type());
 }
 
-RefPtr<CSSStyleValue const> NumericCalculationNode::to_style_value(CalculationContext const& context) const
+RefPtr<StyleValue const> NumericCalculationNode::to_style_value(CalculationContext const& context) const
 {
     // TODO: Clamp values to the range allowed by the context.
     return m_value.visit(
-        [&](Number const& number) -> RefPtr<CSSStyleValue const> {
+        [&](Number const& number) -> RefPtr<StyleValue const> {
             // FIXME: Returning infinity or NaN as a NumberStyleValue isn't valid.
             //        This is a temporary fix until value-clamping is implemented here.
             //        In future, we can remove these two lines and return NonnullRefPtr again.
@@ -679,13 +762,13 @@ RefPtr<CSSStyleValue const> NumericCalculationNode::to_style_value(CalculationCo
                 return IntegerStyleValue::create(llround(number.value()));
             return NumberStyleValue::create(number.value());
         },
-        [](Angle const& angle) -> RefPtr<CSSStyleValue const> { return AngleStyleValue::create(angle); },
-        [](Flex const& flex) -> RefPtr<CSSStyleValue const> { return FlexStyleValue::create(flex); },
-        [](Frequency const& frequency) -> RefPtr<CSSStyleValue const> { return FrequencyStyleValue::create(frequency); },
-        [](Length const& length) -> RefPtr<CSSStyleValue const> { return LengthStyleValue::create(length); },
-        [](Percentage const& percentage) -> RefPtr<CSSStyleValue const> { return PercentageStyleValue::create(percentage); },
-        [](Resolution const& resolution) -> RefPtr<CSSStyleValue const> { return ResolutionStyleValue::create(resolution); },
-        [](Time const& time) -> RefPtr<CSSStyleValue const> { return TimeStyleValue::create(time); });
+        [](Angle const& angle) -> RefPtr<StyleValue const> { return AngleStyleValue::create(angle); },
+        [](Flex const& flex) -> RefPtr<StyleValue const> { return FlexStyleValue::create(flex); },
+        [](Frequency const& frequency) -> RefPtr<StyleValue const> { return FrequencyStyleValue::create(frequency); },
+        [](Length const& length) -> RefPtr<StyleValue const> { return LengthStyleValue::create(length); },
+        [](Percentage const& percentage) -> RefPtr<StyleValue const> { return PercentageStyleValue::create(percentage); },
+        [](Resolution const& resolution) -> RefPtr<StyleValue const> { return ResolutionStyleValue::create(resolution); },
+        [](Time const& time) -> RefPtr<StyleValue const> { return TimeStyleValue::create(time); });
 }
 
 Optional<NonFiniteValue> NumericCalculationNode::infinite_or_nan_value() const
@@ -724,7 +807,7 @@ NonnullRefPtr<NumericCalculationNode const> NumericCalculationNode::negated(Calc
             return create(Number(number.type(), -number.value()), context);
         },
         [&]<typename T>(T const& value) {
-            return create(T(-value.raw_value(), value.type()), context);
+            return create(T(-value.raw_value(), value.unit()), context);
         });
 }
 
@@ -742,6 +825,14 @@ bool NumericCalculationNode::equals(CalculationNode const& other) const
     return m_value == static_cast<NumericCalculationNode const&>(other).m_value;
 }
 
+GC::Ptr<CSSNumericValue> NumericCalculationNode::reify(JS::Realm& realm) const
+{
+    return m_value.visit(
+        [&realm](Number const& number) { return CSSUnitValue::create(realm, number.value(), "number"_fly_string); },
+        [&realm](Percentage const& percentage) { return CSSUnitValue::create(realm, percentage.value(), "percent"_fly_string); },
+        [&realm](auto const& dimension) { return CSSUnitValue::create(realm, dimension.raw_value(), dimension.unit_name()); });
+}
+
 NonnullRefPtr<SumCalculationNode const> SumCalculationNode::create(Vector<NonnullRefPtr<CalculationNode const>> values)
 {
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
@@ -752,7 +843,7 @@ NonnullRefPtr<SumCalculationNode const> SumCalculationNode::create(Vector<Nonnul
     return adopt_ref(*new (nothrow) SumCalculationNode(move(values), move(numeric_type)));
 }
 
-SumCalculationNode::SumCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<CSSNumericType> numeric_type)
+SumCalculationNode::SumCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Sum, move(numeric_type))
     , m_values(move(values))
 {
@@ -813,6 +904,14 @@ bool SumCalculationNode::equals(CalculationNode const& other) const
     return true;
 }
 
+GC::Ptr<CSSNumericValue> SumCalculationNode::reify(JS::Realm& realm) const
+{
+    auto reified_children = reify_children(realm, m_values);
+    if (!reified_children)
+        return nullptr;
+    return CSSMathSum::create(realm, numeric_type().value(), reified_children.as_nonnull());
+}
+
 NonnullRefPtr<ProductCalculationNode const> ProductCalculationNode::create(Vector<NonnullRefPtr<CalculationNode const>> values)
 {
     // https://drafts.csswg.org/css-values-4/#determine-the-type-of-a-calculation
@@ -822,7 +921,7 @@ NonnullRefPtr<ProductCalculationNode const> ProductCalculationNode::create(Vecto
     return adopt_ref(*new (nothrow) ProductCalculationNode(move(values), move(numeric_type)));
 }
 
-ProductCalculationNode::ProductCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<CSSNumericType> numeric_type)
+ProductCalculationNode::ProductCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Product, move(numeric_type))
     , m_values(move(values))
 {
@@ -883,6 +982,14 @@ bool ProductCalculationNode::equals(CalculationNode const& other) const
     return true;
 }
 
+GC::Ptr<CSSNumericValue> ProductCalculationNode::reify(JS::Realm& realm) const
+{
+    auto reified_children = reify_children(realm, m_values);
+    if (!reified_children)
+        return nullptr;
+    return CSSMathProduct::create(realm, numeric_type().value(), reified_children.as_nonnull());
+}
+
 NonnullRefPtr<NegateCalculationNode const> NegateCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
 {
     return adopt_ref(*new (nothrow) NegateCalculationNode(move(value)));
@@ -929,6 +1036,14 @@ bool NegateCalculationNode::equals(CalculationNode const& other) const
     return m_value->equals(*static_cast<NegateCalculationNode const&>(other).m_value);
 }
 
+GC::Ptr<CSSNumericValue> NegateCalculationNode::reify(JS::Realm& realm) const
+{
+    auto reified_value = m_value->reify(realm);
+    if (!reified_value)
+        return nullptr;
+    return CSSMathNegate::create(realm, numeric_type().value(), reified_value.as_nonnull());
+}
+
 NonnullRefPtr<InvertCalculationNode const> InvertCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
 {
     // https://drafts.csswg.org/css-values-4/#determine-the-type-of-a-calculation
@@ -941,7 +1056,7 @@ NonnullRefPtr<InvertCalculationNode const> InvertCalculationNode::create(Nonnull
     return adopt_ref(*new (nothrow) InvertCalculationNode(move(value), move(numeric_type)));
 }
 
-InvertCalculationNode::InvertCalculationNode(NonnullRefPtr<CalculationNode const> value, Optional<CSSNumericType> numeric_type)
+InvertCalculationNode::InvertCalculationNode(NonnullRefPtr<CalculationNode const> value, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Invert, move(numeric_type))
     , m_value(move(value))
 {
@@ -981,6 +1096,14 @@ bool InvertCalculationNode::equals(CalculationNode const& other) const
     return m_value->equals(*static_cast<InvertCalculationNode const&>(other).m_value);
 }
 
+GC::Ptr<CSSNumericValue> InvertCalculationNode::reify(JS::Realm& realm) const
+{
+    auto reified_value = m_value->reify(realm);
+    if (!reified_value)
+        return nullptr;
+    return CSSMathInvert::create(realm, numeric_type().value(), reified_value.as_nonnull());
+}
+
 NonnullRefPtr<MinCalculationNode const> MinCalculationNode::create(Vector<NonnullRefPtr<CalculationNode const>> values)
 {
     // https://drafts.csswg.org/css-values-4/#determine-the-type-of-a-calculation
@@ -989,7 +1112,7 @@ NonnullRefPtr<MinCalculationNode const> MinCalculationNode::create(Vector<Nonnul
     return adopt_ref(*new (nothrow) MinCalculationNode(move(values), move(numeric_type)));
 }
 
-MinCalculationNode::MinCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<CSSNumericType> numeric_type)
+MinCalculationNode::MinCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Min, move(numeric_type))
     , m_values(move(values))
 {
@@ -1052,6 +1175,13 @@ static Optional<CalculatedStyleValue::CalculationResult> run_min_or_max_operatio
             if (!consistent_type.has_value())
                 return {};
 
+            // https://drafts.csswg.org/css-values-4/#calc-ieee
+            // Any operation with at least one NaN argument produces NaN.
+            if (isnan(child_value->value()) || isnan(result->value())) {
+                result = CalculatedStyleValue::CalculationResult { AK::NaN<double>, consistent_type };
+                continue;
+            }
+
             if (min_or_max == MinOrMax::Min) {
                 if (child_value->value() < result->value()) {
                     result = CalculatedStyleValue::CalculationResult { child_value->value(), consistent_type };
@@ -1098,6 +1228,14 @@ bool MinCalculationNode::equals(CalculationNode const& other) const
     return true;
 }
 
+GC::Ptr<CSSNumericValue> MinCalculationNode::reify(JS::Realm& realm) const
+{
+    auto reified_children = reify_children(realm, m_values);
+    if (!reified_children)
+        return nullptr;
+    return CSSMathMin::create(realm, numeric_type().value(), reified_children.as_nonnull());
+}
+
 NonnullRefPtr<MaxCalculationNode const> MaxCalculationNode::create(Vector<NonnullRefPtr<CalculationNode const>> values)
 {
     // https://drafts.csswg.org/css-values-4/#determine-the-type-of-a-calculation
@@ -1106,7 +1244,7 @@ NonnullRefPtr<MaxCalculationNode const> MaxCalculationNode::create(Vector<Nonnul
     return adopt_ref(*new (nothrow) MaxCalculationNode(move(values), move(numeric_type)));
 }
 
-MaxCalculationNode::MaxCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<CSSNumericType> numeric_type)
+MaxCalculationNode::MaxCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Max, move(numeric_type))
     , m_values(move(values))
 {
@@ -1175,6 +1313,14 @@ bool MaxCalculationNode::equals(CalculationNode const& other) const
     return true;
 }
 
+GC::Ptr<CSSNumericValue> MaxCalculationNode::reify(JS::Realm& realm) const
+{
+    auto reified_children = reify_children(realm, m_values);
+    if (!reified_children)
+        return nullptr;
+    return CSSMathMax::create(realm, numeric_type().value(), reified_children.as_nonnull());
+}
+
 NonnullRefPtr<ClampCalculationNode const> ClampCalculationNode::create(NonnullRefPtr<CalculationNode const> min, NonnullRefPtr<CalculationNode const> center, NonnullRefPtr<CalculationNode const> max)
 {
     // https://drafts.csswg.org/css-values-4/#determine-the-type-of-a-calculation
@@ -1183,7 +1329,7 @@ NonnullRefPtr<ClampCalculationNode const> ClampCalculationNode::create(NonnullRe
     return adopt_ref(*new (nothrow) ClampCalculationNode(move(min), move(center), move(max), move(numeric_type)));
 }
 
-ClampCalculationNode::ClampCalculationNode(NonnullRefPtr<CalculationNode const> min, NonnullRefPtr<CalculationNode const> center, NonnullRefPtr<CalculationNode const> max, Optional<CSSNumericType> numeric_type)
+ClampCalculationNode::ClampCalculationNode(NonnullRefPtr<CalculationNode const> min, NonnullRefPtr<CalculationNode const> center, NonnullRefPtr<CalculationNode const> max, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Clamp, move(numeric_type))
     , m_min_value(move(min))
     , m_center_value(move(center))
@@ -1262,6 +1408,11 @@ Optional<CalculatedStyleValue::CalculationResult> ClampCalculationNode::run_oper
     if (!consistent_type.has_value())
         return {};
 
+    // https://drafts.csswg.org/css-values-4/#calc-ieee
+    // Any operation with at least one NaN argument produces NaN.
+    if (isnan(min_result->value()) || isnan(center_result->value()) || isnan(max_result->value()))
+        return CalculatedStyleValue::CalculationResult { AK::NaN<double>, consistent_type.release_value() };
+
     auto chosen_value = max(min_result->value(), min(center_result->value(), max_result->value()));
     return CalculatedStyleValue::CalculationResult { chosen_value, consistent_type.release_value() };
 }
@@ -1283,6 +1434,17 @@ bool ClampCalculationNode::equals(CalculationNode const& other) const
     return m_min_value->equals(*static_cast<ClampCalculationNode const&>(other).m_min_value)
         && m_center_value->equals(*static_cast<ClampCalculationNode const&>(other).m_center_value)
         && m_max_value->equals(*static_cast<ClampCalculationNode const&>(other).m_max_value);
+}
+
+GC::Ptr<CSSNumericValue> ClampCalculationNode::reify(JS::Realm& realm) const
+{
+    auto lower = m_min_value->reify(realm);
+    auto value = m_center_value->reify(realm);
+    auto upper = m_max_value->reify(realm);
+    if (!lower || !value || !upper)
+        return nullptr;
+
+    return CSSMathClamp::create(realm, numeric_type().value(), lower.as_nonnull(), value.as_nonnull(), upper.as_nonnull());
 }
 
 NonnullRefPtr<AbsCalculationNode const> AbsCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
@@ -1352,7 +1514,7 @@ NonnullRefPtr<SignCalculationNode const> SignCalculationNode::create(NonnullRefP
 SignCalculationNode::SignCalculationNode(NonnullRefPtr<CalculationNode const> value)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ ]» (empty map).
-    : CalculationNode(Type::Sign, CSSNumericType {})
+    : CalculationNode(Type::Sign, NumericType {})
     , m_value(move(value))
 {
 }
@@ -1370,12 +1532,12 @@ CalculatedStyleValue::CalculationResult SignCalculationNode::resolve(Calculation
     auto node_a_value = node_a.value();
 
     if (node_a_value < 0)
-        return { -1, CSSNumericType {} };
+        return { -1, NumericType {} };
 
     if (node_a_value > 0)
-        return { 1, CSSNumericType {} };
+        return { 1, NumericType {} };
 
-    return { 0, CSSNumericType {} };
+    return { 0, NumericType {} };
 }
 
 NonnullRefPtr<CalculationNode const> SignCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -1408,7 +1570,7 @@ Optional<CalculatedStyleValue::CalculationResult> SignCalculationNode::run_opera
         sign = extractor.sign ? -0.0 : 0.0;
     }
 
-    return CalculatedStyleValue::CalculationResult { sign, CSSNumericType {}.made_consistent_with(numeric_child.numeric_type().value_or({})) };
+    return CalculatedStyleValue::CalculationResult { sign, NumericType {}.made_consistent_with(numeric_child.numeric_type().value_or({})) };
 }
 
 void SignCalculationNode::dump(StringBuilder& builder, int indent) const
@@ -1433,7 +1595,7 @@ NonnullRefPtr<SinCalculationNode const> SinCalculationNode::create(NonnullRefPtr
 
 SinCalculationNode::SinCalculationNode(NonnullRefPtr<CalculationNode const> value)
     // «[ ]» (empty map).
-    : CalculationNode(Type::Sin, CSSNumericType {})
+    : CalculationNode(Type::Sin, NumericType {})
     , m_value(move(value))
 {
 }
@@ -1451,7 +1613,7 @@ CalculatedStyleValue::CalculationResult SinCalculationNode::resolve(CalculationR
     auto node_a_value = AK::to_radians(node_a.value());
     auto result = sin(node_a_value);
 
-    return { result, CSSNumericType {} };
+    return { result, NumericType {} };
 }
 
 NonnullRefPtr<CalculationNode const> SinCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -1495,7 +1657,7 @@ static Optional<CalculatedStyleValue::CalculationResult> run_sin_cos_or_tan_oper
         break;
     }
 
-    return CalculatedStyleValue::CalculationResult { result, CSSNumericType {}.made_consistent_with(child.numeric_type().value()) };
+    return CalculatedStyleValue::CalculationResult { result, NumericType {}.made_consistent_with(child.numeric_type().value()) };
 }
 
 // https://drafts.csswg.org/css-values-4/#funcdef-sin
@@ -1527,7 +1689,7 @@ NonnullRefPtr<CosCalculationNode const> CosCalculationNode::create(NonnullRefPtr
 CosCalculationNode::CosCalculationNode(NonnullRefPtr<CalculationNode const> value)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ ]» (empty map).
-    : CalculationNode(Type::Cos, CSSNumericType {})
+    : CalculationNode(Type::Cos, NumericType {})
     , m_value(move(value))
 {
 }
@@ -1545,7 +1707,7 @@ CalculatedStyleValue::CalculationResult CosCalculationNode::resolve(CalculationR
     auto node_a_value = AK::to_radians(node_a.value());
     auto result = cos(node_a_value);
 
-    return { result, CSSNumericType {} };
+    return { result, NumericType {} };
 }
 
 NonnullRefPtr<CalculationNode const> CosCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -1582,7 +1744,7 @@ NonnullRefPtr<TanCalculationNode const> TanCalculationNode::create(NonnullRefPtr
 TanCalculationNode::TanCalculationNode(NonnullRefPtr<CalculationNode const> value)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ ]» (empty map).
-    : CalculationNode(Type::Tan, CSSNumericType {})
+    : CalculationNode(Type::Tan, NumericType {})
     , m_value(move(value))
 {
 }
@@ -1600,7 +1762,7 @@ CalculatedStyleValue::CalculationResult TanCalculationNode::resolve(CalculationR
     auto node_a_value = AK::to_radians(node_a.value());
     auto result = tan(node_a_value);
 
-    return { result, CSSNumericType {} };
+    return { result, NumericType {} };
 }
 
 NonnullRefPtr<CalculationNode const> TanCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -1637,7 +1799,7 @@ NonnullRefPtr<AsinCalculationNode const> AsinCalculationNode::create(NonnullRefP
 AsinCalculationNode::AsinCalculationNode(NonnullRefPtr<CalculationNode const> value)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ "angle" → 1 ]».
-    : CalculationNode(Type::Asin, CSSNumericType { CSSNumericType::BaseType::Angle, 1 })
+    : CalculationNode(Type::Asin, NumericType { NumericType::BaseType::Angle, 1 })
     , m_value(move(value))
 {
 }
@@ -1653,7 +1815,7 @@ CalculatedStyleValue::CalculationResult AsinCalculationNode::resolve(Calculation
 {
     auto node_a = m_value->resolve(context);
     auto result = AK::to_degrees(asin(node_a.value()));
-    return { result, CSSNumericType { CSSNumericType::BaseType::Angle, 1 } };
+    return { result, NumericType { NumericType::BaseType::Angle, 1 } };
 }
 
 NonnullRefPtr<CalculationNode const> AsinCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -1702,7 +1864,7 @@ static Optional<CalculatedStyleValue::CalculationResult> run_asin_acos_or_atan_o
         break;
     }
 
-    return CalculatedStyleValue::CalculationResult { result, CSSNumericType { CSSNumericType::BaseType::Angle, 1 }.made_consistent_with(child.numeric_type().value()) };
+    return CalculatedStyleValue::CalculationResult { result, NumericType { NumericType::BaseType::Angle, 1 }.made_consistent_with(child.numeric_type().value()) };
 }
 
 // https://drafts.csswg.org/css-values-4/#funcdef-asin
@@ -1734,7 +1896,7 @@ NonnullRefPtr<AcosCalculationNode const> AcosCalculationNode::create(NonnullRefP
 AcosCalculationNode::AcosCalculationNode(NonnullRefPtr<CalculationNode const> value)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ "angle" → 1 ]».
-    : CalculationNode(Type::Acos, CSSNumericType { CSSNumericType::BaseType::Angle, 1 })
+    : CalculationNode(Type::Acos, NumericType { NumericType::BaseType::Angle, 1 })
     , m_value(move(value))
 {
 }
@@ -1750,7 +1912,7 @@ CalculatedStyleValue::CalculationResult AcosCalculationNode::resolve(Calculation
 {
     auto node_a = m_value->resolve(context);
     auto result = AK::to_degrees(acos(node_a.value()));
-    return { result, CSSNumericType { CSSNumericType::BaseType::Angle, 1 } };
+    return { result, NumericType { NumericType::BaseType::Angle, 1 } };
 }
 
 NonnullRefPtr<CalculationNode const> AcosCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -1787,7 +1949,7 @@ NonnullRefPtr<AtanCalculationNode const> AtanCalculationNode::create(NonnullRefP
 AtanCalculationNode::AtanCalculationNode(NonnullRefPtr<CalculationNode const> value)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ "angle" → 1 ]».
-    : CalculationNode(Type::Atan, CSSNumericType { CSSNumericType::BaseType::Angle, 1 })
+    : CalculationNode(Type::Atan, NumericType { NumericType::BaseType::Angle, 1 })
     , m_value(move(value))
 {
 }
@@ -1803,7 +1965,7 @@ CalculatedStyleValue::CalculationResult AtanCalculationNode::resolve(Calculation
 {
     auto node_a = m_value->resolve(context);
     auto result = AK::to_degrees(atan(node_a.value()));
-    return { result, CSSNumericType { CSSNumericType::BaseType::Angle, 1 } };
+    return { result, NumericType { NumericType::BaseType::Angle, 1 } };
 }
 
 NonnullRefPtr<CalculationNode const> AtanCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -1840,7 +2002,7 @@ NonnullRefPtr<Atan2CalculationNode const> Atan2CalculationNode::create(NonnullRe
 Atan2CalculationNode::Atan2CalculationNode(NonnullRefPtr<CalculationNode const> y, NonnullRefPtr<CalculationNode const> x)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ "angle" → 1 ]».
-    : CalculationNode(Type::Atan2, CSSNumericType { CSSNumericType::BaseType::Angle, 1 })
+    : CalculationNode(Type::Atan2, NumericType { NumericType::BaseType::Angle, 1 })
     , m_y(move(y))
     , m_x(move(x))
 {
@@ -1858,7 +2020,7 @@ CalculatedStyleValue::CalculationResult Atan2CalculationNode::resolve(Calculatio
     auto node_a = m_y->resolve(context);
     auto node_b = m_x->resolve(context);
     auto result = AK::to_degrees(atan2(node_a.value(), node_b.value()));
-    return { result, CSSNumericType { CSSNumericType::BaseType::Angle, 1 } };
+    return { result, NumericType { NumericType::BaseType::Angle, 1 } };
 }
 
 NonnullRefPtr<CalculationNode const> Atan2CalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -1891,7 +2053,7 @@ Optional<CalculatedStyleValue::CalculationResult> Atan2CalculationNode::run_oper
     while (degrees > 180)
         degrees -= 360;
 
-    return CalculatedStyleValue::CalculationResult { degrees, CSSNumericType { CSSNumericType::BaseType::Angle, 1 }.made_consistent_with(*input_consistent_type) };
+    return CalculatedStyleValue::CalculationResult { degrees, NumericType { NumericType::BaseType::Angle, 1 }.made_consistent_with(*input_consistent_type) };
 }
 
 void Atan2CalculationNode::dump(StringBuilder& builder, int indent) const
@@ -1919,7 +2081,7 @@ NonnullRefPtr<PowCalculationNode const> PowCalculationNode::create(NonnullRefPtr
 PowCalculationNode::PowCalculationNode(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ ]» (empty map).
-    : CalculationNode(Type::Pow, CSSNumericType {})
+    : CalculationNode(Type::Pow, NumericType {})
     , m_x(move(x))
     , m_y(move(y))
 {
@@ -1932,7 +2094,7 @@ CalculatedStyleValue::CalculationResult PowCalculationNode::resolve(CalculationR
     auto node_a = m_x->resolve(context);
     auto node_b = m_y->resolve(context);
     auto result = pow(node_a.value(), node_b.value());
-    return { result, CSSNumericType {} };
+    return { result, NumericType {} };
 }
 
 NonnullRefPtr<CalculationNode const> PowCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -1983,7 +2145,7 @@ NonnullRefPtr<SqrtCalculationNode const> SqrtCalculationNode::create(NonnullRefP
 SqrtCalculationNode::SqrtCalculationNode(NonnullRefPtr<CalculationNode const> value)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ ]» (empty map).
-    : CalculationNode(Type::Sqrt, CSSNumericType {})
+    : CalculationNode(Type::Sqrt, NumericType {})
     , m_value(move(value))
 {
 }
@@ -1994,7 +2156,7 @@ CalculatedStyleValue::CalculationResult SqrtCalculationNode::resolve(Calculation
 {
     auto node_a = m_value->resolve(context);
     auto result = sqrt(node_a.value());
-    return { result, CSSNumericType {} };
+    return { result, NumericType {} };
 }
 
 NonnullRefPtr<CalculationNode const> SqrtCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -2013,7 +2175,7 @@ Optional<CalculatedStyleValue::CalculationResult> SqrtCalculationNode::run_opera
     if (!number.has_value())
         return {};
 
-    auto consistent_type = CSSNumericType {}.made_consistent_with(m_value->numeric_type().value());
+    auto consistent_type = NumericType {}.made_consistent_with(m_value->numeric_type().value());
     if (!consistent_type.has_value())
         return {};
 
@@ -2043,7 +2205,7 @@ NonnullRefPtr<HypotCalculationNode const> HypotCalculationNode::create(Vector<No
     return adopt_ref(*new (nothrow) HypotCalculationNode(move(values), move(numeric_type)));
 }
 
-HypotCalculationNode::HypotCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<CSSNumericType> numeric_type)
+HypotCalculationNode::HypotCalculationNode(Vector<NonnullRefPtr<CalculationNode const>> values, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Hypot, move(numeric_type))
     , m_values(move(values))
 {
@@ -2064,7 +2226,7 @@ bool HypotCalculationNode::contains_percentage() const
 CalculatedStyleValue::CalculationResult HypotCalculationNode::resolve(CalculationResolutionContext const& context) const
 {
     double square_sum = 0.0;
-    Optional<CSSNumericType> result_type;
+    Optional<NumericType> result_type;
 
     for (auto const& value : m_values) {
         auto child_resolved = value->resolve(context);
@@ -2096,7 +2258,7 @@ Optional<CalculatedStyleValue::CalculationResult> HypotCalculationNode::run_oper
     // <percentage>, but must have a consistent type or else the function is invalid; the result’s type will be the
     // consistent type.
 
-    Optional<CSSNumericType> consistent_type;
+    Optional<NumericType> consistent_type;
     double value = 0;
 
     for (auto const& child : m_values) {
@@ -2149,7 +2311,7 @@ NonnullRefPtr<LogCalculationNode const> LogCalculationNode::create(NonnullRefPtr
 LogCalculationNode::LogCalculationNode(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ ]» (empty map).
-    : CalculationNode(Type::Log, CSSNumericType {})
+    : CalculationNode(Type::Log, NumericType {})
     , m_x(move(x))
     , m_y(move(y))
 {
@@ -2162,7 +2324,7 @@ CalculatedStyleValue::CalculationResult LogCalculationNode::resolve(CalculationR
     auto node_a = m_x->resolve(context);
     auto node_b = m_y->resolve(context);
     auto result = log2(node_a.value()) / log2(node_b.value());
-    return { result, CSSNumericType {} };
+    return { result, NumericType {} };
 }
 
 NonnullRefPtr<CalculationNode const> LogCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -2182,7 +2344,7 @@ Optional<CalculatedStyleValue::CalculationResult> LogCalculationNode::run_operat
     if (!number.has_value() || !base.has_value())
         return {};
 
-    auto consistent_type = CSSNumericType {}.made_consistent_with(m_x->numeric_type().value());
+    auto consistent_type = NumericType {}.made_consistent_with(m_x->numeric_type().value());
     if (!consistent_type.has_value())
         return {};
 
@@ -2214,7 +2376,7 @@ NonnullRefPtr<ExpCalculationNode const> ExpCalculationNode::create(NonnullRefPtr
 ExpCalculationNode::ExpCalculationNode(NonnullRefPtr<CalculationNode const> value)
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
     // «[ ]» (empty map).
-    : CalculationNode(Type::Exp, CSSNumericType {})
+    : CalculationNode(Type::Exp, NumericType {})
     , m_value(move(value))
 {
 }
@@ -2225,7 +2387,7 @@ CalculatedStyleValue::CalculationResult ExpCalculationNode::resolve(CalculationR
 {
     auto node_a = m_value->resolve(context);
     auto result = exp(node_a.value());
-    return { result, CSSNumericType {} };
+    return { result, NumericType {} };
 }
 
 NonnullRefPtr<CalculationNode const> ExpCalculationNode::with_simplified_children(CalculationContext const& context, CalculationResolutionContext const& resolution_context) const
@@ -2243,7 +2405,7 @@ Optional<CalculatedStyleValue::CalculationResult> ExpCalculationNode::run_operat
     if (!number.has_value())
         return {};
 
-    auto consistent_type = CSSNumericType {}.made_consistent_with(m_value->numeric_type().value());
+    auto consistent_type = NumericType {}.made_consistent_with(m_value->numeric_type().value());
     if (!consistent_type.has_value())
         return {};
 
@@ -2273,7 +2435,7 @@ NonnullRefPtr<RoundCalculationNode const> RoundCalculationNode::create(RoundingS
     return adopt_ref(*new (nothrow) RoundCalculationNode(strategy, move(x), move(y), move(numeric_type)));
 }
 
-RoundCalculationNode::RoundCalculationNode(RoundingStrategy mode, NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y, Optional<CSSNumericType> numeric_type)
+RoundCalculationNode::RoundCalculationNode(RoundingStrategy mode, NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Round, move(numeric_type))
     , m_strategy(mode)
     , m_x(move(x))
@@ -2355,6 +2517,55 @@ Optional<CalculatedStyleValue::CalculationResult> RoundCalculationNode::run_oper
     auto a = maybe_a->value();
     auto b = maybe_b->value();
 
+    // https://drafts.csswg.org/css-values-4/#round-infinities
+    // In round(A, B), if B is 0, the result is NaN. If A and B are both infinite, the result is NaN.
+    if (b == 0 || (isinf(a) && isinf(b)))
+        return CalculatedStyleValue::CalculationResult { AK::NaN<double>, consistent_type };
+
+    // If A is infinite but B is finite, the result is the same infinity.
+    if (isinf(a) && isfinite(b))
+        return CalculatedStyleValue::CalculationResult { a, consistent_type };
+
+    // If A is finite but B is infinite, the result depends on the <rounding-strategy> and the sign of A:
+    if (isfinite(a) && isinf(b)) {
+        FloatExtractor<double> const extractor { .d = a };
+
+        switch (m_strategy) {
+        // nearest, to-zero:
+        case RoundingStrategy::Nearest:
+        case RoundingStrategy::ToZero: {
+            // If A is positive or 0⁺, return 0⁺. Otherwise, return 0⁻.
+            return CalculatedStyleValue::CalculationResult { !extractor.sign ? 0.0 : -0.0, consistent_type };
+        }
+        // up:
+        case RoundingStrategy::Up: {
+            double result;
+            if (a > 0) {
+                // If A is positive(not zero), return +∞.
+                result = AK::Infinity<double>;
+            } else {
+                // If A is 0⁺, return 0⁺. Otherwise, return 0⁻.
+                result = !extractor.sign ? 0.0 : -0.0;
+            }
+
+            return CalculatedStyleValue::CalculationResult { result, consistent_type };
+        }
+        // down:
+        case RoundingStrategy::Down: {
+            double result;
+            if (a < 0) {
+                // If A is negative (not zero), return −∞.
+                result = -AK::Infinity<double>;
+            } else {
+                // If A is 0⁻, return 0⁻. Otherwise, return 0⁺.
+                result = extractor.sign ? -0.0 : 0.0;
+            }
+
+            return CalculatedStyleValue::CalculationResult { result, consistent_type };
+        }
+        }
+    }
+
     // If A is exactly equal to an integer multiple of B, round() resolves to A exactly (preserving whether A is 0⁻ or
     // 0⁺, if relevant).
     if (fmod(a, b) == 0)
@@ -2434,7 +2645,7 @@ NonnullRefPtr<ModCalculationNode const> ModCalculationNode::create(NonnullRefPtr
     return adopt_ref(*new (nothrow) ModCalculationNode(move(x), move(y), move(numeric_type)));
 }
 
-ModCalculationNode::ModCalculationNode(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y, Optional<CSSNumericType> numeric_type)
+ModCalculationNode::ModCalculationNode(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Mod, move(numeric_type))
     , m_x(move(x))
     , m_y(move(y))
@@ -2537,7 +2748,7 @@ NonnullRefPtr<RemCalculationNode const> RemCalculationNode::create(NonnullRefPtr
     return adopt_ref(*new (nothrow) RemCalculationNode(move(x), move(y), move(numeric_type)));
 }
 
-RemCalculationNode::RemCalculationNode(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y, Optional<CSSNumericType> numeric_type)
+RemCalculationNode::RemCalculationNode(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y, Optional<NumericType> numeric_type)
     : CalculationNode(Type::Rem, move(numeric_type))
     , m_x(move(x))
     , m_y(move(y))
@@ -2587,7 +2798,7 @@ bool RemCalculationNode::equals(CalculationNode const& other) const
         && m_y->equals(*static_cast<RemCalculationNode const&>(other).m_y);
 }
 
-CalculatedStyleValue::CalculationResult CalculatedStyleValue::CalculationResult::from_value(Value const& value, CalculationResolutionContext const& context, Optional<CSSNumericType> numeric_type)
+CalculatedStyleValue::CalculationResult CalculatedStyleValue::CalculationResult::from_value(Value const& value, CalculationResolutionContext const& context, Optional<NumericType> numeric_type)
 {
     auto number = value.visit(
         [](Number const& number) { return number.value(); },
@@ -2596,11 +2807,8 @@ CalculatedStyleValue::CalculationResult CalculatedStyleValue::CalculationResult:
         [](Frequency const& frequency) { return frequency.to_hertz(); },
         [&context](Length const& length) {
             // Handle some common cases first, so we can resolve more without a context
-            if (length.is_auto())
-                return 0.0;
-
             if (length.is_absolute())
-                return length.absolute_length_to_px().to_double();
+                return length.absolute_length_to_px_without_rounding();
 
             // If we don't have a context, we cant resolve the length, so return NAN
             if (!context.length_resolution_context.has_value()) {
@@ -2661,7 +2869,57 @@ String CalculatedStyleValue::to_string(SerializationMode serialization_mode) con
     return serialize_a_math_function(m_calculation, m_context, serialization_mode);
 }
 
-bool CalculatedStyleValue::equals(CSSStyleValue const& other) const
+ValueComparingNonnullRefPtr<StyleValue const> CalculatedStyleValue::absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const
+{
+    Length::ResolutionContext length_resolution_context {
+        .viewport_rect = viewport_rect,
+        .font_metrics = font_metrics,
+        .root_font_metrics = root_font_metrics
+    };
+
+    auto simplified_calculation_tree = simplify_a_calculation_tree(m_calculation, m_context, { .length_resolution_context = length_resolution_context });
+
+    auto const simplified_percentage_dimension_mix = [&]() -> Optional<ValueComparingNonnullRefPtr<StyleValue const>> {
+        // NOTE: A percentage dimension mix is a SumCalculationNode with two NumericCalculationNode children which have
+        //       matching base types - only the first of which has a percent hint.
+        if (simplified_calculation_tree->type() != CalculationNode::Type::Sum)
+            return {};
+
+        auto const& sum_node = as<SumCalculationNode>(*simplified_calculation_tree);
+
+        if (sum_node.children()[0]->type() != CalculationNode::Type::Numeric || sum_node.children()[1]->type() != CalculationNode::Type::Numeric)
+            return {};
+
+        auto const& first_node = as<NumericCalculationNode>(*sum_node.children()[0]);
+        auto const& second_node = as<NumericCalculationNode>(*sum_node.children()[1]);
+
+        auto first_base_type = first_node.numeric_type()->entry_with_value_1_while_all_others_are_0();
+        auto second_base_type = second_node.numeric_type()->entry_with_value_1_while_all_others_are_0();
+
+        if (!first_base_type.has_value() || first_base_type != second_base_type)
+            return {};
+
+        if (!first_node.numeric_type()->percent_hint().has_value() || second_node.numeric_type()->percent_hint().has_value())
+            return {};
+
+        auto dimension_component = try_get_value_with_canonical_unit(second_node, m_context, {});
+
+        // https://drafts.csswg.org/css-values-4/#combine-mixed
+        // The computed value of a percentage-dimension mix is defined as
+        //  - a computed percentage if the dimension component is zero
+        if (dimension_component->value() == 0)
+            return PercentageStyleValue::create(first_node.value().get<Percentage>());
+
+        return {};
+    }();
+
+    if (simplified_percentage_dimension_mix.has_value())
+        return simplified_percentage_dimension_mix.value();
+
+    return CalculatedStyleValue::create(simplified_calculation_tree, m_resolved_type, m_context);
+}
+
+bool CalculatedStyleValue::equals(StyleValue const& other) const
 {
     if (type() != other.type())
         return false;
@@ -2669,7 +2927,61 @@ bool CalculatedStyleValue::equals(CSSStyleValue const& other) const
     return m_calculation->equals(*other.as_calculated().m_calculation);
 }
 
-Optional<Angle> CalculatedStyleValue::resolve_angle(CalculationResolutionContext const& context) const
+// https://drafts.csswg.org/css-values-4/#calc-computed-value
+Optional<CalculatedStyleValue::ResolvedValue> CalculatedStyleValue::resolve_value(CalculationResolutionContext const& resolution_context) const
+{
+    // The calculation tree is again simplified at used value time; with used value time information.
+    auto simplified_tree = simplify_a_calculation_tree(m_calculation, m_context, resolution_context);
+
+    if (!is<NumericCalculationNode>(*simplified_tree))
+        return {};
+
+    auto value = try_get_value_with_canonical_unit(simplified_tree, m_context, resolution_context);
+
+    VERIFY(value.has_value());
+
+    auto raw_value = value->value();
+
+    // https://drafts.csswg.org/css-values/#calc-ieee
+    // NaN does not escape a top-level calculation; it’s censored into a zero value.
+    if (isnan(raw_value))
+        raw_value = 0;
+
+    // https://drafts.csswg.org/css-values/#calc-range
+    // the value resulting from a top-level calculation must be clamped to the range allowed in the target context.
+    // Clamping is performed on computed values to the extent possible, and also on used values if computation was
+    // unable to sufficiently simplify the expression to allow range-checking.
+    Optional<AcceptedTypeRange> accepted_range;
+
+    if (value->type()->matches_number(m_context.percentages_resolve_as))
+        accepted_range = m_context.resolve_numbers_as_integers ? m_context.accepted_type_ranges.get(ValueType::Integer) : m_context.accepted_type_ranges.get(ValueType::Number);
+    else if (value->type()->matches_angle_percentage(m_context.percentages_resolve_as))
+        accepted_range = m_context.accepted_type_ranges.get(ValueType::Angle);
+    else if (value->type()->matches_flex(m_context.percentages_resolve_as))
+        accepted_range = m_context.accepted_type_ranges.get(ValueType::Flex);
+    else if (value->type()->matches_frequency_percentage(m_context.percentages_resolve_as))
+        accepted_range = m_context.accepted_type_ranges.get(ValueType::Frequency);
+    else if (value->type()->matches_length_percentage(m_context.percentages_resolve_as))
+        accepted_range = m_context.accepted_type_ranges.get(ValueType::Length);
+    else if (value->type()->matches_percentage())
+        accepted_range = m_context.accepted_type_ranges.get(ValueType::Percentage);
+    else if (value->type()->matches_resolution(m_context.percentages_resolve_as))
+        accepted_range = m_context.accepted_type_ranges.get(ValueType::Resolution);
+    else if (value->type()->matches_time_percentage(m_context.percentages_resolve_as))
+        accepted_range = m_context.accepted_type_ranges.get(ValueType::Time);
+
+    if (!accepted_range.has_value()) {
+        dbgln_if(LIBWEB_CSS_DEBUG, "FIXME: Calculation context missing accepted type range {}", value->type());
+        // FIXME: Infinity for integers should be i32 max rather than float max
+        accepted_range = { AK::NumericLimits<float>::lowest(), AK::NumericLimits<float>::max() };
+    }
+
+    raw_value = clamp(raw_value, accepted_range->min, accepted_range->max);
+
+    return ResolvedValue { raw_value, value->type() };
+}
+
+Optional<Angle> CalculatedStyleValue::resolve_angle_deprecated(CalculationResolutionContext const& context) const
 {
     auto result = m_calculation->resolve(context);
     if (result.type().has_value() && result.type()->matches_angle(m_context.percentages_resolve_as))
@@ -2677,7 +2989,17 @@ Optional<Angle> CalculatedStyleValue::resolve_angle(CalculationResolutionContext
     return {};
 }
 
-Optional<Flex> CalculatedStyleValue::resolve_flex(CalculationResolutionContext const& context) const
+Optional<Angle> CalculatedStyleValue::resolve_angle(CalculationResolutionContext const& context) const
+{
+    auto result = resolve_value(context);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_angle(m_context.percentages_resolve_as))
+        return Angle::make_degrees(result->value);
+
+    return {};
+}
+
+Optional<Flex> CalculatedStyleValue::resolve_flex_deprecated(CalculationResolutionContext const& context) const
 {
     auto result = m_calculation->resolve(context);
     if (result.type().has_value() && result.type()->matches_flex(m_context.percentages_resolve_as))
@@ -2685,7 +3007,17 @@ Optional<Flex> CalculatedStyleValue::resolve_flex(CalculationResolutionContext c
     return {};
 }
 
-Optional<Frequency> CalculatedStyleValue::resolve_frequency(CalculationResolutionContext const& context) const
+Optional<Flex> CalculatedStyleValue::resolve_flex(CalculationResolutionContext const& context) const
+{
+    auto result = resolve_value(context);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_flex(m_context.percentages_resolve_as))
+        return Flex::make_fr(result->value);
+
+    return {};
+}
+
+Optional<Frequency> CalculatedStyleValue::resolve_frequency_deprecated(CalculationResolutionContext const& context) const
 {
     auto result = m_calculation->resolve(context);
     if (result.type().has_value() && result.type()->matches_frequency(m_context.percentages_resolve_as))
@@ -2693,15 +3025,35 @@ Optional<Frequency> CalculatedStyleValue::resolve_frequency(CalculationResolutio
     return {};
 }
 
-Optional<Length> CalculatedStyleValue::resolve_length(CalculationResolutionContext const& context) const
+Optional<Frequency> CalculatedStyleValue::resolve_frequency(CalculationResolutionContext const& context) const
 {
-    auto result = m_calculation->resolve(context);
-    if (result.type().has_value() && result.type()->matches_length(m_context.percentages_resolve_as))
-        return Length::make_px(CSSPixels { result.value() });
+    auto result = resolve_value(context);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_frequency(m_context.percentages_resolve_as))
+        return Frequency::make_hertz(result->value);
+
     return {};
 }
 
-Optional<Percentage> CalculatedStyleValue::resolve_percentage(CalculationResolutionContext const& context) const
+Optional<Length> CalculatedStyleValue::resolve_length_deprecated(CalculationResolutionContext const& context) const
+{
+    auto result = m_calculation->resolve(context);
+    if (result.type().has_value() && result.type()->matches_length(m_context.percentages_resolve_as))
+        return Length::make_px(result.value());
+    return {};
+}
+
+Optional<Length> CalculatedStyleValue::resolve_length(CalculationResolutionContext const& context) const
+{
+    auto result = resolve_value(context);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_length(m_context.percentages_resolve_as))
+        return Length::make_px(result->value);
+
+    return {};
+}
+
+Optional<Percentage> CalculatedStyleValue::resolve_percentage_deprecated(CalculationResolutionContext const& context) const
 {
     auto result = m_calculation->resolve(context);
     if (result.type().has_value() && result.type()->matches_percentage())
@@ -2709,7 +3061,17 @@ Optional<Percentage> CalculatedStyleValue::resolve_percentage(CalculationResolut
     return {};
 }
 
-Optional<Resolution> CalculatedStyleValue::resolve_resolution(CalculationResolutionContext const& context) const
+Optional<Percentage> CalculatedStyleValue::resolve_percentage(CalculationResolutionContext const& context) const
+{
+    auto result = resolve_value(context);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_percentage())
+        return Percentage { result->value };
+
+    return {};
+}
+
+Optional<Resolution> CalculatedStyleValue::resolve_resolution_deprecated(CalculationResolutionContext const& context) const
 {
     auto result = m_calculation->resolve(context);
     if (result.type().has_value() && result.type()->matches_resolution(m_context.percentages_resolve_as))
@@ -2717,7 +3079,17 @@ Optional<Resolution> CalculatedStyleValue::resolve_resolution(CalculationResolut
     return {};
 }
 
-Optional<Time> CalculatedStyleValue::resolve_time(CalculationResolutionContext const& context) const
+Optional<Resolution> CalculatedStyleValue::resolve_resolution(CalculationResolutionContext const& context) const
+{
+    auto result = resolve_value(context);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_resolution(m_context.percentages_resolve_as))
+        return Resolution::make_dots_per_pixel(result->value);
+
+    return {};
+}
+
+Optional<Time> CalculatedStyleValue::resolve_time_deprecated(CalculationResolutionContext const& context) const
 {
     auto result = m_calculation->resolve(context);
     if (result.type().has_value() && result.type()->matches_time(m_context.percentages_resolve_as))
@@ -2725,7 +3097,17 @@ Optional<Time> CalculatedStyleValue::resolve_time(CalculationResolutionContext c
     return {};
 }
 
-Optional<double> CalculatedStyleValue::resolve_number(CalculationResolutionContext const& context) const
+Optional<Time> CalculatedStyleValue::resolve_time(CalculationResolutionContext const& context) const
+{
+    auto result = resolve_value(context);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_time(m_context.percentages_resolve_as))
+        return Time::make_seconds(result->value);
+
+    return {};
+}
+
+Optional<double> CalculatedStyleValue::resolve_number_deprecated(CalculationResolutionContext const& context) const
 {
     auto result = m_calculation->resolve(context);
     if (!result.type().has_value() || !result.type()->matches_number(m_context.percentages_resolve_as))
@@ -2740,11 +3122,31 @@ Optional<double> CalculatedStyleValue::resolve_number(CalculationResolutionConte
     return value;
 }
 
-Optional<i64> CalculatedStyleValue::resolve_integer(CalculationResolutionContext const& context) const
+Optional<double> CalculatedStyleValue::resolve_number(CalculationResolutionContext const& context) const
+{
+    auto result = resolve_value(context);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_number(m_context.percentages_resolve_as))
+        return result->value;
+
+    return {};
+}
+
+Optional<i64> CalculatedStyleValue::resolve_integer_deprecated(CalculationResolutionContext const& context) const
 {
     auto result = m_calculation->resolve(context);
     if (result.type().has_value() && result.type()->matches_number(m_context.percentages_resolve_as))
         return llround(result.value());
+    return {};
+}
+
+Optional<i64> CalculatedStyleValue::resolve_integer(CalculationResolutionContext const& context) const
+{
+    auto result = resolve_value(context);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_number(m_context.percentages_resolve_as))
+        return llround(result->value);
+
     return {};
 }
 
@@ -2758,6 +3160,18 @@ String CalculatedStyleValue::dump() const
     StringBuilder builder;
     m_calculation->dump(builder, 0);
     return builder.to_string_without_validation();
+}
+
+// https://drafts.css-houdini.org/css-typed-om-1/#reify-a-math-expression
+GC::Ref<CSSStyleValue> CalculatedStyleValue::reify(JS::Realm& realm, String const& associated_property) const
+{
+    // NB: This spec algorithm isn't really implementable here - it's incomplete, and assumes we don't already have a
+    //     calculation tree. So we have a per-node method instead.
+    if (auto reified = m_calculation->reify(realm))
+        return *reified;
+    // Some math functions are not reifiable yet. If we contain one, we have to fall back to CSSStyleValue.
+    // https://github.com/w3c/css-houdini-drafts/issues/1090
+    return StyleValue::reify(realm, associated_property);
 }
 
 struct NumericChildAndIndex {
@@ -2782,7 +3196,7 @@ static Optional<NumericChildAndIndex> find_numeric_child_with_same_unit(Vector<N
                 return target.value().has<Number>();
             },
             [&]<typename T>(T const& value) {
-                if (auto const* other = target.value().get_pointer<T>(); other && other->type() == value.type()) {
+                if (auto const* other = target.value().get_pointer<T>(); other && other->unit() == value.unit()) {
                     return true;
                 }
                 return false;
@@ -2838,20 +3252,20 @@ NonnullRefPtr<CalculationNode const> simplify_a_calculation_tree(CalculationNode
                 [](Empty const&) -> RefPtr<NumericCalculationNode const> { return nullptr; },
                 [&](Angle const& angle) -> RefPtr<NumericCalculationNode const> {
                     VERIFY(context.percentages_resolve_as == ValueType::Angle);
-                    if (angle.type() == Angle::Type::Deg)
-                        return nullptr;
+                    if (angle.unit() == AngleUnit::Deg)
+                        return NumericCalculationNode::create(angle.percentage_of(*percentage), context);
                     return NumericCalculationNode::create(Angle::make_degrees(angle.to_degrees()).percentage_of(*percentage), context);
                 },
                 [&](Frequency const& frequency) -> RefPtr<NumericCalculationNode const> {
                     VERIFY(context.percentages_resolve_as == ValueType::Frequency);
-                    if (frequency.type() == Frequency::Type::Hz)
-                        return nullptr;
+                    if (frequency.unit() == FrequencyUnit::Hz)
+                        return NumericCalculationNode::create(frequency.percentage_of(*percentage), context);
                     return NumericCalculationNode::create(Frequency::make_hertz(frequency.to_hertz()).percentage_of(*percentage), context);
                 },
                 [&](Length const& length) -> RefPtr<NumericCalculationNode const> {
                     VERIFY(context.percentages_resolve_as == ValueType::Length);
-                    if (length.type() == Length::Type::Px)
-                        return nullptr;
+                    if (length.unit() == LengthUnit::Px)
+                        return NumericCalculationNode::create(length.percentage_of(*percentage), context);
                     if (length.is_absolute())
                         return NumericCalculationNode::create(Length::make_px(length.absolute_length_to_px()).percentage_of(*percentage), context);
                     if (resolution_context.length_resolution_context.has_value())
@@ -2860,8 +3274,8 @@ NonnullRefPtr<CalculationNode const> simplify_a_calculation_tree(CalculationNode
                 },
                 [&](Time const& time) -> RefPtr<NumericCalculationNode const> {
                     VERIFY(context.percentages_resolve_as == ValueType::Time);
-                    if (time.type() == Time::Type::S)
-                        return nullptr;
+                    if (time.unit() == TimeUnit::S)
+                        return NumericCalculationNode::create(time.percentage_of(*percentage), context);
                     return NumericCalculationNode::create(Time::make_seconds(time.to_seconds()).percentage_of(*percentage), context);
                 });
 
@@ -2875,22 +3289,22 @@ NonnullRefPtr<CalculationNode const> simplify_a_calculation_tree(CalculationNode
             // NOTE: We use nullptr here to signify "use the original".
             RefPtr<CalculationNode const> resolved = root_numeric.value().visit(
                 [&](Angle const& angle) -> RefPtr<CalculationNode const> {
-                    if (angle.type() == Angle::Type::Deg)
+                    if (angle.unit() == AngleUnit::Deg)
                         return nullptr;
                     return NumericCalculationNode::create(Angle::make_degrees(angle.to_degrees()), context);
                 },
                 [&](Flex const& flex) -> RefPtr<CalculationNode const> {
-                    if (flex.type() == Flex::Type::Fr)
+                    if (flex.unit() == FlexUnit::Fr)
                         return nullptr;
                     return NumericCalculationNode::create(Flex::make_fr(flex.to_fr()), context);
                 },
                 [&](Frequency const& frequency) -> RefPtr<CalculationNode const> {
-                    if (frequency.type() == Frequency::Type::Hz)
+                    if (frequency.unit() == FrequencyUnit::Hz)
                         return nullptr;
                     return NumericCalculationNode::create(Frequency::make_hertz(frequency.to_hertz()), context);
                 },
                 [&](Length const& length) -> RefPtr<CalculationNode const> {
-                    if (length.type() == Length::Type::Px)
+                    if (length.unit() == LengthUnit::Px)
                         return nullptr;
                     if (length.is_absolute())
                         return NumericCalculationNode::create(Length::make_px(length.absolute_length_to_px()), context);
@@ -2905,12 +3319,12 @@ NonnullRefPtr<CalculationNode const> simplify_a_calculation_tree(CalculationNode
                     return nullptr;
                 },
                 [&](Resolution const& resolution) -> RefPtr<CalculationNode const> {
-                    if (resolution.type() == Resolution::Type::Dppx)
+                    if (resolution.unit() == ResolutionUnit::Dppx)
                         return nullptr;
                     return NumericCalculationNode::create(Resolution::make_dots_per_pixel(resolution.to_dots_per_pixel()), context);
                 },
                 [&](Time const& time) -> RefPtr<CalculationNode const> {
-                    if (time.type() == Time::Type::S)
+                    if (time.unit() == TimeUnit::S)
                         return nullptr;
                     return NumericCalculationNode::create(Time::make_seconds(time.to_seconds()), context);
                 });
@@ -3086,7 +3500,7 @@ NonnullRefPtr<CalculationNode const> simplify_a_calculation_tree(CalculationNode
                         return NumericCalculationNode::create(Number(Number::Type::Number, number.value() + child_numeric.value().get<Number>().value()), context);
                     },
                     [&]<typename T>(T const& value) {
-                        return NumericCalculationNode::create(T(value.raw_value() + child_numeric.value().get<T>().raw_value(), value.type()), context);
+                        return NumericCalculationNode::create(T(value.raw_value() + child_numeric.value().get<T>().raw_value(), value.unit()), context);
                     });
                 summed_children[existing_child_and_index->index] = move(new_value);
             } else {
@@ -3168,7 +3582,17 @@ NonnullRefPtr<CalculationNode const> simplify_a_calculation_tree(CalculationNode
                         all_numeric = false;
                         break;
                     }
-                    multiplied_children.append(as<NumericCalculationNode>(*sum_child).value().visit([&](Percentage const& percentage) { return NumericCalculationNode::create(Percentage(percentage.value() * multiplier->value()), context); }, [&](Number const& number) { return NumericCalculationNode::create(Number(Number::Type::Number, number.value() * multiplier->value()), context); }, [&]<typename T>(T const& value) { return NumericCalculationNode::create(T(value.raw_value() * multiplier->value(), value.type()), context); }));
+                    auto& child_value = as<NumericCalculationNode>(*sum_child).value();
+                    multiplied_children.append(child_value.visit(
+                        [&](Percentage const& percentage) {
+                            return NumericCalculationNode::create(Percentage(percentage.value() * multiplier->value()), context);
+                        },
+                        [&](Number const& number) {
+                            return NumericCalculationNode::create(Number(Number::Type::Number, number.value() * multiplier->value()), context);
+                        },
+                        [&]<typename T>(T const& value) {
+                            return NumericCalculationNode::create(T(value.raw_value() * multiplier->value(), value.unit()), context);
+                        }));
                 }
 
                 if (all_numeric)
@@ -3183,32 +3607,45 @@ NonnullRefPtr<CalculationNode const> simplify_a_calculation_tree(CalculationNode
         //    its child’s value), expressed in the result’s canonical unit.
         Optional<CalculatedStyleValue::CalculationResult> accumulated_result;
         bool is_valid = true;
+
+        auto accumulate = [&accumulated_result, &resolution_context](NumericCalculationNode const& numeric_child, bool invert) {
+            auto child_type = numeric_child.numeric_type();
+
+            if (!child_type.has_value())
+                return false;
+
+            // FIXME: The spec doesn't cover how to handle values in non-canonical units
+            if (!numeric_child.is_in_canonical_unit())
+                return false;
+
+            // AD-HOC: The spec doesn't cover how to handle unresolved percentages, to handle this we force percentages
+            //         back to the percent type (e.g. { hint: None, "percent" → 1 } rather than
+            //         { hint: length, "length" → 1 }), this avoids a situation calling make_calculation_node below
+            //         where we would treat the value as an absolute value expressed in canonical units rather than a
+            //         percent. `make_calculation_node` will still calculate the correct numeric type for the
+            //         simplified node. See spec issue: https://github.com/w3c/csswg-drafts/issues/11588
+            if (numeric_child.value().has<Percentage>())
+                child_type = NumericType { NumericType::BaseType::Percent, 1 };
+
+            auto child_value = CalculatedStyleValue::CalculationResult::from_value(numeric_child.value(), resolution_context, child_type);
+
+            if (invert)
+                child_value.invert();
+
+            if (accumulated_result.has_value())
+                accumulated_result->multiply_by(child_value);
+            else
+                accumulated_result = child_value;
+
+            if (!accumulated_result->type().has_value())
+                return false;
+
+            return true;
+        };
+
         for (auto const& child : children) {
             if (child->type() == CalculationNode::Type::Numeric) {
-                auto const& numeric_child = as<NumericCalculationNode>(*child);
-                auto child_type = numeric_child.numeric_type();
-                if (!child_type.has_value()) {
-                    is_valid = false;
-                    break;
-                }
-
-                // FIXME: The spec doesn't handle unresolved percentages here, but if we don't exit when we see one,
-                //        we'll get a wrongly-typed value after multiplying the types.
-                //        Same goes for other numerics with non-canonical units.
-                //        Spec bug: https://github.com/w3c/csswg-drafts/issues/11588
-                if ((numeric_child.value().has<Percentage>() && context.percentages_resolve_as.has_value())
-                    || !numeric_child.is_in_canonical_unit()) {
-                    is_valid = false;
-                    break;
-                }
-
-                auto child_value = CalculatedStyleValue::CalculationResult::from_value(numeric_child.value(), resolution_context, child_type);
-                if (accumulated_result.has_value()) {
-                    accumulated_result->multiply_by(child_value);
-                } else {
-                    accumulated_result = move(child_value);
-                }
-                if (!accumulated_result->type().has_value()) {
+                if (!accumulate(as<NumericCalculationNode>(*child), false)) {
                     is_valid = false;
                     break;
                 }
@@ -3216,26 +3653,7 @@ NonnullRefPtr<CalculationNode const> simplify_a_calculation_tree(CalculationNode
             }
             if (child->type() == CalculationNode::Type::Invert) {
                 auto const& invert_child = as<InvertCalculationNode>(*child);
-                if (invert_child.child().type() != CalculationNode::Type::Numeric) {
-                    is_valid = false;
-                    break;
-                }
-                auto const& grandchild = as<NumericCalculationNode>(invert_child.child());
-
-                auto child_type = child->numeric_type();
-                if (!child_type.has_value()) {
-                    is_valid = false;
-                    break;
-                }
-
-                auto child_value = CalculatedStyleValue::CalculationResult::from_value(grandchild.value(), resolution_context, grandchild.numeric_type());
-                child_value.invert();
-                if (accumulated_result.has_value()) {
-                    accumulated_result->multiply_by(child_value);
-                } else {
-                    accumulated_result = move(child_value);
-                }
-                if (!accumulated_result->type().has_value()) {
+                if (invert_child.child().type() != CalculationNode::Type::Numeric || !accumulate(as<NumericCalculationNode>(invert_child.child()), true)) {
                     is_valid = false;
                     break;
                 }

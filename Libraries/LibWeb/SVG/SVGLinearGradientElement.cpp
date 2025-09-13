@@ -156,31 +156,28 @@ Optional<Painting::PaintStyle> SVGLinearGradientElement::to_gfx_paint_style(SVGP
 
     m_paint_style->set_gradient_transform(gradient_paint_transform(paint_context));
     m_paint_style->set_spread_method(to_painting_spread_method(spread_method()));
+    m_paint_style->set_color_space(color_space());
     return *m_paint_style;
 }
 
 GC::Ref<SVGAnimatedLength> SVGLinearGradientElement::x1() const
 {
-    // FIXME: Implement this properly.
-    return SVGAnimatedLength::create(realm(), SVGLength::create(realm(), 0, 0), SVGLength::create(realm(), 0, 0));
+    return fake_animated_length_fixme();
 }
 
 GC::Ref<SVGAnimatedLength> SVGLinearGradientElement::y1() const
 {
-    // FIXME: Implement this properly.
-    return SVGAnimatedLength::create(realm(), SVGLength::create(realm(), 0, 0), SVGLength::create(realm(), 0, 0));
+    return fake_animated_length_fixme();
 }
 
 GC::Ref<SVGAnimatedLength> SVGLinearGradientElement::x2() const
 {
-    // FIXME: Implement this properly.
-    return SVGAnimatedLength::create(realm(), SVGLength::create(realm(), 0, 0), SVGLength::create(realm(), 0, 0));
+    return fake_animated_length_fixme();
 }
 
 GC::Ref<SVGAnimatedLength> SVGLinearGradientElement::y2() const
 {
-    // FIXME: Implement this properly.
-    return SVGAnimatedLength::create(realm(), SVGLength::create(realm(), 0, 0), SVGLength::create(realm(), 0, 0));
+    return fake_animated_length_fixme();
 }
 
 }

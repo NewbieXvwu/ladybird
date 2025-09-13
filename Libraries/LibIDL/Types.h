@@ -119,7 +119,7 @@ public:
     // https://webidl.spec.whatwg.org/#idl-symbol
     bool is_symbol() const { return is_plain() && m_name == "symbol"; }
 
-    bool is_string() const { return is_plain() && m_name.is_one_of("ByteString", "CSSOMString", "DOMString", "USVString"); }
+    bool is_string() const { return is_plain() && m_name.is_one_of("ByteString", "CSSOMString", "DOMString", "Utf16DOMString", "USVString", "Utf16USVString"); }
 
     // https://webidl.spec.whatwg.org/#dfn-integer-type
     bool is_integer() const { return is_plain() && m_name.is_one_of("byte", "octet", "short", "unsigned short", "long", "unsigned long", "long long", "unsigned long long"); }
@@ -208,6 +208,8 @@ struct DictionaryMember {
 struct Dictionary {
     ByteString parent_name;
     Vector<DictionaryMember> members;
+    HashMap<ByteString, ByteString> extended_attributes;
+    bool is_original_definition { true };
 };
 
 struct Typedef {
@@ -285,7 +287,9 @@ public:
     bool has_unscopable_member { false };
 
     Optional<NonnullRefPtr<Type const>> value_iterator_type;
+    Optional<size_t> value_iterator_offset;
     Optional<Tuple<NonnullRefPtr<Type const>, NonnullRefPtr<Type const>>> pair_iterator_types;
+    Optional<size_t> pair_iterator_offset;
 
     Optional<NonnullRefPtr<Type const>> async_value_iterator_type;
     Vector<Parameter> async_value_iterator_parameters;
@@ -318,11 +322,13 @@ public:
     HashMap<ByteString, HashTable<ByteString>> included_mixins;
 
     ByteString module_own_path;
+    Vector<NonnullOwnPtr<Interface>> partial_interfaces;
+    Vector<NonnullOwnPtr<Interface>> partial_namespaces;
     Vector<Interface&> imported_modules;
 
-    HashMap<ByteString, Vector<Function&>> overload_sets;
-    HashMap<ByteString, Vector<Function&>> static_overload_sets;
-    HashMap<ByteString, Vector<Constructor&>> constructor_overload_sets;
+    OrderedHashMap<ByteString, Vector<Function&>> overload_sets;
+    OrderedHashMap<ByteString, Vector<Function&>> static_overload_sets;
+    OrderedHashMap<ByteString, Vector<Constructor&>> constructor_overload_sets;
 
     // https://webidl.spec.whatwg.org/#dfn-support-indexed-properties
     bool supports_indexed_properties() const { return indexed_property_getter.has_value(); }
@@ -335,8 +341,10 @@ public:
 
     bool will_generate_code() const
     {
-        return !name.is_empty() || any_of(enumerations, [](auto& entry) { return entry.value.is_original_definition; });
+        return !name.is_empty() || any_of(dictionaries, [](auto& entry) { return entry.value.is_original_definition; }) || any_of(enumerations, [](auto& entry) { return entry.value.is_original_definition; });
     }
+
+    void extend_with_partial_interface(Interface const&);
 };
 
 class UnionType : public Type {

@@ -12,8 +12,8 @@
 #include <LibWeb/Animations/DocumentTimeline.h>
 #include <LibWeb/Animations/PseudoElementParsing.h>
 #include <LibWeb/CSS/CSSTransition.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
 #include <LibWeb/CSS/StyleValues/EasingStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/TimeStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
@@ -152,8 +152,25 @@ void Animatable::add_transitioned_properties(Optional<CSS::PseudoElement> pseudo
     auto& transition = *maybe_transition;
     for (size_t i = 0; i < properties.size(); i++) {
         size_t index_of_this_transition = transition.transition_attributes.size();
-        auto delay = delays[i]->is_time() ? delays[i]->as_time().time().to_milliseconds() : 0;
-        auto duration = durations[i]->is_time() ? durations[i]->as_time().time().to_milliseconds() : 0;
+        double delay = 0.0;
+        if (delays[i]->is_time()) {
+            delay = delays[i]->as_time().time().to_milliseconds();
+        } else if (delays[i]->is_calculated() && delays[i]->as_calculated().resolves_to_time()) {
+            auto resolved_time = delays[i]->as_calculated().resolve_time({});
+            if (resolved_time.has_value()) {
+                delay = resolved_time.value().to_milliseconds();
+            }
+        }
+
+        double duration = 0.0;
+        if (durations[i]->is_time()) {
+            duration = durations[i]->as_time().time().to_milliseconds();
+        } else if (durations[i]->is_calculated() && durations[i]->as_calculated().resolves_to_time()) {
+            auto resolved_time = durations[i]->as_calculated().resolve_time({});
+            if (resolved_time.has_value()) {
+                duration = resolved_time.value().to_milliseconds();
+            }
+        }
         auto timing_function = timing_functions[i]->is_easing() ? timing_functions[i]->as_easing().function() : CSS::EasingStyleValue::CubicBezier::ease();
         auto transition_behavior = CSS::keyword_to_transition_behavior(transition_behaviors[i]->to_keyword()).value_or(CSS::TransitionBehavior::Normal);
         VERIFY(timing_functions[i]->is_easing());
@@ -216,6 +233,15 @@ void Animatable::clear_transitions(Optional<CSS::PseudoElement> pseudo_element)
     transition.associated_transitions.clear();
     transition.transition_attribute_indices.clear();
     transition.transition_attributes.clear();
+}
+
+void Animatable::remove_animations_from_timeline()
+{
+    // This is needed to avoid leaking Animation objects
+    auto& impl = ensure_impl();
+    for (auto animation : impl.associated_animations) {
+        animation->set_timeline({});
+    }
 }
 
 void Animatable::visit_edges(JS::Cell::Visitor& visitor)

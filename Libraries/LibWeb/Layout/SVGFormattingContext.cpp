@@ -177,7 +177,6 @@ void SVGFormattingContext::run(AvailableSpace const& available_space)
     // NOTE: SVG doesn't have a "formatting context" in the spec, but this is the most
     //       obvious way to drive SVG layout in our engine at the moment.
 
-    auto& svg_viewport = dynamic_cast<SVG::SVGViewport const&>(*context_box().dom_node());
     auto& svg_box_state = m_state.get_mutable(context_box());
 
     if (!this->context_box().root().document().is_decoded_svg()) {
@@ -197,38 +196,48 @@ void SVGFormattingContext::run(AvailableSpace const& available_space)
     svg_box_state.set_has_definite_width(true);
     svg_box_state.set_has_definite_height(true);
 
-    auto viewbox = svg_viewport.view_box();
+    auto* dom_node = context_box().dom_node();
+    VERIFY(dom_node);
+    auto& svg_graphics_element = as<SVG::SVGGraphicsElement>(*dom_node);
+    auto active_view_box = svg_graphics_element.active_view_box();
     // https://svgwg.org/svg2-draft/coords.html#ViewBoxAttribute
-    if (viewbox.has_value()) {
-        if (viewbox->width < 0 || viewbox->height < 0) {
+    if (active_view_box.has_value()) {
+        if (active_view_box->width < 0 || active_view_box->height < 0) {
             // A negative value for <width> or <height> is an error and invalidates the ‘viewBox’ attribute.
-            viewbox = {};
-        } else if (viewbox->width == 0 || viewbox->height == 0) {
+            active_view_box = {};
+        } else if (active_view_box->width == 0 || active_view_box->height == 0) {
             // A value of zero disables rendering of the element.
             return;
         }
     }
 
     m_current_viewbox_transform = m_parent_viewbox_transform;
-    if (viewbox.has_value()) {
+    if (active_view_box.has_value()) {
         // FIXME: This should allow just one of width or height to be specified.
         // E.g. We should be able to layout <svg width="100%"> where height is unspecified/auto.
         if (!svg_box_state.has_definite_width() || !svg_box_state.has_definite_height()) {
             dbgln_if(LIBWEB_CSS_DEBUG, "FIXME: Attempting to layout indefinitely sized SVG with a viewbox -- this likely won't work!");
         }
 
-        auto scale_width = svg_box_state.has_definite_width() ? svg_box_state.content_width() / viewbox->width : 1;
-        auto scale_height = svg_box_state.has_definite_height() ? svg_box_state.content_height() / viewbox->height : 1;
+        auto scale_width = svg_box_state.has_definite_width() ? svg_box_state.content_width() / active_view_box->width : 1;
+        auto scale_height = svg_box_state.has_definite_height() ? svg_box_state.content_height() / active_view_box->height : 1;
 
         // The initial value for preserveAspectRatio is xMidYMid meet.
-        auto preserve_aspect_ratio = svg_viewport.preserve_aspect_ratio().value_or(SVG::PreserveAspectRatio {});
-        auto viewbox_offset_and_scale = scale_and_align_viewbox_content(preserve_aspect_ratio, *viewbox, { scale_width, scale_height }, svg_box_state);
+        SVG::PreserveAspectRatio preserve_aspect_ratio {};
+        if (auto* view_box = as_if<SVG::SVGFitToViewBox>(*dom_node)) {
+            preserve_aspect_ratio = view_box->preserve_aspect_ratio().value_or(SVG::PreserveAspectRatio {});
+        } else if (is<SVG::SVGMaskElement>(*dom_node) || is<SVG::SVGClipPathElement>(*dom_node)) {
+            // This allows mask and clipPath elements to be scaled in the x and y directions independently to match the target size.
+            preserve_aspect_ratio = SVG::PreserveAspectRatio { SVG::PreserveAspectRatio::Align::None, {} };
+        }
+
+        auto viewbox_offset_and_scale = scale_and_align_viewbox_content(preserve_aspect_ratio, *active_view_box, { scale_width, scale_height }, svg_box_state);
 
         CSSPixelPoint offset = viewbox_offset_and_scale.offset;
         m_current_viewbox_transform = Gfx::AffineTransform { m_current_viewbox_transform }.multiply(Gfx::AffineTransform {}
                 .translate(offset.to_type<float>())
                 .scale(viewbox_offset_and_scale.scale_factor_x, viewbox_offset_and_scale.scale_factor_y)
-                .translate({ -viewbox->min_x, -viewbox->min_y }));
+                .translate({ -active_view_box->min_x, -active_view_box->min_y }));
     }
 
     if (svg_box_state.has_definite_width() && svg_box_state.has_definite_height()) {
@@ -246,8 +255,8 @@ void SVGFormattingContext::run(AvailableSpace const& available_space)
     }
 
     auto viewport_width = [&] {
-        if (viewbox.has_value())
-            return CSSPixels::nearest_value_for(viewbox->width);
+        if (active_view_box.has_value())
+            return CSSPixels::nearest_value_for(active_view_box->width);
         if (svg_box_state.has_definite_width())
             return svg_box_state.content_width();
         dbgln_if(LIBWEB_CSS_DEBUG, "FIXME: Failed to resolve width of SVG viewport!");
@@ -255,8 +264,8 @@ void SVGFormattingContext::run(AvailableSpace const& available_space)
     }();
 
     auto viewport_height = [&] {
-        if (viewbox.has_value())
-            return CSSPixels::nearest_value_for(viewbox->height);
+        if (active_view_box.has_value())
+            return CSSPixels::nearest_value_for(active_view_box->height);
         if (svg_box_state.has_definite_height())
             return svg_box_state.content_height();
         dbgln_if(LIBWEB_CSS_DEBUG, "FIXME: Failed to resolve height of SVG viewport!");
@@ -275,7 +284,7 @@ void SVGFormattingContext::run(AvailableSpace const& available_space)
 
 void SVGFormattingContext::layout_svg_element(Box const& child)
 {
-    if (is<SVG::SVGViewport>(child.dom_node())) {
+    if (is<SVG::SVGFitToViewBox>(child.dom_node())) {
         layout_nested_viewport(child);
     } else if (is<SVG::SVGForeignObjectElement>(child.dom_node()) && is<BlockContainer>(child)) {
         Layout::BlockFormattingContext bfc(m_state, m_layout_mode, static_cast<BlockContainer const&>(child), this);
@@ -339,8 +348,7 @@ Gfx::Path SVGFormattingContext::compute_path_for_text(SVGTextBox const& text_box
     // FIXME: Use per-code-point fonts.
     auto& font = text_box.first_available_font();
     auto text_contents = text_element.text_contents();
-    Utf8View text_utf8 { text_contents };
-    auto text_width = font.width(text_utf8);
+    auto text_width = font.width(text_contents);
     auto text_offset = text_element.get_offset(m_viewport_size);
 
     // https://svgwg.org/svg2-draft/text.html#TextAnchoringProperties
@@ -368,7 +376,7 @@ Gfx::Path SVGFormattingContext::compute_path_for_text(SVGTextBox const& text_box
 
     Gfx::Path path;
     path.move_to(text_offset);
-    path.text(text_utf8, font);
+    path.text(text_contents, font);
     return path;
 }
 
@@ -382,10 +390,9 @@ Gfx::Path SVGFormattingContext::compute_path_for_text_path(SVGTextPathBox const&
     // FIXME: Use per-code-point fonts.
     auto& font = text_path_box.first_available_font();
     auto text_contents = text_path_element.text_contents();
-    Utf8View text_utf8 { text_contents };
 
     auto shape_path = const_cast<SVG::SVGGeometryElement&>(*path_or_shape).get_path(m_viewport_size);
-    return shape_path.place_text_along(text_utf8, font);
+    return shape_path.place_text_along(text_contents, font);
 }
 
 void SVGFormattingContext::layout_path_like_element(SVGGraphicsBox const& graphics_box)
@@ -455,7 +462,11 @@ void SVGFormattingContext::layout_graphics_element(SVGGraphicsBox const& graphic
 void SVGFormattingContext::layout_image_element(SVGImageBox const& image_box)
 {
     auto& box_state = m_state.get_mutable(image_box);
-    auto bounding_box = image_box.dom_node().bounding_box();
+    // FIXME: Support transforms on SVG image elements.
+    auto to_css_pixels_transform = Gfx::AffineTransform {}
+                                       .multiply(m_current_viewbox_transform);
+    auto bounding_box = to_css_pixels_transform.map(image_box.dom_node().bounding_box()).to_type<CSSPixels>();
+
     box_state.set_content_x(bounding_box.x());
     box_state.set_content_y(bounding_box.y());
     box_state.set_content_width(bounding_box.width());

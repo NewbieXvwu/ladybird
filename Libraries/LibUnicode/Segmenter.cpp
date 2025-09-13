@@ -75,7 +75,12 @@ public:
 
     virtual void set_segmented_text(Utf16View const& text) override
     {
-        m_segmented_text = icu::UnicodeString { text.span().data(), static_cast<i32>(text.length_in_code_units()) };
+        if (text.has_ascii_storage()) {
+            set_segmented_text(MUST(text.to_utf8()));
+            return;
+        }
+
+        m_segmented_text = icu::UnicodeString { text.utf16_span().data(), static_cast<i32>(text.length_in_code_units()) };
         m_segmenter->setText(m_segmented_text.get<icu::UnicodeString>());
     }
 
@@ -242,7 +247,7 @@ NonnullOwnPtr<Segmenter> Segmenter::create(StringView locale, SegmenterGranulari
     return make<SegmenterImpl>(segmenter.release_nonnull(), segmenter_granularity);
 }
 
-bool Segmenter::should_continue_beyond_word(Utf8View const& word)
+bool Segmenter::should_continue_beyond_word(Utf16View const& word)
 {
     for (auto code_point : word) {
         if (!code_point_has_punctuation_general_category(code_point) && !code_point_has_separator_general_category(code_point))

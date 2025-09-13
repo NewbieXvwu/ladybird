@@ -12,6 +12,7 @@
 #include <LibCore/Socket.h>
 #include <LibURL/URL.h>
 #include <LibWeb/DOM/EventTarget.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/Scripting/Fetching.h>
 #include <LibWeb/HTML/UniversalGlobalScope.h>
@@ -33,7 +34,7 @@ namespace Web::HTML {
 // https://html.spec.whatwg.org/multipage/workers.html#the-workerglobalscope-common-interface
 // WorkerGlobalScope is the base class of each real WorkerGlobalScope that will be created when the
 // user agent runs the run a worker algorithm.
-class WorkerGlobalScope
+class WEB_API WorkerGlobalScope
     : public DOM::EventTarget
     , public WindowOrWorkerGlobalScopeMixin
     , public UniversalGlobalScopeMixin {
@@ -109,6 +110,8 @@ public:
 protected:
     explicit WorkerGlobalScope(JS::Realm&, GC::Ref<Web::Page>);
 
+    virtual void visit_edges(Cell::Visitor&) override;
+
     virtual void initialize_web_interfaces_impl();
 
     void close_a_worker();
@@ -119,8 +122,6 @@ protected:
 
 private:
     virtual bool is_window_or_worker_global_scope_mixin() const final { return true; }
-
-    virtual void visit_edges(Cell::Visitor&) override;
 
     GC::Ptr<WorkerLocation> m_location;
     GC::Ptr<WorkerNavigator> m_navigator;

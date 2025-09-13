@@ -15,19 +15,20 @@
 #include <LibIPC/Transport.h>
 #include <LibWeb/Bindings/Transferable.h>
 #include <LibWeb/DOM/EventTarget.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/web-messaging.html#message-ports
-class MessagePort final
+class WEB_API MessagePort final
     : public DOM::EventTarget
     , public Bindings::Transferable {
     WEB_PLATFORM_OBJECT(MessagePort, DOM::EventTarget);
     GC_DECLARE_ALLOCATOR(MessagePort);
 
 public:
-    [[nodiscard]] static GC::Ref<MessagePort> create(JS::Realm&, HTML::TransferType primary_interface = HTML::TransferType::MessagePort);
+    [[nodiscard]] static GC::Ref<MessagePort> create(JS::Realm&);
 
     static void for_each_message_port(Function<void(MessagePort&)>);
 
@@ -59,16 +60,16 @@ public:
     GC::Ptr<WebIDL::CallbackType> onmessage();
 
     // ^Transferable
-    virtual WebIDL::ExceptionOr<void> transfer_steps(HTML::TransferDataHolder&) override;
-    virtual WebIDL::ExceptionOr<void> transfer_receiving_steps(HTML::TransferDataHolder&) override;
-    virtual HTML::TransferType primary_interface() const override { return m_primary_interface; }
+    virtual WebIDL::ExceptionOr<void> transfer_steps(HTML::TransferDataEncoder&) override;
+    virtual WebIDL::ExceptionOr<void> transfer_receiving_steps(HTML::TransferDataDecoder&) override;
+    virtual HTML::TransferType primary_interface() const override { return HTML::TransferType::MessagePort; }
 
     void set_worker_event_target(GC::Ref<DOM::EventTarget>);
 
     WebIDL::ExceptionOr<void> message_port_post_message_steps(GC::Ptr<MessagePort> target_port, JS::Value message, StructuredSerializeOptions const& options);
 
 private:
-    explicit MessagePort(JS::Realm&, HTML::TransferType primary_interface);
+    explicit MessagePort(JS::Realm&);
 
     virtual void initialize(JS::Realm&) override;
     virtual void finalize() override;
@@ -77,11 +78,9 @@ private:
     bool is_entangled() const;
 
     void post_message_task_steps(SerializedTransferRecord&);
-    void post_port_message(SerializedTransferRecord);
+    void post_port_message(SerializedTransferRecord const&);
     ErrorOr<void> send_message_on_transport(SerializedTransferRecord const&);
     void read_from_transport();
-
-    HTML::TransferType m_primary_interface { HTML::TransferType::MessagePort };
 
     // The HTML spec implies(!) that this is MessagePort.[[RemotePort]]
     GC::Ptr<MessagePort> m_remote_port;

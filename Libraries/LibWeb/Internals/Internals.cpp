@@ -1,9 +1,11 @@
 /*
  * Copyright (c) 2023, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/JsonObject.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibUnicode/TimeZone.h>
@@ -12,14 +14,15 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/EventTarget.h>
+#include <LibWeb/DOM/NodeList.h>
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/Internals/InternalGamepad.h>
 #include <LibWeb/Internals/Internals.h>
 #include <LibWeb/Page/InputEvent.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/PaintableBox.h>
-#include <LibWeb/Painting/ViewportPaintable.h>
 
 namespace Web::Internals {
 
@@ -50,6 +53,59 @@ void Internals::set_test_timeout(double milliseconds)
     page().client().page_did_set_test_timeout(milliseconds);
 }
 
+// https://web-platform-tests.org/writing-tests/reftests.html#components-of-a-reftest
+WebIDL::ExceptionOr<void> Internals::load_reference_test_metadata()
+{
+    auto& vm = this->vm();
+    auto& page = this->page();
+
+    auto* document = page.top_level_browsing_context().active_document();
+    if (!document)
+        return vm.throw_completion<JS::InternalError>("No active document available"sv);
+
+    JsonObject metadata;
+
+    // Collect all <link rel="match"> and <link rel="mismatch"> references.
+    auto collect_references = [&vm, &document](StringView type) -> WebIDL::ExceptionOr<JsonArray> {
+        JsonArray references;
+        auto reference_nodes = TRY(document->query_selector_all(MUST(String::formatted("link[rel={}]", type))));
+        for (size_t i = 0; i < reference_nodes->length(); ++i) {
+            auto const* reference_node = reference_nodes->item(i);
+            auto href = as<DOM::Element>(reference_node)->get_attribute_value(HTML::AttributeNames::href);
+            auto url = document->encoding_parse_url(href);
+            if (!url.has_value())
+                return vm.throw_completion<JS::InternalError>(MUST(String::formatted("Failed to construct URL for '{}'", href)));
+            references.must_append(url->to_string());
+        }
+        return references;
+    };
+    metadata.set("match_references"sv, TRY(collect_references("match"sv)));
+    metadata.set("mismatch_references"sv, TRY(collect_references("mismatch"sv)));
+
+    // Collect all <meta name="fuzzy" content=".."> values.
+    JsonArray fuzzy_configurations;
+    auto fuzzy_nodes = TRY(document->query_selector_all("meta[name=fuzzy]"sv));
+    for (size_t i = 0; i < fuzzy_nodes->length(); ++i) {
+        auto const* fuzzy_node = fuzzy_nodes->item(i);
+        auto content = as<DOM::Element>(fuzzy_node)->get_attribute_value(HTML::AttributeNames::content);
+
+        JsonObject fuzzy_configuration;
+        if (content.contains(':')) {
+            auto content_parts = MUST(content.split_limit(':', 2));
+            auto reference_url = document->encoding_parse_url(content_parts[0]);
+            fuzzy_configuration.set("reference"sv, reference_url->to_string());
+            content = content_parts[1];
+        }
+        fuzzy_configuration.set("content"sv, content);
+
+        fuzzy_configurations.must_append(fuzzy_configuration);
+    }
+    metadata.set("fuzzy"sv, fuzzy_configurations);
+
+    page.client().page_did_receive_reference_test_metadata(metadata);
+    return {};
+}
+
 void Internals::gc()
 {
     vm().heap().collect_garbage();
@@ -76,8 +132,8 @@ JS::Object* Internals::hit_test(double x, double y)
     auto result = active_document.paintable_box()->hit_test({ x, y }, Painting::HitTestType::Exact);
     if (result.has_value()) {
         auto hit_testing_result = JS::Object::create(realm(), nullptr);
-        hit_testing_result->define_direct_property("node"_fly_string, result->dom_node(), JS::default_attributes);
-        hit_testing_result->define_direct_property("indexInNode"_fly_string, JS::Value(result->index_in_node), JS::default_attributes);
+        hit_testing_result->define_direct_property("node"_utf16_fly_string, result->dom_node(), JS::default_attributes);
+        hit_testing_result->define_direct_property("indexInNode"_utf16_fly_string, JS::Value(result->index_in_node), JS::default_attributes);
         return hit_testing_result;
     }
     return nullptr;
@@ -98,6 +154,14 @@ void Internals::send_key(HTML::HTMLElement& target, String const& key_name, WebI
     target.focus();
 
     page().handle_keydown(key_code, modifiers, 0, false);
+}
+
+void Internals::paste(HTML::HTMLElement& target, String const& text)
+{
+    auto& page = this->page();
+    target.focus();
+
+    page.focused_navigable().paste(text);
 }
 
 void Internals::commit_text()
@@ -255,6 +319,27 @@ void Internals::set_browser_zoom(double factor)
 bool Internals::headless()
 {
     return page().client().is_headless();
+}
+
+String Internals::dump_display_list()
+{
+    return window().associated_document().dump_display_list();
+}
+
+GC::Ptr<DOM::ShadowRoot> Internals::get_shadow_root(GC::Ref<DOM::Element> element)
+{
+    return element->shadow_root();
+}
+
+void Internals::handle_sdl_input_events()
+{
+    page().handle_sdl_input_events();
+}
+
+GC::Ref<InternalGamepad> Internals::connect_virtual_gamepad()
+{
+    auto& realm = this->realm();
+    return realm.create<InternalGamepad>(realm);
 }
 
 }

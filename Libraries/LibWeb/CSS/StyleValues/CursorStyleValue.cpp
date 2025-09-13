@@ -22,10 +22,18 @@ String CursorStyleValue::to_string(SerializationMode mode) const
 
     if (m_properties.x.has_value()) {
         VERIFY(m_properties.y.has_value());
-        builder.appendff(" {} {}", m_properties.x->to_string(), m_properties.y->to_string());
+        builder.appendff(" {} {}", m_properties.x->to_string(mode), m_properties.y->to_string(mode));
     }
 
     return builder.to_string_without_validation();
+}
+
+ValueComparingNonnullRefPtr<StyleValue const> CursorStyleValue::absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const
+{
+    return CursorStyleValue::create(
+        m_properties.image->absolutized(viewport_rect, font_metrics, root_font_metrics)->as_abstract_image(),
+        m_properties.x.map([&](NumberOrCalculated const& value) { return value.absolutized(viewport_rect, font_metrics, root_font_metrics); }),
+        m_properties.y.map([&](NumberOrCalculated const& value) { return value.absolutized(viewport_rect, font_metrics, root_font_metrics); }));
 }
 
 Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithStyle const& layout_node) const
@@ -82,9 +90,9 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
         painter->clear_rect(bitmap.rect().to_type<float>(), Color::Transparent);
 
         // Paint the cursor into a bitmap.
-        auto display_list = Painting::DisplayList::create();
+        auto display_list = Painting::DisplayList::create(document.page().client().device_pixels_per_css_pixel());
         Painting::DisplayListRecorder display_list_recorder(display_list);
-        PaintContext paint_context { display_list_recorder, document.page().palette(), document.page().client().device_pixels_per_css_pixel() };
+        DisplayListRecordingContext paint_context { display_list_recorder, document.page().palette(), document.page().client().device_pixels_per_css_pixel() };
 
         image.resolve_for_size(layout_node, CSSPixelSize { bitmap.size() });
         image.paint(paint_context, DevicePixelRect { bitmap.rect() }, ImageRendering::Auto);
@@ -94,8 +102,7 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
         case DisplayListPlayerType::SkiaCPU: {
             auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(bitmap);
             Painting::DisplayListPlayerSkia display_list_player;
-            Painting::ScrollStateSnapshot scroll_state_snapshot;
-            display_list_player.execute(*display_list, scroll_state_snapshot, painting_surface);
+            display_list_player.execute(*display_list, {}, painting_surface);
             break;
         }
         }

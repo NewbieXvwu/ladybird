@@ -14,7 +14,7 @@
 #include <LibWeb/CSS/FontFace.h>
 #include <LibWeb/CSS/FontFaceSet.h>
 #include <LibWeb/CSS/Parser/Parser.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShorthandStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StringStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
@@ -80,7 +80,7 @@ FontFaceSet::add(GC::Root<FontFace> face)
 
     // 2. If font is CSS-connected, throw an InvalidModificationError exception and exit this algorithm immediately.
     if (face->is_css_connected()) {
-        return WebIDL::InvalidModificationError::create(realm(), "Cannot add a CSS-connected FontFace to a FontFaceSet"_string);
+        return WebIDL::InvalidModificationError::create(realm(), "Cannot add a CSS-connected FontFace to a FontFaceSet"_utf16);
     }
 
     // 3. Add the font argument to the FontFaceSet’s set entries.
@@ -176,7 +176,7 @@ static WebIDL::ExceptionOr<GC::Ref<JS::Set>> find_matching_font_faces(JS::Realm&
     // 1. Parse font using the CSS value syntax of the font property. If a syntax error occurs, return a syntax error.
     auto property = parse_css_value(CSS::Parser::ParsingParams(), font, PropertyID::Font);
     if (!property || !property->is_shorthand())
-        return WebIDL::SyntaxError::create(realm, "Unable to parse font"_string);
+        return WebIDL::SyntaxError::create(realm, "Unable to parse font"_utf16);
 
     // If the parsed value is a CSS-wide keyword, return a syntax error.
     // Note: This case is already caught by the is_shorthand check.
@@ -264,9 +264,10 @@ JS::ThrowCompletionOr<GC::Ref<WebIDL::Promise>> FontFaceSet::load(String const& 
 
             WebIDL::wait_for_all(
                 realm, promises,
-                [&realm, promise](auto const&) {
+                [&realm, promise](auto const& fonts) {
                     HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
-                    WebIDL::resolve_promise(realm, promise);
+                    auto fonts_array = JS::Array::create_from(realm, fonts);
+                    WebIDL::resolve_promise(realm, promise, fonts_array);
                 },
                 [&realm, promise](auto error) {
                     HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };

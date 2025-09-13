@@ -12,11 +12,12 @@
 #include <AK/RefPtr.h>
 #include <LibWeb/CSS/Parser/Token.h>
 #include <LibWeb/CSS/Parser/Types.h>
+#include <LibWeb/Export.h>
 
 namespace Web::CSS::Parser {
 
 // https://drafts.csswg.org/css-syntax/#component-value
-class ComponentValue {
+class WEB_API ComponentValue {
     AK_MAKE_DEFAULT_COPYABLE(ComponentValue);
     AK_MAKE_DEFAULT_MOVABLE(ComponentValue);
 
@@ -47,6 +48,8 @@ public:
     String to_string() const;
     String to_debug_string() const;
     String original_source_text() const;
+
+    bool operator==(ComponentValue const&) const = default;
 
 private:
     Variant<Token, Function, SimpleBlock, GuaranteedInvalidValue> m_value;

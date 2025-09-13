@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/AutocompleteElement.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
@@ -18,7 +19,7 @@
 
 namespace Web::HTML {
 
-class HTMLSelectElement final
+class WEB_API HTMLSelectElement final
     : public HTMLElement
     , public FormAssociatedElement
     , public AutocompleteElement {
@@ -51,8 +52,8 @@ public:
     WebIDL::Long selected_index() const;
     void set_selected_index(WebIDL::Long);
 
-    virtual String value() const override;
-    WebIDL::ExceptionOr<void> set_value(String const&);
+    virtual Utf16String value() const override;
+    WebIDL::ExceptionOr<void> set_value(Utf16String const&);
 
     bool is_open() const { return m_is_open; }
     void set_is_open(bool);
@@ -60,10 +61,6 @@ public:
     WebIDL::ExceptionOr<void> show_picker();
 
     Vector<GC::Root<HTMLOptionElement>> list_of_options() const;
-
-    bool will_validate();
-    bool check_validity();
-    bool report_validity();
 
     // ^EventTarget
     // https://html.spec.whatwg.org/multipage/interaction.html#the-tabindex-attribute:the-select-element
@@ -82,7 +79,7 @@ public:
     virtual bool is_resettable() const override { return true; }
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-autocapitalize
-    virtual bool is_auto_capitalize_inheriting() const override { return true; }
+    virtual bool is_autocapitalize_and_autocorrect_inheriting() const override { return true; }
 
     // ^HTMLElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-label
@@ -98,7 +95,7 @@ public:
     virtual void activation_behavior(DOM::Event const&) override;
 
     virtual void form_associated_element_was_inserted() override;
-    virtual void form_associated_element_attribute_changed(FlyString const&, Optional<String> const&, Optional<FlyString> const&) override;
+    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
     void did_select_item(Optional<u32> const& id);
 
@@ -116,6 +113,8 @@ public:
 
     // https://html.spec.whatwg.org/multipage/form-elements.html#the-select-element%3Asuffering-from-being-missing
     virtual bool suffering_from_being_missing() const override;
+
+    virtual bool is_mutable() const override;
 
 private:
     HTMLSelectElement(DOM::Document&, DOM::QualifiedName);

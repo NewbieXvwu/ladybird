@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibWeb/Export.h>
 #include <LibWeb/Internals/InternalAnimationTimeline.h>
 #include <LibWeb/Internals/InternalsBase.h>
 #include <LibWeb/UIEvents/MouseButton.h>
@@ -13,7 +14,7 @@
 
 namespace Web::Internals {
 
-class Internals final : public InternalsBase {
+class WEB_API Internals final : public InternalsBase {
     WEB_PLATFORM_OBJECT(Internals, InternalsBase);
     GC_DECLARE_ALLOCATOR(Internals);
 
@@ -22,6 +23,7 @@ public:
 
     void signal_test_is_done(String const& text);
     void set_test_timeout(double milliseconds);
+    WebIDL::ExceptionOr<void> load_reference_test_metadata();
 
     WebIDL::ExceptionOr<String> set_time_zone(StringView time_zone);
 
@@ -30,6 +32,7 @@ public:
 
     void send_text(HTML::HTMLElement&, String const&, WebIDL::UnsignedShort modifiers);
     void send_key(HTML::HTMLElement&, String const&, WebIDL::UnsignedShort modifiers);
+    void paste(HTML::HTMLElement& target, String const& text);
     void commit_text();
 
     void click(double x, double y);
@@ -61,6 +64,14 @@ public:
     void set_browser_zoom(double factor);
 
     bool headless();
+
+    String dump_display_list();
+
+    GC::Ptr<DOM::ShadowRoot> get_shadow_root(GC::Ref<DOM::Element>);
+
+    void handle_sdl_input_events();
+
+    GC::Ref<InternalGamepad> connect_virtual_gamepad();
 
 private:
     explicit Internals(JS::Realm&);

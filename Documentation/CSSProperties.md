@@ -18,7 +18,7 @@ However, there are many CSS properties with more complicated grammar and so they
 
 Property-parsing code goes in `CSS/Parser/PropertyParsing.cpp`, and `CSS/Parser/Parser.h`. First,
 `Parser::parse_css_value()` is called, which has a switch for specific properties. Call your method from there. It
-should return a `RefPtr` to a `CSSStyleValue` or one of its subclasses.
+should return a `RefPtr` to a `StyleValue` or one of its subclasses.
 
 For shorthands, you should normally use `ShorthandStyleValue`, which automatically expands its longhand values. You
 might need to modify `ShorthandStyleValue::to_string` if your shorthand has special serialization rules. For example,
@@ -29,7 +29,7 @@ If you need to do this, pester @AtkinsSJ until he gets around to documenting it.
 
 ## Computed style
 
-After parsing and style computation, longhand properties are stored as `CSSStyleValue` pointers in
+After parsing and style computation, longhand properties are stored as `StyleValue` pointers in
 `ComputedProperties`. Any shorthands have been expanded out, and so we do not need to store them directly.
 
 These longhands then need to be converted to a more usable form. To do this, add a getter to `ComputedProperties` with
@@ -60,5 +60,5 @@ bool Paintable::is_visible() const
 ## JavaScript
 
 Some properties have special rules for getting the computed value from JS. For these, you will need to add to
-`CSSStyleProperties::style_value_for_computed_property()`. Shorthands that are constructed in an unusual way (as in, not
-using `ShorthandStyleValue`) also need handling inside `CSSStyleProperties::get_property_internal()`.
+`CSSStyleProperties::style_value_for_computed_property()`. Shorthands that are serialized in an unusual way
+also need handling inside `CSSShorthandStyleValue::to_string()`.

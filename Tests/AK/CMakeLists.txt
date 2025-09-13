@@ -76,6 +76,8 @@ set(AK_TEST_SOURCES
     TestTypeTraits.cpp
     TestTypedTransfer.cpp
     TestUFixedBigInt.cpp
+    TestUtf16FlyString.cpp
+    TestUtf16String.cpp
     TestUtf16View.cpp
     TestUtf8View.cpp
     TestVariant.cpp
@@ -111,6 +113,7 @@ if (CXX_COMPILER_SUPPORTS_OBJC_ARC)
 endif()
 
 target_link_libraries(TestString PRIVATE LibUnicode)
+target_link_libraries(TestUtf16String PRIVATE LibUnicode)
 
 if (ENABLE_SWIFT)
 

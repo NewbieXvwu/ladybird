@@ -23,7 +23,7 @@ class EditingHostManager
 public:
     [[nodiscard]] static GC::Ref<EditingHostManager> create(JS::Realm&, GC::Ref<Document>);
 
-    virtual void handle_insert(String const&) override;
+    virtual void handle_insert(Utf16String const&) override;
     virtual void handle_delete(DeleteDirection) override;
     virtual EventResult handle_return_key(FlyString const& ui_input_type) override;
     virtual void select_all() override;
@@ -35,6 +35,8 @@ public:
     virtual void decrement_cursor_position_offset(CollapseSelection) override;
     virtual void increment_cursor_position_to_next_word(CollapseSelection) override;
     virtual void decrement_cursor_position_to_previous_word(CollapseSelection) override;
+    virtual void increment_cursor_position_to_next_line(CollapseSelection) override;
+    virtual void decrement_cursor_position_to_previous_line(CollapseSelection) override;
 
     virtual void visit_edges(Cell::Visitor& visitor) override;
 
@@ -47,6 +49,8 @@ private:
     EditingHostManager(GC::Ref<Document>);
 
     virtual GC::Ref<JS::Cell> as_cell() override { return *this; }
+
+    GC::Ptr<Selection::Selection> get_selection_for_navigation(CollapseSelection) const;
 
     GC::Ref<Document> m_document;
     GC::Ptr<DOM::Node> m_active_contenteditable_element;

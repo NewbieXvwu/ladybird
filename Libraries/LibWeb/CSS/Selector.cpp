@@ -7,6 +7,7 @@
 
 #include "Selector.h"
 #include <AK/GenericShorthands.h>
+#include <LibWeb/CSS/Parser/ErrorReporter.h>
 #include <LibWeb/CSS/Serialize.h>
 
 namespace Web::CSS {
@@ -62,6 +63,7 @@ static bool can_selector_use_fast_matches(Selector const& selector)
                         PseudoClass::OnlyChild,
                         PseudoClass::Root,
                         PseudoClass::State,
+                        PseudoClass::Unchecked,
                         PseudoClass::Visited))
                     return false;
             } else if (!first_is_one_of(simple_selector.type,
@@ -135,6 +137,13 @@ Selector::Selector(Vector<CompoundSelector>&& compound_selectors)
 
 void Selector::collect_ancestor_hashes()
 {
+    if (is_slotted()) {
+        // Ancestor filtering is not supported for slotted selectors, because those
+        // are supposed to be collected for element inside a slot, while being
+        // matched against slot element.
+        return;
+    }
+
     size_t next_hash_index = 0;
     auto append_unique_hash = [&](u32 hash) -> bool {
         if (next_hash_index >= m_ancestor_hashes.size())
@@ -253,8 +262,13 @@ u32 Selector::specificity() const
                 break;
             }
             case SimpleSelector::Type::TagName:
+                // count the number of type selectors and pseudo-elements in the selector (= C)
+                ++tag_names;
+                break;
             case SimpleSelector::Type::PseudoElement:
                 // count the number of type selectors and pseudo-elements in the selector (= C)
+                // FIXME: This needs special handling for view transition pseudos:
+                //        https://drafts.csswg.org/css-view-transitions-1/#named-view-transition-pseudo
                 ++tag_names;
                 break;
             case SimpleSelector::Type::Universal:
@@ -294,6 +308,11 @@ String Selector::PseudoElementSelector::serialize() const
     }
 
     m_value.visit(
+        [&builder](NonnullRefPtr<Selector> const& compund_selector) {
+            builder.append('(');
+            builder.append(compund_selector->serialize());
+            builder.append(')');
+        },
         [&builder](PTNameSelector const& pt_name_selector) {
             builder.append('(');
             if (pt_name_selector.is_universal)
@@ -420,22 +439,24 @@ String Selector::SimpleSelector::serialize() const
         auto& pseudo_class = this->pseudo_class();
 
         auto metadata = pseudo_class_metadata(pseudo_class.type);
-        // HACK: `:host()` has both a function and a non-function form, so handle that first.
-        //       It's also not in the spec.
-        if (pseudo_class.type == PseudoClass::Host) {
-            if (pseudo_class.argument_selector_list.is_empty()) {
-                s.append(':');
-                s.append(pseudo_class_name(pseudo_class.type));
-            } else {
-                s.append(':');
-                s.append(pseudo_class_name(pseudo_class.type));
-                s.append('(');
-                s.append(serialize_a_group_of_selectors(pseudo_class.argument_selector_list));
-                s.append(')');
+        bool accepts_arguments = [&]() {
+            if (!metadata.is_valid_as_function)
+                return false;
+            if (!metadata.is_valid_as_identifier)
+                return true;
+            // For pseudo-classes with both a function and identifier form, see if they have arguments.
+            switch (pseudo_class.type) {
+            case PseudoClass::Heading:
+                return !pseudo_class.levels.is_empty();
+            case PseudoClass::Host:
+                return !pseudo_class.argument_selector_list.is_empty();
+            default:
+                VERIFY_NOT_REACHED();
             }
-        }
+        }();
+
         // If the pseudo-class does not accept arguments append ":" (U+003A), followed by the name of the pseudo-class, to s.
-        else if (metadata.is_valid_as_identifier) {
+        if (!accepts_arguments) {
             s.append(':');
             s.append(pseudo_class_name(pseudo_class.type));
         }
@@ -453,7 +474,7 @@ String Selector::SimpleSelector::serialize() const
             case PseudoClassMetadata::ParameterType::ANPlusB:
             case PseudoClassMetadata::ParameterType::ANPlusBOf:
                 // The result of serializing the value using the rules to serialize an <an+b> value.
-                s.append(pseudo_class.nth_child_pattern.serialize());
+                s.append(pseudo_class.an_plus_b_pattern.serialize());
                 break;
             case PseudoClassMetadata::ParameterType::CompoundSelector:
             case PseudoClassMetadata::ParameterType::ForgivingSelectorList:
@@ -469,6 +490,10 @@ String Selector::SimpleSelector::serialize() const
             case PseudoClassMetadata::ParameterType::LanguageRanges:
                 // The serialization of a comma-separated list of each argument’s serialization as a string, preserving relative order.
                 s.join(", "sv, pseudo_class.languages);
+                break;
+            case PseudoClassMetadata::ParameterType::LevelList:
+                // AD-HOC: not in the spec.
+                s.join(", "sv, pseudo_class.levels);
                 break;
             }
             s.append(')');
@@ -722,7 +747,10 @@ Optional<Selector::SimpleSelector> Selector::SimpleSelector::absolutized(Selecto
         if (pseudo_class.type == PseudoClass::Has) {
             for (auto const& selector : pseudo_class.argument_selector_list) {
                 if (contains_invalid_contents_for_has(selector)) {
-                    dbgln_if(CSS_PARSER_DEBUG, "After absolutizing, :has() would contain invalid contents; rejecting");
+                    Parser::ErrorReporter::the().report(Parser::InvalidSelectorError {
+                        .value_string = selector->serialize(),
+                        .description = "After absolutizing, :has() would contain invalid contents."_string,
+                    });
                     return {};
                 }
             }
@@ -811,6 +839,79 @@ SelectorList adapt_nested_relative_selector_list(SelectorList const& selectors)
         }
     }
     return new_list;
+}
+
+// https://drafts.csswg.org/css-syntax-3/#anb-microsyntax
+bool Selector::SimpleSelector::ANPlusBPattern::matches(int index) const
+{
+    // "If both a and b are equal to zero, the pseudo-class represents no element in the document tree."
+    if (step_size == 0 && offset == 0)
+        return false;
+
+    // When "step_size == -1", selector represents first "offset" elements in document tree.
+    if (step_size == -1)
+        return !(offset <= 0 || index > offset);
+
+    // When "step_size == 1", selector represents last "offset" elements in document tree.
+    if (step_size == 1)
+        return !(offset < 0 || index < offset);
+
+    // When "step_size == 0", selector picks only the "offset" element.
+    if (step_size == 0)
+        return index == offset;
+
+    // If both are negative, nothing can match.
+    if (step_size < 0 && offset < 0)
+        return false;
+
+    // Like "a % b", but handles negative integers correctly.
+    auto const canonical_modulo = [](int a, int b) -> int {
+        int c = a % b;
+        if ((c < 0 && b > 0) || (c > 0 && b < 0)) {
+            c += b;
+        }
+        return c;
+    };
+
+    // When "step_size < 0", we start at "offset" and count backwards.
+    if (step_size < 0)
+        return index <= offset && canonical_modulo(index - offset, -step_size) == 0;
+
+    // Otherwise, we start at "offset" and count forwards.
+    return index >= offset && canonical_modulo(index - offset, step_size) == 0;
+}
+
+// https://drafts.csswg.org/css-syntax-3/#serializing-anb
+String Selector::SimpleSelector::ANPlusBPattern::serialize() const
+{
+    // 1. If A is zero, return the serialization of B.
+    if (step_size == 0)
+        return String::number(offset);
+
+    // 2. Otherwise, let result initially be an empty string.
+    StringBuilder result;
+
+    // 3.
+    // - A is 1: Append "n" to result.
+    if (step_size == 1)
+        result.append('n');
+    // - A is -1: Append "-n" to result.
+    else if (step_size == -1)
+        result.append("-n"sv);
+    // - A is non-zero: Serialize A and append it to result, then append "n" to result.
+    else if (step_size != 0)
+        result.appendff("{}n", step_size);
+
+    // 4.
+    // - B is greater than zero: Append "+" to result, then append the serialization of B to result.
+    if (offset > 0)
+        result.appendff("+{}", offset);
+    // - B is less than zero: Append the serialization of B to result.
+    else if (offset < 0)
+        result.appendff("{}", offset);
+
+    // 5. Return result.
+    return MUST(result.to_string());
 }
 
 }

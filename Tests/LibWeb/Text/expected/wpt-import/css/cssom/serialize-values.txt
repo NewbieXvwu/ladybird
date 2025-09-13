@@ -2,8 +2,8 @@ Harness status: OK
 
 Found 687 tests
 
-658 Pass
-29 Fail
+661 Pass
+26 Fail
 Pass	background-attachment: scroll
 Pass	background-attachment: fixed
 Pass	background-attachment: inherit
@@ -322,8 +322,8 @@ Pass	content: normal
 Pass	content: none
 Pass	content: "string"
 Pass	content: 'string'
-Fail	content: url("http://localhost/")
-Fail	content: url(http://localhost/)
+Pass	content: url("http://localhost/")
+Pass	content: url(http://localhost/)
 Pass	content: counter(par-num)
 Pass	content: counter(par-num, decimal)
 Pass	content: counter(par-num, upper-roman)
@@ -468,7 +468,7 @@ Pass	list-style-type: decimal
 Pass	list-style-type: decimal-leading-zero
 Pass	list-style-type: lower-roman
 Pass	list-style-type: upper-roman
-Fail	list-style-type: lower-greek
+Pass	list-style-type: lower-greek
 Pass	list-style-type: lower-latin
 Pass	list-style-type: upper-latin
 Fail	list-style-type: armenian

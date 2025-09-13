@@ -22,6 +22,7 @@
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLSlotElement.h>
 #include <LibWeb/Layout/FieldSetBox.h>
+#include <LibWeb/Layout/ImageBox.h>
 #include <LibWeb/Layout/ListItemBox.h>
 #include <LibWeb/Layout/ListItemMarkerBox.h>
 #include <LibWeb/Layout/Node.h>
@@ -83,11 +84,8 @@ static Layout::Node& insertion_parent_for_inline_node(Layout::NodeWithStyle& lay
     if (layout_parent.display().is_inline_outside() && layout_parent.display().is_flow_inside())
         return layout_parent;
 
-    if (layout_parent.display().is_flex_inside()
-        || layout_parent.display().is_grid_inside()
-        || layout_parent.display().is_table_cell()) {
+    if (layout_parent.display().is_flex_inside() || layout_parent.display().is_grid_inside())
         return last_child_creating_anonymous_wrapper_if_needed(layout_parent);
-    }
 
     if (!has_in_flow_block_children(layout_parent) || layout_parent.children_are_inline())
         return layout_parent;
@@ -186,11 +184,83 @@ void TreeBuilder::insert_node_into_inline_or_block_ancestor(Layout::Node& node, 
     }
 }
 
+class GeneratedContentImageProvider final
+    : public GC::Cell
+    , public ImageProvider
+    , public CSS::ImageStyleValue::Client {
+    GC_CELL(GeneratedContentImageProvider, GC::Cell);
+    GC_DECLARE_ALLOCATOR(GeneratedContentImageProvider);
+
+public:
+    virtual ~GeneratedContentImageProvider() override = default;
+
+    virtual void finalize() override
+    {
+        Base::finalize();
+        image_style_value_finalize();
+    }
+
+    virtual bool is_image_available() const override { return m_image->is_paintable(); }
+
+    virtual Optional<CSSPixels> intrinsic_width() const override { return m_image->natural_width(); }
+    virtual Optional<CSSPixels> intrinsic_height() const override { return m_image->natural_height(); }
+    virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override { return m_image->natural_aspect_ratio(); }
+
+    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap_sized(Gfx::IntSize size) const override
+    {
+        auto rect = DevicePixelRect { DevicePixelPoint {}, size.to_type<DevicePixels>() };
+        return const_cast<Gfx::ImmutableBitmap*>(m_image->current_frame_bitmap(rect));
+    }
+
+    virtual void set_visible_in_viewport(bool) override { }
+
+    virtual GC::Ptr<DOM::Element const> to_html_element() const override { return nullptr; }
+
+    static GC::Ref<GeneratedContentImageProvider> create(GC::Heap& heap, NonnullRefPtr<CSS::ImageStyleValue> image)
+    {
+        return heap.allocate<GeneratedContentImageProvider>(move(image));
+    }
+
+    void set_layout_node(GC::Ref<Layout::Node> layout_node)
+    {
+        m_layout_node = layout_node;
+    }
+
+private:
+    GeneratedContentImageProvider(NonnullRefPtr<CSS::ImageStyleValue> image)
+        : Client(image)
+        , m_image(move(image))
+    {
+    }
+
+    virtual void visit_edges(Visitor& visitor) override
+    {
+        Base::visit_edges(visitor);
+        visitor.visit(m_layout_node);
+    }
+
+    virtual void image_provider_visit_edges(Visitor& visitor) const override
+    {
+        ImageProvider::image_provider_visit_edges(visitor);
+        visitor.visit(*this);
+    }
+
+    virtual void image_style_value_did_update(CSS::ImageStyleValue&) override
+    {
+        m_layout_node->set_needs_layout_update(DOM::SetNeedsLayoutReason::GeneratedContentImageFinishedLoading);
+    }
+
+    GC::Ptr<Layout::Node> m_layout_node;
+    NonnullRefPtr<CSS::ImageStyleValue> m_image;
+};
+
+GC_DEFINE_ALLOCATOR(GeneratedContentImageProvider);
+
 void TreeBuilder::create_pseudo_element_if_needed(DOM::Element& element, CSS::PseudoElement pseudo_element, AppendOrPrepend mode)
 {
     auto& document = element.document();
 
-    auto pseudo_element_style = element.pseudo_element_computed_properties(pseudo_element);
+    auto pseudo_element_style = element.computed_properties(pseudo_element);
     if (!pseudo_element_style)
         return;
 
@@ -215,7 +285,7 @@ void TreeBuilder::create_pseudo_element_if_needed(DOM::Element& element, CSS::Ps
 
     // FIXME: This code actually computes style for element::marker, and shouldn't for element::pseudo::marker
     if (is<ListItemBox>(*pseudo_element_node)) {
-        auto marker_style = style_computer.compute_style(element, CSS::PseudoElement::Marker);
+        auto marker_style = style_computer.compute_style({ element, CSS::PseudoElement::Marker });
         auto list_item_marker = document.heap().allocate<ListItemMarkerBox>(
             document,
             pseudo_element_node->computed_values().list_style_type(),
@@ -239,18 +309,28 @@ void TreeBuilder::create_pseudo_element_if_needed(DOM::Element& element, CSS::Ps
     DOM::AbstractElement pseudo_element_reference { element, pseudo_element };
     CSS::resolve_counters(pseudo_element_reference);
     // Now that we have counters, we can compute the content for real. Which is silly.
-    if (pseudo_element_content.type == CSS::ContentData::Type::String) {
+    if (pseudo_element_content.type == CSS::ContentData::Type::List) {
         auto [new_content, _] = pseudo_element_style->content(element_reference, initial_quote_nesting_level);
         pseudo_element_node->mutable_computed_values().set_content(new_content);
 
         // FIXME: Handle images, and multiple values
-        if (new_content.type == CSS::ContentData::Type::String) {
-            auto text = document.realm().create<DOM::Text>(document, new_content.data);
-            auto text_node = document.heap().allocate<TextNode>(document, *text);
-            text_node->set_generated_for(pseudo_element, element);
-
+        if (new_content.type == CSS::ContentData::Type::List) {
             push_parent(*pseudo_element_node);
-            insert_node_into_inline_or_block_ancestor(*text_node, text_node->display(), AppendOrPrepend::Append);
+            for (auto& item : new_content.data) {
+                GC::Ptr<Layout::Node> layout_node;
+                if (auto const* string = item.get_pointer<String>()) {
+                    auto text = document.realm().create<DOM::Text>(document, Utf16String::from_utf8(*string));
+                    layout_node = document.heap().allocate<TextNode>(document, *text);
+                } else {
+                    auto& image = *item.get<NonnullRefPtr<CSS::ImageStyleValue>>();
+                    image.load_any_resources(document);
+                    auto image_provider = GeneratedContentImageProvider::create(element.heap(), image);
+                    layout_node = document.heap().allocate<ImageBox>(document, nullptr, *pseudo_element_style, image_provider);
+                    image_provider->set_layout_node(*layout_node);
+                }
+                layout_node->set_generated_for(pseudo_element, element);
+                insert_node_into_inline_or_block_ancestor(*layout_node, layout_node->display(), AppendOrPrepend::Append);
+            }
             pop_parent();
         } else {
             TODO();
@@ -410,13 +490,18 @@ void TreeBuilder::restructure_block_node_in_inline_parent(NodeWithStyleAndBoxMod
 
 static bool is_ignorable_whitespace(Layout::Node const& node)
 {
-    if (node.is_text_node() && static_cast<TextNode const&>(node).text_for_rendering().bytes_as_string_view().is_whitespace())
+    if (auto* text_node = as_if<TextNode>(node); text_node && text_node->text_for_rendering().is_ascii_whitespace())
         return true;
 
-    if (node.is_anonymous() && node.is_block_container() && static_cast<BlockContainer const&>(node).children_are_inline()) {
+    if (node.is_anonymous() && node.is_block_container() && node.children_are_inline()) {
         bool contains_only_white_space = true;
-        node.for_each_in_inclusive_subtree_of_type<TextNode>([&contains_only_white_space](auto& text_node) {
-            if (!text_node.text_for_rendering().bytes_as_string_view().is_whitespace()) {
+        node.for_each_in_inclusive_subtree([&contains_only_white_space](auto& descendant) {
+            if (auto* text_node = as_if<TextNode>(descendant)) {
+                if (!text_node->text_for_rendering().is_ascii_whitespace()) {
+                    contains_only_white_space = false;
+                    return TraversalDecision::Break;
+                }
+            } else if (descendant.is_out_of_flow()) {
                 contains_only_white_space = false;
                 return TraversalDecision::Break;
             }
@@ -644,57 +729,34 @@ void TreeBuilder::update_layout_tree(DOM::Node& dom_node, TreeBuilder::Context& 
 
 void TreeBuilder::wrap_in_button_layout_tree_if_needed(DOM::Node& dom_node, GC::Ref<Layout::Node> layout_node)
 {
-    auto is_button_layout = [&] {
-        if (dom_node.is_html_button_element())
-            return true;
-        if (!dom_node.is_html_input_element())
-            return false;
-        // https://html.spec.whatwg.org/multipage/rendering.html#the-input-element-as-a-button
-        // An input element whose type attribute is in the Submit Button, Reset Button, or Button state, when it generates a CSS box, is expected to depict a button and use button layout
-        auto const& input_element = static_cast<HTML::HTMLInputElement const&>(dom_node);
-        if (input_element.is_button())
-            return true;
-        return false;
-    }();
-
-    if (!is_button_layout)
+    auto const* html_element = as_if<HTML::HTMLElement>(dom_node);
+    if (!html_element || !html_element->uses_button_layout())
         return;
 
+    // https://html.spec.whatwg.org/multipage/rendering.html#button-layout
+    // If the element is an input element, or if it is a button element and its computed value for 'display' is not
+    // 'inline-grid', 'grid', 'inline-flex', or 'flex', then the element's box has a child anonymous button content box
+    // with the following behaviors:
     auto display = layout_node->display();
-
-    // https://html.spec.whatwg.org/multipage/rendering.html#button-layout
-    // If the computed value of 'inline-size' is 'auto', then the used value is the fit-content inline size.
-    if (is_button_layout && dom_node.layout_node()->computed_values().width().is_auto()) {
-        auto& computed_values = as<NodeWithStyle>(*dom_node.layout_node()).mutable_computed_values();
-        computed_values.set_width(CSS::Size::make_fit_content());
-    }
-
-    // https://html.spec.whatwg.org/multipage/rendering.html#button-layout
-    // If the element is an input element, or if it is a button element and its computed value for
-    // 'display' is not 'inline-grid', 'grid', 'inline-flex', or 'flex', then the element's box has
-    // a child anonymous button content box with the following behaviors:
-    if (is_button_layout && !display.is_grid_inside() && !display.is_flex_inside()) {
-        auto& parent = *layout_node;
+    if (!display.is_grid_inside() && !display.is_flex_inside()) {
+        auto& parent = as<NodeWithStyle>(*layout_node);
 
         // If the box does not overflow in the vertical axis, then it is centered vertically.
         // FIXME: Only apply alignment when box overflows
-        auto flex_computed_values = parent.computed_values().clone_inherited_values();
-        auto& mutable_flex_computed_values = static_cast<CSS::MutableComputedValues&>(*flex_computed_values);
-        mutable_flex_computed_values.set_display(CSS::Display { CSS::DisplayOutside::Block, CSS::DisplayInside::Flex });
-        mutable_flex_computed_values.set_justify_content(CSS::JustifyContent::Center);
-        mutable_flex_computed_values.set_flex_direction(CSS::FlexDirection::Column);
-        mutable_flex_computed_values.set_height(CSS::Size::make_percentage(CSS::Percentage(100)));
-        mutable_flex_computed_values.set_min_height(parent.computed_values().min_height());
-        auto flex_wrapper = parent.heap().template allocate<BlockContainer>(parent.document(), nullptr, move(flex_computed_values));
+        auto flex_wrapper = parent.create_anonymous_wrapper();
+        auto& flex_computed_values = flex_wrapper->mutable_computed_values();
+        flex_computed_values.set_display(CSS::Display { CSS::DisplayOutside::Block, CSS::DisplayInside::Flex });
+        flex_computed_values.set_justify_content(CSS::JustifyContent::Center);
+        flex_computed_values.set_flex_direction(CSS::FlexDirection::Column);
+        flex_computed_values.set_height(CSS::Size::make_percentage(CSS::Percentage(100)));
+        flex_computed_values.set_min_height(parent.computed_values().min_height());
 
-        auto content_box_computed_values = parent.computed_values().clone_inherited_values();
-        auto content_box_wrapper = parent.heap().template allocate<BlockContainer>(parent.document(), nullptr, move(content_box_computed_values));
+        auto content_box_wrapper = parent.create_anonymous_wrapper();
         content_box_wrapper->set_children_are_inline(parent.children_are_inline());
 
         Vector<GC::Root<Node>> sequence;
-        for (auto child = parent.first_child(); child; child = child->next_sibling()) {
+        for (auto child = parent.first_child(); child; child = child->next_sibling())
             sequence.append(*child);
-        }
 
         for (auto& node : sequence) {
             parent.remove_child(*node);
@@ -726,14 +788,14 @@ void TreeBuilder::update_layout_tree_after_children(DOM::Node& dom_node, GC::Ref
 
     if (is<ListItemBox>(*layout_node)) {
         auto& element = static_cast<DOM::Element&>(dom_node);
-        auto marker_style = style_computer.compute_style(element, CSS::PseudoElement::Marker);
+        DOM::AbstractElement list_marker_pseudo { element, CSS::PseudoElement::Marker };
+        auto marker_style = style_computer.compute_style(list_marker_pseudo);
         auto list_item_marker = document.heap().allocate<ListItemMarkerBox>(document, layout_node->computed_values().list_style_type(), layout_node->computed_values().list_style_position(), element, marker_style);
         static_cast<ListItemBox&>(*layout_node).set_marker(list_item_marker);
-        element.set_pseudo_element_computed_properties(CSS::PseudoElement::Marker, marker_style);
+        element.set_computed_properties(CSS::PseudoElement::Marker, marker_style);
         element.set_pseudo_element_node({}, CSS::PseudoElement::Marker, list_item_marker);
         layout_node->prepend_child(*list_item_marker);
-        DOM::AbstractElement marker_reference { element, CSS::PseudoElement::Marker };
-        CSS::resolve_counters(marker_reference);
+        CSS::resolve_counters(list_marker_pseudo);
     }
 
     if (is<SVG::SVGGraphicsElement>(dom_node)) {

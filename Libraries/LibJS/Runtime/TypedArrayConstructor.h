@@ -10,7 +10,7 @@
 
 namespace JS {
 
-class JS_API TypedArrayConstructor : public NativeFunction {
+class TypedArrayConstructor : public NativeFunction {
     JS_OBJECT(TypedArrayConstructor, NativeFunction);
     GC_DECLARE_ALLOCATOR(TypedArrayConstructor);
 
@@ -23,7 +23,7 @@ public:
     virtual ThrowCompletionOr<GC::Ref<Object>> construct(FunctionObject& new_target) override;
 
 protected:
-    TypedArrayConstructor(FlyString const& name, Object& prototype);
+    TypedArrayConstructor(Utf16FlyString const& name, Object& prototype);
 
 private:
     virtual bool has_constructor() const override { return true; }

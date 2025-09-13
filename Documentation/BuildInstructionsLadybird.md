@@ -18,7 +18,7 @@ CMake 3.25 or newer must be available in $PATH.
 
 <!-- Note: If you change something here, please also change it in the `devcontainer/devcontainer.json` file. -->
 ```bash
-sudo apt install autoconf autoconf-archive automake build-essential ccache cmake curl fonts-liberation2 git libgl1-mesa-dev nasm ninja-build pkg-config python3-venv qt6-base-dev qt6-tools-dev-tools qt6-wayland tar unzip zip
+sudo apt install autoconf autoconf-archive automake build-essential ccache cmake curl fonts-liberation2 git libdrm-dev libgl1-mesa-dev nasm ninja-build pkg-config python3-venv qt6-base-dev qt6-tools-dev-tools qt6-wayland tar unzip zip
 ```
 
 #### CMake 3.25 or newer:
@@ -88,7 +88,7 @@ sudo pacman -S --needed autoconf-archive automake base-devel ccache cmake curl l
 ### Fedora or derivatives:
 
 ```
-sudo dnf install autoconf-archive automake ccache cmake curl git liberation-sans-fonts libglvnd-devel nasm ninja-build patchelf perl-FindBin perl-IPC-Cmd perl-lib qt6-qtbase-devel qt6-qtmultimedia-devel qt6-qttools-devel qt6-qtwayland-devel tar unzip zip zlib-ng-compat-static
+sudo dnf install autoconf-archive automake ccache cmake curl git libdrm-devel liberation-sans-fonts libglvnd-devel nasm ninja-build patchelf perl-FindBin perl-IPC-Cmd perl-lib qt6-qtbase-devel qt6-qtmultimedia-devel qt6-qttools-devel qt6-qtwayland-devel tar unzip zip zlib-ng-compat-static
 ```
 
 ### openSUSE:
@@ -105,7 +105,7 @@ sudo zypper install libpulse-devel
 
 The build process requires at least python3.7; openSUSE Leap only features Python 3.6 as default, so it is recommendable to install the package `python312` and create a virtual environment (venv) in this case.
 
-A virtual enviroment can be created in your home directory and once the `source` command is issued `python3 --version` will show that the current version is python 3.12 within the virtual environment shell session.
+A virtual environment can be created in your home directory and once the `source` command is issued `python3 --version` will show that the current version is python 3.12 within the virtual environment shell session.
 ```
 python3.12 -m venv ~/python312_venv
 source ~/python312_venv/bin/activate
@@ -182,6 +182,12 @@ choco install pkgconfiglite -y
 
 On a Unix-like platform, install the prerequisites for that platform and then see the [Android Studio guide](EditorConfiguration/AndroidStudioConfiguration.md).
 Or, download a version of Gradle >= 8.0.0, and run the ``gradlew`` program in ``UI/Android``
+
+### FreeBSD
+
+```
+pkg install autoconf-archive automake autoconf bash cmake curl gmake gn libtool libxcb libxkbcommon libX11 libXrender libXi nasm ninja patchelf pkgconf python3 qt6-base qt6-multimedia unzip zip
+```
 
 ## Build steps
 

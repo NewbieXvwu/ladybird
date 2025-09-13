@@ -144,7 +144,7 @@ void Printer::print(Wasm::DataSection::Data const& data)
                 print_indent();
                 print("(active init {}xu8 (", value.init.size());
                 print("{}", ByteString::join(' ', value.init, "{:x}"sv));
-                print("\n");
+                print(")\n");
                 {
                     TemporaryChange change { m_indent, m_indent + 1 };
                     print_indent();
@@ -161,6 +161,8 @@ void Printer::print(Wasm::DataSection::Data const& data)
                     print_indent();
                     print("(index {})\n", value.index.value());
                 }
+                print_indent();
+                print(")\n");
             });
     }
     print_indent();
@@ -435,6 +437,8 @@ void Printer::print(Wasm::Instruction const& instruction)
     print_indent();
     print("({}", instruction_name(instruction.opcode()));
     if (instruction.arguments().has<u8>()) {
+        if (instruction.opcode() == Instructions::local_get || instruction.opcode() == Instructions::local_set || instruction.opcode() == Instructions::local_tee)
+            print(" (local index {})", instruction.local_index());
         print(")\n");
     } else {
         print(" ");
@@ -478,7 +482,10 @@ void Printer::print(Wasm::Instruction const& instruction)
             [&](Instruction::TableTableArgs const& args) { print("(table_table (table index {}) (table index {}))", args.lhs.value(), args.rhs.value()); },
             [&](ValueType const& type) { print(type); },
             [&](Vector<ValueType> const&) { print("(types...)"); },
-            [&](auto const& value) { print("{}", value); });
+            [&](auto const& value) { print("(const {})", value); });
+
+        if (instruction.local_index().value())
+            print(" (local index {})", instruction.local_index().value());
 
         print(")\n");
     }
@@ -1141,5 +1148,20 @@ HashMap<Wasm::OpCode, ByteString> Wasm::Names::instruction_names {
     { Instructions::f64x2_convert_low_i32x4_u, "f64x2.convert_low_i32x4_u" },
     { Instructions::structured_else, "synthetic:else" },
     { Instructions::structured_end, "synthetic:end" },
+    { Instructions::synthetic_i32_add2local, "synthetic:i32.add2local" },
+    { Instructions::synthetic_i32_addconstlocal, "synthetic:i32.add_const_local" },
+    { Instructions::synthetic_i32_andconstlocal, "synthetic:i32.and_const_local" },
+    { Instructions::synthetic_i32_storelocal, "synthetic:i32.store_local" },
+    { Instructions::synthetic_i64_storelocal, "synthetic:i64.store_local" },
+    { Instructions::synthetic_local_seti32_const, "synthetic:local.set_i32_const" },
+    { Instructions::synthetic_call_00, "synthetic:call.00" },
+    { Instructions::synthetic_call_01, "synthetic:call.01" },
+    { Instructions::synthetic_call_10, "synthetic:call.10" },
+    { Instructions::synthetic_call_11, "synthetic:call.11" },
+    { Instructions::synthetic_call_20, "synthetic:call.20" },
+    { Instructions::synthetic_call_21, "synthetic:call.21" },
+    { Instructions::synthetic_call_30, "synthetic:call.30" },
+    { Instructions::synthetic_call_31, "synthetic:call.31" },
+    { Instructions::synthetic_end_expression, "synthetic:expression.end" },
 };
 HashMap<ByteString, Wasm::OpCode> Wasm::Names::instructions_by_name;

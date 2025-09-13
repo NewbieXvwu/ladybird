@@ -9,7 +9,6 @@
 
 #include <AK/Concepts.h>
 #include <AK/Types.h>
-#include <LibJS/Export.h>
 
 #define JS_DECLARE_NATIVE_FUNCTION(name) \
     static JS::ThrowCompletionOr<JS::Value> name(JS::VM&)
@@ -219,7 +218,6 @@ struct SourceRange;
 class SourceTextModule;
 class Symbol;
 class Token;
-class Utf16String;
 class VM;
 class PrototypeChainValidity;
 class Value;

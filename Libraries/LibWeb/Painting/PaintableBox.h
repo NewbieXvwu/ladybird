@@ -10,6 +10,7 @@
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/ImmutableBitmap.h>
 #include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Layout/Box.h>
 #include <LibWeb/Painting/BackgroundPainting.h>
@@ -18,12 +19,13 @@
 #include <LibWeb/Painting/ClipFrame.h>
 #include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Painting/PaintableFragment.h>
+#include <LibWeb/Painting/ShouldAntiAlias.h>
 
 namespace Web::Painting {
 
-extern bool g_paint_viewport_scrollbars;
+WEB_API void set_paint_viewport_scrollbars(bool enabled);
 
-class PaintableBox : public Paintable
+class WEB_API PaintableBox : public Paintable
     , public Weakable<PaintableBox> {
     GC_CELL(PaintableBox, Paintable);
 
@@ -32,10 +34,10 @@ public:
     static GC::Ref<PaintableBox> create(Layout::InlineNode const&);
     virtual ~PaintableBox();
 
-    virtual void before_paint(PaintContext&, PaintPhase) const override;
-    virtual void after_paint(PaintContext&, PaintPhase) const override;
+    virtual void before_paint(DisplayListRecordingContext&, PaintPhase) const override;
+    virtual void after_paint(DisplayListRecordingContext&, PaintPhase) const override;
 
-    virtual void paint(PaintContext&, PaintPhase) const override;
+    virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
 
     StackingContext* stacking_context() { return m_stacking_context; }
     StackingContext const* stacking_context() const { return m_stacking_context; }
@@ -44,10 +46,10 @@ public:
 
     virtual Optional<CSSPixelRect> get_masking_area() const;
     virtual Optional<Gfx::Bitmap::MaskKind> get_mask_type() const { return {}; }
-    virtual RefPtr<Gfx::ImmutableBitmap> calculate_mask(PaintContext&, CSSPixelRect const&) const { return {}; }
+    virtual RefPtr<Gfx::ImmutableBitmap> calculate_mask(DisplayListRecordingContext&, CSSPixelRect const&) const { return {}; }
 
-    Layout::NodeWithStyleAndBoxModelMetrics& layout_node_with_style_and_box_metrics() { return static_cast<Layout::NodeWithStyleAndBoxModelMetrics&>(Paintable::layout_node()); }
-    Layout::NodeWithStyleAndBoxModelMetrics const& layout_node_with_style_and_box_metrics() const { return static_cast<Layout::NodeWithStyleAndBoxModelMetrics const&>(Paintable::layout_node()); }
+    Layout::NodeWithStyleAndBoxModelMetrics& layout_node_with_style_and_box_metrics() { return as<Layout::NodeWithStyleAndBoxModelMetrics>(layout_node()); }
+    Layout::NodeWithStyleAndBoxModelMetrics const& layout_node_with_style_and_box_metrics() const { return as<Layout::NodeWithStyleAndBoxModelMetrics const>(layout_node()); }
 
     auto& box_model() { return m_box_model; }
     auto const& box_model() const { return m_box_model; }
@@ -134,11 +136,11 @@ public:
 
     virtual void set_needs_display(InvalidateDisplayList = InvalidateDisplayList::Yes) override;
 
-    void apply_scroll_offset(PaintContext&) const;
-    void reset_scroll_offset(PaintContext&) const;
+    void apply_scroll_offset(DisplayListRecordingContext&) const;
+    void reset_scroll_offset(DisplayListRecordingContext&) const;
 
-    void apply_clip_overflow_rect(PaintContext&, PaintPhase) const;
-    void clear_clip_overflow_rect(PaintContext&, PaintPhase) const;
+    void apply_clip_overflow_rect(DisplayListRecordingContext&, PaintPhase) const;
+    void clear_clip_overflow_rect(DisplayListRecordingContext&, PaintPhase) const;
 
     [[nodiscard]] virtual TraversalDecision hit_test(CSSPixelPoint position, HitTestType type, Function<TraversalDecision(HitTestResult)> const& callback) const override;
     Optional<HitTestResult> hit_test(CSSPixelPoint, HitTestType) const;
@@ -261,14 +263,16 @@ public:
     [[nodiscard]] RefPtr<ClipFrame const> enclosing_clip_frame() const { return m_enclosing_clip_frame; }
     [[nodiscard]] RefPtr<ClipFrame const> own_clip_frame() const { return m_own_clip_frame; }
 
+    Optional<Gfx::Filter> resolve_filter(CSS::Filter const& computed_filter) const;
+
 protected:
     explicit PaintableBox(Layout::Box const&);
     explicit PaintableBox(Layout::InlineNode const&);
 
-    virtual void paint_border(PaintContext&) const;
-    virtual void paint_backdrop_filter(PaintContext&) const;
-    virtual void paint_background(PaintContext&) const;
-    virtual void paint_box_shadow(PaintContext&) const;
+    virtual void paint_border(DisplayListRecordingContext&) const;
+    virtual void paint_backdrop_filter(DisplayListRecordingContext&) const;
+    virtual void paint_background(DisplayListRecordingContext&) const;
+    virtual void paint_box_shadow(DisplayListRecordingContext&) const;
 
     virtual CSSPixelRect compute_absolute_rect() const;
     virtual CSSPixelRect compute_absolute_paint_rect() const;
@@ -301,12 +305,10 @@ private:
     virtual DispatchEventOfSameName handle_mousedown(Badge<EventHandler>, CSSPixelPoint, unsigned button, unsigned modifiers) override;
     virtual DispatchEventOfSameName handle_mouseup(Badge<EventHandler>, CSSPixelPoint, unsigned button, unsigned modifiers) override;
     virtual DispatchEventOfSameName handle_mousemove(Badge<EventHandler>, CSSPixelPoint, unsigned buttons, unsigned modifiers) override;
+    virtual void handle_mouseleave(Badge<EventHandler>) override;
 
     bool scrollbar_contains_mouse_position(ScrollDirection, CSSPixelPoint);
     void scroll_to_mouse_position(CSSPixelPoint);
-
-    static void apply_clip(PaintContext&, RefPtr<ClipFrame const> const&);
-    static void restore_clip(PaintContext&, RefPtr<ClipFrame const> const&);
 
     OwnPtr<StackingContext> m_stacking_context;
 
@@ -359,9 +361,6 @@ public:
     static GC::Ref<PaintableWithLines> create(Layout::InlineNode const&, size_t line_index);
     virtual ~PaintableWithLines() override;
 
-    Layout::NodeWithStyleAndBoxModelMetrics const& layout_node_with_style_and_box_metrics() const;
-    Layout::NodeWithStyleAndBoxModelMetrics& layout_node_with_style_and_box_metrics();
-
     Vector<PaintableFragment> const& fragments() const { return m_fragments; }
     Vector<PaintableFragment>& fragments() { return m_fragments; }
 
@@ -369,8 +368,6 @@ public:
     {
         m_fragments.append(PaintableFragment { fragment });
     }
-
-    void set_fragments(Vector<PaintableFragment>&& fragments) { m_fragments = move(fragments); }
 
     template<typename Callback>
     void for_each_fragment(Callback callback) const
@@ -381,7 +378,7 @@ public:
         }
     }
 
-    virtual void paint(PaintContext&, PaintPhase) const override;
+    virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
 
     [[nodiscard]] virtual TraversalDecision hit_test(CSSPixelPoint position, HitTestType type, Function<TraversalDecision(HitTestResult)> const& callback) const override;
 
@@ -408,8 +405,8 @@ private:
     size_t m_line_index { 0 };
 };
 
-void paint_text_decoration(PaintContext&, TextPaintable const&, PaintableFragment const&);
-void paint_cursor_if_needed(PaintContext&, TextPaintable const&, PaintableFragment const&);
-void paint_text_fragment(PaintContext&, TextPaintable const&, PaintableFragment const&, PaintPhase);
+void paint_text_decoration(DisplayListRecordingContext&, TextPaintable const&, PaintableFragment const&);
+void paint_cursor_if_needed(DisplayListRecordingContext&, TextPaintable const&, PaintableFragment const&);
+void paint_text_fragment(DisplayListRecordingContext&, TextPaintable const&, PaintableFragment const&, PaintPhase);
 
 }

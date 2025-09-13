@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2024, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2018-2025, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021-2024, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -20,6 +20,7 @@
 #include <LibWeb/CSS/CascadedProperties.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleInvalidationData.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 
@@ -86,6 +87,7 @@ struct MatchingRule {
     u32 specificity { 0 };
     CascadeOrigin cascade_origin;
     bool contains_pseudo_element { false };
+    bool slotted { false };
 
     // Helpers to deal with the fact that `rule` might be a CSSStyleRule or a CSSNestedDeclarations
     CSSStyleProperties const& declaration() const;
@@ -116,20 +118,25 @@ struct RuleCache {
     HashMap<FlyString, Vector<MatchingRule>, AK::ASCIICaseInsensitiveFlyStringTraits> rules_by_attribute_name;
     Array<Vector<MatchingRule>, to_underlying(CSS::PseudoElement::KnownPseudoElementCount)> rules_by_pseudo_element;
     Vector<MatchingRule> root_rules;
+    Vector<MatchingRule> slotted_rules;
     Vector<MatchingRule> other_rules;
 
     HashMap<FlyString, NonnullRefPtr<Animations::KeyframeEffect::KeyFrameSet>> rules_by_animation_keyframes;
 
     void add_rule(MatchingRule const&, Optional<PseudoElement>, bool contains_root_pseudo_class);
-    void for_each_matching_rules(DOM::Element const&, Optional<PseudoElement>, Function<IterationDecision(Vector<MatchingRule> const&)> callback) const;
+    void for_each_matching_rules(DOM::AbstractElement, Function<IterationDecision(Vector<MatchingRule> const&)> callback) const;
 };
 
 class FontLoader;
 
-class StyleComputer {
+class WEB_API StyleComputer final : public GC::Cell {
+    GC_CELL(StyleComputer, GC::Cell);
+    GC_DECLARE_ALLOCATOR(StyleComputer);
+
 public:
-    static void for_each_property_expanding_shorthands(PropertyID, CSSStyleValue const&, Function<void(PropertyID, CSSStyleValue const&)> const& set_longhand_property);
-    static NonnullRefPtr<CSSStyleValue const> get_inherit_value(CSS::PropertyID, DOM::Element const*, Optional<CSS::PseudoElement> = {});
+    static void for_each_property_expanding_shorthands(PropertyID, StyleValue const&, Function<void(PropertyID, StyleValue const&)> const& set_longhand_property);
+    static NonnullRefPtr<StyleValue const> get_inherit_value(PropertyID, DOM::AbstractElement);
+    static Optional<NonnullRefPtr<StyleValue const>> get_animated_inherit_value(PropertyID, DOM::AbstractElement);
 
     static Optional<String> user_agent_style_sheet_source(StringView name);
 
@@ -145,12 +152,12 @@ public:
 
     [[nodiscard]] GC::Ref<ComputedProperties> create_document_style() const;
 
-    [[nodiscard]] GC::Ref<ComputedProperties> compute_style(DOM::Element&, Optional<CSS::PseudoElement> = {}) const;
-    [[nodiscard]] GC::Ptr<ComputedProperties> compute_pseudo_element_style_if_needed(DOM::Element&, Optional<CSS::PseudoElement>) const;
+    [[nodiscard]] GC::Ref<ComputedProperties> compute_style(DOM::AbstractElement, Optional<bool&> did_change_custom_properties = {}) const;
+    [[nodiscard]] GC::Ptr<ComputedProperties> compute_pseudo_element_style_if_needed(DOM::AbstractElement, Optional<bool&> did_change_custom_properties) const;
 
     [[nodiscard]] RuleCache const& get_pseudo_class_rule_cache(PseudoClass) const;
 
-    [[nodiscard]] Vector<MatchingRule const*> collect_matching_rules(DOM::Element const&, CascadeOrigin, Optional<CSS::PseudoElement>, PseudoClassBitmap& attempted_psuedo_class_matches, FlyString const& qualified_layer_name = {}) const;
+    [[nodiscard]] Vector<MatchingRule const*> collect_matching_rules(DOM::AbstractElement, CascadeOrigin, PseudoClassBitmap& attempted_pseudo_class_matches, Optional<FlyString const> qualified_layer_name = {}) const;
 
     InvalidationSet invalidation_set_for_properties(Vector<InvalidationSet::Property> const&) const;
     bool invalidation_property_used_in_has_selector(InvalidationSet::Property const&) const;
@@ -162,71 +169,53 @@ public:
 
     void did_load_font(FlyString const& family_name);
 
-    Optional<FontLoader&> load_font_face(ParsedFontFace const&, ESCAPING Function<void(RefPtr<Gfx::Typeface const>)> on_load = {});
+    GC::Ptr<FontLoader> load_font_face(ParsedFontFace const&, ESCAPING Function<void(RefPtr<Gfx::Typeface const>)> on_load = {});
 
     void load_fonts_from_sheet(CSSStyleSheet&);
     void unload_fonts_from_sheet(CSSStyleSheet&);
 
     static CSSPixels default_user_font_size();
     static CSSPixelFraction absolute_size_mapping(Keyword);
-    RefPtr<Gfx::FontCascadeList const> compute_font_for_style_values(DOM::Element const* element, Optional<CSS::PseudoElement> pseudo_element, CSSStyleValue const& font_family, CSSStyleValue const& font_size, CSSStyleValue const& font_style, CSSStyleValue const& font_weight, CSSStyleValue const& font_stretch, int math_depth = 0) const;
+    RefPtr<Gfx::FontCascadeList const> compute_font_for_style_values(Optional<DOM::AbstractElement>, StyleValue const& font_family, StyleValue const& font_size, StyleValue const& font_style, StyleValue const& font_weight, StyleValue const& font_stretch, int math_depth = 0) const;
 
-    [[nodiscard]] RefPtr<CSSStyleValue const> recascade_font_size_if_needed(DOM::Element&, Optional<CSS::PseudoElement> pseudo_element, CascadedProperties&) const;
+    [[nodiscard]] RefPtr<StyleValue const> recascade_font_size_if_needed(DOM::AbstractElement, CascadedProperties&) const;
 
     void set_viewport_rect(Badge<DOM::Document>, CSSPixelRect const& viewport_rect) { m_viewport_rect = viewport_rect; }
 
-    enum class AnimationRefresh {
-        No,
-        Yes,
-    };
-    void collect_animation_into(DOM::Element&, Optional<CSS::PseudoElement>, GC::Ref<Animations::KeyframeEffect> animation, ComputedProperties&, AnimationRefresh = AnimationRefresh::No) const;
+    void collect_animation_into(DOM::AbstractElement, GC::Ref<Animations::KeyframeEffect> animation, ComputedProperties&) const;
 
     [[nodiscard]] bool may_have_has_selectors() const;
     [[nodiscard]] bool have_has_selectors() const;
 
     size_t number_of_css_font_faces_with_loading_in_progress() const;
 
-    [[nodiscard]] GC::Ref<ComputedProperties> compute_properties(DOM::Element&, Optional<PseudoElement>, CascadedProperties&) const;
+    [[nodiscard]] GC::Ref<ComputedProperties> compute_properties(DOM::AbstractElement, CascadedProperties&) const;
 
-    void absolutize_values(ComputedProperties&, GC::Ptr<DOM::Element const>) const;
-    void compute_font(ComputedProperties&, DOM::Element const*, Optional<CSS::PseudoElement>) const;
+    void compute_property_values(ComputedProperties&) const;
+    void compute_font(ComputedProperties&, Optional<DOM::AbstractElement>) const;
 
     [[nodiscard]] inline bool should_reject_with_ancestor_filter(Selector const&) const;
 
-    static NonnullRefPtr<CSSStyleValue const> compute_value_of_custom_property(DOM::AbstractElement, FlyString const& custom_property, Optional<Parser::GuardedSubstitutionContexts&> = {});
+    static NonnullRefPtr<StyleValue const> compute_value_of_custom_property(DOM::AbstractElement, FlyString const& custom_property, Optional<Parser::GuardedSubstitutionContexts&> = {});
+
+    struct PropertyValueComputationContext {
+        Length::ResolutionContext length_resolution_context;
+        double device_pixels_per_css_pixel;
+    };
+    static NonnullRefPtr<StyleValue const> compute_value_of_property(PropertyID, NonnullRefPtr<StyleValue const> const& specified_value, Function<NonnullRefPtr<StyleValue const>(PropertyID)> const& get_property_specified_value, PropertyValueComputationContext const&);
+    static NonnullRefPtr<StyleValue const> compute_border_or_outline_width(NonnullRefPtr<StyleValue const> const& specified_value, NonnullRefPtr<StyleValue const> const& style_specified_value, PropertyValueComputationContext const&);
+    static NonnullRefPtr<StyleValue const> compute_opacity(NonnullRefPtr<StyleValue const> const& specified_value, PropertyValueComputationContext const&);
+    static NonnullRefPtr<StyleValue const> compute_text_underline_offset(NonnullRefPtr<StyleValue const> const& specified_value, PropertyValueComputationContext const&);
 
 private:
+    virtual void visit_edges(Visitor&) override;
+
     enum class ComputeStyleMode {
         Normal,
         CreatePseudoElementStyleIfNeeded,
     };
 
     struct MatchingFontCandidate;
-
-    LogicalAliasMappingContext compute_logical_alias_mapping_context(DOM::Element&, Optional<CSS::PseudoElement>, ComputeStyleMode) const;
-    [[nodiscard]] GC::Ptr<ComputedProperties> compute_style_impl(DOM::Element&, Optional<CSS::PseudoElement>, ComputeStyleMode) const;
-    [[nodiscard]] GC::Ref<CascadedProperties> compute_cascaded_values(DOM::Element&, Optional<CSS::PseudoElement>, bool& did_match_any_pseudo_element_rules, PseudoClassBitmap& attempted_pseudo_class_matches, ComputeStyleMode, Optional<LogicalAliasMappingContext>) const;
-    static RefPtr<Gfx::FontCascadeList const> find_matching_font_weight_ascending(Vector<MatchingFontCandidate> const& candidates, int target_weight, float font_size_in_pt, bool inclusive);
-    static RefPtr<Gfx::FontCascadeList const> find_matching_font_weight_descending(Vector<MatchingFontCandidate> const& candidates, int target_weight, float font_size_in_pt, bool inclusive);
-    RefPtr<Gfx::FontCascadeList const> font_matching_algorithm(FlyString const& family_name, int weight, int slope, float font_size_in_pt) const;
-    void compute_custom_properties(ComputedProperties&, DOM::AbstractElement) const;
-    void compute_math_depth(ComputedProperties&, DOM::Element const*, Optional<CSS::PseudoElement>) const;
-    void compute_defaulted_values(ComputedProperties&, DOM::Element const*, Optional<CSS::PseudoElement>) const;
-    void start_needed_transitions(ComputedProperties const& old_style, ComputedProperties& new_style, DOM::Element&, Optional<PseudoElement>) const;
-    void resolve_effective_overflow_values(ComputedProperties&) const;
-    void transform_box_type_if_needed(ComputedProperties&, DOM::Element const&, Optional<CSS::PseudoElement>) const;
-
-    void compute_defaulted_property_value(ComputedProperties&, DOM::Element const*, CSS::PropertyID, Optional<CSS::PseudoElement>) const;
-
-    template<typename Callback>
-    void for_each_stylesheet(CascadeOrigin, Callback) const;
-
-    [[nodiscard]] CSSPixelRect viewport_rect() const { return m_viewport_rect; }
-
-    [[nodiscard]] Length::FontMetrics calculate_root_element_font_metrics(ComputedProperties const&) const;
-
-    Vector<FlyString> m_qualified_layer_names_in_order;
-    void build_qualified_layer_names_cache();
 
     struct LayerMatchingRules {
         FlyString qualified_layer_name;
@@ -239,15 +228,39 @@ private:
         Vector<LayerMatchingRules> author_rules;
     };
 
+    [[nodiscard]] MatchingRuleSet build_matching_rule_set(DOM::AbstractElement, PseudoClassBitmap& attempted_pseudo_class_matches, bool& did_match_any_pseudo_element_rules, ComputeStyleMode) const;
+
+    LogicalAliasMappingContext compute_logical_alias_mapping_context(DOM::AbstractElement, ComputeStyleMode, MatchingRuleSet const&) const;
+    [[nodiscard]] GC::Ptr<ComputedProperties> compute_style_impl(DOM::AbstractElement, ComputeStyleMode, Optional<bool&> did_change_custom_properties) const;
+    [[nodiscard]] GC::Ref<CascadedProperties> compute_cascaded_values(DOM::AbstractElement, bool did_match_any_pseudo_element_rules, ComputeStyleMode, MatchingRuleSet const&, Optional<LogicalAliasMappingContext>, ReadonlySpan<PropertyID> properties_to_cascade) const;
+    static RefPtr<Gfx::FontCascadeList const> find_matching_font_weight_ascending(Vector<MatchingFontCandidate> const& candidates, int target_weight, float font_size_in_pt, bool inclusive);
+    static RefPtr<Gfx::FontCascadeList const> find_matching_font_weight_descending(Vector<MatchingFontCandidate> const& candidates, int target_weight, float font_size_in_pt, bool inclusive);
+    RefPtr<Gfx::FontCascadeList const> font_matching_algorithm(FlyString const& family_name, int weight, int slope, float font_size_in_pt) const;
+    void compute_custom_properties(ComputedProperties&, DOM::AbstractElement) const;
+    void compute_math_depth(ComputedProperties&, Optional<DOM::AbstractElement>) const;
+    void start_needed_transitions(ComputedProperties const& old_style, ComputedProperties& new_style, DOM::AbstractElement) const;
+    void resolve_effective_overflow_values(ComputedProperties&) const;
+    void transform_box_type_if_needed(ComputedProperties&, DOM::AbstractElement) const;
+
+    template<typename Callback>
+    void for_each_stylesheet(CascadeOrigin, Callback) const;
+
+    [[nodiscard]] CSSPixelRect viewport_rect() const { return m_viewport_rect; }
+
+    [[nodiscard]] Length::FontMetrics calculate_root_element_font_metrics(ComputedProperties const&) const;
+
+    Vector<FlyString> m_qualified_layer_names_in_order;
+    void build_qualified_layer_names_cache();
+
     void cascade_declarations(
         CascadedProperties&,
-        DOM::Element&,
-        Optional<CSS::PseudoElement>,
+        DOM::AbstractElement,
         Vector<MatchingRule const*> const&,
         CascadeOrigin,
         Important,
         Optional<FlyString> layer_name,
-        Optional<LogicalAliasMappingContext>) const;
+        Optional<LogicalAliasMappingContext>,
+        ReadonlySpan<PropertyID> properties_to_cascade) const;
 
     void build_rule_cache();
     void build_rule_cache_if_needed() const;
@@ -270,7 +283,7 @@ private:
 
     void make_rule_cache_for_cascade_origin(CascadeOrigin, SelectorInsights&);
 
-    [[nodiscard]] RuleCache const* rule_cache_for_cascade_origin(CascadeOrigin, FlyString const& qualified_layer_name, GC::Ptr<DOM::ShadowRoot const>) const;
+    [[nodiscard]] RuleCache const* rule_cache_for_cascade_origin(CascadeOrigin, Optional<FlyString const> qualified_layer_name, GC::Ptr<DOM::ShadowRoot const>) const;
 
     static void collect_selector_insights(Selector const&, SelectorInsights&);
 
@@ -280,9 +293,9 @@ private:
     OwnPtr<RuleCachesForDocumentAndShadowRoots> m_author_rule_cache;
     OwnPtr<RuleCachesForDocumentAndShadowRoots> m_user_rule_cache;
     OwnPtr<RuleCachesForDocumentAndShadowRoots> m_user_agent_rule_cache;
-    GC::Root<CSSStyleSheet> m_user_style_sheet;
+    GC::Ptr<CSSStyleSheet> m_user_style_sheet;
 
-    using FontLoaderList = Vector<NonnullOwnPtr<FontLoader>>;
+    using FontLoaderList = Vector<GC::Ref<FontLoader>>;
     HashMap<OwnFontFaceKey, FontLoaderList> m_loaded_fonts;
 
     [[nodiscard]] Length::FontMetrics const& root_element_font_metrics_for_element(GC::Ptr<DOM::Element const>) const;
@@ -292,10 +305,13 @@ private:
 
     CSSPixelRect m_viewport_rect;
 
-    CountingBloomFilter<u8, 14> m_ancestor_filter;
+    OwnPtr<CountingBloomFilter<u8, 14>> m_ancestor_filter;
 };
 
-class FontLoader : public Weakable<FontLoader> {
+class FontLoader final : public GC::Cell {
+    GC_CELL(FontLoader, GC::Cell);
+    GC_DECLARE_ALLOCATOR(FontLoader);
+
 public:
     FontLoader(StyleComputer& style_computer, GC::Ptr<CSSStyleSheet> parent_style_sheet, FlyString family_name, Vector<Gfx::UnicodeRange> unicode_ranges, Vector<URL> urls, ESCAPING Function<void(RefPtr<Gfx::Typeface const>)> on_load = {});
 
@@ -310,17 +326,19 @@ public:
     bool is_loading() const;
 
 private:
+    virtual void visit_edges(Visitor&) override;
+
     ErrorOr<NonnullRefPtr<Gfx::Typeface const>> try_load_font(Fetch::Infrastructure::Response const&, ByteBuffer const&);
 
     void font_did_load_or_fail(RefPtr<Gfx::Typeface const>);
 
-    StyleComputer& m_style_computer;
+    GC::Ref<StyleComputer> m_style_computer;
     GC::Ptr<CSSStyleSheet> m_parent_style_sheet;
     FlyString m_family_name;
     Vector<Gfx::UnicodeRange> m_unicode_ranges;
     RefPtr<Gfx::Typeface const> m_vector_font;
     Vector<URL> m_urls;
-    GC::Root<Fetch::Infrastructure::FetchController> m_fetch_controller;
+    GC::Ptr<Fetch::Infrastructure::FetchController> m_fetch_controller;
     Function<void(RefPtr<Gfx::Typeface const>)> m_on_load;
 };
 
@@ -329,7 +347,7 @@ inline bool StyleComputer::should_reject_with_ancestor_filter(Selector const& se
     for (u32 hash : selector.ancestor_hashes()) {
         if (hash == 0)
             break;
-        if (!m_ancestor_filter.may_contain(hash))
+        if (!m_ancestor_filter->may_contain(hash))
             return true;
     }
     return false;

@@ -69,7 +69,6 @@ public:
     [[nodiscard]] static String from_string_builder_without_validation(Badge<StringBuilder>, StringBuilder&);
 
     // Creates a new String from a sequence of UTF-16 encoded code points.
-    static ErrorOr<String> from_utf16(Utf16View const&);
     static ErrorOr<String> from_utf16_le_with_replacement_character(ReadonlyBytes);
     static ErrorOr<String> from_utf16_be_with_replacement_character(ReadonlyBytes);
 
@@ -103,6 +102,7 @@ public:
         Lower,
     };
     [[nodiscard]] static String bijective_base_from(size_t value, Case, unsigned base = 26, StringView map = {});
+    [[nodiscard]] static String greek_letter_from(size_t value);
     [[nodiscard]] static String roman_number_from(size_t value, Case);
 
     // Creates a new String by case-transforming this String. Using these methods require linking LibUnicode into your application.
@@ -144,7 +144,7 @@ public:
     [[nodiscard]] bool is_empty() const { return byte_count() == 0; }
 
     // Returns a StringView covering the full length of the string. Note that iterating this will go byte-at-a-time, not code-point-at-a-time.
-    [[nodiscard]] StringView bytes_as_string_view() const& { return StringView(bytes()); }
+    [[nodiscard]] StringView bytes_as_string_view() const& LIFETIME_BOUND { return StringView(bytes()); }
     [[nodiscard]] StringView bytes_as_string_view() const&& = delete;
 
     [[nodiscard]] size_t count(StringView needle) const { return StringUtils::count(bytes_as_string_view(), needle); }
@@ -195,9 +195,9 @@ public:
     }
 
     template<Arithmetic T>
-    Optional<T> to_number(TrimWhitespace trim_whitespace = TrimWhitespace::Yes) const
+    Optional<T> to_number(TrimWhitespace trim_whitespace = TrimWhitespace::Yes, int base = 10) const
     {
-        return bytes_as_string_view().to_number<T>(trim_whitespace);
+        return bytes_as_string_view().to_number<T>(trim_whitespace, base);
     }
 
     static ErrorOr<String> vformatted(StringView fmtstr, TypeErasedFormatParams&);

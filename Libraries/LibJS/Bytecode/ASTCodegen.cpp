@@ -568,7 +568,8 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> AssignmentExpression::g
                     lhs_is_super_expression = is<SuperExpression>(expression.object());
 
                     if (!lhs_is_super_expression) {
-                        base = TRY(expression.object().generate_bytecode(generator)).value();
+                        auto generated_base = TRY(expression.object().generate_bytecode(generator)).value();
+                        base = generator.copy_if_needed_to_preserve_evaluation_order(generated_base);
                     } else {
                         // https://tc39.es/ecma262/#sec-super-keyword-runtime-semantics-evaluation
                         // 1. Let env be GetThisEnvironment().
@@ -1171,7 +1172,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> ObjectExpression::gener
 
         if (is<StringLiteral>(property->key())) {
             auto& string_literal = static_cast<StringLiteral const&>(property->key());
-            Bytecode::IdentifierTableIndex key_name = generator.intern_identifier(MUST(FlyString::from_utf8(string_literal.value().bytes())));
+            Bytecode::IdentifierTableIndex key_name = generator.intern_identifier(string_literal.value());
 
             Optional<ScopedOperand> value;
             if (property_kind == Bytecode::Op::PropertyKind::ProtoSetter) {
@@ -1179,9 +1180,10 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> ObjectExpression::gener
             } else {
                 auto identifier = string_literal.value();
                 if (property_kind == Bytecode::Op::PropertyKind::Getter)
-                    identifier = MUST(String::formatted("get {}", identifier));
+                    identifier = Utf16String::formatted("get {}", identifier);
                 else if (property_kind == Bytecode::Op::PropertyKind::Setter)
-                    identifier = MUST(String::formatted("set {}", identifier));
+                    identifier = Utf16String::formatted("set {}", identifier);
+
                 auto name = generator.intern_identifier(identifier);
                 value = TRY(generator.emit_named_evaluation_if_anonymous_function(property->value(), name));
             }
@@ -1776,7 +1778,13 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> CallExpression::generat
 
     if (has_spread) {
         auto arguments = TRY(arguments_to_array_for_call(generator, this->arguments())).value();
-        generator.emit<Bytecode::Op::CallWithArgumentArray>(call_type, dst, callee, this_value, arguments, expression_string_index);
+        if (call_type == Op::CallType::Construct) {
+            generator.emit<Bytecode::Op::CallConstructWithArgumentArray>(dst, callee, this_value, arguments, expression_string_index);
+        } else if (call_type == Op::CallType::DirectEval) {
+            generator.emit<Bytecode::Op::CallDirectEvalWithArgumentArray>(dst, callee, this_value, arguments, expression_string_index);
+        } else {
+            generator.emit<Bytecode::Op::CallWithArgumentArray>(dst, callee, this_value, arguments, expression_string_index);
+        }
     } else {
         Vector<ScopedOperand> argument_operands;
         argument_operands.ensure_capacity(arguments().size());
@@ -2018,7 +2026,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> YieldExpression::genera
         auto array = generator.allocate_register();
         generator.emit_with_extra_operand_slots<Bytecode::Op::NewArray>(1, array, ReadonlySpan<ScopedOperand> { &received_completion_value, 1 });
         auto inner_result = generator.allocate_register();
-        generator.emit<Bytecode::Op::CallWithArgumentArray>(Bytecode::Op::CallType::Call, inner_result, next_method, iterator, array);
+        generator.emit<Bytecode::Op::CallWithArgumentArray>(inner_result, next_method, iterator, array);
 
         // ii. If generatorKind is async, set innerResult to ? Await(innerResult).
         if (generator.is_in_async_generator_function()) {
@@ -2092,7 +2100,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> YieldExpression::genera
 
         // i. Let throw be ? GetMethod(iterator, "throw").
         auto throw_method = generator.allocate_register();
-        generator.emit<Bytecode::Op::GetMethod>(throw_method, iterator, generator.intern_identifier("throw"_fly_string));
+        generator.emit<Bytecode::Op::GetMethod>(throw_method, iterator, generator.intern_identifier("throw"_utf16_fly_string));
 
         // ii. If throw is not undefined, then
         auto& throw_method_is_defined_block = generator.make_block();
@@ -2107,7 +2115,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> YieldExpression::genera
         // 1. Let innerResult be ? Call(throw, iterator, « received.[[Value]] »).
         auto received_value_array = generator.allocate_register();
         generator.emit_with_extra_operand_slots<Bytecode::Op::NewArray>(1, received_value_array, ReadonlySpan<ScopedOperand> { &received_completion_value, 1 });
-        generator.emit<Bytecode::Op::CallWithArgumentArray>(Bytecode::Op::CallType::Call, inner_result, throw_method, iterator, received_value_array);
+        generator.emit<Bytecode::Op::CallWithArgumentArray>(inner_result, throw_method, iterator, received_value_array);
 
         // 2. If generatorKind is async, set innerResult to ? Await(innerResult).
         if (generator.is_in_async_generator_function()) {
@@ -2177,7 +2185,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> YieldExpression::genera
 
         // ii. Let return be ? GetMethod(iterator, "return").
         auto return_method = generator.allocate_register();
-        generator.emit<Bytecode::Op::GetMethod>(return_method, iterator, generator.intern_identifier("return"_fly_string));
+        generator.emit<Bytecode::Op::GetMethod>(return_method, iterator, generator.intern_identifier("return"_utf16_fly_string));
 
         // iii. If return is undefined, then
         auto& return_is_undefined_block = generator.make_block();
@@ -2204,7 +2212,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> YieldExpression::genera
         auto call_array = generator.allocate_register();
         generator.emit_with_extra_operand_slots<Bytecode::Op::NewArray>(1, call_array, ReadonlySpan<ScopedOperand> { &received_completion_value, 1 });
         auto inner_return_result = generator.allocate_register();
-        generator.emit<Bytecode::Op::CallWithArgumentArray>(Bytecode::Op::CallType::Call, inner_return_result, return_method, iterator, call_array);
+        generator.emit<Bytecode::Op::CallWithArgumentArray>(inner_return_result, return_method, iterator, call_array);
 
         // v. If generatorKind is async, set innerReturnResult to ? Await(innerReturnResult).
         if (generator.is_in_async_generator_function()) {
@@ -2532,7 +2540,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> TaggedTemplateLiteral::
         generator.emit_with_extra_operand_slots<Bytecode::Op::NewArray>(raw_string_regs.size(), raw_strings_array, raw_string_regs);
     }
 
-    generator.emit<Bytecode::Op::PutById>(strings_array, generator.intern_identifier("raw"_fly_string), raw_strings_array, Bytecode::Op::PropertyKind::KeyValue, generator.next_property_lookup_cache());
+    generator.emit<Bytecode::Op::PutById>(strings_array, generator.intern_identifier("raw"_utf16_fly_string), raw_strings_array, Bytecode::Op::PropertyKind::KeyValue, generator.next_property_lookup_cache());
 
     auto arguments = generator.allocate_register();
     if (!argument_regs.is_empty())
@@ -2541,7 +2549,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> TaggedTemplateLiteral::
         generator.emit<Bytecode::Op::NewArray>(arguments);
 
     auto dst = choose_dst(generator, preferred_dst);
-    generator.emit<Bytecode::Op::CallWithArgumentArray>(Bytecode::Op::CallType::Call, dst, tag, this_value, arguments);
+    generator.emit<Bytecode::Op::CallWithArgumentArray>(dst, tag, this_value, arguments);
     return dst;
 }
 
@@ -2892,11 +2900,14 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> ClassExpression::genera
     if (m_super_class)
         super_class = TRY(m_super_class->generate_bytecode(generator)).value();
 
-    generator.emit<Op::CreatePrivateEnvironment>();
-
+    bool did_emit_private_environment_allocation = false;
     for (auto const& element : m_elements) {
         auto opt_private_name = element->private_bound_identifier();
         if (opt_private_name.has_value()) {
+            if (!did_emit_private_environment_allocation) {
+                generator.emit<Op::CreatePrivateEnvironment>();
+                did_emit_private_environment_allocation = true;
+            }
             generator.emit<Op::AddPrivateName>(generator.intern_identifier(*opt_private_name));
         }
     }
@@ -2920,7 +2931,9 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> ClassExpression::genera
     auto dst = choose_dst(generator, preferred_dst);
     generator.emit_with_extra_slots<Op::NewClass, Optional<Operand>>(elements.size(), dst, super_class.has_value() ? super_class->operand() : Optional<Operand> {}, *this, lhs_name, elements);
 
-    generator.emit<Op::LeavePrivateEnvironment>();
+    if (did_emit_private_environment_allocation) {
+        generator.emit<Op::LeavePrivateEnvironment>();
+    }
 
     return dst;
 }
@@ -3496,7 +3509,7 @@ static Bytecode::CodeGenerationErrorOr<void> generate_optional_chain(Bytecode::G
         TRY(reference.visit(
             [&](OptionalChain::Call const& call) -> Bytecode::CodeGenerationErrorOr<void> {
                 auto arguments = TRY(arguments_to_array_for_call(generator, call.arguments)).value();
-                generator.emit<Bytecode::Op::CallWithArgumentArray>(Bytecode::Op::CallType::Call, current_value, current_value, current_base, arguments);
+                generator.emit<Bytecode::Op::CallWithArgumentArray>(current_value, current_value, current_base, arguments);
                 generator.emit_mov(current_base, generator.add_constant(js_undefined()));
                 return {};
             },
@@ -3572,7 +3585,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> ExportStatement::genera
     }
 
     if (is<ClassExpression>(*m_statement)) {
-        auto value = TRY(generator.emit_named_evaluation_if_anonymous_function(static_cast<ClassExpression const&>(*m_statement), generator.intern_identifier("default"_fly_string)));
+        auto value = TRY(generator.emit_named_evaluation_if_anonymous_function(static_cast<ClassExpression const&>(*m_statement), generator.intern_identifier("default"_utf16_fly_string)));
 
         if (!static_cast<ClassExpression const&>(*m_statement).has_name()) {
             generator.emit<Bytecode::Op::InitializeLexicalBinding>(
@@ -3585,7 +3598,7 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> ExportStatement::genera
 
     // ExportDeclaration : export default AssignmentExpression ;
     VERIFY(is<Expression>(*m_statement));
-    auto value = TRY(generator.emit_named_evaluation_if_anonymous_function(static_cast<Expression const&>(*m_statement), generator.intern_identifier("default"_fly_string)));
+    auto value = TRY(generator.emit_named_evaluation_if_anonymous_function(static_cast<Expression const&>(*m_statement), generator.intern_identifier("default"_utf16_fly_string)));
     generator.emit<Bytecode::Op::InitializeLexicalBinding>(
         generator.intern_identifier(ExportStatement::local_name_for_default),
         value);

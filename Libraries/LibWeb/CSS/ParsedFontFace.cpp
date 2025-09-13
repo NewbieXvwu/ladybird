@@ -8,11 +8,11 @@
 #include <LibWeb/CSS/CSSFontFaceDescriptors.h>
 #include <LibWeb/CSS/CSSRule.h>
 #include <LibWeb/CSS/ParsedFontFace.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
 #include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CustomIdentStyleValue.h>
 #include <LibWeb/CSS/StyleValues/FontSourceStyleValue.h>
 #include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/CSS/StyleValues/OpenTypeTaggedStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
@@ -22,7 +22,7 @@
 
 namespace Web::CSS {
 
-static FlyString extract_font_name(CSSStyleValue const& value)
+static FlyString extract_font_name(StyleValue const& value)
 {
     if (value.is_string())
         return value.as_string().string_value();
@@ -31,7 +31,7 @@ static FlyString extract_font_name(CSSStyleValue const& value)
     return FlyString {};
 }
 
-Vector<ParsedFontFace::Source> ParsedFontFace::sources_from_style_value(CSSStyleValue const& style_value)
+Vector<ParsedFontFace::Source> ParsedFontFace::sources_from_style_value(StyleValue const& style_value)
 {
     Vector<Source> sources;
     auto add_source = [&sources](FontSourceStyleValue const& font_source) {
@@ -55,12 +55,12 @@ Vector<ParsedFontFace::Source> ParsedFontFace::sources_from_style_value(CSSStyle
 
 ParsedFontFace ParsedFontFace::from_descriptors(CSSFontFaceDescriptors const& descriptors)
 {
-    auto extract_percentage_or_normal = [](CSSStyleValue const& value) -> Optional<Percentage> {
+    auto extract_percentage_or_normal = [](StyleValue const& value) -> Optional<Percentage> {
         if (value.is_percentage())
             return value.as_percentage().percentage();
         if (value.is_calculated()) {
             // FIXME: These should probably be simplified already?
-            return value.as_calculated().resolve_percentage({});
+            return value.as_calculated().resolve_percentage_deprecated({});
         }
         if (value.to_keyword() == Keyword::Normal)
             return {};
@@ -139,7 +139,7 @@ ParsedFontFace ParsedFontFace::from_descriptors(CSSFontFaceDescriptors const& de
                 if (setting_value->is_integer()) {
                     settings.set(feature_tag->as_open_type_tagged().tag(), setting_value->as_integer().integer());
                 } else if (setting_value->is_calculated() && setting_value->as_calculated().resolves_to_number()) {
-                    if (auto integer = setting_value->as_calculated().resolve_integer({}); integer.has_value()) {
+                    if (auto integer = setting_value->as_calculated().resolve_integer_deprecated({}); integer.has_value()) {
                         settings.set(feature_tag->as_open_type_tagged().tag(), *integer);
                     }
                 }
@@ -161,7 +161,7 @@ ParsedFontFace ParsedFontFace::from_descriptors(CSSFontFaceDescriptors const& de
                 if (setting_value->is_number()) {
                     settings.set(variation_tag->as_open_type_tagged().tag(), setting_value->as_number().number());
                 } else if (setting_value->is_calculated() && setting_value->as_calculated().resolves_to_number()) {
-                    if (auto number = setting_value->as_calculated().resolve_number({}); number.has_value()) {
+                    if (auto number = setting_value->as_calculated().resolve_number_deprecated({}); number.has_value()) {
                         settings.set(variation_tag->as_open_type_tagged().tag(), *number);
                     }
                 }

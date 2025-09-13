@@ -6,7 +6,10 @@
 
 #include "ConnectionFromClient.h"
 
+#include <AK/Windows.h>
 #include <RequestServer/WebSocketImplCurl.h>
+
+#include <curl/curl.h>
 
 namespace RequestServer {
 
@@ -160,6 +163,43 @@ void WebSocketImplCurl::discard_connection()
     }
 }
 
+void WebSocketImplCurl::read_from_socket()
+{
+    bool received_data = false;
+
+    // "Wait on the socket only if curl_easy_recv returns CURLE_AGAIN. The reason for this is libcurl or the SSL
+    // library may internally cache some data, therefore you should call curl_easy_recv until all data is read which
+    // would include any cached data."
+    for (;;) {
+        u8 buffer[65536];
+        size_t nread = 0;
+        CURLcode const result = curl_easy_recv(m_easy_handle, buffer, sizeof(buffer), &nread);
+        if (result == CURLE_AGAIN)
+            break;
+
+        if (result != CURLE_OK) {
+            dbgln("Failed to read from WebSocket: {}", curl_easy_strerror(result));
+            on_connection_error();
+            return;
+        }
+
+        // "Reading exactly 0 bytes indicates a closed connection." which
+        // may be part of the closing handshake
+
+        received_data = true;
+        if (0 == nread)
+            break;
+
+        if (auto const err = m_read_buffer.write_until_depleted({ buffer, nread }); err.is_error()) {
+            on_connection_error();
+            return;
+        }
+    }
+
+    if (received_data)
+        on_ready_to_read();
+}
+
 bool WebSocketImplCurl::did_connect()
 {
     curl_socket_t socket_fd = CURL_SOCKET_BAD;
@@ -169,21 +209,7 @@ bool WebSocketImplCurl::did_connect()
 
     m_read_notifier = Core::Notifier::construct(socket_fd, Core::Notifier::Type::Read);
     m_read_notifier->on_activation = [this] {
-        u8 buffer[65536];
-        size_t nread = 0;
-        CURLcode const result = curl_easy_recv(m_easy_handle, buffer, sizeof(buffer), &nread);
-        if (result == CURLE_AGAIN)
-            return;
-
-        if (result != CURLE_OK) {
-            dbgln("Failed to read from WebSocket: {}", curl_easy_strerror(result));
-            on_connection_error();
-        }
-
-        if (auto const err = m_read_buffer.write_until_depleted({ buffer, nread }); err.is_error())
-            on_connection_error();
-
-        on_ready_to_read();
+        read_from_socket();
     };
     m_error_notifier = Core::Notifier::construct(socket_fd, Core::Notifier::Type::Error | Core::Notifier::Type::HangUp);
     m_error_notifier->on_activation = [this] {
@@ -191,6 +217,11 @@ bool WebSocketImplCurl::did_connect()
     };
 
     on_connected();
+
+    // There may be data waiting for us already (e.g. if the server sends us data immediately upon opening a WebSocket),
+    // so try reading immediately.
+    read_from_socket();
+
     return true;
 }
 

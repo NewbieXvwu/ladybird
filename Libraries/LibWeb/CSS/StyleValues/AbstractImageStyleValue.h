@@ -9,17 +9,17 @@
 
 #pragma once
 
-#include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/PercentageOr.h>
 #include <LibWeb/CSS/Serialize.h>
-#include <LibWeb/CSS/StyleValues/CSSColorValue.h>
+#include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
 
-class AbstractImageStyleValue : public CSSStyleValue {
+class AbstractImageStyleValue : public StyleValue {
 public:
-    using CSSStyleValue::CSSStyleValue;
+    using StyleValue::StyleValue;
 
     virtual Optional<CSSPixels> natural_width() const { return {}; }
     virtual Optional<CSSPixels> natural_height() const { return {}; }
@@ -37,7 +37,7 @@ public:
     virtual void resolve_for_size(Layout::NodeWithStyle const&, CSSPixelSize) const { }
 
     virtual bool is_paintable() const = 0;
-    virtual void paint(PaintContext& context, DevicePixelRect const& dest_rect, ImageRendering) const = 0;
+    virtual void paint(DisplayListRecordingContext& context, DevicePixelRect const& dest_rect, ImageRendering) const = 0;
 
     virtual Optional<Gfx::Color> color_if_single_pixel_bitmap() const { return {}; }
 };
@@ -165,7 +165,7 @@ struct ColorStopListElement {
 
     Optional<ColorHint> transition_hint;
     struct ColorStop {
-        RefPtr<CSSStyleValue const> color;
+        RefPtr<StyleValue const> color;
         Optional<TPosition> position;
         Optional<TPosition> second_position = {};
         inline bool operator==(ColorStop const&) const = default;
@@ -185,12 +185,12 @@ static void serialize_color_stop_list(StringBuilder& builder, auto const& color_
             builder.append(", "sv);
 
         if (element.transition_hint.has_value())
-            builder.appendff("{}, "sv, element.transition_hint->value.to_string());
+            builder.appendff("{}, "sv, element.transition_hint->value.to_string(mode));
 
         builder.append(element.color_stop.color->to_string(mode));
         for (auto position : Array { &element.color_stop.position, &element.color_stop.second_position }) {
             if (position->has_value())
-                builder.appendff(" {}"sv, (*position)->to_string());
+                builder.appendff(" {}"sv, (*position)->to_string(mode));
         }
         first = false;
     }

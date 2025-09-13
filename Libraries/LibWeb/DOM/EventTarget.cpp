@@ -164,8 +164,7 @@ static bool default_passive_value(FlyString const& type, EventTarget* event_targ
         if (is<HTML::Window>(event_target))
             return true;
 
-        if (is<Node>(event_target)) {
-            auto* node = as<Node>(event_target);
+        if (auto* node = as_if<Node>(event_target)) {
             if (&node->document() == event_target || node->document().document_element() == event_target || node->document().body() == event_target)
                 return true;
         }
@@ -289,10 +288,10 @@ WebIDL::ExceptionOr<bool> EventTarget::dispatch_event_binding(Event& event)
 {
     // 1. If event’s dispatch flag is set, or if its initialized flag is not set, then throw an "InvalidStateError" DOMException.
     if (event.dispatched())
-        return WebIDL::InvalidStateError::create(realm(), "The event is already being dispatched."_string);
+        return WebIDL::InvalidStateError::create(realm(), "The event is already being dispatched."_utf16);
 
     if (!event.initialized())
-        return WebIDL::InvalidStateError::create(realm(), "Cannot dispatch an uninitialized event."_string);
+        return WebIDL::InvalidStateError::create(realm(), "Cannot dispatch an uninitialized event."_utf16);
 
     // 2. Initialize event’s isTrusted attribute to false.
     event.set_is_trusted(false);
@@ -400,14 +399,12 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(FlyString 
         GC::Ptr<Element> element;
         GC::Ptr<Document> document;
 
-        if (is<Element>(this)) {
-            auto* element_event_target = as<Element>(this);
+        if (auto* element_event_target = as_if<Element>(this)) {
             element = element_event_target;
             document = &element_event_target->document();
         } else {
-            VERIFY(is<HTML::Window>(this));
-            auto* window_event_target = as<HTML::Window>(this);
-            document = &window_event_target->associated_document();
+            auto& window_event_target = as<HTML::Window>(*this);
+            document = window_event_target.associated_document();
         }
 
         VERIFY(document);
@@ -423,12 +420,9 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(FlyString 
 
         // 5. If element is not null and element has a form owner, let form owner be that form owner. Otherwise, let form owner be null.
         GC::Ptr<HTML::HTMLFormElement> form_owner;
-        if (is<HTML::FormAssociatedElement>(element.ptr())) {
-            auto* form_associated_element = dynamic_cast<HTML::FormAssociatedElement*>(element.ptr());
-            VERIFY(form_associated_element);
-
-            if (form_associated_element->form())
-                form_owner = form_associated_element->form();
+        if (auto* form_associated_element = as_if<HTML::FormAssociatedElement>(element.ptr())) {
+            if (auto* form = form_associated_element->form())
+                form_owner = form;
         }
 
         // 6. Let settings object be the relevant settings object of document.
@@ -516,7 +510,7 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(FlyString 
 
         //  6. Return scope. (NOTE: Not necessary)
 
-        auto function = JS::ECMAScriptFunctionObject::create(realm, name, builder.to_byte_string(), program->body(), program->parameters(), program->function_length(), program->local_variables_names(), scope, nullptr, JS::FunctionKind::Normal, program->is_strict_mode(),
+        auto function = JS::ECMAScriptFunctionObject::create(realm, Utf16FlyString::from_utf8(name), builder.to_byte_string(), program->body(), program->parameters(), program->function_length(), program->local_variables_names(), scope, nullptr, JS::FunctionKind::Normal, program->is_strict_mode(),
             program->parsing_insights(), is_arrow_function);
 
         // 10. Remove settings object's realm execution context from the JavaScript execution context stack.
@@ -617,7 +611,7 @@ void EventTarget::activate_event_handler(FlyString const& name, HTML::EventHandl
             TRY(event_target->process_event_handler_for_event(name, event));
             return JS::js_undefined();
         },
-        0, FlyString {}, &realm);
+        0, Utf16FlyString {}, &realm);
 
     // NOTE: As per the spec, the callback context is arbitrary.
     auto callback = realm.heap().allocate<WebIDL::CallbackType>(*callback_function, realm);

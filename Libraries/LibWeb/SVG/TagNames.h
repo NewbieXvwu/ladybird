@@ -20,6 +20,10 @@ namespace Web::SVG::TagNames {
     __ENUMERATE_SVG_TAG(feBlend)        \
     __ENUMERATE_SVG_TAG(feFlood)        \
     __ENUMERATE_SVG_TAG(feGaussianBlur) \
+    __ENUMERATE_SVG_TAG(feImage)        \
+    __ENUMERATE_SVG_TAG(feMerge)        \
+    __ENUMERATE_SVG_TAG(feMergeNode)    \
+    __ENUMERATE_SVG_TAG(feOffset)       \
     __ENUMERATE_SVG_TAG(filter)         \
     __ENUMERATE_SVG_TAG(foreignObject)  \
     __ENUMERATE_SVG_TAG(g)              \
@@ -42,7 +46,8 @@ namespace Web::SVG::TagNames {
     __ENUMERATE_SVG_TAG(textPath)       \
     __ENUMERATE_SVG_TAG(title)          \
     __ENUMERATE_SVG_TAG(tspan)          \
-    __ENUMERATE_SVG_TAG(use)
+    __ENUMERATE_SVG_TAG(use)            \
+    __ENUMERATE_SVG_TAG(view)
 
 #define __ENUMERATE_SVG_TAG(name) extern FlyString name;
 ENUMERATE_SVG_TAGS

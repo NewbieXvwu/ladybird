@@ -45,15 +45,20 @@ CSSPixels InlineFormattingContext::leftmost_inline_offset_at(CSSPixels y) const
     auto box_in_root_rect = content_box_rect_in_ancestor_coordinate_space(m_containing_block_used_values, parent().root());
     CSSPixels y_in_root = box_in_root_rect.y() + y;
     auto space_and_containing_margin = parent().space_used_and_containing_margin_for_floats(y_in_root);
-    auto left_side_floats_limit_to_right = space_and_containing_margin.left_total_containing_margin + space_and_containing_margin.left_used_space;
-    if (box_in_root_rect.x() >= left_side_floats_limit_to_right) {
-        // The left edge of the containing block is to the right of the rightmost left-side float.
-        // We start placing inline content at the left edge of the containing block.
+
+    // If there's no float box to take into account, we start at the left edge of the containing block.
+    if (!space_and_containing_margin.matching_left_float_box)
         return 0;
-    }
+
+    // If the left edge of the containing block is to the right of the rightmost left-side float, start placing inline
+    // content at the left edge of the containing block.
+    auto left_side_floats_limit_to_right = space_and_containing_margin.left_total_containing_margin + space_and_containing_margin.left_used_space;
+    if (box_in_root_rect.x() >= left_side_floats_limit_to_right)
+        return 0;
+
     // The left edge of the containing block is to the left of the rightmost left-side float.
     // We adjust the inline content insertion point by the overlap between the containing block and the float.
-    return left_side_floats_limit_to_right - max(CSSPixels(0), box_in_root_rect.x());
+    return left_side_floats_limit_to_right - box_in_root_rect.x();
 }
 
 AvailableSize InlineFormattingContext::available_space_for_line(CSSPixels y) const
@@ -98,23 +103,23 @@ void InlineFormattingContext::dimension_box_on_line(Box const& box, LayoutMode l
     auto& box_state = m_state.get_mutable(box);
     auto const& computed_values = box.computed_values();
 
-    box_state.margin_left = computed_values.margin().left().to_px(box, width_of_containing_block);
+    box_state.margin_left = computed_values.margin().left().to_px_or_zero(box, width_of_containing_block);
     box_state.border_left = computed_values.border_left().width;
-    box_state.padding_left = computed_values.padding().left().to_px(box, width_of_containing_block);
+    box_state.padding_left = computed_values.padding().left().to_px_or_zero(box, width_of_containing_block);
 
-    box_state.margin_right = computed_values.margin().right().to_px(box, width_of_containing_block);
+    box_state.margin_right = computed_values.margin().right().to_px_or_zero(box, width_of_containing_block);
     box_state.border_right = computed_values.border_right().width;
-    box_state.padding_right = computed_values.padding().right().to_px(box, width_of_containing_block);
+    box_state.padding_right = computed_values.padding().right().to_px_or_zero(box, width_of_containing_block);
 
-    box_state.margin_top = computed_values.margin().top().to_px(box, width_of_containing_block);
+    box_state.margin_top = computed_values.margin().top().to_px_or_zero(box, width_of_containing_block);
     box_state.border_top = computed_values.border_top().width;
-    box_state.padding_top = computed_values.padding().top().to_px(box, width_of_containing_block);
+    box_state.padding_top = computed_values.padding().top().to_px_or_zero(box, width_of_containing_block);
 
-    box_state.padding_bottom = computed_values.padding().bottom().to_px(box, width_of_containing_block);
+    box_state.padding_bottom = computed_values.padding().bottom().to_px_or_zero(box, width_of_containing_block);
     box_state.border_bottom = computed_values.border_bottom().width;
-    box_state.margin_bottom = computed_values.margin().bottom().to_px(box, width_of_containing_block);
+    box_state.margin_bottom = computed_values.margin().bottom().to_px_or_zero(box, width_of_containing_block);
 
-    if (box_is_sized_as_replaced_element(box)) {
+    if (box_is_sized_as_replaced_element(box, *m_available_space)) {
         box_state.set_content_width(compute_width_for_replaced_element(box, *m_available_space));
         box_state.set_content_height(compute_height_for_replaced_element(box, *m_available_space));
         auto independent_formatting_context = layout_inside(box, layout_mode, box_state.available_inner_space_or_constraints_from(*m_available_space));
@@ -303,19 +308,18 @@ void InlineFormattingContext::generate_line_boxes()
             break;
         }
         case InlineLevelIterator::Item::Type::AbsolutelyPositionedElement:
-            if (is<Box>(*item.node)) {
-                auto const& box = static_cast<Layout::Box const&>(*item.node);
+            if (auto const* box = as_if<Box>(*item.node)) {
                 // Calculation of static position for absolute boxes is delayed until trailing whitespaces are removed.
-                absolute_boxes.append(&box);
+                absolute_boxes.append(box);
             }
             break;
 
         case InlineLevelIterator::Item::Type::FloatingElement:
-            if (is<Box>(*item.node)) {
+            if (auto* box = as_if<Box>(*item.node)) {
                 (void)parent().clear_floating_boxes(*item.node, *this);
                 // Even if this introduces clearance, we do NOT reset the margin state, because that is clearance
                 // between floats and does not contribute to the height of the Inline Formatting Context.
-                parent().layout_floating_box(static_cast<Layout::Box const&>(*item.node), containing_block(), *m_available_space, 0, &line_builder);
+                parent().layout_floating_box(*box, containing_block(), *m_available_space, 0, &line_builder);
             }
             break;
 
@@ -331,22 +335,41 @@ void InlineFormattingContext::generate_line_boxes()
                     next_width = iterator.next_non_whitespace_sequence_width();
                 } else {
                     // In whitespace-preserving contexts (white-space: pre*), we have to check manually.
-                    auto view = text_node.text_for_rendering().bytes_as_string_view().substring_view(item.offset_in_node, item.length_in_node);
-                    is_whitespace = view.is_whitespace();
+                    auto view = text_node.text_for_rendering().substring_view(item.offset_in_node, item.length_in_node);
+                    is_whitespace = view.is_ascii_whitespace();
                     if (is_whitespace)
                         next_width = iterator.next_non_whitespace_sequence_width();
                 }
 
-                // If whitespace caused us to break, we swallow the whitespace instead of
-                // putting it on the next line.
+                // If whitespace caused us to break, we swallow the whitespace instead of putting it on the next line.
                 if (is_whitespace && next_width > 0 && line_builder.break_if_needed(item.border_box_width() + next_width))
                     break;
             } else if (text_node.computed_values().text_overflow() == CSS::TextOverflow::Ellipsis
                 && text_node.computed_values().overflow_x() != CSS::Overflow::Visible) {
                 // We may need to do an ellipsis if the text is too long for the container
                 constexpr u32 ellipsis_codepoint = 0x2026;
-                if (m_available_space.has_value()
-                    && item.width.to_double() > m_available_space.value().width.to_px_or_zero().to_double()) {
+
+                // NOTE: We compute whether we need to truncate the text with an ellipsis based on the width of the
+                //       text node EXCLUSIVE of trailing collapsible whitespace, this is because that trailing
+                //       collapsible whitespace is removed later when we trim the line-boxes anyway.
+                //       Note that this relies on the assumption that this text node is the last in this linebox (as
+                //       there is only one text-node per line box when we have text-wrap: nowrap)
+                double width_without_trailing_collapsible_whitespace = item.width.to_double();
+
+                if (first_is_one_of(text_node.computed_values().white_space_collapse(), CSS::WhiteSpaceCollapse::Collapse, CSS::WhiteSpaceCollapse::PreserveBreaks)) {
+                    auto last_text = text_node.text_for_rendering();
+
+                    size_t last_fragment_length = last_text.length_in_code_units();
+                    while (last_fragment_length) {
+                        auto last_character = last_text.code_unit_at(--last_fragment_length);
+                        if (!is_ascii_space(last_character))
+                            break;
+
+                        width_without_trailing_collapsible_whitespace -= item.glyph_run->font().glyph_width(last_character);
+                    }
+                }
+
+                if (m_available_space.has_value() && width_without_trailing_collapsible_whitespace > m_available_space.value().width.to_px_or_zero().to_double()) {
                     // Do the ellipsis
                     auto& glyph_run = item.glyph_run;
 
@@ -370,7 +393,10 @@ void InlineFormattingContext::generate_line_boxes()
                         glyphs.remove(last_glyph_index - 1, remove_item_count);
                         glyphs.append(Gfx::DrawGlyph {
                             .position = last_glyph_position,
-                            .glyph_id = glyph_run->font().glyph_id_for_code_point(ellipsis_codepoint) });
+                            .length_in_code_units = AK::UnicodeUtils::code_unit_length_for_code_point(ellipsis_codepoint),
+                            .glyph_width = glyph_run->font().glyph_width(ellipsis_codepoint),
+                            .glyph_id = glyph_run->font().glyph_id_for_code_point(ellipsis_codepoint),
+                        });
                     }
                 }
             }
@@ -415,6 +441,8 @@ void InlineFormattingContext::generate_line_boxes()
             }
         }
     }
+
+    line_builder.update_last_line();
 
     for (auto* box : absolute_boxes) {
         auto& box_state = m_state.get_mutable(*box);
@@ -470,20 +498,13 @@ void InlineFormattingContext::set_vertical_float_clearance(CSSPixels vertical_fl
 
 StaticPositionRect InlineFormattingContext::calculate_static_position_rect(Box const& box) const
 {
-    CSSPixels x = 0;
-    CSSPixels y = 0;
-
     VERIFY(box.parent());
     VERIFY(box.parent()->children_are_inline());
-    // We're an abspos box with inline siblings. This is gonna get messy!
+
+    CSSPixelPoint position;
     if (auto const* sibling = box.previous_sibling()) {
-        // Hard case: there's a previous sibling. This means there's already inline content
-        // preceding the hypothetical static position of `box` within its containing block.
-        // If we had been position:static, that inline content would have been wrapped in
-        // anonymous block box, so now we get to imagine what the world might have looked like
-        // in that scenario..
-        // Basically, we find its last associated line box fragment and place `box` under it.
-        // FIXME: I'm 100% sure this can be smarter, better and faster.
+        // We're calculating the position for an absolutely positioned box with a previous sibling in an IFC. We need to
+        // position the box at the top right corner of the last fragment of this sibling.
         LineBoxFragment const* last_fragment = nullptr;
         auto const& cb_state = m_state.get(*sibling->containing_block());
         for (auto const& line_box : cb_state.line_boxes) {
@@ -493,15 +514,12 @@ StaticPositionRect InlineFormattingContext::calculate_static_position_rect(Box c
             }
         }
         if (last_fragment) {
-            x = last_fragment->offset().x() + last_fragment->width();
-            y = last_fragment->offset().y() + last_fragment->height();
+            position.set_x(last_fragment->offset().x() + last_fragment->width());
+            position.set_y(last_fragment->offset().y());
         }
-    } else {
-        // Easy case: no previous sibling, we're at the top of the containing block.
     }
-    StaticPositionRect static_position_rect;
-    static_position_rect.rect = { { x, y }, { 0, 0 } };
-    return static_position_rect;
+
+    return { .rect = { position, { 0, 0 } } };
 }
 
 }

@@ -19,12 +19,12 @@ namespace Web::CSS {
 
 GC_DEFINE_ALLOCATOR(CSSTransition);
 
-GC::Ref<CSSTransition> CSSTransition::start_a_transition(DOM::Element& element, Optional<PseudoElement> pseudo_element, PropertyID property_id,
-    size_t transition_generation, double start_time, double end_time, NonnullRefPtr<CSSStyleValue const> start_value,
-    NonnullRefPtr<CSSStyleValue const> end_value, NonnullRefPtr<CSSStyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor)
+GC::Ref<CSSTransition> CSSTransition::start_a_transition(DOM::AbstractElement abstract_element, PropertyID property_id,
+    size_t transition_generation, double delay, double start_time, double end_time, NonnullRefPtr<StyleValue const> start_value,
+    NonnullRefPtr<StyleValue const> end_value, NonnullRefPtr<StyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor)
 {
-    auto& realm = element.realm();
-    return realm.create<CSSTransition>(realm, element, pseudo_element, property_id, transition_generation, start_time, end_time, start_value, end_value, reversing_adjusted_start_value, reversing_shortening_factor);
+    auto& realm = abstract_element.element().realm();
+    return realm.create<CSSTransition>(realm, abstract_element, property_id, transition_generation, delay, start_time, end_time, start_value, end_value, reversing_adjusted_start_value, reversing_shortening_factor);
 }
 
 Animations::AnimationClass CSSTransition::animation_class() const
@@ -75,14 +75,14 @@ Optional<int> CSSTransition::class_specific_composite_order(GC::Ref<Animations::
     return {};
 }
 
-CSSTransition::CSSTransition(JS::Realm& realm, DOM::Element& element, Optional<PseudoElement> pseudo_element, PropertyID property_id, size_t transition_generation,
-    double start_time, double end_time, NonnullRefPtr<CSSStyleValue const> start_value, NonnullRefPtr<CSSStyleValue const> end_value,
-    NonnullRefPtr<CSSStyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor)
+CSSTransition::CSSTransition(JS::Realm& realm, DOM::AbstractElement abstract_element, PropertyID property_id, size_t transition_generation,
+    double delay, double start_time, double end_time, NonnullRefPtr<StyleValue const> start_value, NonnullRefPtr<StyleValue const> end_value,
+    NonnullRefPtr<StyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor)
     : Animations::Animation(realm)
     , m_transition_property(property_id)
     , m_transition_generation(transition_generation)
-    , m_start_time(start_time)
-    , m_end_time(end_time)
+    , m_start_time(start_time + delay)
+    , m_end_time(end_time + delay)
     , m_start_value(move(start_value))
     , m_end_value(move(end_value))
     , m_reversing_adjusted_start_value(move(reversing_adjusted_start_value))
@@ -95,15 +95,13 @@ CSSTransition::CSSTransition(JS::Realm& realm, DOM::Element& element, Optional<P
     // when they transition out of the idle play state after being disassociated from their owning element. Transitions
     // that have been disassociated from their owning element but are still idle do not have a defined composite order.
 
-    set_start_time(start_time - element.document().timeline()->current_time().value());
-
     // Construct a KeyframesEffect for our animation
-    m_keyframe_effect->set_target(&element);
-    if (pseudo_element.has_value())
-        m_keyframe_effect->set_pseudo_element(Selector::PseudoElementSelector { pseudo_element.value() });
-    m_keyframe_effect->set_start_delay(start_time);
-    m_keyframe_effect->set_iteration_duration(m_end_time - start_time);
-    m_keyframe_effect->set_timing_function(element.property_transition_attributes(pseudo_element, property_id)->timing_function);
+    m_keyframe_effect->set_target(&abstract_element.element());
+    if (abstract_element.pseudo_element().has_value())
+        m_keyframe_effect->set_pseudo_element(Selector::PseudoElementSelector { abstract_element.pseudo_element().value() });
+    m_keyframe_effect->set_start_delay(delay);
+    m_keyframe_effect->set_iteration_duration(end_time - start_time);
+    m_keyframe_effect->set_timing_function(abstract_element.element().property_transition_attributes(abstract_element.pseudo_element(), property_id)->timing_function);
 
     auto key_frame_set = adopt_ref(*new Animations::KeyframeEffect::KeyFrameSet);
     Animations::KeyframeEffect::KeyFrameSet::ResolvedKeyFrame initial_keyframe;
@@ -116,11 +114,10 @@ CSSTransition::CSSTransition(JS::Realm& realm, DOM::Element& element, Optional<P
     key_frame_set->keyframes_by_key.insert(100 * Animations::KeyframeEffect::AnimationKeyFrameKeyScaleFactor, final_keyframe);
 
     m_keyframe_effect->set_key_frame_set(key_frame_set);
-    set_timeline(element.document().timeline());
-    set_owning_element(element);
+    set_timeline(abstract_element.document().timeline());
+    set_owning_element(abstract_element.element());
     set_effect(m_keyframe_effect);
-    element.associate_with_animation(*this);
-    element.set_transition(pseudo_element, m_transition_property, *this);
+    abstract_element.element().set_transition(abstract_element.pseudo_element(), m_transition_property, *this);
 
     HTML::TemporaryExecutionContext context(realm);
     play().release_value_but_fixme_should_propagate_errors();

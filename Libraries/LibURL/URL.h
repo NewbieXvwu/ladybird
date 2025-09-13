@@ -42,11 +42,16 @@ enum class ExcludeFragment {
 
 // https://w3c.github.io/FileAPI/#blob-url-entry
 struct BlobURLEntry {
-    // This represents the raw bytes behind a 'Blob' (and does not yet support a MediaSourceQuery).
-    struct Object {
+    // This represents the raw bytes behind a 'Blob'
+    struct Blob {
         String type;
         ByteBuffer data;
     };
+
+    // This represents a MediaSource
+    struct MediaSource { };
+
+    using Object = Variant<Blob, MediaSource>;
 
     // This represents the parts of HTML::Environment that we need for a BlobURL entry.
     struct Environment {
@@ -109,6 +114,7 @@ public:
     void set_host(Host);
     void set_port(Optional<u16>);
     void set_paths(Vector<ByteString> const&);
+    void set_raw_paths(Vector<String>);
     Vector<String> const& paths() const { return m_data->paths; }
     void set_query(Optional<String> query) { m_data->query = move(query); }
     void set_fragment(Optional<String> fragment) { m_data->fragment = move(fragment); }

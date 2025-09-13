@@ -12,10 +12,12 @@
 
 namespace Web::Layout {
 
-LineBoxFragment::LineBoxFragment(Node const& layout_node, size_t start, size_t length, CSSPixels inline_offset, CSSPixels block_offset, CSSPixels inline_length, CSSPixels block_length, CSSPixels border_box_top, CSS::Direction direction, CSS::WritingMode writing_mode, RefPtr<Gfx::GlyphRun> glyph_run)
+LineBoxFragment::LineBoxFragment(Node const& layout_node, size_t start, size_t length_in_code_units,
+    CSSPixels inline_offset, CSSPixels block_offset, CSSPixels inline_length, CSSPixels block_length,
+    CSSPixels border_box_top, CSS::Direction direction, CSS::WritingMode writing_mode, RefPtr<Gfx::GlyphRun> glyph_run)
     : m_layout_node(layout_node)
     , m_start(start)
-    , m_length(length)
+    , m_length_in_code_units(length_in_code_units)
     , m_inline_offset(inline_offset)
     , m_block_offset(block_offset)
     , m_inline_length(inline_length)
@@ -48,27 +50,26 @@ CSSPixelSize LineBoxFragment::size() const
 
 bool LineBoxFragment::ends_in_whitespace() const
 {
-    auto text = this->text();
-    if (text.is_empty())
+    if (m_length_in_code_units == 0)
         return false;
-    return isspace(text[text.length() - 1]);
+    return is_ascii_space(text().code_unit_at(m_length_in_code_units - 1));
 }
 
 bool LineBoxFragment::is_justifiable_whitespace() const
 {
-    return text() == " ";
+    return text() == " "sv;
 }
 
-StringView LineBoxFragment::text() const
+Utf16View LineBoxFragment::text() const
 {
-    if (!is<TextNode>(layout_node()))
-        return {};
-    return as<TextNode>(layout_node()).text_for_rendering().bytes_as_string_view().substring_view(m_start, m_length);
+    if (auto* text_node = as_if<TextNode>(layout_node()))
+        return text_node->text_for_rendering().substring_view(m_start, m_length_in_code_units);
+    return {};
 }
 
 bool LineBoxFragment::is_atomic_inline() const
 {
-    return layout_node().is_replaced_box() || (layout_node().display().is_inline_outside() && !layout_node().display().is_flow_inside());
+    return layout_node().is_atomic_inline();
 }
 
 CSS::Direction LineBoxFragment::resolve_glyph_run_direction(Gfx::GlyphRun::TextType text_type) const

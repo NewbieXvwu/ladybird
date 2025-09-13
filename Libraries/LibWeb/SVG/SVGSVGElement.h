@@ -11,17 +11,16 @@
 #include <LibWeb/Geometry/DOMPoint.h>
 #include <LibWeb/SVG/AttributeParser.h>
 #include <LibWeb/SVG/SVGAnimatedLength.h>
+#include <LibWeb/SVG/SVGFitToViewBox.h>
 #include <LibWeb/SVG/SVGGraphicsElement.h>
 #include <LibWeb/SVG/SVGLength.h>
 #include <LibWeb/SVG/SVGTransform.h>
-#include <LibWeb/SVG/SVGViewport.h>
-#include <LibWeb/SVG/ViewBox.h>
 #include <LibWeb/WebIDL/Types.h>
 
 namespace Web::SVG {
 
 class SVGSVGElement final : public SVGGraphicsElement
-    , public SVGViewport {
+    , public SVGFitToViewBox {
     WEB_PLATFORM_OBJECT(SVGSVGElement, SVGGraphicsElement);
     GC_DECLARE_ALLOCATOR(SVGSVGElement);
 
@@ -34,12 +33,11 @@ public:
     virtual bool requires_svg_container() const override { return false; }
     virtual bool is_svg_container() const override { return true; }
 
-    virtual Optional<ViewBox> view_box() const override;
-    virtual Optional<PreserveAspectRatio> preserve_aspect_ratio() const override { return m_preserve_aspect_ratio; }
+    virtual Optional<ViewBox> active_view_box() const override;
+
+    void set_active_view_element(GC::Ptr<SVGViewElement> view_element) { m_active_view_element = view_element; }
 
     void set_fallback_view_box_for_svg_as_image(Optional<ViewBox>);
-
-    GC::Ref<SVGAnimatedRect> view_box_for_bindings() { return *m_view_box_for_bindings; }
 
     GC::Ref<SVGAnimatedLength> x() const;
     GC::Ref<SVGAnimatedLength> y() const;
@@ -78,8 +76,8 @@ public:
     void unsuspend_redraw_all() const { }
     void force_redraw() const { }
 
-    [[nodiscard]] RefPtr<CSS::CSSStyleValue const> width_style_value_from_attribute() const;
-    [[nodiscard]] RefPtr<CSS::CSSStyleValue const> height_style_value_from_attribute() const;
+    [[nodiscard]] RefPtr<CSS::StyleValue const> width_style_value_from_attribute() const;
+    [[nodiscard]] RefPtr<CSS::StyleValue const> height_style_value_from_attribute() const;
 
     struct NaturalMetrics {
         Optional<CSSPixels> width;
@@ -97,16 +95,16 @@ private:
 
     virtual bool is_svg_svg_element() const override { return true; }
 
+    GC::Ptr<SVGViewElement> active_view_element() const { return m_active_view_element; }
+
     virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void children_changed(ChildrenChangedMetadata const*) override;
 
     void update_fallback_view_box_for_svg_as_image();
 
-    Optional<ViewBox> m_view_box;
-    Optional<PreserveAspectRatio> m_preserve_aspect_ratio;
-
     Optional<ViewBox> m_fallback_view_box_for_svg_as_image;
 
-    GC::Ptr<SVGAnimatedRect> m_view_box_for_bindings;
+    GC::Ptr<SVGViewElement> m_active_view_element;
 };
 
 }

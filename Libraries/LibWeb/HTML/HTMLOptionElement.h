@@ -7,11 +7,12 @@
 
 #pragma once
 
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/HTMLElement.h>
 
 namespace Web::HTML {
 
-class HTMLOptionElement final : public HTMLElement {
+class WEB_API HTMLOptionElement final : public HTMLElement {
     WEB_PLATFORM_OBJECT(HTMLOptionElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLOptionElement);
 
@@ -23,11 +24,11 @@ public:
     void set_selected_internal(bool);
     [[nodiscard]] u64 selectedness_update_index() const { return m_selectedness_update_index; }
 
-    String value() const;
-    WebIDL::ExceptionOr<void> set_value(String const&);
+    Utf16String value() const;
+    WebIDL::ExceptionOr<void> set_value(Utf16String const&);
 
-    String text() const;
-    void set_text(String const&);
+    Utf16String text() const;
+    void set_text(Utf16String const&);
 
     [[nodiscard]] String label() const;
     void set_label(String const&);

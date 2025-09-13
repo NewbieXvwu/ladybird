@@ -9,9 +9,11 @@
 
 #include <AK/HashTable.h>
 #include <AK/String.h>
+#include <AK/Tuple.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibWeb/Bindings/NavigationPrototype.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
 #include <LibWeb/HTML/HistoryHandlingBehavior.h>
@@ -20,7 +22,7 @@
 #include <LibWeb/HTML/RenderingThread.h>
 #include <LibWeb/HTML/SandboxingFlagSet.h>
 #include <LibWeb/HTML/SourceSnapshotParams.h>
-#include <LibWeb/HTML/StructuredSerialize.h>
+#include <LibWeb/HTML/StructuredSerializeTypes.h>
 #include <LibWeb/HTML/TokenizedFeatures.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/Page/EventHandler.h>
@@ -49,7 +51,7 @@ struct PaintConfig {
 };
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#navigable
-class Navigable : public JS::Cell
+class WEB_API Navigable : public JS::Cell
     , public Weakable<Navigable> {
     GC_CELL(Navigable, JS::Cell);
     GC_DECLARE_ALLOCATOR(Navigable);
@@ -91,7 +93,7 @@ public:
 
     void activate_history_entry(GC::Ptr<SessionHistoryEntry>);
 
-    GC::Ptr<DOM::Document> active_document();
+    GC::Ptr<DOM::Document> active_document() const;
     GC::Ptr<BrowsingContext> active_browsing_context();
     GC::Ptr<WindowProxy> active_window_proxy();
     GC::Ptr<Window> active_window();
@@ -147,6 +149,7 @@ public:
 
     struct NavigateParams {
         URL::URL url;
+        // FIXME: source_document should now be nullable, and default to nullptr.
         GC::Ref<DOM::Document> source_document;
         Variant<Empty, String, POSTResource> document_resource = Empty {};
         GC::Ptr<Fetch::Infrastructure::Response> response = nullptr;
@@ -197,6 +200,11 @@ public:
 
     Web::EventHandler& event_handler() { return m_event_handler; }
     Web::EventHandler const& event_handler() const { return m_event_handler; }
+
+    // https://drafts.csswg.org/css-view-transitions-1/#snapshot-containing-block
+    CSSPixelRect snapshot_containing_block();
+    // https://drafts.csswg.org/css-view-transitions-1/#snapshot-containing-block-size
+    CSSPixelSize snapshot_containing_block_size();
 
     bool has_session_history_entry_and_ready_for_navigation() const { return m_has_session_history_entry_and_ready_for_navigation; }
     void set_has_session_history_entry_and_ready_for_navigation();
@@ -291,7 +299,7 @@ private:
     RenderingThread m_rendering_thread;
 };
 
-HashTable<GC::RawRef<Navigable>>& all_navigables();
+WEB_API HashTable<GC::RawRef<Navigable>>& all_navigables();
 
 bool navigation_must_be_a_replace(URL::URL const& url, DOM::Document const& document);
 void finalize_a_cross_document_navigation(GC::Ref<Navigable>, HistoryHandlingBehavior, UserNavigationInvolvement, GC::Ref<SessionHistoryEntry>);

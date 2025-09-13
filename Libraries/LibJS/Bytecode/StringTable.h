@@ -7,9 +7,8 @@
 #pragma once
 
 #include <AK/DistinctNumeric.h>
-#include <AK/String.h>
+#include <AK/Utf16String.h>
 #include <AK/Vector.h>
-#include <LibJS/Forward.h>
 
 namespace JS::Bytecode {
 
@@ -19,20 +18,20 @@ struct StringTableIndex {
     u32 value { 0 };
 };
 
-class JS_API StringTable {
+class StringTable {
     AK_MAKE_NONMOVABLE(StringTable);
     AK_MAKE_NONCOPYABLE(StringTable);
 
 public:
     StringTable() = default;
 
-    StringTableIndex insert(String);
-    String const& get(StringTableIndex) const;
+    StringTableIndex insert(Utf16String);
+    Utf16String const& get(StringTableIndex) const;
     void dump() const;
     bool is_empty() const { return m_strings.is_empty(); }
 
 private:
-    Vector<String> m_strings;
+    Vector<Utf16String> m_strings;
 };
 
 }

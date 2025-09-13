@@ -47,7 +47,7 @@ WebIDL::ExceptionOr<String> UniversalGlobalScopeMixin::btoa(String const& data) 
     byte_string.ensure_capacity(data.bytes().size());
     for (u32 code_point : Utf8View(data)) {
         if (code_point > 0xff)
-            return WebIDL::InvalidCharacterError::create(realm, "Data contains characters outside the range U+0000 and U+00FF"_string);
+            return WebIDL::InvalidCharacterError::create(realm, "Data contains characters outside the range U+0000 and U+00FF"_utf16);
         byte_string.append(code_point);
     }
 
@@ -67,7 +67,7 @@ WebIDL::ExceptionOr<String> UniversalGlobalScopeMixin::atob(String const& data) 
 
     // 2. If decodedData is failure, then throw an "InvalidCharacterError" DOMException.
     if (decoded_data.is_error())
-        return WebIDL::InvalidCharacterError::create(realm, "Input string is not valid base64 data"_string);
+        return WebIDL::InvalidCharacterError::create(realm, "Input string is not valid base64 data"_utf16);
 
     // 3. Return decodedData.
     // decode_base64() returns a byte buffer. LibJS uses UTF-8 for strings. Use isomorphic decoding to convert bytes to UTF-8.
@@ -118,7 +118,7 @@ GC::Ref<WebIDL::CallbackType> UniversalGlobalScopeMixin::count_queuing_strategy_
         };
 
         // 2. Let F be ! CreateBuiltinFunction(steps, 0, "size", « », globalObject’s relevant Realm).
-        auto function = JS::NativeFunction::create(realm, move(steps), 0, "size"_fly_string, &realm);
+        auto function = JS::NativeFunction::create(realm, move(steps), 0, "size"_utf16_fly_string, &realm);
 
         // 3. Set globalObject’s count queuing strategy size function to a Function that represents a reference to F, with callback context equal to globalObject’s relevant settings object.
         // FIXME: Update spec comment to pass globalObject's relevant realm once Streams spec is updated for ShadowRealm spec
@@ -143,7 +143,7 @@ GC::Ref<WebIDL::CallbackType> UniversalGlobalScopeMixin::byte_length_queuing_str
         };
 
         // 2. Let F be ! CreateBuiltinFunction(steps, 1, "size", « », globalObject’s relevant Realm).
-        auto function = JS::NativeFunction::create(realm, move(steps), 1, "size"_fly_string, &realm);
+        auto function = JS::NativeFunction::create(realm, move(steps), 1, "size"_utf16_fly_string, &realm);
 
         // 3. Set globalObject’s byte length queuing strategy size function to a Function that represents a reference to F, with callback context equal to globalObject’s relevant settings object.
         // FIXME: Update spec comment to pass globalObject's relevant realm once Streams spec is updated for ShadowRealm spec

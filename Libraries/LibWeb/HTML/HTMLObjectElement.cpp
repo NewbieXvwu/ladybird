@@ -8,8 +8,8 @@
 #include <LibWeb/Bindings/HTMLObjectElementPrototype.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleComputer.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
@@ -76,22 +76,12 @@ void HTMLObjectElement::initialize(JS::Realm& realm)
 void HTMLObjectElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
+    image_provider_visit_edges(visitor);
     visitor.visit(m_resource_request);
     visitor.visit(m_document_observer);
 }
 
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-willvalidate
-bool HTMLObjectElement::will_validate()
-{
-    // The willValidate attribute's getter must return true, if this element is a candidate for constraint validation,
-    // and false otherwise (i.e., false if any conditions are barring it from constraint validation).
-    // A submittable element is a candidate for constraint validation
-    // https://html.spec.whatwg.org/multipage/forms.html#category-submit
-    // Submittable elements: button, input, select, textarea, form-associated custom elements [but not object]
-    return false;
-}
-
-void HTMLObjectElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<FlyString> const&)
+void HTMLObjectElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const&, Optional<FlyString> const&)
 {
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-object-element
     // Whenever one of the following conditions occur:
@@ -132,9 +122,9 @@ void HTMLObjectElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperti
     for_each_attribute([&](auto& name, auto& value) {
         if (name == HTML::AttributeNames::align) {
             if (value.equals_ignoring_ascii_case("center"sv))
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::CSSKeywordValue::create(CSS::Keyword::Center));
+                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::Center));
             else if (value.equals_ignoring_ascii_case("middle"sv))
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::CSSKeywordValue::create(CSS::Keyword::Middle));
+                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::Middle));
         } else if (name == HTML::AttributeNames::border) {
             if (auto parsed_value = parse_non_negative_integer(value); parsed_value.has_value()) {
                 auto width_style_value = CSS::LengthStyleValue::create(CSS::Length::make_px(*parsed_value));
@@ -143,7 +133,7 @@ void HTMLObjectElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperti
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomWidth, width_style_value);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderLeftWidth, width_style_value);
 
-                auto border_style_value = CSS::CSSKeywordValue::create(CSS::Keyword::Solid);
+                auto border_style_value = CSS::KeywordStyleValue::create(CSS::Keyword::Solid);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderTopStyle, border_style_value);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderRightStyle, border_style_value);
                 cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomStyle, border_style_value);
@@ -611,7 +601,7 @@ Optional<CSSPixelFraction> HTMLObjectElement::intrinsic_aspect_ratio() const
     return {};
 }
 
-RefPtr<Gfx::ImmutableBitmap> HTMLObjectElement::current_image_bitmap(Gfx::IntSize size) const
+RefPtr<Gfx::ImmutableBitmap> HTMLObjectElement::current_image_bitmap_sized(Gfx::IntSize size) const
 {
     if (auto image_data = this->image_data())
         return image_data->bitmap(0, size);

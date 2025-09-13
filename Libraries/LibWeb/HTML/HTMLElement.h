@@ -8,6 +8,7 @@
 
 #include <AK/Optional.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/GlobalEventHandlers.h>
 #include <LibWeb/HTML/HTMLOrSVGElement.h>
@@ -70,7 +71,7 @@ enum class IsPopover {
     No,
 };
 
-class HTMLElement
+class WEB_API HTMLElement
     : public DOM::Element
     , public HTML::GlobalEventHandlers
     , public HTML::HTMLOrSVGElement<HTMLElement> {
@@ -94,11 +95,11 @@ public:
     ContentEditableState content_editable_state() const { return m_content_editable_state; }
     WebIDL::ExceptionOr<void> set_content_editable(StringView);
 
-    String inner_text();
-    void set_inner_text(StringView);
+    Utf16String inner_text();
+    void set_inner_text(Utf16View const&);
 
-    [[nodiscard]] String outer_text();
-    WebIDL::ExceptionOr<void> set_outer_text(String const&);
+    [[nodiscard]] Utf16String outer_text();
+    WebIDL::ExceptionOr<void> set_outer_text(Utf16View const&);
 
     int offset_top() const;
     int offset_left() const;
@@ -115,6 +116,33 @@ public:
     void click();
 
     [[nodiscard]] String access_key_label() const;
+
+    bool spellcheck() const;
+    void set_spellcheck(bool);
+
+    String writing_suggestions() const;
+    void set_writing_suggestions(String const&);
+
+    enum class AutocapitalizationHint {
+        Default,
+        None,
+        Sentences,
+        Words,
+        Characters
+    };
+
+    AutocapitalizationHint own_autocapitalization_hint() const;
+    String autocapitalize() const;
+    void set_autocapitalize(String const&);
+
+    enum class AutocorrectionState {
+        On,
+        Off
+    };
+
+    AutocorrectionState used_autocorrection_state() const;
+    bool autocorrect() const;
+    void set_autocorrect(bool);
 
     bool fire_a_synthetic_pointer_event(FlyString const& type, DOM::Element& target, bool not_trusted);
 
@@ -157,10 +185,16 @@ public:
 
     bool is_inert() const { return m_inert; }
 
+    bool draggable() const;
+    void set_draggable(bool draggable) { MUST(set_attribute(HTML::AttributeNames::draggable, draggable ? "true"_string : "false"_string)); }
+
     virtual bool is_valid_invoker_command(String&) { return false; }
     virtual void invoker_command_steps(DOM::Element&, String&) { }
 
     bool is_form_associated_custom_element();
+
+    // https://html.spec.whatwg.org/multipage/rendering.html#button-layout
+    virtual bool uses_button_layout() const { return false; }
 
 protected:
     HTMLElement(DOM::Document&, DOM::QualifiedName);
@@ -195,8 +229,8 @@ private:
     virtual void did_receive_focus() override;
     virtual void did_lose_focus() override;
 
-    [[nodiscard]] String get_the_text_steps();
-    GC::Ref<DOM::DocumentFragment> rendered_text_fragment(StringView input);
+    [[nodiscard]] Utf16String get_the_text_steps();
+    GC::Ref<DOM::DocumentFragment> rendered_text_fragment(Utf16View const& input);
 
     GC::Ptr<DOM::NodeList> m_labels;
 

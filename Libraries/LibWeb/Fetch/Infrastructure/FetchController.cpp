@@ -10,6 +10,7 @@
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Infrastructure/FetchParams.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/WebIDL/DOMException.h>
 
 namespace Web::Fetch::Infrastructure {
@@ -79,7 +80,7 @@ void FetchController::abort(JS::Realm& realm, Optional<JS::Value> error)
     m_state = State::Aborted;
 
     // 2. Let fallbackError be an "AbortError" DOMException.
-    auto fallback_error = WebIDL::AbortError::create(realm, "Fetch was aborted"_string);
+    auto fallback_error = WebIDL::AbortError::create(realm, "Fetch was aborted"_utf16);
 
     // 3. Set error to fallbackError if it is not given.
     if (!error.has_value())
@@ -100,7 +101,7 @@ void FetchController::abort(JS::Realm& realm, Optional<JS::Value> error)
 JS::Value FetchController::deserialize_a_serialized_abort_reason(JS::Realm& realm)
 {
     // 1. Let fallbackError be an "AbortError" DOMException.
-    auto fallback_error = WebIDL::AbortError::create(realm, "Fetch was aborted"_string);
+    auto fallback_error = WebIDL::AbortError::create(realm, "Fetch was aborted"_utf16);
 
     // 2. Let deserializedError be fallbackError.
     JS::Value deserialized_error = fallback_error;

@@ -25,7 +25,6 @@
 #include <LibJS/Runtime/StringIterator.h>
 #include <LibJS/Runtime/StringObject.h>
 #include <LibJS/Runtime/StringPrototype.h>
-#include <LibJS/Runtime/Utf16String.h>
 #include <LibJS/Runtime/Value.h>
 #include <LibJS/Runtime/ValueInlines.h>
 #include <LibUnicode/CharacterTypes.h>
@@ -99,7 +98,7 @@ Optional<size_t> string_index_of(Utf16View const& string, Utf16View const& searc
 static bool is_string_well_formed_unicode(Utf16View string)
 {
     // OPTIMIZATION: simdutf can do this much faster.
-    return string.validate(AllowLonelySurrogates::No);
+    return string.validate();
 }
 
 // 11.1.4 CodePointAt ( string, position ), https://tc39.es/ecma262/#sec-codepointat
@@ -259,7 +258,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::at)
         return js_undefined();
 
     // 7. Return ? Get(O, ! ToString(𝔽(k))).
-    return PrimitiveString::create(vm, Utf16String::create(string->utf16_string_view().substring_view(index.value(), 1)));
+    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(index.value(), 1));
 }
 
 // 22.1.3.2 String.prototype.charAt ( pos ), https://tc39.es/ecma262/#sec-string.prototype.charat
@@ -278,7 +277,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::char_at)
         return PrimitiveString::create(vm, String {});
 
     // 6. Return the substring of S from position to position + 1.
-    return PrimitiveString::create(vm, Utf16String::create(string->utf16_string_view().substring_view(position, 1)));
+    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(position, 1));
 }
 
 // 22.1.3.3 String.prototype.charCodeAt ( pos ), https://tc39.es/ecma262/#sec-string.prototype.charcodeat
@@ -539,10 +538,10 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::locale_compare)
     auto object = TRY(require_object_coercible(vm, vm.this_value()));
 
     // 2. Let S be ? ToString(O).
-    auto string = TRY(object.to_string(vm));
+    auto string = TRY(object.to_utf16_string(vm));
 
     // 3. Let thatValue be ? ToString(that).
-    auto that_value = TRY(vm.argument(0).to_string(vm));
+    auto that_value = TRY(vm.argument(0).to_utf16_string(vm));
 
     // 4. Let collator be ? Construct(%Collator%, « locales, options »).
     auto locales = vm.argument(1);
@@ -686,7 +685,7 @@ static ThrowCompletionOr<Value> pad_string(VM& vm, GC::Ref<PrimitiveString> stri
         return string;
 
     // 5. If fillString is undefined, let filler be the String value consisting solely of the code unit 0x0020 (SPACE).
-    auto filler = Utf16String::create(Utf16Data { 0x20 });
+    auto filler = " "_utf16;
     if (!fill_string.is_undefined()) {
         // 6. Else, let filler be ? ToString(fillString).
         filler = TRY(fill_string.to_utf16_string(vm));
@@ -702,7 +701,7 @@ static ThrowCompletionOr<Value> pad_string(VM& vm, GC::Ref<PrimitiveString> stri
     StringBuilder truncated_string_filler_builder;
     auto fill_code_units = filler.length_in_code_units();
     for (size_t i = 0; i < fill_length / fill_code_units; ++i)
-        truncated_string_filler_builder.append(filler.view());
+        truncated_string_filler_builder.append(filler);
 
     // 9. Let truncatedStringFiller be the String value consisting of repeated concatenations of filler truncated to length fillLen.
     truncated_string_filler_builder.append(filler.substring_view(0, fill_length % fill_code_units));
@@ -1046,7 +1045,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::slice)
         return PrimitiveString::create(vm, String {});
 
     // 13. Return the substring of S from from to to.
-    return PrimitiveString::create(vm, Utf16String::create(string->utf16_string_view().substring_view(int_start, int_end - int_start)));
+    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(int_start, int_end - int_start));
 }
 
 // 22.1.3.23 String.prototype.split ( separator, limit ), https://tc39.es/ecma262/#sec-string.prototype.split
@@ -1127,7 +1126,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::split)
         auto segment = string->utf16_string_view().substring_view(start, position - start);
 
         // b. Append T to substrings.
-        MUST(array->create_data_property_or_throw(array_length, PrimitiveString::create(vm, Utf16String::create(segment))));
+        MUST(array->create_data_property_or_throw(array_length, PrimitiveString::create(vm, segment)));
         ++array_length;
 
         // c. If the number of elements in substrings is lim, return CreateArrayFromList(substrings).
@@ -1145,7 +1144,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::split)
     auto rest = string->utf16_string_view().substring_view(start);
 
     // 16. Append T to substrings.
-    MUST(array->create_data_property_or_throw(array_length, PrimitiveString::create(vm, Utf16String::create(rest))));
+    MUST(array->create_data_property_or_throw(array_length, PrimitiveString::create(vm, rest)));
 
     // 17. Return CreateArrayFromList(substrings).
     return array;
@@ -1237,7 +1236,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::substring)
     size_t to = max(final_start, final_end);
 
     // 10. Return the substring of S from from to to.
-    return PrimitiveString::create(vm, Utf16String::create(string->utf16_string_view().substring_view(from, to - from)));
+    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(from, to - from));
 }
 
 enum class TargetCase {
@@ -1363,44 +1362,17 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::to_well_formed)
     // 2. Let S be ? ToString(O).
     auto string = TRY(primitive_string_from(vm));
 
-    // NOTE: Rest of steps in to_well_formed below
-    return PrimitiveString::create(vm, to_well_formed_string(string->utf16_string()));
-}
-
-// https://tc39.es/ecma262/#sec-string.prototype.towellformed
-String to_well_formed_string(Utf16String const& string)
-{
     // 3. Let strLen be the length of S.
-    auto length = string.length_in_code_units();
-
     // 4. Let k be 0.
-    size_t k = 0;
-
     // 5. Let result be the empty String.
-    StringBuilder result;
-
     // 6. Repeat, while k < strLen,
-    while (k < length) {
-        // a. Let cp be CodePointAt(S, k).
-        auto code_point = JS::code_point_at(string.view(), k);
-
-        // b. If cp.[[IsUnpairedSurrogate]] is true, then
-        if (code_point.is_unpaired_surrogate) {
-            // i. Set result to the string-concatenation of result and 0xFFFD (REPLACEMENT CHARACTER).
-            result.append_code_point(0xfffd);
-        }
-        // c. Else,
-        else {
-            // i. Set result to the string-concatenation of result and UTF16EncodeCodePoint(cp.[[CodePoint]]).
-            result.append_code_point(code_point.code_point);
-        }
-
-        // d. Set k to k + cp.[[CodeUnitCount]].
-        k += code_point.code_unit_count;
-    }
-
-    // 7. Return result.
-    return MUST(result.to_string());
+    //     a. Let cp be CodePointAt(S, k).
+    //     b. If cp.[[IsUnpairedSurrogate]] is true, then
+    //         i. Set result to the string-concatenation of result and 0xFFFD (REPLACEMENT CHARACTER).
+    //     c. Else,
+    //         i. Set result to the string-concatenation of result and UTF16EncodeCodePoint(cp.[[CodePoint]]).
+    //     d. Set k to k + cp.[[CodeUnitCount]].
+    return PrimitiveString::create(vm, string->utf16_string().to_well_formed());
 }
 
 // 22.1.3.32.1 TrimString ( string, where ), https://tc39.es/ecma262/#sec-trimstring
@@ -1507,7 +1479,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::substr)
         return PrimitiveString::create(vm, String {});
 
     // 11. Return the substring of S from intStart to intEnd.
-    return PrimitiveString::create(vm, Utf16String::create(string->utf16_string_view().substring_view(int_start, int_end - int_start)));
+    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(int_start, int_end - int_start));
 }
 
 // B.2.2.2.1 CreateHTML ( string, tag, attribute, value ), https://tc39.es/ecma262/#sec-createhtml

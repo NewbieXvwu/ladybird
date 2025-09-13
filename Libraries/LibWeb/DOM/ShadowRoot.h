@@ -9,11 +9,12 @@
 #include <LibWeb/Bindings/ShadowRootPrototype.h>
 #include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/ElementByIdMap.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/WebIDL/ObservableArray.h>
 
 namespace Web::DOM {
 
-class ShadowRoot final : public DocumentFragment {
+class WEB_API ShadowRoot final : public DocumentFragment {
     WEB_PLATFORM_OBJECT(ShadowRoot, DocumentFragment);
     GC_DECLARE_ALLOCATOR(ShadowRoot);
 
@@ -50,6 +51,8 @@ public:
     WebIDL::ExceptionOr<void> set_html_unsafe(StringView);
 
     WebIDL::ExceptionOr<String> get_html(GetHTMLOptions const&) const;
+
+    GC::Ptr<Element> active_element();
 
     CSS::StyleSheetList& style_sheets();
     CSS::StyleSheetList const& style_sheets() const;

@@ -15,6 +15,7 @@
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleSheet.h>
 #include <LibWeb/DOM/Node.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/WebIDL/Types.h>
 
 namespace Web::CSS {
@@ -29,7 +30,7 @@ struct CSSStyleSheetInit {
 };
 
 // https://drafts.csswg.org/cssom-1/#cssstylesheet
-class CSSStyleSheet final : public StyleSheet {
+class WEB_API CSSStyleSheet final : public StyleSheet {
     WEB_PLATFORM_OBJECT(CSSStyleSheet, StyleSheet);
     GC_DECLARE_ALLOCATOR(CSSStyleSheet);
 
@@ -91,7 +92,7 @@ public:
     void set_source_text(String);
     Optional<String> source_text(Badge<DOM::Document>) const;
 
-    void add_associated_font_loader(WeakPtr<FontLoader const> font_loader)
+    void add_associated_font_loader(GC::Ref<FontLoader const> font_loader)
     {
         m_associated_font_loaders.append(font_loader);
     }
@@ -126,7 +127,7 @@ private:
     bool m_disallow_modification { false };
     Optional<bool> m_did_match;
 
-    Vector<WeakPtr<FontLoader const>> m_associated_font_loaders;
+    Vector<GC::Ptr<FontLoader const>> m_associated_font_loaders;
 };
 
 }

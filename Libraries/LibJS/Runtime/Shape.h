@@ -11,6 +11,7 @@
 #include <AK/StringView.h>
 #include <AK/WeakPtr.h>
 #include <AK/Weakable.h>
+#include <LibJS/Export.h>
 #include <LibJS/Forward.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibJS/Runtime/PropertyAttributes.h>
@@ -34,7 +35,7 @@ struct TransitionKey {
     }
 };
 
-class JS_API PrototypeChainValidity final : public Cell
+class PrototypeChainValidity final : public Cell
     , public Weakable<PrototypeChainValidity> {
     GC_CELL(PrototypeChainValidity, Cell);
     GC_DECLARE_ALLOCATOR(PrototypeChainValidity);
@@ -149,7 +150,7 @@ private:
 
 template<>
 struct AK::Traits<JS::TransitionKey> : public DefaultTraits<JS::TransitionKey> {
-    static unsigned hash(const JS::TransitionKey& key)
+    static unsigned hash(JS::TransitionKey const& key)
     {
         return pair_int_hash(key.attributes.bits(), Traits<JS::PropertyKey>::hash(key.property_key));
     }

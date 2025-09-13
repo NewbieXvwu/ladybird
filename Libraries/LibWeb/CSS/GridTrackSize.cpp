@@ -11,41 +11,26 @@
 
 namespace Web::CSS {
 
-GridSize::GridSize(Type type, LengthPercentage length_percentage)
-    : m_value(move(length_percentage))
-{
-    VERIFY(type == Type::FitContent);
-    m_type = type;
-}
-
-GridSize::GridSize(LengthPercentage length_percentage)
-    : m_type(Type::LengthPercentage)
-    , m_value(move(length_percentage))
+GridSize::GridSize(Size size)
+    : m_value(move(size))
 {
 }
 
 GridSize::GridSize(Flex flex_factor)
-    : m_type(Type::FlexibleLength)
-    , m_value(move(flex_factor))
+    : m_value(move(flex_factor))
 {
-}
-
-GridSize::GridSize(Type type)
-    : m_value { Empty() }
-{
-    VERIFY(type == Type::MinContent || type == Type::MaxContent);
-    m_type = type;
 }
 
 GridSize::~GridSize() = default;
 
 bool GridSize::is_auto(Layout::AvailableSize const& available_size) const
 {
-    if (m_type == Type::LengthPercentage) {
-        auto& length_percentage = m_value.get<LengthPercentage>();
-        if (length_percentage.contains_percentage())
+    if (auto const* size = m_value.get_pointer<Size>()) {
+        if (size->is_auto())
+            return true;
+        if (size->contains_percentage())
             return !available_size.is_definite();
-        return length_percentage.is_auto();
+        return false;
     }
 
     return false;
@@ -53,69 +38,91 @@ bool GridSize::is_auto(Layout::AvailableSize const& available_size) const
 
 bool GridSize::is_fixed(Layout::AvailableSize const& available_size) const
 {
-    if (m_type == Type::LengthPercentage) {
-        auto& length_percentage = m_value.get<LengthPercentage>();
-        if (length_percentage.contains_percentage())
+    if (auto const* size = m_value.get_pointer<Size>()) {
+        if (!size->is_length_percentage())
+            return false;
+        if (size->contains_percentage())
             return available_size.is_definite();
-        return !length_percentage.is_auto();
+        return true;
     }
+
+    return false;
+}
+
+bool GridSize::is_flexible_length() const
+{
+    return m_value.has<Flex>();
+}
+
+bool GridSize::is_fit_content() const
+{
+    if (auto const* size = m_value.get_pointer<Size>())
+        return size->is_fit_content();
+
+    return false;
+}
+
+bool GridSize::is_max_content() const
+{
+    if (auto const* size = m_value.get_pointer<Size>())
+        return size->is_max_content();
+
+    return false;
+}
+
+bool GridSize::is_min_content() const
+{
+    if (auto const* size = m_value.get_pointer<Size>())
+        return size->is_min_content();
 
     return false;
 }
 
 bool GridSize::is_intrinsic(Layout::AvailableSize const& available_size) const
 {
-    return is_auto(available_size) || is_max_content() || is_min_content() || is_fit_content();
+    return m_value.visit(
+        [&available_size](Size const& size) {
+            return size.is_auto()
+                || size.is_max_content()
+                || size.is_min_content()
+                || size.is_fit_content()
+                || (size.contains_percentage() && !available_size.is_definite());
+        },
+        [](Flex const&) {
+            return false;
+        });
+}
+
+bool GridSize::is_definite() const
+{
+    return m_value.visit(
+        [](Size const& size) { return size.is_length_percentage(); },
+        [](Flex const&) { return false; });
 }
 
 GridSize GridSize::make_auto()
 {
-    return GridSize(CSS::Length::make_auto());
+    return GridSize(Size::make_auto());
 }
 
-Size GridSize::css_size() const
+String GridSize::to_string(SerializationMode mode) const
 {
-    VERIFY(m_type == Type::LengthPercentage || m_type == Type::FitContent);
-    auto& length_percentage = m_value.get<LengthPercentage>();
-    if (length_percentage.is_auto())
-        return CSS::Size::make_auto();
-    if (length_percentage.is_length())
-        return CSS::Size::make_length(length_percentage.length());
-    if (length_percentage.is_calculated())
-        return CSS::Size::make_calculated(length_percentage.calculated());
-    return CSS::Size::make_percentage(length_percentage.percentage());
-}
-
-String GridSize::to_string() const
-{
-    switch (m_type) {
-    case Type::LengthPercentage:
-        return m_value.get<LengthPercentage>().to_string();
-    case Type::FitContent:
-        return MUST(String::formatted("fit-content({})", m_value.get<LengthPercentage>().to_string()));
-    case Type::FlexibleLength:
-        return m_value.get<Flex>().to_string();
-    case Type::MaxContent:
-        return "max-content"_string;
-    case Type::MinContent:
-        return "min-content"_string;
-    }
-    VERIFY_NOT_REACHED();
+    return m_value.visit([mode](auto const& it) { return it.to_string(mode); });
 }
 
 GridMinMax::GridMinMax(GridSize min_grid_size, GridSize max_grid_size)
-    : m_min_grid_size(min_grid_size)
-    , m_max_grid_size(max_grid_size)
+    : m_min_grid_size(move(min_grid_size))
+    , m_max_grid_size(move(max_grid_size))
 {
 }
 
-String GridMinMax::to_string() const
+String GridMinMax::to_string(SerializationMode mode) const
 {
     StringBuilder builder;
     builder.append("minmax("sv);
-    builder.appendff("{}", m_min_grid_size.to_string());
+    builder.appendff("{}", m_min_grid_size.to_string(mode));
     builder.append(", "sv);
-    builder.appendff("{}", m_max_grid_size.to_string());
+    builder.appendff("{}", m_max_grid_size.to_string(mode));
     builder.append(")"sv);
     return MUST(builder.to_string());
 }
@@ -127,7 +134,7 @@ GridRepeat::GridRepeat(GridTrackSizeList&& grid_track_size_list, GridRepeatParam
 {
 }
 
-String GridRepeat::to_string() const
+String GridRepeat::to_string(SerializationMode mode) const
 {
     StringBuilder builder;
     builder.append("repeat("sv);
@@ -145,7 +152,7 @@ String GridRepeat::to_string() const
         VERIFY_NOT_REACHED();
     }
     builder.append(", "sv);
-    builder.appendff("{}", m_grid_track_size_list.to_string());
+    builder.appendff("{}", m_grid_track_size_list.to_string(mode));
     builder.append(")"sv);
     return MUST(builder.to_string());
 }
@@ -155,10 +162,10 @@ ExplicitGridTrack::ExplicitGridTrack(Variant<GridRepeat, GridMinMax, GridSize>&&
 {
 }
 
-String ExplicitGridTrack::to_string() const
+String ExplicitGridTrack::to_string(SerializationMode mode) const
 {
-    return m_value.visit([](auto const& track) {
-        return track.to_string();
+    return m_value.visit([&mode](auto const& track) {
+        return track.to_string(mode);
     });
 }
 
@@ -180,7 +187,7 @@ GridTrackSizeList GridTrackSizeList::make_none()
     return GridTrackSizeList();
 }
 
-String GridTrackSizeList::to_string() const
+String GridTrackSizeList::to_string(SerializationMode mode) const
 {
     if (m_list.is_empty())
         return "none"_string;
@@ -190,7 +197,7 @@ String GridTrackSizeList::to_string() const
         if (!builder.is_empty())
             builder.append(" "sv);
         if (line_definition_or_name.has<ExplicitGridTrack>()) {
-            builder.append(line_definition_or_name.get<ExplicitGridTrack>().to_string());
+            builder.append(line_definition_or_name.get<ExplicitGridTrack>().to_string(mode));
         } else if (line_definition_or_name.has<GridLineNames>()) {
             auto const& line_names = line_definition_or_name.get<GridLineNames>();
             builder.append(line_names.to_string());

@@ -14,6 +14,7 @@
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/IntersectionObserver/IntersectionObserver.h>
+#include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Page/Page.h>
 
 namespace Web::IntersectionObserver {
@@ -31,13 +32,13 @@ WebIDL::ExceptionOr<GC::Ref<IntersectionObserver>> IntersectionObserver::constru
     // 3. Attempt to parse a margin from options.rootMargin. If a list is returned, set this’s internal [[rootMargin]] slot to that. Otherwise, throw a SyntaxError exception.
     auto root_margin = parse_a_margin(realm, options.root_margin);
     if (!root_margin.has_value()) {
-        return WebIDL::SyntaxError::create(realm, "IntersectionObserver: Cannot parse root margin as a margin."_string);
+        return WebIDL::SyntaxError::create(realm, "IntersectionObserver: Cannot parse root margin as a margin."_utf16);
     }
 
     // 4. Attempt to parse a margin from options.scrollMargin. If a list is returned, set this’s internal [[scrollMargin]] slot to that. Otherwise, throw a SyntaxError exception.
     auto scroll_margin = parse_a_margin(realm, options.scroll_margin);
     if (!scroll_margin.has_value()) {
-        return WebIDL::SyntaxError::create(realm, "IntersectionObserver: Cannot parse scroll margin as a margin."_string);
+        return WebIDL::SyntaxError::create(realm, "IntersectionObserver: Cannot parse scroll margin as a margin."_utf16);
     }
 
     // 5. Let thresholds be a list equal to options.threshold.
@@ -208,13 +209,13 @@ String IntersectionObserver::root_margin() const
     // IntersectionObserver constructor. If no rootMargin was passed to the IntersectionObserver
     // constructor, the value of this attribute is "0px 0px 0px 0px".
     StringBuilder builder;
-    builder.append(m_root_margin[0].to_string());
+    builder.append(m_root_margin[0].to_string(CSS::SerializationMode::ResolvedValue));
     builder.append(' ');
-    builder.append(m_root_margin[1].to_string());
+    builder.append(m_root_margin[1].to_string(CSS::SerializationMode::ResolvedValue));
     builder.append(' ');
-    builder.append(m_root_margin[2].to_string());
+    builder.append(m_root_margin[2].to_string(CSS::SerializationMode::ResolvedValue));
     builder.append(' ');
-    builder.append(m_root_margin[3].to_string());
+    builder.append(m_root_margin[3].to_string(CSS::SerializationMode::ResolvedValue));
     return builder.to_string().value();
 }
 
@@ -227,13 +228,13 @@ String IntersectionObserver::scroll_margin() const
     // IntersectionObserver constructor. If no scrollMargin was passed to the IntersectionObserver
     // constructor, the value of this attribute is "0px 0px 0px 0px".
     StringBuilder builder;
-    builder.append(m_scroll_margin[0].to_string());
+    builder.append(m_scroll_margin[0].to_string(CSS::SerializationMode::ResolvedValue));
     builder.append(' ');
-    builder.append(m_scroll_margin[1].to_string());
+    builder.append(m_scroll_margin[1].to_string(CSS::SerializationMode::ResolvedValue));
     builder.append(' ');
-    builder.append(m_scroll_margin[2].to_string());
+    builder.append(m_scroll_margin[2].to_string(CSS::SerializationMode::ResolvedValue));
     builder.append(' ');
-    builder.append(m_scroll_margin[3].to_string());
+    builder.append(m_scroll_margin[3].to_string(CSS::SerializationMode::ResolvedValue));
     return builder.to_string().value();
 }
 
@@ -298,12 +299,13 @@ CSSPixelRect IntersectionObserver::root_intersection_rectangle() const
         document = &intersection_root.get<GC::Root<DOM::Element>>().cell()->document();
     }
     if (m_document.has_value() && document->origin().is_same_origin(m_document->origin())) {
-        auto layout_node = intersection_root.visit([&](auto& elem) { return static_cast<GC::Root<DOM::Node>>(*elem)->layout_node(); });
-        rect.inflate(
-            m_root_margin[0].to_px(*layout_node, rect.height()),
-            m_root_margin[1].to_px(*layout_node, rect.width()),
-            m_root_margin[2].to_px(*layout_node, rect.height()),
-            m_root_margin[3].to_px(*layout_node, rect.width()));
+        if (auto layout_node = intersection_root.visit([&](auto& node) -> GC::Ptr<Layout::Node> { return node->layout_node(); })) {
+            rect.inflate(
+                m_root_margin[0].to_px(*layout_node, rect.height()),
+                m_root_margin[1].to_px(*layout_node, rect.width()),
+                m_root_margin[2].to_px(*layout_node, rect.height()),
+                m_root_margin[3].to_px(*layout_node, rect.width()));
+        }
     }
 
     return rect;
@@ -340,7 +342,7 @@ Optional<Vector<CSS::LengthPercentage>> IntersectionObserver::parse_a_margin(JS:
     for (auto const& token : tokens) {
         // If token is an absolute length dimension token, replace it with a an equivalent pixel length.
         if (token.is(CSS::Parser::Token::Type::Dimension)) {
-            auto length = CSS::Length(token.token().dimension_value(), CSS::Length::unit_from_name(token.token().dimension_unit()).value());
+            auto length = CSS::Length(token.token().dimension_value(), CSS::string_to_length_unit(token.token().dimension_unit()).value());
             if (length.is_absolute()) {
                 length.absolute_length_to_px();
                 tokens_length_percentage.append(length);

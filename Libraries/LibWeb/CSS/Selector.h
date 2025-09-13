@@ -31,7 +31,7 @@ public:
             FlyString value {};
         };
 
-        using Value = Variant<Empty, PTNameSelector>;
+        using Value = Variant<Empty, PTNameSelector, NonnullRefPtr<Selector>>;
 
         explicit PseudoElementSelector(PseudoElement type, Value value = {})
             : m_type(type)
@@ -60,10 +60,13 @@ public:
 
         PTNameSelector const& pt_name_selector() const { return m_value.get<PTNameSelector>(); }
 
+        // NOTE: This can't (currently) be a CompoundSelector due to cyclic dependencies.
+        Selector const& compound_selector() const { return m_value.get<NonnullRefPtr<Selector>>(); }
+
     private:
         PseudoElement m_type;
         String m_name;
-        Variant<Empty, PTNameSelector> m_value;
+        Value m_value;
     };
 
     struct SimpleSelector {
@@ -83,47 +86,15 @@ public:
             int step_size { 0 }; // "A"
             int offset = { 0 };  // "B"
 
-            // https://www.w3.org/TR/css-syntax-3/#serializing-anb
-            String serialize() const
-            {
-                // 1. If A is zero, return the serialization of B.
-                if (step_size == 0) {
-                    return String::number(offset);
-                }
-
-                // 2. Otherwise, let result initially be an empty string.
-                StringBuilder result;
-
-                // 3.
-                // - A is 1: Append "n" to result.
-                if (step_size == 1)
-                    result.append('n');
-                // - A is -1: Append "-n" to result.
-                else if (step_size == -1)
-                    result.append("-n"sv);
-                // - A is non-zero: Serialize A and append it to result, then append "n" to result.
-                else if (step_size != 0)
-                    result.appendff("{}n", step_size);
-
-                // 4.
-                // - B is greater than zero: Append "+" to result, then append the serialization of B to result.
-                if (offset > 0)
-                    result.appendff("+{}", offset);
-                // - B is less than zero: Append the serialization of B to result.
-                if (offset < 0)
-                    result.appendff("{}", offset);
-
-                // 5. Return result.
-                return MUST(result.to_string());
-            }
+            bool matches(int index) const;
+            String serialize() const;
         };
 
         struct PseudoClassSelector {
             PseudoClass type;
 
-            // FIXME: We don't need this field on every single SimpleSelector, but it's also annoying to malloc it somewhere.
-            // Only used when "pseudo_class" is "NthChild" or "NthLastChild".
-            ANPlusBPattern nth_child_pattern {};
+            // Used for the :nth-*() pseudo-classes
+            ANPlusBPattern an_plus_b_pattern {};
 
             // FIXME: This would make more sense as part of SelectorList but that's currently a `using`
             bool is_forgiving { false };
@@ -138,6 +109,9 @@ public:
                 FlyString string_value;
             };
             Optional<Ident> ident {};
+
+            // Used by :heading()
+            Vector<i64> levels {};
         };
 
         struct Name {
@@ -253,6 +227,8 @@ public:
     bool can_use_ancestor_filter() const { return m_can_use_ancestor_filter; }
 
     size_t sibling_invalidation_distance() const;
+
+    bool is_slotted() const { return m_pseudo_element.has_value() && m_pseudo_element->type() == PseudoElement::Slotted; }
 
 private:
     explicit Selector(Vector<CompoundSelector>&&);

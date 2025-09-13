@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2025, Luke Wilde <luke@ladybird.org>
+ * Copyright (c) 2025, Kenneth Myhra <kennethmyhra@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -14,7 +15,11 @@
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/Fetch/Infrastructure/URL.h>
+#include <LibWeb/HTML/Window.h>
+#include <LibWeb/HTML/WorkerGlobalScope.h>
 #include <LibWeb/Infra/Strings.h>
+#include <LibWeb/SRI/SRI.h>
 #include <LibWeb/WebAssembly/WebAssembly.h>
 
 namespace Web::ContentSecurityPolicy {
@@ -128,6 +133,66 @@ Directives::Directive::Result should_request_be_blocked_by_content_security_poli
 
     // 4. Return result.
     return result;
+}
+
+// https://w3c.github.io/webappsec-subresource-integrity/#should-request-be-blocked-by-integrity-policy
+Directives::Directive::Result should_request_be_blocked_by_integrity_policy(GC::Ref<Fetch::Infrastructure::Request> request)
+{
+    VERIFY(request->policy_container().has<GC::Ref<HTML::PolicyContainer>>());
+
+    // 1. Let policyContainer be request’s policy container.
+    auto const& policy_container = request->policy_container().get<GC::Ref<HTML::PolicyContainer>>();
+
+    // 2. Let parsedMetadata be the result of calling parse metadata with request’s integrity metadata.
+    auto parsed_metadata = MUST(SRI::parse_metadata(request->integrity_metadata()));
+
+    // 3. If parsedMetadata is not the empty set and request’s mode is either "cors" or "same-origin", return "Allowed".
+    if (!parsed_metadata.is_empty() && (request->mode() == Fetch::Infrastructure::Request::Mode::CORS || request->mode() == Fetch::Infrastructure::Request::Mode::SameOrigin))
+        return Directives::Directive::Result::Allowed;
+
+    // 4. If request’s url is local, return "Allowed".
+    if (Fetch::Infrastructure::is_local_url(request->url()))
+        return Directives::Directive::Result::Allowed;
+
+    // 5. Let policy be policyContainer’s integrity policy.
+    auto const& policy = policy_container->integrity_policy;
+
+    // 6. Let reportPolicy be policyContainer’s report only integrity policy.
+    auto const& report_policy = policy_container->report_only_integrity_policy;
+
+    // 7. If both policy and reportPolicy are empty integrity policys, return "Allowed".
+    if (policy.is_empty() && report_policy.is_empty())
+        return Directives::Directive::Result::Allowed;
+
+    // 8. Let global be request’s client’s global object.
+    auto& global = request->client()->global_object();
+
+    // 9. If global is not a Window nor a WorkerGlobalScope, return "Allowed".
+    if (!is<HTML::Window>(global) && !is<HTML::WorkerGlobalScope>(global))
+        return Directives::Directive::Result::Allowed;
+
+    // 10. Let block be a boolean, initially false.
+    bool block = false;
+
+    // FIXME: 11. Let reportBlock be a boolean, initially false.
+    [[maybe_unused]] auto report_block = false;
+
+    // 12. If policy’s sources contains "inline" and policy’s blocked destinations contains request’s destination, set block to true.
+    if (policy.sources.contains_slow("inline"sv)
+        && request->destination().has_value()
+        && policy.blocked_destinations.contains_slow(request->destination().value()))
+        block = true;
+
+    // 13. If reportPolicy’s sources contains "inline" and reportPolicy’s blocked destinations contains request’s destination, set reportBlock to true.
+    if (report_policy.sources.contains_slow("inline"sv)
+        && request->destination().has_value()
+        && report_policy.blocked_destinations.contains_slow(request->destination().value()))
+        report_block = true;
+
+    // FIXME: 14. If block is true or reportBlock is true, then report violation with request, block, reportBlock, policy and reportPolicy.
+
+    // 15. If block is true, then return "Blocked"; otherwise "Allowed".
+    return block ? Directives::Directive::Result::Blocked : Directives::Directive::Result::Allowed;
 }
 
 // https://w3c.github.io/webappsec-csp/#should-block-response
@@ -554,6 +619,54 @@ JS::ThrowCompletionOr<void> ensure_csp_does_not_block_wasm_byte_compilation(JS::
     }
 
     return {};
+}
+
+// https://w3c.github.io/webappsec-csp/#allow-base-for-document
+Directives::Directive::Result is_base_allowed_for_document(JS::Realm& realm, URL::URL const& base, GC::Ref<DOM::Document const> document)
+{
+    // 1. For each policy of document’s global object’s csp list:
+    auto csp_list = PolicyList::from_object(document->realm().global_object());
+    VERIFY(csp_list);
+    for (auto const policy : csp_list->policies()) {
+        // 1. Let source list be null.
+        // NOTE: Not necessary.
+
+        // 2. If a directive whose name is "base-uri" is present in policy’s directive set, set source list to that
+        //    directive’s value.
+        auto maybe_base_uri = policy->directives().find_if([](auto const& directive) {
+            return directive->name() == Directives::Names::BaseUri;
+        });
+
+        // 3. If source list is null, skip to the next policy.
+        if (maybe_base_uri.is_end())
+            continue;
+
+        auto const& source_list = (*maybe_base_uri)->value();
+
+        // 4. If the result of executing § 6.7.2.7 Does url match source list in origin with redirect count? on base,
+        //    source list, policy’s self-origin, and 0 is "Does Not Match":
+        // Spec Note: We compare against the fallback base URL in order to deal correctly with things like an iframe
+        //            srcdoc Document which has been sandboxed into an opaque origin.
+        if (Directives::does_url_match_source_list_in_origin_with_redirect_count(base, source_list, policy->self_origin(), 0) == Directives::MatchResult::DoesNotMatch) {
+            // 1. Let violation be the result of executing § 2.4.1 Create a violation object for global, policy, and
+            //    directive on document’s global object, policy, and "base-uri".
+            auto base_uri_string = Directives::Names::BaseUri.to_string();
+            auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(realm, document->window(), policy, base_uri_string);
+
+            // 2. Set violation’s resource to "inline".
+            violation->set_resource(Violation::Resource::Inline);
+
+            // 3. Execute § 5.5 Report a violation on violation.
+            violation->report_a_violation(realm);
+
+            // 4. If policy’s disposition is "enforce", return "Blocked".
+            if (policy->disposition() == Policy::Disposition::Enforce)
+                return Directives::Directive::Result::Blocked;
+        }
+    }
+
+    // 2. Return "Allowed".
+    return Directives::Directive::Result::Allowed;
 }
 
 }

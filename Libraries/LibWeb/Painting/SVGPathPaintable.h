@@ -7,12 +7,13 @@
 #pragma once
 
 #include <LibGfx/Path.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Layout/SVGGraphicsBox.h>
 #include <LibWeb/Painting/SVGGraphicsPaintable.h>
 
 namespace Web::Painting {
 
-class SVGPathPaintable final : public SVGGraphicsPaintable {
+class WEB_API SVGPathPaintable final : public SVGGraphicsPaintable {
     GC_CELL(SVGPathPaintable, SVGGraphicsPaintable);
     GC_DECLARE_ALLOCATOR(SVGPathPaintable);
 
@@ -21,7 +22,7 @@ public:
 
     virtual TraversalDecision hit_test(CSSPixelPoint, HitTestType, Function<TraversalDecision(HitTestResult)> const& callback) const override;
 
-    virtual void paint(PaintContext&, PaintPhase) const override;
+    virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
 
     Layout::SVGGraphicsBox const& layout_box() const;
 

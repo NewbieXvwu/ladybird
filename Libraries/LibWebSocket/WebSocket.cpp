@@ -97,17 +97,27 @@ void WebSocket::send(Message const& message)
 
 void WebSocket::close(u16 code, ByteString const& message)
 {
+    // Section 3.1: close(code, reason): https://websockets.spec.whatwg.org/#the-websocket-interface
     VERIFY(m_impl);
 
     switch (m_state) {
+    case InternalState::Closed:
+    case InternalState::Closing:
+        // "If this’s ready state is CLOSING (2) or CLOSED (3)
+        // Do nothing."
+        break;
     case InternalState::NotStarted:
     case InternalState::EstablishingProtocolConnection:
     case InternalState::SendingClientHandshake:
     case InternalState::WaitingForServerHandshake:
+        // "If the WebSocket connection is not yet established [WSP]
+        // Fail the WebSocket connection and set this’s ready state to CLOSING (2)."
         // FIXME: Fail the connection.
         set_state(InternalState::Closing);
         break;
     case InternalState::Open: {
+        // "If the WebSocket closing handshake has not yet been started [WSP]
+        // Start the WebSocket closing handshake and set this’s ready state to CLOSING (2)."
         auto message_bytes = message.bytes();
         auto close_payload = ByteBuffer::create_uninitialized(message_bytes.size() + 2).release_value_but_fixme_should_propagate_errors(); // FIXME: Handle possible OOM situation.
         close_payload.overwrite(0, (u8*)&code, 2);
@@ -117,6 +127,9 @@ void WebSocket::close(u16 code, ByteString const& message)
         break;
     }
     default:
+        // "Otherwise
+        // Set this’s ready state to CLOSING (2)."
+        set_state(InternalState::Closing);
         break;
     }
 }
@@ -151,7 +164,10 @@ void WebSocket::drain_read()
         }
         auto bytes = result.release_value();
         m_buffered_data.append(bytes.data(), bytes.size());
-        read_frame();
+        do {
+            if (auto maybe_error = read_frame(); maybe_error.is_error())
+                break;
+        } while (!m_buffered_data.is_empty());
     } break;
     case InternalState::Closed:
     case InternalState::Errored: {
@@ -388,7 +404,7 @@ void WebSocket::read_server_handshake()
     // If needed, we will keep reading the header on the next drain_read call
 }
 
-void WebSocket::read_frame()
+ErrorOr<void> WebSocket::read_frame()
 {
     VERIFY(m_impl);
     VERIFY(m_state == WebSocket::InternalState::Open || m_state == WebSocket::InternalState::Closing);
@@ -408,7 +424,7 @@ void WebSocket::read_frame()
         set_state(WebSocket::InternalState::Closed);
         notify_close(m_last_close_code, m_last_close_message, true);
         discard_connection();
-        return;
+        return AK::Error::from_errno(ECONNABORTED);
     }
 
     auto op_code = (WebSocket::OpCode)(head_bytes[0] & 0x0f);
@@ -422,7 +438,7 @@ void WebSocket::read_frame()
         // A code of 127 means that the next 8 bytes contains the payload length
         auto actual_bytes = get_buffered_bytes(8);
         if (actual_bytes.is_null())
-            return;
+            return AK::Error::from_errno(EAGAIN);
         u64 full_payload_length = (u64)((u64)(actual_bytes[0] & 0xff) << 56)
             | (u64)((u64)(actual_bytes[1] & 0xff) << 48)
             | (u64)((u64)(actual_bytes[2] & 0xff) << 40)
@@ -437,7 +453,7 @@ void WebSocket::read_frame()
         // A code of 126 means that the next 2 bytes contains the payload length
         auto actual_bytes = get_buffered_bytes(2);
         if (actual_bytes.is_null())
-            return;
+            return AK::Error::from_errno(EAGAIN);
         payload_length = (size_t)((size_t)(actual_bytes[0] & 0xff) << 8)
             | (size_t)((size_t)(actual_bytes[1] & 0xff) << 0);
     } else {
@@ -454,7 +470,7 @@ void WebSocket::read_frame()
     if (is_masked) {
         auto masking_key_data = get_buffered_bytes(4);
         if (masking_key_data.is_null())
-            return;
+            return AK::Error::from_errno(EAGAIN);
         masking_key[0] = masking_key_data[0];
         masking_key[1] = masking_key_data[1];
         masking_key[2] = masking_key_data[2];
@@ -466,7 +482,7 @@ void WebSocket::read_frame()
     while (read_length < payload_length) {
         auto payload_part = get_buffered_bytes(payload_length - read_length);
         if (payload_part.is_null())
-            return;
+            return AK::Error::from_errno(EAGAIN);
         // We read at most "actual_length - read" bytes, so this is safe to do.
         payload.overwrite(read_length, payload_part.data(), payload_part.size());
         read_length += payload_part.size();
@@ -496,16 +512,16 @@ void WebSocket::read_frame()
             m_last_close_message = {};
         }
         close(m_last_close_code, m_last_close_message);
-        return;
+        return {};
     }
     if (op_code == WebSocket::OpCode::Ping) {
         // Immediately send a pong frame as a reply, with the given payload.
         send_frame(WebSocket::OpCode::Pong, payload, true);
-        return;
+        return {};
     }
     if (op_code == WebSocket::OpCode::Pong) {
         // We can safely ignore the pong
-        return;
+        return {};
     }
     if (!is_final_frame) {
         if (op_code != WebSocket::OpCode::Continuation) {
@@ -514,7 +530,7 @@ void WebSocket::read_frame()
         }
         // First and next fragmented message
         m_fragmented_data_buffer.append(payload.data(), payload_length);
-        return;
+        return {};
     }
     if (is_final_frame && op_code == WebSocket::OpCode::Continuation) {
         // Last fragmented message
@@ -526,13 +542,14 @@ void WebSocket::read_frame()
     }
     if (op_code == WebSocket::OpCode::Text) {
         notify_message(Message(move(payload), true));
-        return;
+        return {};
     }
     if (op_code == WebSocket::OpCode::Binary) {
         notify_message(Message(move(payload), false));
-        return;
+        return {};
     }
     dbgln("Websocket: Found unknown opcode {}", (u8)op_code);
+    return {};
 }
 
 void WebSocket::send_frame(WebSocket::OpCode op_code, ReadonlyBytes payload, bool is_final)

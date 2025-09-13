@@ -58,7 +58,7 @@ struct LayoutState {
     struct UsedValues {
         NodeWithStyle const& node() const { return *m_node; }
         NodeWithStyle& node() { return const_cast<NodeWithStyle&>(*m_node); }
-        void set_node(NodeWithStyle&, UsedValues const* containing_block_used_values);
+        void set_node(NodeWithStyle const&, UsedValues const* containing_block_used_values);
 
         UsedValues const* containing_block_used_values() const { return m_containing_block_used_values; }
 
@@ -157,10 +157,9 @@ struct LayoutState {
         void set_static_position_rect(StaticPositionRect const& static_position_rect) { m_static_position_rect = static_position_rect; }
         CSSPixelPoint static_position() const
         {
-            CSSPixelSize size;
-            size.set_width(content_width() + padding_left + padding_right + border_left + border_right + margin_left + margin_right);
-            size.set_height(content_height() + padding_top + padding_bottom + border_top + border_bottom + margin_top + margin_bottom);
-            return m_static_position_rect->aligned_position_for_box_with_size(size);
+            if (!m_static_position_rect.has_value())
+                return {};
+            return m_static_position_rect->aligned_position_for_box_with_size({ margin_box_width(), margin_box_height() });
         }
 
     private:

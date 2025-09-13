@@ -6,9 +6,13 @@
 
 #include <LibWeb/CSS/Parser/ArbitrarySubstitutionFunctions.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/Parser/Syntax.h>
+#include <LibWeb/CSS/Parser/SyntaxParsing.h>
 #include <LibWeb/CSS/PropertyName.h>
 #include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnresolvedStyleValue.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 
 namespace Web::CSS::Parser {
@@ -61,6 +65,8 @@ Optional<ArbitrarySubstitutionFunction> to_arbitrary_substitution_function(FlySt
 {
     if (name.equals_ignoring_ascii_case("attr"sv))
         return ArbitrarySubstitutionFunction::Attr;
+    if (name.equals_ignoring_ascii_case("env"sv))
+        return ArbitrarySubstitutionFunction::Env;
     if (name.equals_ignoring_ascii_case("var"sv))
         return ArbitrarySubstitutionFunction::Var;
     return {};
@@ -85,12 +91,16 @@ static Vector<ComponentValue> replace_an_attr_function(DOM::AbstractElement& ele
     auto const second_argument = arguments.get(1);
 
     FlyString attribute_name;
-    Optional<FlyString> maybe_syntax = {};
+
+    struct RawString { };
+    Variant<Empty, NonnullOwnPtr<SyntaxNode>, RawString> syntax;
+    Optional<FlyString> unit_name;
+
     auto failure = [&] -> Vector<ComponentValue> {
         // This is step 6, but defined here for convenience.
 
         // 1. If second arg is null, and syntax was omitted, return an empty CSS <string>.
-        if (!second_argument.has_value() && !maybe_syntax.has_value())
+        if (!second_argument.has_value() && syntax.has<Empty>())
             return { Token::create_string({}) };
 
         // 2. If second arg is null, return the guaranteed-invalid value.
@@ -115,22 +125,24 @@ static Vector<ComponentValue> replace_an_attr_function(DOM::AbstractElement& ele
     first_argument_tokens.discard_whitespace();
 
     // <attr-type> = type( <syntax> ) | raw-string | <attr-unit>
-    // FIXME: Support type(<syntax>)
-    bool is_dimension_unit = false;
     if (first_argument_tokens.next_token().is(Token::Type::Ident)) {
         auto const& syntax_ident = first_argument_tokens.next_token().token().ident();
         if (syntax_ident.equals_ignoring_ascii_case("raw-string"sv)) {
-            maybe_syntax = first_argument_tokens.consume_a_token().token().ident();
+            first_argument_tokens.discard_a_token(); // raw-string
+            syntax = RawString {};
+        } else if (syntax_ident == "%"sv
+            || dimension_for_unit(syntax_ident).has_value()) {
+            syntax = TypeSyntaxNode::create("number"_fly_string).release_nonnull<SyntaxNode>();
+            unit_name = first_argument_tokens.consume_a_token().token().ident();
         } else {
-            is_dimension_unit = syntax_ident == "%"sv
-                || Angle::unit_from_name(syntax_ident).has_value()
-                || Flex::unit_from_name(syntax_ident).has_value()
-                || Frequency::unit_from_name(syntax_ident).has_value()
-                || Length::unit_from_name(syntax_ident).has_value()
-                || Resolution::unit_from_name(syntax_ident).has_value()
-                || Time::unit_from_name(syntax_ident).has_value();
-            if (is_dimension_unit)
-                maybe_syntax = first_argument_tokens.consume_a_token().token().ident();
+            return failure();
+        }
+    } else if (first_argument_tokens.next_token().is_function("type"sv)) {
+        auto const& type_function = first_argument_tokens.consume_a_token().function();
+        if (auto parsed_syntax = parse_as_syntax(type_function.value)) {
+            syntax = parsed_syntax.release_nonnull();
+        } else {
+            return failure();
         }
     }
     first_argument_tokens.discard_whitespace();
@@ -145,32 +157,101 @@ static Vector<ComponentValue> replace_an_attr_function(DOM::AbstractElement& ele
 
     // 4. If syntax is null or the keyword raw-string, return a CSS <string> whose value is attr value.
     // NOTE: No parsing or modification of any kind is performed on the value.
-    if (!maybe_syntax.has_value() || maybe_syntax->equals_ignoring_ascii_case("raw-string"sv))
+    if (syntax.visit(
+            [](Empty) { return true; },
+            [](RawString) { return true; },
+            [](auto&) { return false; })) {
         return { Token::create_string(*attribute_value) };
-    auto syntax = maybe_syntax.release_value();
+    }
 
     // 5. Substitute arbitrary substitution functions in attr value, with «"attribute", attr name» as the substitution
-    //    context, then parse with a attr value, with syntax and el. If that succeeds, return the result; otherwise,
-    //    jump to the last step (labeled FAILURE).
+    //    context, then parse with a <syntax> attr value, with syntax and el. If that succeeds, return the result;
+    //    otherwise, jump to the last step (labeled FAILURE).
     auto parser = Parser::create(ParsingParams { element.element().document() }, attribute_value.value());
     auto unsubstituted_values = parser.parse_as_list_of_component_values();
-    auto substituted_values = substitute_arbitrary_substitution_functions(element, guarded_contexts, unsubstituted_values, SubstitutionContext { SubstitutionContext::DependencyType::Attribute, attribute_name.to_string() });
+    auto substituted_values = substitute_arbitrary_substitution_functions(element, guarded_contexts, unsubstituted_values,
+        SubstitutionContext { SubstitutionContext::DependencyType::Attribute, attribute_name.to_string() });
 
-    // FIXME: Parse using the syntax. For now we just handle `<attr-unit>` here.
-    TokenStream value_tokens { substituted_values };
-    value_tokens.discard_whitespace();
-    auto const& component_value = value_tokens.consume_a_token();
-    value_tokens.discard_whitespace();
-    if (value_tokens.has_next_token())
+    auto parsed_value = parse_with_a_syntax(ParsingParams { element.document() }, substituted_values, *syntax.get<NonnullOwnPtr<SyntaxNode>>(), element);
+    if (parsed_value->is_guaranteed_invalid())
         return failure();
 
-    if (component_value.is(Token::Type::Number) && is_dimension_unit)
-        return { Token::create_dimension(component_value.token().number_value(), syntax) };
+    if (unit_name.has_value()) {
+        // https://drafts.csswg.org/css-values-5/#ref-for-typedef-attr-type%E2%91%A0
+        // If given as an <attr-unit> value, the value is first parsed as if type(<number>) was specified, then the
+        // resulting numeric value is turned into a dimension with the corresponding unit, or a percentage if % was
+        // given. Values that fail to parse as a <number> trigger fallback.
 
-    return failure();
+        // FIXME: The spec is ambiguous about what we should do for non-number-literals.
+        //        Chromium treats them as invalid, so copy that for now.
+        //        Spec issue: https://github.com/w3c/csswg-drafts/issues/12479
+        if (!parsed_value->is_number())
+            return failure();
+        return { Token::create_dimension(parsed_value->as_number().number(), unit_name.release_value()) };
+    }
+
+    return parsed_value->tokenize();
 
     // 6. FAILURE:
     // NB: Step 6 is a lambda defined at the top of the function.
+}
+
+// https://drafts.csswg.org/css-env/#substitute-an-env
+static Vector<ComponentValue> replace_an_env_function(DOM::AbstractElement& element, GuardedSubstitutionContexts& guarded_contexts, ArbitrarySubstitutionFunctionArguments const& arguments)
+{
+    // AD-HOC: env() is not defined as an ASF (and was defined before the ASF concept was), but behaves a lot like one.
+    // So, this is a combination of the spec's "substitute an env()" algorithm linked above, and the "replace a FOO function()" algorithms.
+
+    auto const& first_argument = arguments.first();
+    auto const second_argument = arguments.get(1);
+
+    // AD-HOC: Substitute ASFs in the first argument.
+    auto substituted_first_argument = substitute_arbitrary_substitution_functions(element, guarded_contexts, first_argument);
+
+    // AD-HOC: Parse the arguments.
+    // env() = env( <custom-ident> <integer [0,∞]>*, <declaration-value>? )
+    TokenStream first_argument_tokens { substituted_first_argument };
+    first_argument_tokens.discard_whitespace();
+    auto& name_token = first_argument_tokens.consume_a_token();
+    if (!name_token.is(Token::Type::Ident))
+        return { ComponentValue { GuaranteedInvalidValue {} } };
+    auto& name = name_token.token().ident();
+    first_argument_tokens.discard_whitespace();
+
+    Vector<i64> indices;
+    // FIXME: Are non-literal <integer>s allowed here?
+    while (first_argument_tokens.has_next_token()) {
+        auto& maybe_integer = first_argument_tokens.consume_a_token();
+        if (!maybe_integer.is(Token::Type::Number))
+            return { ComponentValue { GuaranteedInvalidValue {} } };
+        auto& number = maybe_integer.token().number();
+        if (number.is_integer() && number.integer_value() >= 0)
+            indices.append(number.integer_value());
+        else
+            return { ComponentValue { GuaranteedInvalidValue {} } };
+        first_argument_tokens.discard_whitespace();
+    }
+
+    // 1. If the name provided by the first argument of the env() function is a recognized environment variable name,
+    //    the number of supplied integers matches the number of dimensions of the environment variable referenced by
+    //    that name, and values of the indices correspond to a known sub-value, replace the env() function by the value
+    //    of the named environment variable.
+    if (auto environment_variable = environment_variable_from_string(name);
+        environment_variable.has_value() && indices.size() == environment_variable_dimension_count(*environment_variable)) {
+
+        auto result = element.document().environment_variable_value(*environment_variable, indices);
+        if (result.has_value())
+            return result.release_value();
+    }
+
+    // 2. Otherwise, if the env() function has a fallback value as its second argument, replace the env() function by
+    //    the fallback value. If there are any env() references in the fallback, substitute them as well.
+    // AD-HOC: Substitute all ASFs in the result.
+    if (second_argument.has_value())
+        return substitute_arbitrary_substitution_functions(element, guarded_contexts, second_argument.value());
+
+    // 3. Otherwise, the property or descriptor containing the env() function is invalid at computed-value time.
+    return { ComponentValue { GuaranteedInvalidValue {} } };
 }
 
 // https://drafts.csswg.org/css-variables-1/#replace-a-var-function
@@ -320,10 +401,8 @@ Vector<ComponentValue> substitute_arbitrary_substitution_functions(DOM::Abstract
     Vector<ComponentValue> new_values;
     TokenStream source { values };
     auto maybe_error = substitute_arbitrary_substitution_functions_step_2(element, guarded_contexts, source, new_values);
-    if (maybe_error.is_error()) {
-        dbgln_if(CSS_PARSER_DEBUG, "{} (context? {})", maybe_error.release_error(), context.map([](auto& it) { return it.to_string(); }));
+    if (maybe_error.is_error())
         return { ComponentValue { GuaranteedInvalidValue {} } };
-    }
 
     // 3. If context is marked as a cyclic substitution context, return the guaranteed-invalid value.
     // NOTE: Nested arbitrary substitution functions may have marked context as cyclic in step 2.
@@ -363,6 +442,11 @@ Optional<ArbitrarySubstitutionFunctionArguments> parse_according_to_argument_gra
         // https://drafts.csswg.org/css-values-5/#attr-notation
         // <attr-args> = attr( <declaration-value> , <declaration-value>? )
         return parse_declaration_value_then_optional_declaration_value(values);
+    case ArbitrarySubstitutionFunction::Env:
+        // https://drafts.csswg.org/css-env/#env-function
+        // AD-HOC: This doesn't have an argument-grammar definition.
+        //         However, it follows the same format of "some CVs, then an optional comma and a fallback".
+        return parse_declaration_value_then_optional_declaration_value(values);
     case ArbitrarySubstitutionFunction::Var:
         // https://drafts.csswg.org/css-variables/#funcdef-var
         // <var-args> = var( <declaration-value> , <declaration-value>? )
@@ -377,6 +461,8 @@ Vector<ComponentValue> replace_an_arbitrary_substitution_function(DOM::AbstractE
     switch (function) {
     case ArbitrarySubstitutionFunction::Attr:
         return replace_an_attr_function(element, guarded_contexts, arguments);
+    case ArbitrarySubstitutionFunction::Env:
+        return replace_an_env_function(element, guarded_contexts, arguments);
     case ArbitrarySubstitutionFunction::Var:
         return replace_a_var_function(element, guarded_contexts, arguments);
     }

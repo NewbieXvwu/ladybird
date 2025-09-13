@@ -11,8 +11,8 @@
 #include <LibWeb/Bindings/HTMLCanvasElementPrototype.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleComputer.h>
-#include <LibWeb/CSS/StyleValues/CSSKeywordValue.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RatioStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/DOM/Document.h>
@@ -90,7 +90,7 @@ void HTMLCanvasElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperti
         // then the user agent is expected to use the parsed integers as a presentational hint for the 'aspect-ratio' property of the form auto w / h.
         cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::AspectRatio,
             CSS::StyleValueList::create(CSS::StyleValueVector {
-                                            CSS::CSSKeywordValue::create(CSS::Keyword::Auto),
+                                            CSS::KeywordStyleValue::create(CSS::Keyword::Auto),
                                             CSS::RatioStyleValue::create(CSS::Ratio { static_cast<double>(w.value()), static_cast<double>(h.value()) }) },
 
                 CSS::StyleValueList::Separator::Space));
@@ -331,27 +331,12 @@ String HTMLCanvasElement::to_data_url(StringView type, JS::Value js_quality)
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-canvas-toblob
 WebIDL::ExceptionOr<void> HTMLCanvasElement::to_blob(GC::Ref<WebIDL::CallbackType> callback, StringView type, JS::Value js_quality)
 {
-    // It is possible the canvas doesn't have a associated bitmap so create one
-    allocate_painting_surface_if_needed();
-    auto surface = this->surface();
-    auto size = bitmap_size_for_canvas();
-    if (!surface && !size.is_empty()) {
-        // If the context is not initialized yet, we need to allocate transparent surface for serialization
-        auto skia_backend_context = navigable()->traversable_navigable()->skia_backend_context();
-        surface = Gfx::PaintingSurface::create_with_size(skia_backend_context, size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied);
-    }
-
     // FIXME: 1. If this canvas element's bitmap's origin-clean flag is set to false, then throw a "SecurityError" DOMException.
 
     // 2. Let result be null.
-    RefPtr<Gfx::Bitmap> bitmap_result;
-
     // 3. If this canvas element's bitmap has pixels (i.e., neither its horizontal dimension nor its vertical dimension is zero),
     //    then set result to a copy of this canvas element's bitmap.
-    if (surface) {
-        bitmap_result = MUST(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, surface->size()));
-        surface->read_into_bitmap(*bitmap_result);
-    }
+    auto bitmap_result = get_bitmap_from_surface();
 
     Optional<double> quality = js_quality.is_number() ? js_quality.as_double() : Optional<double>();
 
@@ -381,6 +366,26 @@ WebIDL::ExceptionOr<void> HTMLCanvasElement::to_blob(GC::Ref<WebIDL::CallbackTyp
         });
     }));
     return {};
+}
+
+RefPtr<Gfx::Bitmap> HTMLCanvasElement::get_bitmap_from_surface()
+{
+    // It is possible the canvas doesn't have an associated bitmap so create one
+    allocate_painting_surface_if_needed();
+    auto surface = this->surface();
+    if (auto const size = bitmap_size_for_canvas(); !surface && !size.is_empty()) {
+        // If the context is not initialized yet, we need to allocate transparent surface for serialization
+        auto const skia_backend_context = navigable()->traversable_navigable()->skia_backend_context();
+        surface = Gfx::PaintingSurface::create_with_size(skia_backend_context, size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied);
+    }
+
+    RefPtr<Gfx::Bitmap> bitmap;
+    if (surface) {
+        bitmap = MUST(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, surface->size()));
+        surface->read_into_bitmap(*bitmap);
+    }
+
+    return bitmap;
 }
 
 void HTMLCanvasElement::present()
