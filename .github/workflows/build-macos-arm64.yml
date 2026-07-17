@@ -14,20 +14,28 @@ jobs:
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '26.6.0'
+          xcode-version: '16.2'
 
       - name: Install dependencies
         run: |
           brew install autoconf autoconf-archive automake ccache \
             coreutils llvm@21 nasm ninja pkg-config qt unzip wabt
 
-      - name: Build Ladybird
+      - name: Set up vcpkg
+        run: ./Meta/ladybird.py vcpkg
+
+      - name: Configure with M5 optimization
         run: |
-          export CC="$(brew --prefix llvm@21)/bin/clang"
-          export CXX="$(brew --prefix llvm@21)/bin/clang++"
-          export CFLAGS="-mcpu=apple-m5 -O3"
-          export CXXFLAGS="-mcpu=apple-m5 -O3"
-          ./Meta/ladybird.py build ladybird
+          cmake --preset Release \
+            -S . -B Build/release \
+            -DCMAKE_C_COMPILER="$(brew --prefix llvm@21)/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$(brew --prefix llvm@21)/bin/clang++" \
+            -DLADYBIRD_GUI_FRAMEWORK=Qt \
+            -DCMAKE_C_FLAGS="-mcpu=apple-m5 -O3" \
+            -DCMAKE_CXX_FLAGS="-mcpu=apple-m5 -O3"
+
+      - name: Build
+        run: cmake --build Build/release
 
       - name: Package
         run: |
