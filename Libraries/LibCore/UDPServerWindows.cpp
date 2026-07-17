@@ -18,8 +18,7 @@ namespace Core {
 UDPServer::UDPServer()
 {
     m_fd = MUST(Core::System::socket(AF_INET, SOCK_DGRAM, 0));
-    int option = 1;
-    MUST(Core::System::ioctl(m_fd, FIONBIO, option));
+    MUST(Core::System::set_socket_blocking(m_fd, false));
     auto const ret = SetHandleInformation(to_handle(m_fd), HANDLE_FLAG_INHERIT, 0);
     VERIFY(ret != 0);
 }
@@ -56,15 +55,21 @@ ErrorOr<ByteBuffer> UDPServer::receive(size_t size, sockaddr_in& in)
 {
     auto buf = TRY(ByteBuffer::create_uninitialized(size));
     socklen_t in_len = sizeof(in);
-    auto bytes_received = TRY(Core::System::recvfrom(m_fd, buf.data(), size, 0, (sockaddr*)&in, &in_len));
+    auto bytes_received = TRY(Core::System::recvfrom(m_fd, buf, 0, (sockaddr*)&in, &in_len));
     buf.resize(bytes_received);
     return buf;
+}
+
+ErrorOr<ByteBuffer> UDPServer::receive(size_t size)
+{
+    struct sockaddr_in saddr;
+    return receive(size, saddr);
 }
 
 ErrorOr<size_t> UDPServer::send(ReadonlyBytes buffer, sockaddr_in const& to)
 {
     socklen_t to_len = sizeof(to);
-    return TRY(Core::System::sendto(m_fd, buffer.data(), buffer.size(), 0, (sockaddr const*)&to, to_len));
+    return Core::System::sendto(m_fd, buffer, 0, (sockaddr const*)&to, to_len);
 }
 
 Optional<IPv4Address> UDPServer::local_address() const

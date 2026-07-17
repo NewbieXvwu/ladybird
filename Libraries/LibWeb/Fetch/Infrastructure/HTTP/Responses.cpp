@@ -9,11 +9,14 @@
 #include <LibGC/Heap.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/VM.h>
+#include <LibRequests/Request.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/Infrastructure/FetchParams.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/CORS.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/MimeSniff/MimeType.h>
 
 namespace Web::Fetch::Infrastructure {
 
@@ -23,22 +26,21 @@ GC_DEFINE_ALLOCATOR(CORSFilteredResponse);
 GC_DEFINE_ALLOCATOR(OpaqueFilteredResponse);
 GC_DEFINE_ALLOCATOR(OpaqueRedirectFilteredResponse);
 
-Response::Response(GC::Ref<HeaderList> header_list)
-    : m_header_list(header_list)
-    , m_response_time(MonotonicTime::now())
+GC::Ref<Response> Response::create(JS::VM& vm)
+{
+    return vm.heap().allocate<Response>(HTTP::HeaderList::create());
+}
+
+Response::Response(NonnullRefPtr<HTTP::HeaderList> header_list)
+    : m_header_list(move(header_list))
+    , m_monotonic_response_time(MonotonicTime::now())
 {
 }
 
 void Response::visit_edges(JS::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_header_list);
     visitor.visit(m_body);
-}
-
-GC::Ref<Response> Response::create(JS::VM& vm)
-{
-    return vm.heap().allocate<Response>(HeaderList::create(vm));
 }
 
 // https://fetch.spec.whatwg.org/#ref-for-concept-network-error%E2%91%A3
@@ -104,6 +106,29 @@ bool Response::is_network_error() const
     return true;
 }
 
+void Response::release_request_for_transfer() const
+{
+    if (m_request_server_request.has_value() && m_request_server_request->request)
+        m_request_server_request->request->release_for_transfer();
+}
+
+void Response::resume_body_delivery() const
+{
+    release_request_for_transfer();
+    if (m_request_server_request.has_value()) {
+        if (m_request_server_request->request)
+            m_request_server_request->request->resume_body_delivery();
+    }
+}
+
+void Response::resume_body_delivery_up_to(size_t byte_count) const
+{
+    if (m_request_server_request.has_value()) {
+        if (m_request_server_request->request)
+            m_request_server_request->request->resume_body_delivery_up_to(byte_count);
+    }
+}
+
 // https://fetch.spec.whatwg.org/#concept-response-url
 Optional<URL::URL const&> Response::url() const
 {
@@ -125,16 +150,14 @@ ErrorOr<Optional<URL::URL>> Response::location_url(Optional<String> const& reque
         return Optional<URL::URL> {};
 
     // 2. Let location be the result of extracting header list values given `Location` and response’s header list.
-    auto location_values_or_failure = extract_header_list_values("Location"sv.bytes(), m_header_list);
-    if (location_values_or_failure.has<Infrastructure::ExtractHeaderParseFailure>() || location_values_or_failure.has<Empty>())
-        return Optional<URL::URL> {};
+    auto location_values_or_failure = m_header_list->extract_header_list_values("Location"sv);
+    auto const* location_values = location_values_or_failure.get_pointer<Vector<ByteString>>();
 
-    auto const& location_values = location_values_or_failure.get<Vector<ByteBuffer>>();
-    if (location_values.size() != 1)
-        return Optional<URL::URL> {};
+    if (!location_values || location_values->size() != 1)
+        return OptionalNone {};
 
     // 3. If location is a header value, then set location to the result of parsing location with response’s URL.
-    auto location = DOMURL::parse(location_values.first(), url());
+    auto location = DOMURL::parse_from_byte_string(location_values->first(), url());
     if (!location.has_value())
         return Error::from_string_literal("Invalid 'Location' header URL");
 
@@ -181,6 +204,12 @@ GC::Ref<Response> Response::clone(JS::Realm& realm) const
     new_response->set_request_includes_credentials(m_request_includes_credentials);
     new_response->set_timing_allow_passed(m_timing_allow_passed);
     new_response->set_body_info(m_body_info);
+    new_response->set_javascript_bytecode_cache(m_javascript_bytecode_cache);
+    new_response->set_javascript_bytecode_cache_vary_key(m_javascript_bytecode_cache_vary_key);
+    if (m_request_server_request.has_value())
+        new_response->set_request_server_request(*m_request_server_request);
+    if (m_javascript_bytecode_cache_memory_cache_request_headers.has_value())
+        new_response->set_javascript_bytecode_cache_memory_cache_request_headers(HTTP::HeaderList::create((*m_javascript_bytecode_cache_memory_cache_request_headers)->headers()));
     // FIXME: service worker timing info
 
     // 3. If response’s body is non-null, then set newResponse’s body to the result of cloning response’s body.
@@ -222,128 +251,8 @@ bool Response::is_cors_cross_origin() const
     return type() == Type::Opaque || type() == Type::OpaqueRedirect;
 }
 
-// https://fetch.spec.whatwg.org/#concept-fresh-response
-bool Response::is_fresh() const
-{
-    // A fresh response is a response whose current age is within its freshness lifetime.
-    return current_age() < freshness_lifetime();
-}
-
-// https://fetch.spec.whatwg.org/#concept-stale-while-revalidate-response
-bool Response::is_stale_while_revalidate() const
-{
-    // A stale-while-revalidate response is a response that is not a fresh response and whose current age is within the stale-while-revalidate lifetime.
-    return !is_fresh() && current_age() < stale_while_revalidate_lifetime();
-}
-
-// https://fetch.spec.whatwg.org/#concept-stale-response
-bool Response::is_stale() const
-{
-    // A stale response is a response that is not a fresh response or a stale-while-revalidate response.
-    return !is_fresh() && !is_stale_while_revalidate();
-}
-
-// https://httpwg.org/specs/rfc9111.html#age.calculations
-u64 Response::current_age() const
-{
-    // The term "age_value" denotes the value of the Age header field (Section 5.1), in a form appropriate for arithmetic operation; or 0, if not available.
-    Optional<AK::Duration> age;
-    if (auto const age_header = header_list()->get("Age"sv.bytes()); age_header.has_value()) {
-        if (auto converted_age = StringView { *age_header }.to_number<u64>(); converted_age.has_value())
-            age = AK::Duration::from_seconds(converted_age.value());
-    }
-
-    auto const age_value = age.value_or(AK::Duration::from_seconds(0));
-
-    // The term "date_value" denotes the value of the Date header field, in a form appropriate for arithmetic operations. See Section 6.6.1 of [HTTP] for the definition of the Date header field and for requirements regarding responses without it.
-    // FIXME: Do we have a parser for HTTP-date?
-    auto const date_value = MonotonicTime::now() - AK::Duration::from_seconds(5);
-
-    // The term "now" means the current value of this implementation's clock (Section 5.6.7 of [HTTP]).
-    auto const now = MonotonicTime::now();
-
-    // The value of the clock at the time of the request that resulted in the stored response.
-    // FIXME: Let's get the correct time.
-    auto const request_time = MonotonicTime::now() - AK::Duration::from_seconds(5);
-
-    // The value of the clock at the time the response was received.
-    auto const response_time = m_response_time;
-
-    auto const apparent_age = max(0, (response_time - date_value).to_seconds());
-
-    auto const response_delay = response_time - request_time;
-    auto const corrected_age_value = age_value + response_delay;
-
-    auto const corrected_initial_age = max(apparent_age, corrected_age_value.to_seconds());
-
-    auto const resident_time = (now - response_time).to_seconds();
-    return corrected_initial_age + resident_time;
-}
-
-// https://httpwg.org/specs/rfc9111.html#calculating.freshness.lifetime
-u64 Response::freshness_lifetime() const
-{
-    auto const elem = header_list()->get_decode_and_split("Cache-Control"sv.bytes());
-    if (!elem.has_value())
-        return 0;
-
-    // FIXME: If the cache is shared and the s-maxage response directive (Section 5.2.2.10) is present, use its value
-
-    // If the max-age response directive (Section 5.2.2.1) is present, use its value, or
-    for (auto const& directive : *elem) {
-        if (directive.starts_with_bytes("max-age"sv)) {
-            auto equal_offset = directive.find_byte_offset('=');
-            if (!equal_offset.has_value()) {
-                dbgln("Bogus directive: '{}'", directive);
-                continue;
-            }
-            auto const value_string = directive.bytes_as_string_view().substring_view(equal_offset.value() + 1);
-            auto maybe_value = value_string.to_number<u64>();
-            if (!maybe_value.has_value()) {
-                dbgln("Bogus directive: '{}'", directive);
-                continue;
-            }
-            return maybe_value.value();
-        }
-    }
-
-    // FIXME: If the Expires response header field (Section 5.3) is present, use its value minus the value of the Date response header field (using the time the message was received if it is not present, as per Section 6.6.1 of [HTTP]), or
-    // FIXME: Otherwise, no explicit expiration time is present in the response. A heuristic freshness lifetime might be applicable; see Section 4.2.2.
-
-    return 0;
-}
-
-// https://httpwg.org/specs/rfc5861.html#n-the-stale-while-revalidate-cache-control-extension
-u64 Response::stale_while_revalidate_lifetime() const
-{
-    auto const elem = header_list()->get_decode_and_split("Cache-Control"sv.bytes());
-    if (!elem.has_value())
-        return 0;
-
-    for (auto const& directive : *elem) {
-        if (directive.starts_with_bytes("stale-while-revalidate"sv)) {
-            auto equal_offset = directive.find_byte_offset('=');
-            if (!equal_offset.has_value()) {
-                dbgln("Bogus directive: '{}'", directive);
-                continue;
-            }
-            auto const value_string = directive.bytes_as_string_view().substring_view(equal_offset.value() + 1);
-            auto maybe_value = value_string.to_number<u64>();
-            if (!maybe_value.has_value()) {
-                dbgln("Bogus directive: '{}'", directive);
-                continue;
-            }
-            return maybe_value.value();
-        }
-    }
-
-    return 0;
-}
-
-// Non-standard
-
-FilteredResponse::FilteredResponse(GC::Ref<Response> internal_response, GC::Ref<HeaderList> header_list)
-    : Response(header_list)
+FilteredResponse::FilteredResponse(GC::Ref<Response> internal_response, NonnullRefPtr<HTTP::HeaderList> header_list)
+    : Response(move(header_list))
     , m_internal_response(internal_response)
 {
 }
@@ -362,25 +271,20 @@ GC::Ref<BasicFilteredResponse> BasicFilteredResponse::create(JS::VM& vm, GC::Ref
 {
     // A basic filtered response is a filtered response whose type is "basic" and header list excludes
     // any headers in internal response’s header list whose name is a forbidden response-header name.
-    auto header_list = HeaderList::create(vm);
+    auto header_list = HTTP::HeaderList::create();
+
     for (auto const& header : *internal_response->header_list()) {
-        if (!is_forbidden_response_header_name(header.name))
+        if (!HTTP::is_forbidden_response_header_name(header.name))
             header_list->append(header);
     }
 
-    return vm.heap().allocate<BasicFilteredResponse>(internal_response, header_list);
+    return vm.heap().allocate<BasicFilteredResponse>(internal_response, move(header_list));
 }
 
-BasicFilteredResponse::BasicFilteredResponse(GC::Ref<Response> internal_response, GC::Ref<HeaderList> header_list)
+BasicFilteredResponse::BasicFilteredResponse(GC::Ref<Response> internal_response, NonnullRefPtr<HTTP::HeaderList> header_list)
     : FilteredResponse(internal_response, header_list)
-    , m_header_list(header_list)
+    , m_header_list(move(header_list))
 {
-}
-
-void BasicFilteredResponse::visit_edges(JS::Cell::Visitor& visitor)
-{
-    Base::visit_edges(visitor);
-    visitor.visit(m_header_list);
 }
 
 GC::Ref<CORSFilteredResponse> CORSFilteredResponse::create(JS::VM& vm, GC::Ref<Response> internal_response)
@@ -388,11 +292,13 @@ GC::Ref<CORSFilteredResponse> CORSFilteredResponse::create(JS::VM& vm, GC::Ref<R
     // A CORS filtered response is a filtered response whose type is "cors" and header list excludes
     // any headers in internal response’s header list whose name is not a CORS-safelisted response-header
     // name, given internal response’s CORS-exposed header-name list.
-    Vector<ReadonlyBytes> cors_exposed_header_name_list;
-    for (auto const& header_name : internal_response->cors_exposed_header_name_list())
-        cors_exposed_header_name_list.append(header_name.span());
+    Vector<StringView> cors_exposed_header_name_list;
+    cors_exposed_header_name_list.ensure_capacity(internal_response->cors_exposed_header_name_list().size());
 
-    auto header_list = HeaderList::create(vm);
+    for (auto const& header_name : internal_response->cors_exposed_header_name_list())
+        cors_exposed_header_name_list.unchecked_append(header_name);
+
+    auto header_list = HTTP::HeaderList::create();
     for (auto const& header : *internal_response->header_list()) {
         if (is_cors_safelisted_response_header_name(header.name, cors_exposed_header_name_list))
             header_list->append(header);
@@ -401,54 +307,36 @@ GC::Ref<CORSFilteredResponse> CORSFilteredResponse::create(JS::VM& vm, GC::Ref<R
     return vm.heap().allocate<CORSFilteredResponse>(internal_response, header_list);
 }
 
-CORSFilteredResponse::CORSFilteredResponse(GC::Ref<Response> internal_response, GC::Ref<HeaderList> header_list)
+CORSFilteredResponse::CORSFilteredResponse(GC::Ref<Response> internal_response, NonnullRefPtr<HTTP::HeaderList> header_list)
     : FilteredResponse(internal_response, header_list)
-    , m_header_list(header_list)
+    , m_header_list(move(header_list))
 {
-}
-
-void CORSFilteredResponse::visit_edges(JS::Cell::Visitor& visitor)
-{
-    Base::visit_edges(visitor);
-    visitor.visit(m_header_list);
 }
 
 GC::Ref<OpaqueFilteredResponse> OpaqueFilteredResponse::create(JS::VM& vm, GC::Ref<Response> internal_response)
 {
     // An opaque filtered response is a filtered response whose type is "opaque", URL list is the empty list,
     // status is 0, status message is the empty byte sequence, header list is empty, and body is null.
-    return vm.heap().allocate<OpaqueFilteredResponse>(internal_response, HeaderList::create(vm));
+    return vm.heap().allocate<OpaqueFilteredResponse>(internal_response, HTTP::HeaderList::create());
 }
 
-OpaqueFilteredResponse::OpaqueFilteredResponse(GC::Ref<Response> internal_response, GC::Ref<HeaderList> header_list)
+OpaqueFilteredResponse::OpaqueFilteredResponse(GC::Ref<Response> internal_response, NonnullRefPtr<HTTP::HeaderList> header_list)
     : FilteredResponse(internal_response, header_list)
-    , m_header_list(header_list)
+    , m_header_list(move(header_list))
 {
-}
-
-void OpaqueFilteredResponse::visit_edges(JS::Cell::Visitor& visitor)
-{
-    Base::visit_edges(visitor);
-    visitor.visit(m_header_list);
 }
 
 GC::Ref<OpaqueRedirectFilteredResponse> OpaqueRedirectFilteredResponse::create(JS::VM& vm, GC::Ref<Response> internal_response)
 {
     // An opaque-redirect filtered response is a filtered response whose type is "opaqueredirect",
     // status is 0, status message is the empty byte sequence, header list is empty, and body is null.
-    return vm.heap().allocate<OpaqueRedirectFilteredResponse>(internal_response, HeaderList::create(vm));
+    return vm.heap().allocate<OpaqueRedirectFilteredResponse>(internal_response, HTTP::HeaderList::create());
 }
 
-OpaqueRedirectFilteredResponse::OpaqueRedirectFilteredResponse(GC::Ref<Response> internal_response, GC::Ref<HeaderList> header_list)
+OpaqueRedirectFilteredResponse::OpaqueRedirectFilteredResponse(GC::Ref<Response> internal_response, NonnullRefPtr<HTTP::HeaderList> header_list)
     : FilteredResponse(internal_response, header_list)
-    , m_header_list(header_list)
+    , m_header_list(move(header_list))
 {
-}
-
-void OpaqueRedirectFilteredResponse::visit_edges(JS::Cell::Visitor& visitor)
-{
-    Base::visit_edges(visitor);
-    visitor.visit(m_header_list);
 }
 
 }

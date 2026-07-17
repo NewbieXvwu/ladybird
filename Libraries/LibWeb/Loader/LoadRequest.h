@@ -7,30 +7,26 @@
 #pragma once
 
 #include <AK/ByteBuffer.h>
-#include <AK/HashMap.h>
 #include <AK/Time.h>
 #include <LibCore/ElapsedTimer.h>
+#include <LibHTTP/Cache/CacheMode.h>
+#include <LibHTTP/Cookie/IncludeCredentials.h>
+#include <LibHTTP/HeaderList.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Export.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/ReferrerPolicy/ReferrerPolicy.h>
 
 namespace Web {
 
 class WEB_API LoadRequest {
 public:
-    LoadRequest();
-
-    static LoadRequest create_for_url_on_page(URL::URL const& url, Page* page);
-
-    // The main resource is the file being displayed in a frame (unlike subresources like images, scripts, etc.)
-    // If a main resource fails with an HTTP error, we may still display its content if non-empty, e.g a custom 404 page.
-    bool is_main_resource() const { return m_main_resource; }
-    void set_main_resource(bool b) { m_main_resource = b; }
-
-    bool is_valid() const { return m_url.has_value(); }
-
-    int id() const { return m_id; }
+    explicit LoadRequest(NonnullRefPtr<HTTP::HeaderList> headers)
+        : m_headers(move(headers))
+    {
+    }
 
     Optional<URL::URL> const& url() const { return m_url; }
     void set_url(Optional<URL::URL> url) { m_url = move(url); }
@@ -41,58 +37,57 @@ public:
     ByteBuffer const& body() const { return m_body; }
     void set_body(ByteBuffer body) { m_body = move(body); }
 
+    HTTP::CacheMode cache_mode() const { return m_cache_mode; }
+    void set_cache_mode(HTTP::CacheMode cache_mode) { m_cache_mode = cache_mode; }
+
+    HTTP::Cookie::IncludeCredentials include_credentials() const { return m_include_credentials; }
+    void set_include_credentials(HTTP::Cookie::IncludeCredentials include_credentials) { m_include_credentials = include_credentials; }
+
+    Optional<Fetch::Infrastructure::Request::InitiatorType> const& initiator_type() const { return m_initiator_type; }
+    void set_initiator_type(Optional<Fetch::Infrastructure::Request::InitiatorType> initiator_type) { m_initiator_type = move(initiator_type); }
+
+    Optional<Fetch::Infrastructure::Request::Destination> const& destination() const { return m_destination; }
+    void set_destination(Optional<Fetch::Infrastructure::Request::Destination> destination) { m_destination = move(destination); }
+
+    Fetch::Infrastructure::Request::Mode request_mode() const { return m_request_mode; }
+    void set_request_mode(Fetch::Infrastructure::Request::Mode request_mode) { m_request_mode = request_mode; }
+
+    ReferrerPolicy::ReferrerPolicy referrer_policy() const { return m_referrer_policy; }
+    void set_referrer_policy(ReferrerPolicy::ReferrerPolicy referrer_policy) { m_referrer_policy = referrer_policy; }
+
+    bool is_navigation_request() const { return m_is_navigation_request; }
+    void set_is_navigation_request(bool is_navigation_request) { m_is_navigation_request = is_navigation_request; }
+
+    Fetch::Infrastructure::Request::Priority priority() const { return m_priority; }
+    void set_priority(Fetch::Infrastructure::Request::Priority priority) { m_priority = priority; }
+
+    Optional<URL::URL> const& source_url() const { return m_source_url; }
+    void set_source_url(URL::URL source_url) { m_source_url = move(source_url); }
+
     void start_timer() { m_load_timer.start(); }
     AK::Duration load_time() const { return m_load_timer.elapsed_time(); }
 
     GC::Ptr<Page> page() const { return m_page.ptr(); }
     void set_page(Page& page) { m_page = page; }
 
-    unsigned hash() const
-    {
-        auto body_hash = string_hash((char const*)m_body.data(), m_body.size());
-        auto body_and_headers_hash = pair_int_hash(body_hash, m_headers.hash());
-        auto url_hash = m_url.has_value() ? m_url->to_byte_string().hash() : 0;
-        auto url_and_method_hash = pair_int_hash(url_hash, m_method.hash());
-        return pair_int_hash(body_and_headers_hash, url_and_method_hash);
-    }
-
-    bool operator==(LoadRequest const& other) const
-    {
-        if (m_headers.size() != other.m_headers.size())
-            return false;
-        for (auto const& it : m_headers) {
-            auto jt = other.m_headers.find(it.key);
-            if (jt == other.m_headers.end())
-                return false;
-            if (it.value != jt->value)
-                return false;
-        }
-        return m_url == other.m_url && m_method == other.m_method && m_body == other.m_body;
-    }
-
-    void set_header(ByteString const& name, ByteString const& value) { m_headers.set(name, value); }
-    ByteString header(ByteString const& name) const { return m_headers.get(name).value_or({}); }
-
-    HashMap<ByteString, ByteString, CaseInsensitiveStringTraits> const& headers() const { return m_headers; }
+    HTTP::HeaderList const& headers() const { return m_headers; }
 
 private:
-    int m_id { 0 };
     Optional<URL::URL> m_url;
     ByteString m_method { "GET" };
-    HashMap<ByteString, ByteString, CaseInsensitiveStringTraits> m_headers;
+    NonnullRefPtr<HTTP::HeaderList> m_headers;
     ByteBuffer m_body;
     Core::ElapsedTimer m_load_timer;
     GC::Root<Page> m_page;
-    bool m_main_resource { false };
-};
-
-}
-
-namespace AK {
-
-template<>
-struct Traits<Web::LoadRequest> : public DefaultTraits<Web::LoadRequest> {
-    static unsigned hash(Web::LoadRequest const& request) { return request.hash(); }
+    HTTP::CacheMode m_cache_mode { HTTP::CacheMode::Default };
+    HTTP::Cookie::IncludeCredentials m_include_credentials { HTTP::Cookie::IncludeCredentials::Yes };
+    Optional<Fetch::Infrastructure::Request::InitiatorType> m_initiator_type;
+    Optional<Fetch::Infrastructure::Request::Destination> m_destination;
+    Fetch::Infrastructure::Request::Mode m_request_mode { Fetch::Infrastructure::Request::Mode::NoCORS };
+    ReferrerPolicy::ReferrerPolicy m_referrer_policy { ReferrerPolicy::DEFAULT_REFERRER_POLICY };
+    bool m_is_navigation_request { false };
+    Fetch::Infrastructure::Request::Priority m_priority { Fetch::Infrastructure::Request::Priority::Auto };
+    Optional<URL::URL> m_source_url;
 };
 
 }

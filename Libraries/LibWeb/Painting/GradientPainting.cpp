@@ -1,12 +1,18 @@
 /*
  * Copyright (c) 2022-2023, MacDue <macdue@dueutil.tech>
+ * Copyright (c) 2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Array.h>
 #include <AK/Math.h>
 #include <LibGfx/Gradients.h>
+#include <LibWeb/CSS/CalculationResolutionContext.h>
+#include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ConicGradientStyleValue.h>
+#include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LinearGradientStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PositionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RadialGradientStyleValue.h>
@@ -15,13 +21,202 @@
 
 namespace Web::Painting {
 
-static ColorStopData resolve_color_stop_positions(Layout::NodeWithStyle const& node, auto const& color_stop_list, auto resolve_position_to_float, bool repeating)
+using ColorStopList = Vector<Gfx::ColorStop, 4>;
+
+struct ResolvedColorStopData {
+    ColorStopList list;
+    Optional<float> repeat_length;
+    bool repeating { false };
+};
+
+static ColorStopData to_color_stop_data(ColorStopList const& color_stop_list, bool repeating, auto to_position)
+{
+    ColorStopData data;
+    data.colors.ensure_capacity(color_stop_list.size());
+    data.positions.ensure_capacity(color_stop_list.size());
+    for (auto const& color_stop : color_stop_list) {
+        auto position = to_position(color_stop.position);
+        if (!data.colors.is_empty() && data.colors.last() == color_stop.color && data.positions.last() == position)
+            continue;
+        data.colors.unchecked_append(color_stop.color);
+        data.positions.unchecked_append(position);
+    }
+    data.repeating = repeating;
+    return data;
+}
+
+static ColorStopList replace_transition_hints_with_normal_color_stops(ColorStopList const& color_stop_list)
+{
+    ColorStopList stops_with_replaced_transition_hints;
+
+    auto const& first_color_stop = color_stop_list.first();
+    // First color stop in the list should never have transition hint value
+    VERIFY(!first_color_stop.transition_hint.has_value());
+    stops_with_replaced_transition_hints.empend(first_color_stop.color, first_color_stop.position);
+
+    // This loop replaces transition hints with five regular points, calculated using the
+    // formula defined in the spec. After rendering using linear interpolation, this will
+    // produce a result close enough to that obtained if the color of each point were calculated
+    // using the non-linear formula from the spec.
+    for (size_t i = 1; i < color_stop_list.size(); i++) {
+        auto const& color_stop = color_stop_list[i];
+        if (!color_stop.transition_hint.has_value()) {
+            stops_with_replaced_transition_hints.empend(color_stop.color, color_stop.position);
+            continue;
+        }
+
+        auto const& previous_color_stop = color_stop_list[i - 1];
+        auto const& next_color_stop = color_stop_list[i];
+
+        auto distance_between_stops = next_color_stop.position - previous_color_stop.position;
+        auto transition_hint = color_stop.transition_hint.value();
+
+        Array transition_hint_relative_sampling_positions {
+            transition_hint * 0.33f,
+            transition_hint * 0.66f,
+            transition_hint,
+            transition_hint + (1.f - transition_hint) * 0.33f,
+            transition_hint + (1.f - transition_hint) * 0.66f,
+        };
+
+        for (auto const& transition_hint_relative_sampling_position : transition_hint_relative_sampling_positions) {
+            auto position = previous_color_stop.position + transition_hint_relative_sampling_position * distance_between_stops;
+            auto value = Gfx::color_stop_step(previous_color_stop, next_color_stop, position);
+            auto color = previous_color_stop.color.mixed_with(next_color_stop.color, value);
+            stops_with_replaced_transition_hints.empend(color, position);
+        }
+
+        stops_with_replaced_transition_hints.empend(color_stop.color, color_stop.position);
+    }
+
+    return stops_with_replaced_transition_hints;
+}
+
+static ColorStopList expand_repeat_length(ColorStopList const& color_stop_list, float repeat_length)
+{
+    VERIFY(isfinite(repeat_length));
+    VERIFY(repeat_length > 0);
+
+    // https://drafts.csswg.org/css-images/#repeating-gradients
+    // When rendered, however, the color-stops are repeated infinitely in both directions, with their
+    // positions shifted by multiples of the difference between the last specified color-stop's position
+    // and the first specified color-stop's position. For example, repeating-linear-gradient(red 10px, blue 50px)
+    // is equivalent to linear-gradient(..., red -30px, blue 10px, red 10px, blue 50px, red 50px, blue 90px, ...).
+
+    auto first_stop_position = color_stop_list.first().position;
+    int const negative_repeat_count = AK::ceil(first_stop_position / repeat_length);
+    int const positive_repeat_count = AK::ceil((1.0f - first_stop_position) / repeat_length);
+
+    ColorStopList color_stop_list_with_expanded_repeat = color_stop_list;
+
+    auto get_color_between_stops = [](float position, auto const& current_stop, auto const& previous_stop) {
+        auto distance_between_stops = current_stop.position - previous_stop.position;
+        auto percentage = (position - previous_stop.position) / distance_between_stops;
+        return previous_stop.color.mixed_with(current_stop.color, percentage);
+    };
+
+    for (auto repeat_count = 1; repeat_count <= negative_repeat_count; repeat_count++) {
+        for (auto stop : color_stop_list.in_reverse()) {
+            stop.position -= repeat_length * static_cast<float>(repeat_count);
+            if (stop.position < 0) {
+                stop.color = get_color_between_stops(0.0f, stop, color_stop_list_with_expanded_repeat.first());
+                stop.position = 0.0f;
+                color_stop_list_with_expanded_repeat.prepend(stop);
+                break;
+            }
+            color_stop_list_with_expanded_repeat.prepend(stop);
+        }
+    }
+
+    for (auto repeat_count = 1; repeat_count < positive_repeat_count; repeat_count++) {
+        for (auto stop : color_stop_list) {
+            stop.position += repeat_length * static_cast<float>(repeat_count);
+            if (stop.position > 1) {
+                stop.color = get_color_between_stops(1.0f, stop, color_stop_list_with_expanded_repeat.last());
+                stop.position = 1.0f;
+                color_stop_list_with_expanded_repeat.append(stop);
+                break;
+            }
+            color_stop_list_with_expanded_repeat.append(stop);
+        }
+    }
+
+    return color_stop_list_with_expanded_repeat;
+}
+
+static bool has_degenerate_repeat_length(ResolvedColorStopData const& resolved_color_stops)
+{
+    return resolved_color_stops.repeat_length.has_value()
+        && (!isfinite(*resolved_color_stops.repeat_length) || *resolved_color_stops.repeat_length <= 0);
+}
+
+static Gfx::Color average_color_for_degenerate_repeating_gradient(ColorStopList const& color_stop_list)
+{
+    VERIFY(!color_stop_list.is_empty());
+
+    if (color_stop_list.size() == 1)
+        return color_stop_list.first().color;
+
+    // https://drafts.csswg.org/css-images-3/#repeating-gradients
+    // For zero-length repeating gradients, average a gradient with the same
+    // colors and equally-spaced stops over an arbitrary non-zero distance.
+    float premultiplied_red = 0;
+    float premultiplied_green = 0;
+    float premultiplied_blue = 0;
+    float alpha = 0;
+    float const weight = 0.5f / static_cast<float>(color_stop_list.size() - 1);
+
+    auto add_weighted_color = [&](Gfx::Color color) {
+        auto color_alpha = color.alpha() / 255.0f;
+        alpha += color_alpha * weight;
+        premultiplied_red += color.red() / 255.0f * color_alpha * weight;
+        premultiplied_green += color.green() / 255.0f * color_alpha * weight;
+        premultiplied_blue += color.blue() / 255.0f * color_alpha * weight;
+    };
+
+    for (size_t i = 1; i < color_stop_list.size(); ++i) {
+        add_weighted_color(color_stop_list[i - 1].color);
+        add_weighted_color(color_stop_list[i].color);
+    }
+
+    if (alpha == 0)
+        return Gfx::Color::Transparent;
+
+    auto normalized_to_u8 = [](float value) -> u8 {
+        return clamp(lroundf(value * 255.0f), 0L, 255L);
+    };
+
+    return {
+        normalized_to_u8(premultiplied_red / alpha),
+        normalized_to_u8(premultiplied_green / alpha),
+        normalized_to_u8(premultiplied_blue / alpha),
+        normalized_to_u8(alpha),
+    };
+}
+
+static void normalize_degenerate_repeating_gradient(ResolvedColorStopData& resolved_color_stops)
+{
+    auto average_color = average_color_for_degenerate_repeating_gradient(resolved_color_stops.list);
+    resolved_color_stops.list = { { average_color, 0 }, { average_color, 1 } };
+    resolved_color_stops.repeat_length = {};
+    resolved_color_stops.repeating = false;
+}
+
+static ColorStopList expand_color_stops_for_painting(ColorStopList const& color_stop_list, Optional<float> repeat_length)
+{
+    auto expanded = repeat_length.has_value()
+        ? expand_repeat_length(color_stop_list, repeat_length.value())
+        : color_stop_list;
+    return replace_transition_hints_with_normal_color_stops(expanded);
+}
+
+static ResolvedColorStopData resolve_color_stop_positions(Layout::NodeWithStyle const& node, Vector<CSS::ColorStopListElement> const& color_stop_list, auto resolve_position_to_float, bool repeating)
 {
     VERIFY(!color_stop_list.is_empty());
     ColorStopList resolved_color_stops;
 
     auto color_stop_length = [&](auto& stop) {
-        return stop.color_stop.second_position.has_value() ? 2 : 1;
+        return stop.color_stop.second_position ? 2 : 1;
     };
 
     size_t expanded_size = 0;
@@ -35,17 +230,20 @@ static ColorStopData resolve_color_stop_positions(Layout::NodeWithStyle const& n
             resolved_color_stops.append(resolved_stop);
     }
 
+    // https://drafts.csswg.org/css-images-3/#color-stop-fixup
     // 1. If the first color stop does not have a position, set its position to 0%.
-    resolved_color_stops.first().position = 0;
+    if (!color_stop_list.first().color_stop.position)
+        resolved_color_stops.first().position = 0;
     //    If the last color stop does not have a position, set its position to 100%
-    resolved_color_stops.last().position = 1.0f;
+    if (!color_stop_list.last().color_stop.second_position && !color_stop_list.last().color_stop.position)
+        resolved_color_stops.last().position = 1.0f;
 
     // 2. If a color stop or transition hint has a position that is less than the
     //    specified position of any color stop or transition hint before it in the list,
     //    set its position to be equal to the largest specified position of any color stop
     //    or transition hint before it.
-    auto max_previous_color_stop_or_hint = resolved_color_stops[0].position;
-    auto resolve_stop_position = [&](auto& position) {
+    auto max_previous_color_stop_or_hint = -AK::Infinity<float>;
+    auto resolve_stop_position = [&](CSS::StyleValue const& position) {
         float value = resolve_position_to_float(position);
         value = max(value, max_previous_color_stop_or_hint);
         max_previous_color_stop_or_hint = value;
@@ -53,11 +251,11 @@ static ColorStopData resolve_color_stop_positions(Layout::NodeWithStyle const& n
     };
     size_t resolved_index = 0;
     for (auto& stop : color_stop_list) {
-        if (stop.transition_hint.has_value())
-            resolved_color_stops[resolved_index].transition_hint = resolve_stop_position(stop.transition_hint->value);
-        if (stop.color_stop.position.has_value())
+        if (stop.transition_hint)
+            resolved_color_stops[resolved_index].transition_hint = resolve_stop_position(*stop.transition_hint);
+        if (stop.color_stop.position)
             resolved_color_stops[resolved_index].position = resolve_stop_position(*stop.color_stop.position);
-        if (stop.color_stop.second_position.has_value())
+        if (stop.color_stop.second_position)
             resolved_color_stops[++resolved_index].position = resolve_stop_position(*stop.color_stop.second_position);
         ++resolved_index;
     }
@@ -107,7 +305,7 @@ static ColorStopData resolve_color_stop_positions(Layout::NodeWithStyle const& n
     if (repeating)
         repeat_length = resolved_color_stops.last().position - resolved_color_stops.first().position;
 
-    return { resolved_color_stops, repeat_length };
+    return { resolved_color_stops, repeat_length, repeating };
 }
 
 LinearGradientData resolve_linear_gradient_data(Layout::NodeWithStyle const& node, CSSPixelSize gradient_size, CSS::LinearGradientStyleValue const& linear_gradient)
@@ -116,34 +314,67 @@ LinearGradientData resolve_linear_gradient_data(Layout::NodeWithStyle const& nod
     auto gradient_length_px = Gfx::calculate_gradient_length(gradient_size.to_type<float>(), gradient_angle);
 
     auto resolved_color_stops = resolve_color_stop_positions(
-        node, linear_gradient.color_stop_list(), [&](auto const& length_percentage) {
-            return length_percentage.to_px(node, CSSPixels::nearest_value_for(gradient_length_px)).to_float() / static_cast<float>(gradient_length_px);
+        node, linear_gradient.color_stop_list(), [&](auto const& position) -> float {
+            return CSS::Length::from_style_value(position, CSS::Length::make_px(gradient_length_px)).absolute_length_to_px_without_rounding() / gradient_length_px;
         },
         linear_gradient.is_repeating());
 
-    return { gradient_angle, resolved_color_stops, linear_gradient.interpolation_method() };
+    if (has_degenerate_repeat_length(resolved_color_stops))
+        normalize_degenerate_repeating_gradient(resolved_color_stops);
+
+    // Replace transition hints for painting; keep repeat_length for Skia's native tiling
+    resolved_color_stops.list = replace_transition_hints_with_normal_color_stops(resolved_color_stops.list);
+
+    auto repeat_length = resolved_color_stops.repeat_length.value_or(1);
+    auto first_stop_position = resolved_color_stops.repeat_length.has_value() ? resolved_color_stops.list.first().position : 0.f;
+    auto color_stop_data = to_color_stop_data(resolved_color_stops.list, resolved_color_stops.repeating, [&](float position) {
+        return (position - first_stop_position) / repeat_length;
+    });
+    return { gradient_angle, first_stop_position, repeat_length, move(color_stop_data), linear_gradient.interpolation_method() };
 }
 
 ConicGradientData resolve_conic_gradient_data(Layout::NodeWithStyle const& node, CSS::ConicGradientStyleValue const& conic_gradient)
 {
-    CSS::Angle one_turn(360.0f, CSS::AngleUnit::Deg);
+    CSS::Angle const one_turn { 360.0f, CSS::AngleUnit::Deg };
     auto resolved_color_stops = resolve_color_stop_positions(
-        node, conic_gradient.color_stop_list(), [&](auto const& angle_percentage) {
-            return angle_percentage.resolved(node, one_turn).to_degrees() / one_turn.to_degrees();
+        node, conic_gradient.color_stop_list(), [&](auto const& position) -> float {
+            return CSS::Angle::from_style_value(position, one_turn).to_degrees() / one_turn.to_degrees();
         },
         conic_gradient.is_repeating());
-    return { conic_gradient.angle_degrees(), resolved_color_stops, conic_gradient.interpolation_method() };
+
+    if (has_degenerate_repeat_length(resolved_color_stops))
+        normalize_degenerate_repeating_gradient(resolved_color_stops);
+
+    // Expand color stops for painting (replace transition hints and expand repeat length)
+    resolved_color_stops.list = expand_color_stops_for_painting(resolved_color_stops.list, resolved_color_stops.repeat_length);
+    resolved_color_stops.repeat_length = {};
+
+    auto color_stop_data = to_color_stop_data(resolved_color_stops.list, resolved_color_stops.repeating, [](float position) {
+        return position;
+    });
+    return { conic_gradient.angle_degrees(), move(color_stop_data), conic_gradient.interpolation_method() };
 }
 
 RadialGradientData resolve_radial_gradient_data(Layout::NodeWithStyle const& node, CSSPixelSize gradient_size, CSS::RadialGradientStyleValue const& radial_gradient)
 {
     // Start center, goes right to ending point, where the gradient line intersects the ending shape
     auto resolved_color_stops = resolve_color_stop_positions(
-        node, radial_gradient.color_stop_list(), [&](auto const& length_percentage) {
-            return length_percentage.to_px(node, gradient_size.width()).to_float() / gradient_size.width().to_float();
+        node, radial_gradient.color_stop_list(), [&](auto const& position) -> float {
+            return CSS::Length::from_style_value(position, CSS::Length::make_px(gradient_size.width())).absolute_length_to_px_without_rounding() / gradient_size.width().to_float();
         },
         radial_gradient.is_repeating());
-    return { resolved_color_stops, radial_gradient.interpolation_method() };
+
+    if (has_degenerate_repeat_length(resolved_color_stops))
+        normalize_degenerate_repeating_gradient(resolved_color_stops);
+
+    // Expand color stops for painting (replace transition hints and expand repeat length)
+    resolved_color_stops.list = expand_color_stops_for_painting(resolved_color_stops.list, resolved_color_stops.repeat_length);
+    resolved_color_stops.repeat_length = {};
+
+    auto color_stop_data = to_color_stop_data(resolved_color_stops.list, resolved_color_stops.repeating, [](float position) {
+        return position;
+    });
+    return { move(color_stop_data), radial_gradient.interpolation_method() };
 }
 
 }

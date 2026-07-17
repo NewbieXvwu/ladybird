@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGGeometryElementPrototype.h>
+#include <LibWeb/Bindings/SVGGeometryElement.h>
 #include <LibWeb/Layout/SVGGeometryBox.h>
 #include <LibWeb/SVG/SVGGeometryElement.h>
 
@@ -28,9 +28,9 @@ void SVGGeometryElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_path_length);
 }
 
-GC::Ptr<Layout::Node> SVGGeometryElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> SVGGeometryElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
-    return heap().allocate<Layout::SVGGeometryBox>(document(), *this, move(style));
+    return make_ref_counted<Layout::SVGGeometryBox>(document(), *this, style);
 }
 
 float SVGGeometryElement::get_total_length()
@@ -47,7 +47,7 @@ GC::Ref<Geometry::DOMPoint> SVGGeometryElement::get_point_at_length(float distan
 GC::Ref<SVGAnimatedNumber> SVGGeometryElement::path_length()
 {
     if (!m_path_length)
-        m_path_length = SVGAnimatedNumber::create(realm(), *this, AttributeNames::pathLength, 0.f);
+        m_path_length = SVGAnimatedNumber::create(realm(), *this, DOM::QualifiedName { AttributeNames::pathLength, OptionalNone {}, OptionalNone {} }, 0.f);
     return *m_path_length;
 }
 

@@ -10,7 +10,9 @@
 #include <AK/Forward.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
+#include <AK/Utf16String.h>
 #include <AK/Variant.h>
+#include <LibCore/ImmutableBytes.h>
 #include <LibGC/Ptr.h>
 #include <LibGC/Root.h>
 #include <LibWeb/Export.h>
@@ -21,13 +23,16 @@
 
 namespace Web::Fetch::Infrastructure {
 
+// https://mimesniff.spec.whatwg.org/#reading-the-resource-header
+static constexpr size_t MAX_SNIFF_BYTES = 1445;
+
 // https://fetch.spec.whatwg.org/#concept-body
 class WEB_API Body final : public JS::Cell {
     GC_CELL(Body, JS::Cell);
     GC_DECLARE_ALLOCATOR(Body);
 
 public:
-    using SourceType = Variant<Empty, ByteBuffer, GC::Root<FileAPI::Blob>>;
+    using SourceType = Variant<Empty, ByteBuffer, Core::ImmutableBytes, GC::Ref<FileAPI::Blob>>;
     // processBody must be an algorithm accepting a byte sequence.
     using ProcessBodyCallback = GC::Ref<GC::Function<void(ByteBuffer)>>;
     // processBodyError must be an algorithm optionally accepting an exception.
@@ -43,12 +48,27 @@ public:
     [[nodiscard]] GC::Ref<Streams::ReadableStream> stream() const { return *m_stream; }
     void set_stream(GC::Ref<Streams::ReadableStream> value) { m_stream = value; }
     [[nodiscard]] SourceType const& source() const { return m_source; }
+    void set_source(Core::ImmutableBytes, Optional<u64> length);
     [[nodiscard]] Optional<u64> const& length() const { return m_length; }
+
+    // https://mimesniff.spec.whatwg.org/#reading-the-resource-header
+    // Non-standard infrastructure to obtain the "resource header" for MIME type sniffing.
+    // The spec defines resource header as the byte sequence to sniff, obtained by reading
+    // "until [...] 1445 or more bytes have been read" or end of resource is reached.
+    // For non-streaming bodies (ByteBuffer/Blob source), bytes are available immediately.
+    // For streaming bodies, bytes are captured during fetch and delivered via callback.
+    using SniffBytesCallback = GC::Ref<GC::Function<void(ReadonlyBytes)>>;
+    Optional<ReadonlyBytes> sniff_bytes_if_available() const;
+    void wait_for_sniff_bytes(SniffBytesCallback on_ready);
+
+    // Called by FetchedDataReceiver to provide sniff bytes during streaming fetch.
+    void append_sniff_bytes(ReadonlyBytes bytes);
+    void set_sniff_bytes_complete();
 
     [[nodiscard]] GC::Ref<Body> clone(JS::Realm&);
 
     void fully_read(JS::Realm&, ProcessBodyCallback process_body, ProcessBodyErrorCallback process_body_error, TaskDestination) const;
-    void incrementally_read(ProcessBodyChunkCallback process_body_chunk, ProcessEndOfBodyCallback process_end_of_body, ProcessBodyErrorCallback process_body_error, TaskDestination);
+    GC::Ref<Streams::ReadableStreamDefaultReader> incrementally_read(ProcessBodyChunkCallback process_body_chunk, ProcessEndOfBodyCallback process_end_of_body, ProcessBodyErrorCallback process_body_error, TaskDestination);
     void incrementally_read_loop(Streams::ReadableStreamDefaultReader& reader, TaskDestination, ProcessBodyChunkCallback process_body_chunk, ProcessEndOfBodyCallback process_end_of_body, ProcessBodyErrorCallback process_body_error);
 
     virtual void visit_edges(JS::Cell::Visitor&) override;
@@ -68,15 +88,22 @@ private:
     // https://fetch.spec.whatwg.org/#concept-body-total-bytes
     // A length (null or an integer), initially null.
     Optional<u64> m_length;
+
+    // https://mimesniff.spec.whatwg.org/#reading-the-resource-header
+    // Non-standard: Captured "resource header" bytes for MIME type sniffing.
+    ByteBuffer m_sniff_bytes;
+    bool m_sniff_bytes_complete { false };
+    GC::Ptr<GC::Function<void(ReadonlyBytes)>> m_sniff_bytes_callback;
 };
 
 // https://fetch.spec.whatwg.org/#body-with-type
 // A body with type is a tuple that consists of a body (a body) and a type (a header value or null).
 struct BodyWithType {
     GC::Ref<Body> body;
-    Optional<ByteBuffer> type;
+    Optional<Utf16String> type;
 };
 
 WEB_API GC::Ref<Body> byte_sequence_as_body(JS::Realm&, ReadonlyBytes);
+WEB_API void cancel_incremental_read(Streams::ReadableStreamDefaultReader&);
 
 }

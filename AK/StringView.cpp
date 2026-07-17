@@ -4,11 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/AnyOf.h>
 #include <AK/ByteBuffer.h>
 #include <AK/ByteString.h>
 #include <AK/Enumerate.h>
-#include <AK/Find.h>
 #include <AK/FlyString.h>
 #include <AK/Function.h>
 #include <AK/String.h>
@@ -43,6 +41,7 @@ StringView::StringView(ByteBuffer const& buffer)
     : m_characters((char const*)buffer.data())
     , m_length(buffer.size())
 {
+    VERIFY(buffer.data() != nullptr);
 }
 
 Vector<StringView> StringView::split_view(char const separator, SplitBehavior split_behavior) const
@@ -166,11 +165,7 @@ bool StringView::matches(StringView mask, CaseSensitivity case_sensitivity) cons
 
 bool StringView::contains(char needle) const
 {
-    for (char current : *this) {
-        if (current == needle)
-            return true;
-    }
-    return false;
+    return memchr(m_characters, static_cast<unsigned char>(needle), m_length) != nullptr;
 }
 
 bool StringView::contains(u32 needle) const

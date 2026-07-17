@@ -1,5 +1,3 @@
-#import <HTML/HTMLElement.idl>
-
 [MissingValueDefault=auto, InvalidValueDefault=auto]
 enum ClosedByAttribute {
     "any",
@@ -14,11 +12,11 @@ interface HTMLDialogElement : HTMLElement {
     [HTMLConstructor] constructor();
 
     [CEReactions, Reflect] attribute boolean open;
-    attribute DOMString returnValue;
-    [CEReactions, Reflect=closedby, Enumerated=ClosedByAttribute] attribute DOMString closedBy;
+    attribute Utf16DOMString returnValue;
+    [CEReactions, Reflect=closedby, Enumerated=ClosedByAttribute] attribute Utf16DOMString closedBy;
     [CEReactions] undefined show();
     [CEReactions] undefined showModal();
-    [CEReactions] undefined close(optional DOMString returnValue);
-    [CEReactions] undefined requestClose(optional DOMString returnValue);
+    [CEReactions] undefined close(optional Utf16DOMString returnValue);
+    [CEReactions] undefined requestClose(optional Utf16DOMString returnValue);
 
 };

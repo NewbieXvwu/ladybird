@@ -9,6 +9,8 @@
 #pragma once
 
 #include <AK/Function.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/CSS/CSSRule.h>
 #include <LibWeb/CSS/Parser/RuleContext.h>
@@ -58,11 +60,12 @@ public:
         No,
         Yes,
     };
-    WebIDL::ExceptionOr<unsigned> insert_a_css_rule(Variant<StringView, CSSRule*>, u32 index, Nested, HashTable<FlyString> const& declared_namespaces);
+    WebIDL::ExceptionOr<unsigned> insert_a_css_rule(Variant<Utf16View, CSSRule*>, u32 index, Nested, HashTable<Utf16FlyString> const& declared_namespaces);
 
     void for_each_effective_rule(TraversalOrder, Function<void(CSSRule const&)> const& callback) const;
     // Returns whether the match state of any media queries changed after evaluation.
-    bool evaluate_media_queries(HTML::Window const&);
+    bool evaluate_media_queries(DOM::Document const&);
+    bool evaluate_media_queries(DOM::Document const&, Function<void(CSSRule const&)> const& changed_rule_callback);
 
     void set_owner_rule(GC::Ref<CSSRule> owner_rule) { m_owner_rule = owner_rule; }
     void set_rules(Badge<CSSStyleSheet>, Vector<GC::Ref<CSSRule>> rules) { m_rules = move(rules); }
@@ -74,6 +77,7 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     Vector<Parser::RuleContext> rule_context() const;
 

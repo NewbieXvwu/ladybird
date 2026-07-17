@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/NeverDestroyed.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/PluginPrototype.h>
+#include <LibWeb/Bindings/Plugin.h>
 #include <LibWeb/HTML/Plugin.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
@@ -15,7 +16,7 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(Plugin);
 
-Plugin::Plugin(JS::Realm& realm, String name)
+Plugin::Plugin(JS::Realm& realm, Utf16FlyString name)
     : Bindings::PlatformObject(realm)
     , m_name(move(name))
 {
@@ -35,30 +36,28 @@ void Plugin::initialize(JS::Realm& realm)
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-plugin-name
-String const& Plugin::name() const
+Utf16FlyString const& Plugin::name() const
 {
     // The Plugin interface's name getter steps are to return this's name.
     return m_name;
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-plugin-description
-String Plugin::description() const
+Utf16FlyString Plugin::description() const
 {
     // The Plugin interface's description getter steps are to return "Portable Document Format".
-    static String description_string = "Portable Document Format"_string;
-    return description_string;
+    return "Portable Document Format"_utf16_fly_string;
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-plugin-filename
-String Plugin::filename() const
+Utf16FlyString Plugin::filename() const
 {
     // The Plugin interface's filename getter steps are to return "internal-pdf-viewer".
-    static String filename_string = "internal-pdf-viewer"_string;
-    return filename_string;
+    return "internal-pdf-viewer"_utf16_fly_string;
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#pdf-viewing-support:support-named-properties-3
-Vector<FlyString> Plugin::supported_property_names() const
+Vector<Utf16FlyString> Plugin::supported_property_names() const
 {
     // The Plugin interface supports named properties. If the user agent's PDF viewer supported is true, then they are the PDF viewer mime types. Otherwise, they are the empty list.
     auto const& window = as<HTML::Window>(HTML::relevant_global_object(*this));
@@ -66,12 +65,12 @@ Vector<FlyString> Plugin::supported_property_names() const
         return {};
 
     // https://html.spec.whatwg.org/multipage/system-state.html#pdf-viewer-mime-types
-    static Vector<FlyString> const mime_types = {
-        "application/pdf"_fly_string,
-        "text/pdf"_fly_string,
-    };
+    static NeverDestroyed<Vector<Utf16FlyString>> mime_types { Vector<Utf16FlyString> {
+        "application/pdf"_utf16_fly_string,
+        "text/pdf"_utf16_fly_string,
+    } };
 
-    return mime_types;
+    return *mime_types;
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-plugin-length
@@ -97,7 +96,7 @@ GC::Ptr<MimeType> Plugin::item(u32 index) const
     return nullptr;
 }
 
-GC::Ptr<MimeType> Plugin::named_item(FlyString const& name) const
+GC::Ptr<MimeType> Plugin::named_item(Utf16FlyString const& name) const
 {
     // 1. For each MimeType mimeType of this's relevant global object's PDF viewer mime type objects: if mimeType's type is name, then return mimeType.
     auto& window = as<HTML::Window>(HTML::relevant_global_object(*this));
@@ -120,12 +119,17 @@ Optional<JS::Value> Plugin::item_value(size_t index) const
     return return_value.ptr();
 }
 
-JS::Value Plugin::named_item_value(FlyString const& name) const
+JS::Value Plugin::named_item_value(Utf16FlyString const& name) const
 {
-    auto return_value = named_item(name);
-    if (!return_value)
-        return JS::js_null();
-    return return_value.ptr();
+    auto& window = as<HTML::Window>(HTML::relevant_global_object(*this));
+    auto mime_types = window.pdf_viewer_mime_type_objects();
+
+    for (auto& mime_type : mime_types) {
+        if (name == mime_type->type())
+            return mime_type.ptr();
+    }
+
+    return JS::js_null();
 }
 
 }

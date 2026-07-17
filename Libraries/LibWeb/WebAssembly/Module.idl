@@ -6,14 +6,14 @@ enum ImportExportKind {
 };
 
 dictionary ModuleExportDescriptor {
-    required [GenerateAsRequired] USVString name;
-    required [GenerateAsRequired] ImportExportKind kind;
+    required Utf16USVString name;
+    required ImportExportKind kind;
 };
 
 dictionary ModuleImportDescriptor {
-    required [GenerateAsRequired] USVString module;
-    required [GenerateAsRequired] USVString name;
-    required [GenerateAsRequired] ImportExportKind kind;
+    required Utf16USVString module;
+    required Utf16USVString name;
+    required ImportExportKind kind;
 };
 
 // https://webassembly.github.io/spec/js-api/#modules
@@ -23,5 +23,5 @@ interface Module {
 
     static sequence<ModuleExportDescriptor> exports(Module moduleObject);
     static sequence<ModuleImportDescriptor> imports(Module moduleObject);
-    static sequence<ArrayBuffer> customSections(Module moduleObject, DOMString sectionName);
+    static sequence<ArrayBuffer> customSections(Module moduleObject, Utf16DOMString sectionName);
 };

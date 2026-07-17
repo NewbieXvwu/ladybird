@@ -9,6 +9,7 @@
 #include <AK/FlyString.h>
 #include <AK/Function.h>
 #include <AK/HashMap.h>
+#include <AK/HashTable.h>
 #include <LibGfx/Font/FontDatabase.h>
 #include <LibGfx/Font/Typeface.h>
 
@@ -26,12 +27,18 @@ public:
 
     void load_all_fonts_from_uri(StringView);
 
-    virtual RefPtr<Gfx::Font> get_font(FlyString const& family, float point_size, unsigned weight, unsigned width, unsigned slope) override;
+    virtual RefPtr<Gfx::Font> get_font(FlyString const& family, float point_size, unsigned weight, unsigned width, unsigned slope, Optional<FontVariationSettings> const& font_variation_settings = {}, Optional<Gfx::ShapeFeatures> const& shape_features = {}) override;
     virtual void for_each_typeface_with_family_name(FlyString const& family_name, Function<void(Typeface const&)>) override;
     virtual StringView name() const LIFETIME_BOUND override { return m_name.bytes_as_string_view(); }
 
 private:
     HashMap<FlyString, Vector<NonnullRefPtr<Typeface>>, AK::ASCIICaseInsensitiveFlyStringTraits> m_typeface_by_family;
+
+    // Tracks files we've already loaded, to avoid mmap'ing the same .ttf/.otf/.ttc
+    // multiple times when overlapping font directories are walked (fontconfig commonly
+    // returns nested entries like /usr/share/fonts and /usr/share/fonts/truetype).
+    HashTable<String> m_loaded_paths;
+
     String m_name { "Path"_string };
 };
 

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/HTML/StructuredSerializeTypes.h>
@@ -20,9 +21,9 @@ class NavigationDestination : public Bindings::PlatformObject {
 public:
     [[nodiscard]] static GC::Ref<NavigationDestination> create(JS::Realm&);
 
-    String url() const;
-    String key() const;
-    String id() const;
+    Utf16String url() const;
+    Utf16String key() const;
+    Utf16String id() const;
     i64 index() const;
     bool same_document() const;
     WebIDL::ExceptionOr<JS::Value> get_state();
@@ -33,7 +34,7 @@ public:
     // Setters are not available to JS, but expected in many spec algorithms
     void set_url(URL::URL const& url) { m_url = url; }
     void set_entry(GC::Ptr<NavigationHistoryEntry> entry) { m_entry = entry; }
-    void set_state(SerializationRecord state) { m_state = move(state); }
+    void set_state(StorageSerializationRecord state) { m_state = move(state); }
     void set_is_same_document(bool b) { m_is_same_document = b; }
 
     virtual ~NavigationDestination() override;
@@ -53,7 +54,7 @@ private:
     GC::Ptr<NavigationHistoryEntry> m_entry;
 
     // https://html.spec.whatwg.org/multipage/nav-history-apis.html#concept-navigationdestination-state
-    SerializationRecord m_state;
+    StorageSerializationRecord m_state;
 
     // https://html.spec.whatwg.org/multipage/nav-history-apis.html#concept-navigationdestination-samedocument
     bool m_is_same_document { false };

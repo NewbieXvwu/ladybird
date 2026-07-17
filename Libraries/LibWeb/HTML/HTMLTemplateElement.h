@@ -7,11 +7,12 @@
 #pragma once
 
 #include <LibWeb/DOM/DocumentFragment.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/HTML/HTMLElement.h>
 
 namespace Web::HTML {
 
-class HTMLTemplateElement final : public HTMLElement {
+class WEB_API HTMLTemplateElement final : public HTMLElement {
     WEB_PLATFORM_OBJECT(HTMLTemplateElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLTemplateElement);
 
@@ -20,6 +21,8 @@ public:
 
     GC::Ref<DOM::DocumentFragment> content() { return *m_content; }
     GC::Ref<DOM::DocumentFragment> const content() const { return *m_content; }
+
+    GC::Ref<DOM::DocumentFragment> content_for_bindings() const;
 
     void set_template_contents(GC::Ref<DOM::DocumentFragment>);
 

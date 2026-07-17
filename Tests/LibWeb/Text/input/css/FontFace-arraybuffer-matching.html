@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<script>
+    promiseTest(async () => {
+        const fontData = await fetch("../../../Assets/HashSans.woff").then(
+            response => response.arrayBuffer());
+
+        const face = new FontFace("TestFont", fontData);
+        document.fonts.add(face);
+
+        await face.loaded;
+
+        const element = document.createElement("span");
+        element.style.fontFamily = "TestFont, serif";
+        element.style.fontSize = "20px";
+        // We use a deliberately long string and a wide glyph here to ensure the width of the test font and the fallback
+        // font will be different.
+        const testString = "WWWWWWWWWWWWWWWWWWWW"
+        element.textContent = testString;
+        document.body.appendChild(element);
+
+        const fallbackElement = document.createElement("span");
+        fallbackElement.style.fontFamily = "serif";
+        fallbackElement.style.fontSize = "20px";
+        fallbackElement.textContent = testString;
+        document.body.appendChild(fallbackElement);
+
+        // Force layout
+        document.body.offsetHeight;
+
+        const testWidth = element.offsetWidth;
+        const fallbackWidth = fallbackElement.offsetWidth;
+
+        println(`face.status: ${face.status}`);
+        println(`font matched: ${testWidth !== fallbackWidth}`);
+
+        document.fonts.delete(face);
+
+        // Force layout after removal
+        document.body.offsetHeight;
+
+        const afterDeleteWidth = element.offsetWidth;
+        println(`font unmatched after delete: ${afterDeleteWidth === fallbackWidth}`);
+    });
+</script>

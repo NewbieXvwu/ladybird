@@ -8,16 +8,24 @@
 
 #include <AK/Badge.h>
 #include <AK/HashMap.h>
+#include <AK/WeakPtr.h>
 #include <LibGC/Function.h>
 #include <LibGC/Ptr.h>
 #include <LibJS/Forward.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibJS/Runtime/VM.h>
+#include <LibRequests/Forward.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Fetch/Infrastructure/FetchTimingInfo.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/EventLoop/Task.h>
 #include <LibWeb/HTML/StructuredSerializeTypes.h>
+
+namespace Web::Fetch::Fetching {
+
+class PendingResponse;
+
+}
 
 namespace Web::Fetch::Infrastructure {
 
@@ -27,10 +35,11 @@ class WEB_API FetchController : public JS::Cell {
     GC_DECLARE_ALLOCATOR(FetchController);
 
 public:
-    enum class State {
+    enum class State : u8 {
         Ongoing,
         Terminated,
         Aborted,
+        Stopped,
     };
 
     [[nodiscard]] static GC::Ref<FetchController> create(JS::VM&);
@@ -49,8 +58,14 @@ public:
     void terminate();
 
     void set_fetch_params(Badge<FetchParams>, GC::Ref<FetchParams> fetch_params) { m_fetch_params = fetch_params; }
+    [[nodiscard]] GC::Ptr<Fetching::PendingResponse> pending_preloaded_response() const { return m_pending_preloaded_response; }
+    void set_pending_preloaded_response(GC::Ptr<Fetching::PendingResponse> pending_preloaded_response) { m_pending_preloaded_response = pending_preloaded_response; }
+
+    void set_pending_request(RefPtr<Requests::Request> const&);
+    void set_inner_fetch_controller(GC::Ref<FetchController>);
 
     void stop_fetch();
+    void stop_request();
 
     u64 next_fetch_task_id() { return m_next_fetch_task_id++; }
     void fetch_task_queued(u64 fetch_task_id, HTML::TaskID event_id);
@@ -79,7 +94,7 @@ private:
     // https://fetch.spec.whatwg.org/#fetch-controller-report-timing-steps
     // serialized abort reason (default null)
     //     Null or a Record (result of StructuredSerialize).
-    Optional<HTML::SerializationRecord> m_serialized_abort_reason;
+    Optional<HTML::IPCSerializationRecord> m_serialized_abort_reason;
 
     // https://fetch.spec.whatwg.org/#fetch-controller-next-manual-redirect-steps
     // next manual redirect steps (default null)
@@ -87,6 +102,11 @@ private:
     GC::Ptr<GC::Function<void()>> m_next_manual_redirect_steps;
 
     GC::Ptr<FetchParams> m_fetch_params;
+    // NB: Assumes one waiting consumer for a pending preloaded response.
+    // Widen this if preload handoff ever supports multiple consumers.
+    GC::Ptr<Fetching::PendingResponse> m_pending_preloaded_response;
+
+    WeakPtr<Requests::Request> m_pending_request;
 
     HashMap<u64, HTML::TaskID> m_ongoing_fetch_tasks;
     u64 m_next_fetch_task_id { 0 };

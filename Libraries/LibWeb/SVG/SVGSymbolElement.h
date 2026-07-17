@@ -19,20 +19,28 @@ class SVGSymbolElement final : public SVGGraphicsElement
 public:
     virtual ~SVGSymbolElement() override = default;
 
-    virtual bool is_presentational_hint(FlyString const&) const override;
-    virtual void apply_presentational_hints(GC::Ref<CSS::CascadedProperties>) const override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
 private:
+    virtual bool is_svg_symbol_element() const final { return true; }
+
     SVGSymbolElement(DOM::Document&, DOM::QualifiedName);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
 
     bool is_direct_child_of_use_shadow_tree() const;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 };
+
+}
+
+namespace Web::DOM {
+
+template<>
+inline bool Node::fast_is<SVG::SVGSymbolElement>() const { return is_svg_symbol_element(); }
 
 }

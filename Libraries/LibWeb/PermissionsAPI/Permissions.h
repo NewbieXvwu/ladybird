@@ -1,0 +1,43 @@
+/*
+ * Copyright (c) 2026, Niccolo Antonelli-Dziri <niccolo.antonelli-dziri@protonmail.com>
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#pragma once
+
+#include <AK/Optional.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
+#include <LibJS/Runtime/Realm.h>
+#include <LibWeb/Bindings/PermissionStatus.h>
+#include <LibWeb/Bindings/PlatformObject.h>
+
+namespace Web::PermissionsAPI {
+
+bool is_permission_supported(Utf16View);
+
+Bindings::PermissionState permission_state(Bindings::PermissionDescriptor descriptor, Optional<HTML::EnvironmentSettingsObject&> settings = {});
+
+Bindings::PermissionState get_current_permission_state(Utf16View name, Optional<HTML::EnvironmentSettingsObject&> settings = {});
+
+Bindings::PermissionState request_permission(Bindings::PermissionDescriptor const& descriptor);
+
+class WEB_API Permissions : public Bindings::PlatformObject {
+    WEB_PLATFORM_OBJECT(Permissions, Bindings::PlatformObject);
+    GC_DECLARE_ALLOCATOR(Permissions);
+
+public:
+    static GC::Ref<Permissions> create(JS::Realm&);
+
+    GC::Ref<Web::WebIDL::Promise> query(JS::Value permission_desc);
+
+private:
+    Permissions(JS::Realm&);
+
+    virtual void initialize(JS::Realm&) override;
+};
+
+void permission_query_algorithm(Bindings::PermissionDescriptor const&, PermissionStatus&);
+
+}

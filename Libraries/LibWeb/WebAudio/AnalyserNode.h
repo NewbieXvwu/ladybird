@@ -7,20 +7,13 @@
 #pragma once
 
 #include <LibJS/Forward.h>
+#include <LibWeb/Bindings/AnalyserNode.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/WebAudio/AudioNode.h>
 #include <LibWeb/WebIDL/Buffers.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::WebAudio {
-
-// https://webaudio.github.io/web-audio-api/#AnalyserOptions
-struct AnalyserOptions : AudioNodeOptions {
-    unsigned long fft_size { 2048 };
-    double max_decibels { -30 };
-    double min_decibels { -100 };
-    double smoothing_time_constant { 0.8 };
-};
 
 // https://webaudio.github.io/web-audio-api/#AnalyserNode
 class AnalyserNode : public AudioNode {
@@ -33,10 +26,10 @@ public:
     virtual WebIDL::UnsignedLong number_of_inputs() override { return 1; }
     virtual WebIDL::UnsignedLong number_of_outputs() override { return 1; }
 
-    WebIDL::ExceptionOr<void> get_float_frequency_data(GC::Root<WebIDL::BufferSource> const& array);   // Float32Array
-    WebIDL::ExceptionOr<void> get_byte_frequency_data(GC::Root<WebIDL::BufferSource> const& array);    // Uint8Array
-    WebIDL::ExceptionOr<void> get_float_time_domain_data(GC::Root<WebIDL::BufferSource> const& array); // Float32Array
-    WebIDL::ExceptionOr<void> get_byte_time_domain_data(GC::Root<WebIDL::BufferSource> const& array);  // Uint8Array
+    WebIDL::ExceptionOr<void> get_float_frequency_data(GC::Ref<JS::Float32Array>);
+    WebIDL::ExceptionOr<void> get_byte_frequency_data(GC::Ref<JS::Uint8Array>);
+    WebIDL::ExceptionOr<void> get_float_time_domain_data(GC::Ref<JS::Float32Array>);
+    WebIDL::ExceptionOr<void> get_byte_time_domain_data(GC::Ref<JS::Uint8Array>);
 
     unsigned long fft_size() const { return m_fft_size; }
     unsigned long frequency_bin_count() const { return m_fft_size / 2; }
@@ -49,11 +42,11 @@ public:
     WebIDL::ExceptionOr<void> set_min_decibels(double);
     WebIDL::ExceptionOr<void> set_smoothing_time_constant(double);
 
-    static WebIDL::ExceptionOr<GC::Ref<AnalyserNode>> create(JS::Realm&, GC::Ref<BaseAudioContext>, AnalyserOptions const& = {});
-    static WebIDL::ExceptionOr<GC::Ref<AnalyserNode>> construct_impl(JS::Realm&, GC::Ref<BaseAudioContext>, AnalyserOptions const& = {});
+    static WebIDL::ExceptionOr<GC::Ref<AnalyserNode>> create(JS::Realm&, GC::Ref<BaseAudioContext>, Bindings::AnalyserOptions const& = {});
+    static WebIDL::ExceptionOr<GC::Ref<AnalyserNode>> construct_impl(JS::Realm&, GC::Ref<BaseAudioContext>, Bindings::AnalyserOptions const& = {});
 
 protected:
-    AnalyserNode(JS::Realm&, GC::Ref<BaseAudioContext>, AnalyserOptions const& = {});
+    AnalyserNode(JS::Realm&, GC::Ref<BaseAudioContext>, Bindings::AnalyserOptions const& = {});
 
     virtual void initialize(JS::Realm&) override;
 

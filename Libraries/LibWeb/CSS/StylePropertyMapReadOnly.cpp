@@ -6,9 +6,12 @@
 
 #include "StylePropertyMapReadOnly.h"
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/StylePropertyMapReadOnlyPrototype.h>
+#include <LibWeb/Bindings/StylePropertyMapReadOnly.h>
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
-#include <LibWeb/CSS/PropertyName.h>
+#include <LibWeb/CSS/CSSStyleValue.h>
+#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/CustomPropertyData.h>
+#include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
@@ -45,25 +48,23 @@ void StylePropertyMapReadOnly::visit_edges(Cell::Visitor& visitor)
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#dom-stylepropertymapreadonly-get
-WebIDL::ExceptionOr<Variant<GC::Ref<CSSStyleValue>, Empty>> StylePropertyMapReadOnly::get(String property)
+WebIDL::ExceptionOr<Variant<GC::Ref<CSSStyleValue>, Empty>> StylePropertyMapReadOnly::get(Utf16FlyString property_name)
 {
     // The get(property) method, when called on a StylePropertyMapReadOnly this, must perform the following steps:
 
     // 1. If property is not a custom property name string, set property to property ASCII lowercased.
-    if (!is_a_custom_property_name_string(property))
-        property = property.to_ascii_lowercase();
-
     // 2. If property is not a valid CSS property, throw a TypeError.
-    if (!is_a_valid_css_property(property))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("'{}' is not a valid CSS property", property)) };
+    auto property = PropertyNameAndID::from_name(property_name);
+    if (!property.has_value())
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("'{}' is not a valid CSS property", property_name) };
 
     // 3. Let props be the value of this’s [[declarations]] internal slot.
     auto& props = m_declarations;
 
     // 4. If props[property] exists, subdivide into iterations props[property], then reify the first item of the result and return it.
-    if (auto property_value = get_style_value(props, property)) {
-        // FIXME: Subdivide into iterations, and only reify/return the first.
-        return property_value->reify(realm(), property);
+    if (auto property_value = get_style_value(props, property.value())) {
+        auto iterations = property_value->subdivide_into_iterations(property.value());
+        return iterations.first()->reify(realm(), property->name());
     }
 
     // 5. Otherwise, return undefined.
@@ -71,43 +72,43 @@ WebIDL::ExceptionOr<Variant<GC::Ref<CSSStyleValue>, Empty>> StylePropertyMapRead
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#dom-stylepropertymapreadonly-getall
-WebIDL::ExceptionOr<Vector<GC::Ref<CSSStyleValue>>> StylePropertyMapReadOnly::get_all(String property)
+WebIDL::ExceptionOr<GC::RootVector<GC::Ref<CSSStyleValue>>> StylePropertyMapReadOnly::get_all(Utf16FlyString property_name)
 {
     // The getAll(property) method, when called on a StylePropertyMap this, must perform the following steps:
 
     // 1. If property is not a custom property name string, set property to property ASCII lowercased.
-    if (!is_a_custom_property_name_string(property))
-        property = property.to_ascii_lowercase();
-
     // 2. If property is not a valid CSS property, throw a TypeError.
-    if (!is_a_valid_css_property(property))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("'{}' is not a valid CSS property", property)) };
+    auto property = PropertyNameAndID::from_name(property_name);
+    if (!property.has_value())
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("'{}' is not a valid CSS property", property_name) };
 
     // 3. Let props be the value of this’s [[declarations]] internal slot.
     auto& props = m_declarations;
 
+    GC::RootVector<GC::Ref<CSSStyleValue>> results;
+
     // 4. If props[property] exists, subdivide into iterations props[property], then reify each item of the result, and return the list.
-    if (auto property_value = get_style_value(props, property)) {
-        // FIXME: Subdivide into iterations.
-        return Vector { property_value->reify(realm(), property) };
+    if (auto property_value = get_style_value(props, property.value())) {
+        auto iterations = property_value->subdivide_into_iterations(property.value());
+        for (auto const& style_value : iterations)
+            results.append(style_value->reify(realm(), property->name()));
+        return results;
     }
 
     // 5. Otherwise, return an empty list.
-    return Vector<GC::Ref<CSSStyleValue>> {};
+    return results;
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#dom-stylepropertymapreadonly-has
-WebIDL::ExceptionOr<bool> StylePropertyMapReadOnly::has(String property)
+WebIDL::ExceptionOr<bool> StylePropertyMapReadOnly::has(Utf16FlyString property_name)
 {
     // The has(property) method, when called on a StylePropertyMapReadOnly this, must perform the following steps:
 
     // 1. If property is not a custom property name string, set property to property ASCII lowercased.
-    if (!is_a_custom_property_name_string(property))
-        property = property.to_ascii_lowercase();
-
     // 2. If property is not a valid CSS property, throw a TypeError.
-    if (!is_a_valid_css_property(property))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("'{}' is not a valid CSS property", property)) };
+    auto property = PropertyNameAndID::from_name(property_name);
+    if (!property.has_value())
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("'{}' is not a valid CSS property", property_name) };
 
     // 3. Let props be the value of this’s [[declarations]] internal slot.
     auto& props = m_declarations;
@@ -119,20 +120,17 @@ WebIDL::ExceptionOr<bool> StylePropertyMapReadOnly::has(String property)
             // "the name and computed value of every longhand CSS property supported by the User Agent, every
             // registered custom property, and every non-registered custom property which is not set to its initial
             // value on this"
-            auto property_id = property_id_from_string(property);
-            if (!property_id.has_value())
-                return false;
             // Ensure style is computed on the element before we try to read it, so we can check custom properties.
-            element.document().update_style();
-            if (property_id == PropertyID::Custom) {
-                if (element.get_custom_property(property))
+            element.document().update_style_for_element(element);
+            if (property->is_custom_property()) {
+                if (element.get_custom_property(property->name()))
                     return true;
-                return element.document().registered_custom_properties().contains(property);
+                return element.document().get_registered_custom_property(property->name()).has_value();
             }
             return true;
         },
         [&property](GC::Ref<CSSStyleDeclaration>& declaration) {
-            return declaration->has_property(property);
+            return declaration->has_property(property.value());
         });
 }
 
@@ -149,14 +147,17 @@ WebIDL::UnsignedLong StylePropertyMapReadOnly::size() const
             // registered custom property, and every non-registered custom property which is not set to its initial
             // value on this"
             // Ensure style is computed on the element before we try to read it.
-            element.document().update_style();
+            element.document().update_style_for_element(element);
 
             // Some custom properties set on the element might also be in the registered custom properties set, so we
             // want the size of the union of the two sets.
-            HashTable<FlyString> custom_properties;
-            for (auto const& key : element.custom_properties().keys())
-                custom_properties.set(key);
-            for (auto const& [key, _] : element.document().registered_custom_properties())
+            HashTable<Utf16FlyString> custom_properties;
+            if (auto data = element.custom_property_data()) {
+                data->for_each_property([&](Utf16FlyString const& name, CSS::StyleProperty const&) {
+                    custom_properties.set(name);
+                });
+            }
+            for (auto const& [key, _] : element.document().registered_property_set())
                 custom_properties.set(key);
 
             return number_of_longhand_properties + custom_properties.size();
@@ -164,7 +165,7 @@ WebIDL::UnsignedLong StylePropertyMapReadOnly::size() const
         [](GC::Ref<CSSStyleDeclaration> const& declaration) { return declaration->length(); });
 }
 
-RefPtr<StyleValue const> StylePropertyMapReadOnly::get_style_value(Source& source, String property)
+RefPtr<StyleValue const> StylePropertyMapReadOnly::get_style_value(Source& source, PropertyNameAndID const& property)
 {
     return source.visit(
         [&property](DOM::AbstractElement& element) -> RefPtr<StyleValue const> {
@@ -172,23 +173,26 @@ RefPtr<StyleValue const> StylePropertyMapReadOnly::get_style_value(Source& sourc
             // "the name and computed value of every longhand CSS property supported by the User Agent, every
             // registered custom property, and every non-registered custom property which is not set to its initial
             // value on this"
-            auto property_id = property_id_from_string(property);
-            if (!property_id.has_value())
-                return nullptr;
             // Ensure style is computed on the element before we try to read it.
-            element.document().update_style();
-            if (property_id == PropertyID::Custom) {
-                if (auto custom_property = element.get_custom_property(property))
+            element.document().update_style_for_element(element);
+            if (property.is_custom_property()) {
+                if (auto custom_property = element.get_custom_property(property.name()))
                     return custom_property;
-                if (auto registered_custom_property = element.document().registered_custom_properties().get(property); registered_custom_property.has_value())
-                    return registered_custom_property.value()->initial_style_value();
+                if (auto registered_custom_property = element.document().get_registered_custom_property(property.name()); registered_custom_property.has_value())
+                    return registered_custom_property->initial_value;
                 return nullptr;
             }
 
-            if (*property_id >= first_longhand_property_id && *property_id <= last_longhand_property_id) {
+            if (property.id() >= first_longhand_property_id && property.id() <= last_longhand_property_id) {
                 // FIXME: This will only ever be null for pseudo-elements. What should we do in that case?
-                if (auto computed_properties = element.computed_properties())
-                    return computed_properties->property(property_id.value());
+                if (auto computed_values = element.computed_values()) {
+                    auto property_id = property.id();
+                    if (property_is_logical_alias(property_id))
+                        property_id = map_logical_alias_to_physical_property(property_id, LogicalAliasMappingContext { computed_values->writing_mode(), computed_values->direction() });
+                    if (property_id == PropertyID::BackgroundColor && computed_values->background_color_style_value())
+                        return computed_values->background_color_style_value();
+                    return computed_values->computed_style_value(property_id);
+                }
             }
 
             return nullptr;

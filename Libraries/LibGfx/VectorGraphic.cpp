@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGfx/Bitmap.h>
 #include <LibGfx/PainterSkia.h>
 #include <LibGfx/VectorGraphic.h>
 
@@ -12,7 +13,7 @@ namespace Gfx {
 ErrorOr<NonnullRefPtr<Gfx::Bitmap>> VectorGraphic::bitmap(IntSize size, AffineTransform transform) const
 {
     auto bitmap = TRY(Bitmap::create(Gfx::BitmapFormat::BGRA8888, size));
-    auto painter = PainterSkia::create(bitmap);
+    auto painter = make<PainterSkia>(PaintingSurface::wrap_bitmap(bitmap));
 
     // Apply the transform then center within destination rectangle (this ignores any translation from the transform):
     // This allows you to easily rotate or flip the image before painting.

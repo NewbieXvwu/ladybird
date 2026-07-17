@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021, Tobias Christiansen <tobyase@serenityos.org>
- * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2026, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2022-2023, MacDue <macdue@dueutil.tech>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -20,23 +20,23 @@ public:
     {
         switch (keyword) {
         case Keyword::Inherit: {
-            static ValueComparingNonnullRefPtr<KeywordStyleValue const> const inherit_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::Inherit));
+            static auto const& inherit_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::Inherit)).leak_ref();
             return inherit_instance;
         }
         case Keyword::Initial: {
-            static ValueComparingNonnullRefPtr<KeywordStyleValue const> const initial_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::Initial));
+            static auto const& initial_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::Initial)).leak_ref();
             return initial_instance;
         }
         case Keyword::Revert: {
-            static ValueComparingNonnullRefPtr<KeywordStyleValue const> const revert_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::Revert));
+            static auto const& revert_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::Revert)).leak_ref();
             return revert_instance;
         }
         case Keyword::RevertLayer: {
-            static ValueComparingNonnullRefPtr<KeywordStyleValue const> const revert_layer_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::RevertLayer));
+            static auto const& revert_layer_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::RevertLayer)).leak_ref();
             return revert_layer_instance;
         }
         case Keyword::Unset: {
-            static ValueComparingNonnullRefPtr<KeywordStyleValue const> const unset_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::Unset));
+            static auto const& unset_instance = adopt_ref(*new (nothrow) KeywordStyleValue(Keyword::Unset)).leak_ref();
             return unset_instance;
         }
         default:
@@ -50,11 +50,26 @@ public:
     static bool is_color(Keyword);
     virtual bool has_color() const override;
     virtual Optional<Color> to_color(ColorResolutionContext) const override;
-    virtual String to_string(SerializationMode) const override;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    virtual void serialize(Utf16StringBuilder&, SerializationMode) const override;
     virtual Vector<Parser::ComponentValue> tokenize() const override;
-    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, String const& associated_property) const override;
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, Utf16FlyString const& associated_property) const override;
 
     bool properties_equal(KeywordStyleValue const& other) const { return m_keyword == other.m_keyword; }
+
+    virtual bool is_computationally_independent() const override
+    {
+        if (is_css_wide_keyword())
+            return false;
+
+        // FIXME: Are there any other color keywords which aren't computationally independent?
+        if (first_is_one_of(m_keyword, Keyword::Accentcolor, Keyword::Accentcolortext))
+            return false;
+
+        // FIXME: Are there any other keywords which aren't computationally independent?
+        return true;
+    }
 
 private:
     explicit KeywordStyleValue(Keyword keyword)
@@ -65,12 +80,5 @@ private:
 
     Keyword m_keyword { Keyword::Invalid };
 };
-
-inline Keyword StyleValue::to_keyword() const
-{
-    if (is_keyword())
-        return static_cast<KeywordStyleValue const&>(*this).keyword();
-    return Keyword::Invalid;
-}
 
 }

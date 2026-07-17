@@ -21,9 +21,9 @@ public:
 
     Flex const& flex() const { return m_flex; }
     virtual double raw_value() const override { return m_flex.raw_value(); }
-    virtual FlyString unit_name() const override { return m_flex.unit_name(); }
+    virtual Utf16FlyString unit_name() const override { return m_flex.unit_name(); }
 
-    virtual String to_string(SerializationMode serialization_mode) const override { return m_flex.to_string(serialization_mode); }
+    virtual void serialize(StringBuilder& builder, SerializationMode mode) const override { m_flex.serialize(builder, mode); }
 
     bool equals(StyleValue const& other) const override
     {
@@ -32,6 +32,8 @@ public:
         auto const& other_flex = other.as_flex();
         return m_flex == other_flex.m_flex;
     }
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     FlexStyleValue(Flex&& flex)

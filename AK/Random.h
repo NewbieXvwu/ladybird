@@ -31,6 +31,21 @@ inline T get_random()
 u32 get_random_uniform(u32 max_bounds);
 u64 get_random_uniform_64(u64 max_bounds);
 
+String generate_random_uuid();
+
+// http://vigna.di.unimi.it/ftp/papers/xorshiftplus.pdf
+class XorShift128PlusRNG {
+public:
+    XorShift128PlusRNG();
+    double get();
+
+private:
+    u64 splitmix64(u64& state);
+    u64 advance();
+    u64 m_low { 0 };
+    u64 m_high { 0 };
+};
+
 template<typename Collection>
 inline void shuffle(Collection& collection)
 {
@@ -45,7 +60,9 @@ inline void shuffle(Collection& collection)
 
 #if USING_AK_GLOBALLY
 using AK::fill_with_random;
+using AK::generate_random_uuid;
 using AK::get_random;
 using AK::get_random_uniform;
 using AK::shuffle;
+using AK::XorShift128PlusRNG;
 #endif

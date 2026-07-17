@@ -14,8 +14,13 @@
 
 namespace Web::CSS::Parser {
 
-WEB_API OwnPtr<SyntaxNode> parse_as_syntax(Vector<ComponentValue> const&);
+enum class LimitSingleComponentIdentToCustomIdent : u8 {
+    No,
+    Yes,
+};
+WEB_API RefPtr<SyntaxNode> parse_as_syntax(Vector<ComponentValue> const&, LimitSingleComponentIdentToCustomIdent = LimitSingleComponentIdentToCustomIdent::No);
+RefPtr<SyntaxNode> parse_syntax_component(TokenStream<ComponentValue>&, LimitSingleComponentIdentToCustomIdent = LimitSingleComponentIdentToCustomIdent::No);
 
-NonnullRefPtr<StyleValue const> parse_with_a_syntax(ParsingParams const&, Vector<ComponentValue> const& input, SyntaxNode const& syntax, Optional<DOM::AbstractElement> const& element = {});
+NonnullRefPtr<StyleValue const> parse_with_a_syntax(ParsingParams const&, Vector<ComponentValue> const& input, SyntaxNode const& syntax);
 
 }

@@ -1,20 +1,16 @@
-#import <Animations/AnimationEffect.idl>
-#import <Animations/AnimationTimeline.idl>
-#import <DOM/EventTarget.idl>
-
-// https://www.w3.org/TR/web-animations-1/#the-animation-interface
+// https://drafts.csswg.org/web-animations-1/#the-animation-interface
 [Exposed=Window]
 interface Animation : EventTarget {
     constructor(optional AnimationEffect? effect = null,
-                [ExplicitNull] optional AnimationTimeline? timeline);
+                optional AnimationTimeline? timeline);
 
-    attribute DOMString id;
+    attribute [Utf16FlyString] Utf16DOMString id;
     attribute AnimationEffect? effect;
-    attribute AnimationTimeline? timeline;
-    attribute double? startTime;
-    attribute double? currentTime;
+    [ImplementedAs=timeline_for_bindings] attribute AnimationTimeline? timeline;
+    [ImplementedAs=start_time_for_bindings] attribute CSSNumberish? startTime;
+    [ImplementedAs=current_time_for_bindings] attribute CSSNumberish? currentTime;
     attribute double playbackRate;
-    readonly attribute AnimationPlayState playState;
+    [ImplementedAs=play_state_for_bindings] readonly attribute AnimationPlayState playState;
     readonly attribute AnimationReplaceState replaceState;
     readonly attribute boolean pending;
     readonly attribute Promise<Animation> ready;
@@ -34,8 +30,8 @@ interface Animation : EventTarget {
     [FIXME, CEReactions] undefined commitStyles();
 };
 
-// https://www.w3.org/TR/web-animations-1/#the-animationplaystate-enumeration
+// https://drafts.csswg.org/web-animations-1/#the-animationplaystate-enumeration
 enum AnimationPlayState { "idle", "running", "paused", "finished" };
 
-// https://www.w3.org/TR/web-animations-1/#the-animationreplacestate-enumeration
+// https://drafts.csswg.org/web-animations-1/#the-animationreplacestate-enumeration
 enum AnimationReplaceState { "active", "removed", "persisted" };

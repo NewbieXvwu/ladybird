@@ -9,10 +9,11 @@
 
 #include <AK/Error.h>
 #include <AK/Forward.h>
+#include <LibCore/Export.h>
 
 namespace Core {
 
-class StandardPaths {
+class CORE_API StandardPaths {
 public:
     static ByteString home_directory();
     static ByteString desktop_directory();
@@ -22,6 +23,7 @@ public:
     static ByteString pictures_directory();
     static ByteString videos_directory();
     static ByteString tempfile_directory();
+    static ByteString cache_directory();
     static ByteString config_directory();
     static ByteString user_data_directory();
     static Vector<ByteString> system_data_directories();

@@ -70,10 +70,9 @@
       },
       "font-weight": {
         "initial": "auto",
-        "FIXME": "Support multiple font-weight values; disallow relative font-weights",
         "syntax": [
           "auto",
-          "<'font-weight'>"
+          "<font-weight-absolute>{1,2}"
         ]
       },
       "font-width": {
@@ -188,6 +187,91 @@
           "<string>"
         ]
       }
+    }
+  },
+  "counter-style": {
+    "spec": "https://drafts.csswg.org/css-counter-styles/#the-counter-style-rule",
+    "descriptors": {
+      "system": {
+        "initial": "symbolic",
+        "syntax": [
+          "<counter-style-system>"
+        ]
+      },
+      "negative": {
+        "initial": "-",
+        "syntax": [
+          "<counter-style-negative>"
+        ]
+      },
+      "prefix": {
+        "initial": "",
+        "syntax": [
+          "<symbol>"
+        ]
+      },
+      "suffix": {
+        "initial": ". ",
+        "syntax": [
+          "<symbol>"
+        ]
+      },
+      "range": {
+        "initial": "auto",
+        "syntax": [
+          "<counter-style-range>"
+        ]
+      },
+      "pad": {
+        "initial": "0 \"\"",
+        "syntax": [
+          "<counter-style-pad>"
+        ]
+      },
+      "fallback": {
+        "initial": "decimal",
+        "syntax": [
+          "<counter-style-name>"
+        ]
+      },
+      "symbols": {
+        "syntax": [
+          "<symbol>+"
+        ]
+      },
+      "additive-symbols": {
+        "syntax": [
+          "<counter-style-additive-symbols>"
+        ]
+      },
+      "speak-as": {
+        "initial": "auto",
+        "syntax": [
+          "auto",
+          "bullets",
+          "numbers",
+          "words",
+          "spell-out",
+          "<counter-style-name>"
+        ]
+      }
+    }
+  },
+  "function": {
+    "spec": "https://drafts.csswg.org/css-mixins-1/#function-rule",
+    "descriptors": {
+      "result": {
+        "allow-arbitrary-substitution-functions": true,
+        "syntax": [
+          "<declaration-value>?"
+        ]
+      }
+    },
+    "custom-descriptors": {
+      "allow-arbitrary-substitution-functions": true,
+      "syntax": [
+        "<declaration-value>?"
+      ]
     }
   }
 }

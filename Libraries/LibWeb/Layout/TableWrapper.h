@@ -11,12 +11,10 @@
 namespace Web::Layout {
 
 class TableWrapper : public BlockContainer {
-    GC_CELL(TableWrapper, BlockContainer);
-    GC_DECLARE_ALLOCATOR(TableWrapper);
+    LAYOUT_NODE(TableWrapper, BlockContainer);
 
 public:
-    TableWrapper(DOM::Document&, DOM::Node*, GC::Ref<CSS::ComputedProperties>);
-    TableWrapper(DOM::Document&, DOM::Node*, NonnullOwnPtr<CSS::ComputedValues>);
+    TableWrapper(DOM::Document&, DOM::Node*, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~TableWrapper() override;
 
 private:

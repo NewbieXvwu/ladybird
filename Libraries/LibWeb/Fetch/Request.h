@@ -7,10 +7,11 @@
 #pragma once
 
 #include <AK/Forward.h>
+#include <AK/Utf16String.h>
 #include <LibGC/Ptr.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/Bindings/RequestPrototype.h>
+#include <LibWeb/Bindings/Request.h>
 #include <LibWeb/Fetch/Body.h>
 #include <LibWeb/Fetch/BodyInit.h>
 #include <LibWeb/Fetch/Headers.h>
@@ -20,46 +21,7 @@
 namespace Web::Fetch {
 
 // https://fetch.spec.whatwg.org/#requestinfo
-using RequestInfo = Variant<GC::Root<Request>, String>;
-
-// https://fetch.spec.whatwg.org/#requestinit
-struct RequestInit {
-    Optional<String> method;
-    Optional<HeadersInit> headers;
-    Optional<Optional<BodyInit>> body;
-    Optional<String> referrer;
-    Optional<Bindings::ReferrerPolicy> referrer_policy;
-    Optional<Bindings::RequestMode> mode;
-    Optional<Bindings::RequestCredentials> credentials;
-    Optional<Bindings::RequestCache> cache;
-    Optional<Bindings::RequestRedirect> redirect;
-    Optional<String> integrity;
-    Optional<bool> keepalive;
-    Optional<GC::Ptr<DOM::AbortSignal>> signal;
-    Optional<Bindings::RequestDuplex> duplex;
-    Optional<Bindings::RequestPriority> priority;
-    Optional<JS::Value> window;
-
-    // https://infra.spec.whatwg.org/#map-is-empty
-    bool is_empty() const
-    {
-        return !(method.has_value()
-            || headers.has_value()
-            || body.has_value()
-            || referrer.has_value()
-            || referrer_policy.has_value()
-            || mode.has_value()
-            || credentials.has_value()
-            || cache.has_value()
-            || redirect.has_value()
-            || integrity.has_value()
-            || keepalive.has_value()
-            || signal.has_value()
-            || duplex.has_value()
-            || priority.has_value()
-            || window.has_value());
-    }
-};
+using RequestInfo = Variant<GC::Ref<Request>, Utf16String>;
 
 // https://fetch.spec.whatwg.org/#request
 class Request final
@@ -70,7 +32,7 @@ class Request final
 
 public:
     [[nodiscard]] static GC::Ref<Request> create(JS::Realm&, GC::Ref<Infrastructure::Request>, Headers::Guard, GC::Ref<DOM::AbortSignal>);
-    static WebIDL::ExceptionOr<GC::Ref<Request>> construct_impl(JS::Realm&, RequestInfo const& input, RequestInit const& init = {});
+    static WebIDL::ExceptionOr<GC::Ref<Request>> construct_impl(JS::Realm&, RequestInfo const& input, Bindings::RequestInit const& init = {});
 
     virtual ~Request() override;
 
@@ -85,16 +47,16 @@ public:
 
     // JS API functions
     [[nodiscard]] String method() const;
-    [[nodiscard]] String url() const;
+    [[nodiscard]] Utf16String url() const;
     [[nodiscard]] GC::Ref<Headers> headers() const;
     [[nodiscard]] Bindings::RequestDestination destination() const;
-    [[nodiscard]] String referrer() const;
+    [[nodiscard]] Utf16String referrer() const;
     [[nodiscard]] Bindings::ReferrerPolicy referrer_policy() const;
     [[nodiscard]] Bindings::RequestMode mode() const;
     [[nodiscard]] Bindings::RequestCredentials credentials() const;
     [[nodiscard]] Bindings::RequestCache cache() const;
     [[nodiscard]] Bindings::RequestRedirect redirect() const;
-    [[nodiscard]] String integrity() const;
+    [[nodiscard]] Utf16String integrity() const;
     [[nodiscard]] bool keepalive() const;
     [[nodiscard]] bool is_reload_navigation() const;
     [[nodiscard]] bool is_history_navigation() const;

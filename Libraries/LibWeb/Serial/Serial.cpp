@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SerialPrototype.h>
+#include <LibWeb/Bindings/Serial.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
@@ -31,7 +31,7 @@ void Serial::initialize(JS::Realm& realm)
 }
 
 // https://wicg.github.io/serial/#requestport-method
-WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> Serial::request_port(SerialPortRequestOptions const)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> Serial::request_port(Bindings::SerialPortRequestOptions const&)
 {
     auto& realm = this->realm();
 

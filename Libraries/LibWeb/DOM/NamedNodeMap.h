@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
@@ -25,34 +26,35 @@ public:
     [[nodiscard]] static GC::Ref<NamedNodeMap> create(Element&);
     ~NamedNodeMap() = default;
 
-    virtual Vector<FlyString> supported_property_names() const override;
+    virtual Vector<Utf16FlyString> supported_property_names() const override;
     virtual Optional<JS::Value> item_value(size_t index) const override;
-    virtual JS::Value named_item_value(FlyString const& name) const override;
+    virtual JS::Value named_item_value(Utf16FlyString const& name) const override;
 
     size_t length() const { return m_attributes.size(); }
     bool is_empty() const { return m_attributes.is_empty(); }
 
     // Methods defined by the spec for JavaScript:
+    Attr* item(u32 index);
     Attr const* item(u32 index) const;
-    Attr const* get_named_item(FlyString const& qualified_name) const;
-    Attr const* get_named_item_ns(Optional<FlyString> const& namespace_, FlyString const& local_name) const;
+    Attr const* get_named_item(Utf16FlyString const& qualified_name) const;
+    Attr const* get_named_item_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& local_name) const;
     WebIDL::ExceptionOr<GC::Ptr<Attr>> set_named_item(Attr& attribute);
     WebIDL::ExceptionOr<GC::Ptr<Attr>> set_named_item_ns(Attr& attribute);
-    WebIDL::ExceptionOr<Attr const*> remove_named_item(FlyString const& qualified_name);
-    WebIDL::ExceptionOr<Attr const*> remove_named_item_ns(Optional<FlyString> const& namespace_, FlyString const& local_name);
+    WebIDL::ExceptionOr<Attr const*> remove_named_item(Utf16FlyString const& qualified_name);
+    WebIDL::ExceptionOr<Attr const*> remove_named_item_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& local_name);
 
     // Methods defined by the spec for internal use:
-    Attr* get_attribute(FlyString const& qualified_name, size_t* item_index = nullptr);
-    Attr const* get_attribute(FlyString const& qualified_name, size_t* item_index = nullptr) const;
+    Attr* get_attribute(Utf16FlyString const& qualified_name, size_t* item_index = nullptr);
+    Attr const* get_attribute(Utf16FlyString const& qualified_name, size_t* item_index = nullptr) const;
     WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute(Attr& attribute);
     void replace_attribute(Attr& old_attribute, Attr& new_attribute, size_t old_attribute_index);
     void append_attribute(Attr& attribute);
 
-    Attr* get_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& local_name, size_t* item_index = nullptr);
-    Attr const* get_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& local_name, size_t* item_index = nullptr) const;
+    Attr* get_attribute_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& local_name, size_t* item_index = nullptr);
+    Attr const* get_attribute_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& local_name, size_t* item_index = nullptr) const;
 
-    Attr const* remove_attribute(FlyString const& qualified_name);
-    Attr const* remove_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& local_name);
+    Attr const* remove_attribute(Utf16FlyString const& qualified_name);
+    Attr const* remove_attribute_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& local_name);
 
     WebIDL::ExceptionOr<GC::Ref<Attr>> remove_attribute_node(GC::Ref<Attr>);
 

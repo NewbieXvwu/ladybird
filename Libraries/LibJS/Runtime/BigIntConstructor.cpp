@@ -74,6 +74,12 @@ JS_DEFINE_NATIVE_FUNCTION(BigIntConstructor::as_int_n)
     if (bits == 0)
         return BigInt::create(vm, 0);
 
+    // OPTIMIZATION: This condition guarantees bigint is within the signed bits-bit range, so steps 3-5 return bigint.
+    if (bigint->big_integer().is_negative()
+        && bigint->big_integer().unsigned_value().one_based_index_of_highest_set_bit() < bits) {
+        return bigint;
+    }
+
     // 3. Let mod be ℝ(bigint) modulo 2^bits.
     auto const mod = TRY_OR_THROW_OOM(vm, bigint->big_integer().mod_power_of_two(bits));
 
@@ -85,7 +91,7 @@ JS_DEFINE_NATIVE_FUNCTION(BigIntConstructor::as_int_n)
     if (auto top_bit_index = mod.unsigned_value().one_based_index_of_highest_set_bit(); top_bit_index >= bits) {
         // twos complement decode
         auto decoded = TRY_OR_THROW_OOM(vm, mod.unsigned_value().bitwise_not_fill_to_one_based_index(bits)).plus(1);
-        return BigInt::create(vm, Crypto::SignedBigInteger { std::move(decoded), true });
+        return BigInt::create(vm, Crypto::SignedBigInteger { move(decoded), true });
     }
 
     // ... otherwise, return ℤ(mod).

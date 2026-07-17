@@ -28,6 +28,9 @@ public:
 
     TabDescription const& description() const { return m_description; }
     JsonObject serialize_description() const;
+    u64 inner_window_id() const { return m_inner_window_id; }
+
+    void navigate_to(String url, String title);
 
     void reset_selected_node();
 
@@ -37,6 +40,7 @@ private:
     virtual void handle_message(Message const&) override;
 
     TabDescription m_description;
+    u64 m_inner_window_id { 1 };
     WeakPtr<WatcherActor> m_watcher;
 };
 

@@ -21,17 +21,16 @@ public:
 
     Resolution const& resolution() const { return m_resolution; }
     virtual double raw_value() const override { return m_resolution.raw_value(); }
-    virtual FlyString unit_name() const override { return m_resolution.unit_name(); }
+    virtual Utf16FlyString unit_name() const override { return m_resolution.unit_name(); }
 
-    virtual String to_string(SerializationMode serialization_mode) const override { return m_resolution.to_string(serialization_mode); }
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
-    bool equals(StyleValue const& other) const override
-    {
-        if (type() != other.type())
-            return false;
-        auto const& other_resolution = other.as_resolution();
-        return m_resolution == other_resolution.m_resolution;
-    }
+    virtual void serialize(StringBuilder& builder, SerializationMode mode) const override { m_resolution.serialize(builder, mode); }
+    virtual void serialize(Utf16StringBuilder& builder, SerializationMode mode) const override { m_resolution.serialize(builder, mode); }
+
+    virtual bool is_computationally_independent() const override { return true; }
+
+    bool equals(StyleValue const& other) const override;
 
 private:
     explicit ResolutionStyleValue(Resolution resolution)

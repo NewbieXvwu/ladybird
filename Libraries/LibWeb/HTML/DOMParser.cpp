@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/DOMParserPrototype.h>
+#include <LibWeb/Bindings/DOMParser.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/DOM/XMLDocument.h>
 #include <LibWeb/HTML/DOMParser.h>
@@ -12,7 +12,10 @@
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/TrustedTypes/RequireTrustedTypesForDirective.h>
+#include <LibWeb/TrustedTypes/TrustedTypePolicy.h>
 #include <LibWeb/XML/XMLDocumentBuilder.h>
+#include <LibXML/Parser/Parser.h>
 
 namespace Web::HTML {
 
@@ -37,9 +40,16 @@ void DOMParser::initialize(JS::Realm& realm)
 }
 
 // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-domparser-parsefromstring
-GC::Ref<DOM::Document> DOMParser::parse_from_string(StringView string, Bindings::DOMParserSupportedType type)
+WebIDL::ExceptionOr<GC::Ref<DOM::Document>> DOMParser::parse_from_string(TrustedTypes::TrustedHTMLOrString string, Bindings::DOMParserSupportedType type)
 {
-    // FIXME: 1. Let compliantString to the result of invoking the Get Trusted Type compliant string algorithm with TrustedHTML, this's relevant global object, string, "DOMParser parseFromString", and "script".
+    // 1. Let compliantString to the result of invoking the Get Trusted Type compliant string algorithm with
+    //    TrustedHTML, this's relevant global object, string, "DOMParser parseFromString", and "script".
+    auto const compliant_string = TRY(TrustedTypes::get_trusted_type_compliant_string(
+        TrustedTypes::TrustedTypeName::TrustedHTML,
+        relevant_global_object(*this),
+        move(string),
+        TrustedTypes::InjectionSink::DOMParser_parseFromString,
+        TrustedTypes::Script.view()));
 
     // 2. Let document be a new Document, whose content type is type and url is this's relevant global object's associated Document's URL.
     GC::Ptr<DOM::Document> document;
@@ -49,21 +59,37 @@ GC::Ref<DOM::Document> DOMParser::parse_from_string(StringView string, Bindings:
     if (type == Bindings::DOMParserSupportedType::Text_Html) {
         // -> "text/html"
         document = HTML::HTMLDocument::create(realm(), associated_document.url());
-        document->set_content_type(Bindings::idl_enum_to_string(type));
+        document->set_content_type("text/html"_utf16_fly_string);
         document->set_document_type(DOM::Document::Type::HTML);
 
-        // 1. Parse HTML from a string given document and compliantString. FIXME: Use compliantString.
-        document->parse_html_from_a_string(string);
+        // 1. Parse HTML from a string given document and compliantString.
+        document->parse_html_from_a_string(compliant_string.utf16_view());
     } else {
         // -> Otherwise
         document = DOM::Document::create(realm(), associated_document.url());
-        document->set_content_type(Bindings::idl_enum_to_string(type));
+        switch (type) {
+        case Bindings::DOMParserSupportedType::Text_Xml:
+            document->set_content_type("text/xml"_utf16_fly_string);
+            break;
+        case Bindings::DOMParserSupportedType::Application_Xml:
+            document->set_content_type("application/xml"_utf16_fly_string);
+            break;
+        case Bindings::DOMParserSupportedType::Application_XhtmlXml:
+            document->set_content_type("application/xhtml+xml"_utf16_fly_string);
+            break;
+        case Bindings::DOMParserSupportedType::Image_SvgXml:
+            document->set_content_type("image/svg+xml"_utf16_fly_string);
+            break;
+        case Bindings::DOMParserSupportedType::Text_Html:
+            VERIFY_NOT_REACHED();
+        }
         document->set_document_type(DOM::Document::Type::XML);
 
         // 1. Create an XML parser parse, associated with document, and with XML scripting support disabled.
-        XML::Parser parser(string, { .resolve_external_resource = resolve_xml_resource });
+        auto const utf8_complaint_string = compliant_string.to_utf8_but_should_be_ported_to_utf16();
+        XML::Parser parser(utf8_complaint_string, { .resolve_named_html_entity = resolve_named_html_entity });
         XMLDocumentBuilder builder { *document, XMLScriptingSupport::Disabled };
-        // 2. Parse compliantString using parser. FIXME: Use compliantString.
+        // 2. Parse compliantString using parser.
         auto result = parser.parse_with_listener(builder);
         // 3. If the previous step resulted in an XML well-formedness or XML namespace well-formedness error, then:
         if (result.is_error() || builder.has_error()) {
@@ -71,7 +97,7 @@ GC::Ref<DOM::Document> DOMParser::parse_from_string(StringView string, Bindings:
             // 1. Assert: document has no child nodes.
             document->remove_all_children(true);
             // 2. Let root be the result of creating an element given document, "parsererror", and "http://www.mozilla.org/newlayout/xml/parsererror.xml".
-            auto root = DOM::create_element(*document, "parsererror"_fly_string, "http://www.mozilla.org/newlayout/xml/parsererror.xml"_fly_string).release_value_but_fixme_should_propagate_errors();
+            auto root = DOM::create_element(*document, "parsererror"_utf16_fly_string, "http://www.mozilla.org/newlayout/xml/parsererror.xml"_utf16_fly_string).release_value_but_fixme_should_propagate_errors();
             // FIXME: 3. Optionally, add attributes or children to root to describe the nature of the parsing error.
             // 4. Append root to document.
             MUST(document->append_child(*root));
@@ -84,7 +110,7 @@ GC::Ref<DOM::Document> DOMParser::parse_from_string(StringView string, Bindings:
     document->set_origin(associated_document.origin());
 
     // 3. Return document.
-    return *document;
+    return GC::Ref { *document };
 }
 
 }

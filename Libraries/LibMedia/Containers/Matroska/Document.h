@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2021, Hunter Salyer <thefalsehonesty@gmail.com>
+ * Copyright (c) 2025, Gregory Bertilson <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,28 +10,29 @@
 #include <AK/ByteBuffer.h>
 #include <AK/ByteString.h>
 #include <AK/FixedArray.h>
-#include <AK/FlyString.h>
+#include <AK/GenericShorthands.h>
 #include <AK/HashMap.h>
 #include <AK/OwnPtr.h>
+#include <AK/String.h>
 #include <AK/Time.h>
-#include <AK/Utf8View.h>
 #include <LibMedia/Color/CodingIndependentCodePoints.h>
+#include <LibMedia/Track.h>
 
 namespace Media::Matroska {
 
 struct EBMLHeader {
-    ByteString doc_type;
-    u32 doc_type_version;
+    String doc_type;
+    u32 doc_type_version { 0 };
 };
 
 class SegmentInformation {
 public:
     u64 timestamp_scale() const { return m_timestamp_scale; }
     void set_timestamp_scale(u64 timestamp_scale) { m_timestamp_scale = timestamp_scale; }
-    Utf8View muxing_app() const LIFETIME_BOUND { return Utf8View(m_muxing_app); }
-    void set_muxing_app(ByteString muxing_app) { m_muxing_app = move(muxing_app); }
-    Utf8View writing_app() const LIFETIME_BOUND { return Utf8View(m_writing_app); }
-    void set_writing_app(ByteString writing_app) { m_writing_app = move(writing_app); }
+    StringView muxing_app() const LIFETIME_BOUND { return m_muxing_app; }
+    void set_muxing_app(String muxing_app) { m_muxing_app = move(muxing_app); }
+    StringView writing_app() const LIFETIME_BOUND { return m_writing_app; }
+    void set_writing_app(String writing_app) { m_writing_app = move(writing_app); }
     Optional<double> duration_unscaled() const { return m_duration_unscaled; }
     void set_duration_unscaled(double duration) { m_duration_unscaled.emplace(duration); }
     Optional<AK::Duration> duration() const
@@ -42,8 +44,8 @@ public:
 
 private:
     u64 m_timestamp_scale { 1'000'000 };
-    ByteString m_muxing_app;
-    ByteString m_writing_app;
+    String m_muxing_app;
+    String m_writing_app;
     Optional<double> m_duration_unscaled;
 };
 
@@ -99,15 +101,16 @@ public:
     };
 
     struct VideoTrack {
-        u64 pixel_width;
-        u64 pixel_height;
+        u64 pixel_width { 0 };
+        u64 pixel_height { 0 };
 
         ColorFormat color_format;
     };
 
     struct AudioTrack {
-        u64 channels;
-        u64 bit_depth;
+        u64 channels { 1 };
+        double sampling_frequency { 8000.0 };
+        u64 bit_depth { 0 };
     };
 
     u64 track_number() const { return m_track_number; }
@@ -116,10 +119,14 @@ public:
     void set_track_uid(u64 track_uid) { m_track_uid = track_uid; }
     TrackType track_type() const { return m_track_type; }
     void set_track_type(TrackType track_type) { m_track_type = track_type; }
-    FlyString language() const { return m_language; }
-    void set_language(FlyString const& language) { m_language = language; }
-    FlyString codec_id() const { return m_codec_id; }
-    void set_codec_id(FlyString const& codec_id) { m_codec_id = codec_id; }
+    String name() const { return m_name; }
+    void set_name(String const& name) { m_name = name; }
+    String language() const { return m_language; }
+    void set_language(String const& language) { m_language = language; }
+    Optional<String> const& language_bcp_47() const { return m_language_bcp_47; }
+    void set_language_bcp_47(String const& language_bcp_47) { m_language_bcp_47 = language_bcp_47; }
+    String codec_id() const { return m_codec_id; }
+    void set_codec_id(String const& codec_id) { m_codec_id = codec_id; }
     ReadonlyBytes codec_private_data() const LIFETIME_BOUND { return m_codec_private_data.span(); }
     ErrorOr<void> set_codec_private_data(ReadonlyBytes codec_private_data)
     {
@@ -130,39 +137,139 @@ public:
     void set_timestamp_scale(double timestamp_scale) { m_timestamp_scale = timestamp_scale; }
     u64 codec_delay() const { return m_codec_delay; }
     void set_codec_delay(u64 codec_delay) { m_codec_delay = codec_delay; }
+    u64 seek_pre_roll() const { return m_seek_pre_roll; }
+    void set_seek_pre_roll(u64 seek_pre_roll) { m_seek_pre_roll = seek_pre_roll; }
     u64 timestamp_offset() const { return m_timestamp_offset; }
     void set_timestamp_offset(u64 timestamp_offset) { m_timestamp_offset = timestamp_offset; }
-    Optional<VideoTrack> video_track() const
-    {
-        if (track_type() != Video)
-            return {};
-        return m_video_track;
-    }
+    u64 default_duration() const { return m_default_duration; }
+    void set_default_duration(u64 default_duration) { m_default_duration = default_duration; }
+    Optional<VideoTrack> video_track() const { return m_video_track; }
     void set_video_track(VideoTrack video_track) { m_video_track = video_track; }
-    Optional<AudioTrack> audio_track() const
-    {
-        if (track_type() != Audio)
-            return {};
-        return m_audio_track;
-    }
+    bool flag_default() const { return m_flag_default; }
+    void set_flag_default(bool flag_default) { m_flag_default = flag_default; }
+    Optional<AudioTrack> audio_track() const { return m_audio_track; }
     void set_audio_track(AudioTrack audio_track) { m_audio_track = audio_track; }
 
 private:
     u64 m_track_number { 0 };
     u64 m_track_uid { 0 };
     TrackType m_track_type { Invalid };
-    FlyString m_language = "eng"_fly_string;
-    FlyString m_codec_id;
+    String m_name;
+    String m_language = "eng"_string;
+    Optional<String> m_language_bcp_47;
+    String m_codec_id;
     FixedArray<u8> m_codec_private_data;
     double m_timestamp_scale { 1 };
     u64 m_codec_delay { 0 };
+    u64 m_seek_pre_roll { 0 };
     u64 m_timestamp_offset { 0 };
-
-    union {
-        VideoTrack m_video_track {};
-        AudioTrack m_audio_track;
-    };
+    u64 m_default_duration { 0 };
+    bool m_flag_default { true };
+    Optional<VideoTrack> m_video_track;
+    Optional<AudioTrack> m_audio_track;
 };
+
+struct TrackBlockContext {
+    String codec_id;
+    double timestamp_scale { 1 };
+    u64 codec_delay { 0 };
+    u64 seek_pre_roll { 0 };
+    u64 timestamp_offset { 0 };
+    u64 default_duration { 0 };
+
+    static TrackBlockContext from_track_entry(TrackEntry const& entry)
+    {
+        return {
+            .codec_id = entry.codec_id(),
+            .timestamp_scale = entry.timestamp_scale(),
+            .codec_delay = entry.codec_delay(),
+            .seek_pre_roll = entry.seek_pre_roll(),
+            .timestamp_offset = entry.timestamp_offset(),
+            .default_duration = entry.default_duration(),
+        };
+    }
+};
+
+using TrackBlockContexts = HashMap<u64, TrackBlockContext>;
+
+inline TrackType track_type_from_matroska_track_type(TrackEntry::TrackType type)
+{
+    switch (type) {
+    case TrackEntry::TrackType::Video:
+        return TrackType::Video;
+    case TrackEntry::TrackType::Audio:
+        return TrackType::Audio;
+    case TrackEntry::TrackType::Subtitle:
+        return TrackType::Subtitles;
+    case TrackEntry::TrackType::Invalid:
+        return TrackType::Unknown;
+    case TrackEntry::TrackType::Complex:
+    case TrackEntry::TrackType::Logo:
+    case TrackEntry::TrackType::Buttons:
+    case TrackEntry::TrackType::Control:
+    case TrackEntry::TrackType::Metadata:
+        break;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+inline Track track_from_track_entry(TrackEntry const& track_entry, bool is_first_of_type)
+{
+    // https://dev.w3.org/html5/html-sourcing-inband-tracks/#webm
+    auto kind = [&] {
+        if (first_is_one_of(track_entry.track_type(), TrackEntry::TrackType::Subtitle, TrackEntry::TrackType::Metadata)) {
+            auto codec_id = track_entry.codec_id();
+            // "captions": TrackType is "0x11" and CodecId is "D_WEBVTT/captions"
+            if (codec_id == "D_WEBVTT/captions"sv)
+                return Track::Kind::Captions;
+            // "subtitles": TrackType is "0x11" and CodecId is "D_WEBVTT/subtitles"
+            if (codec_id == "D_WEBVTT/subtitles"sv)
+                return Track::Kind::Subtitles;
+            // "descriptions": TrackType is "0x11" and CodecId is "D_WEBVTT/descriptions"
+            if (codec_id == "D_WEBVTT/descriptions"sv)
+                return Track::Kind::Descriptions;
+            // "metadata": otherwise
+            if (codec_id.starts_with_bytes("D_WEBVTT/"sv))
+                return Track::Kind::Metadata;
+
+            // The Matroska container format, which is the basis for WebM, has specifications for other text tracks, in
+            // particular SRT, SSA/ASS, and VOBSUB. The described attribute mappings can be applied to these, too,
+            // except that the kind field will always be "subtitles".
+            return Track::Kind::Subtitles;
+        }
+        // "main": the FlagDefault element is set on the track
+        if (track_entry.flag_default())
+            return Track::Kind::Main;
+        // "translation": not first audio (video) track
+        if (!is_first_of_type)
+            return Track::Kind::Translation;
+        // "": otherwise
+        return Track::Kind::None;
+    }();
+
+    auto name = Utf16String::from_utf8(track_entry.name());
+    auto language = [&] {
+        // LanguageBCP47 - The language of the track, in the BCP47 form; see basics on language codes. If this Element is used,
+        // then any Language Elements used in the same TrackEntry MUST be ignored.
+        if (track_entry.language_bcp_47().has_value())
+            return Utf16String::from_utf8(track_entry.language_bcp_47().value());
+        return Utf16String::from_utf8(track_entry.language());
+    }();
+    Track track(track_type_from_matroska_track_type(track_entry.track_type()), track_entry.track_number(), kind, name, language);
+
+    if (track.type() == TrackType::Video) {
+        auto video_track = track_entry.video_track();
+        if (video_track.has_value()) {
+            track.set_video_data({
+                .pixel_width = video_track->pixel_width,
+                .pixel_height = video_track->pixel_height,
+                .cicp = video_track->color_format.to_cicp(),
+            });
+        }
+    }
+
+    return track;
+}
 
 class Block {
 public:
@@ -175,8 +282,10 @@ public:
 
     u64 track_number() const { return m_track_number; }
     void set_track_number(u64 track_number) { m_track_number = track_number; }
-    AK::Duration timestamp() const { return m_timestamp; }
+    Optional<AK::Duration> timestamp() const { return m_timestamp; }
     void set_timestamp(AK::Duration timestamp) { m_timestamp = timestamp; }
+    Optional<AK::Duration> duration() const { return m_duration; }
+    void set_duration(AK::Duration duration) { m_duration = duration; }
     bool only_keyframes() const { return m_only_keyframes; }
     void set_only_keyframes(bool only_keyframes) { m_only_keyframes = only_keyframes; }
     bool invisible() const { return m_invisible; }
@@ -185,20 +294,24 @@ public:
     void set_lacing(Lacing lacing) { m_lacing = lacing; }
     bool discardable() const { return m_discardable; }
     void set_discardable(bool discardable) { m_discardable = discardable; }
-
-    void set_frames(Vector<ReadonlyBytes>&& frames) { m_frames = move(frames); }
-    ReadonlyBytes const& frame(size_t index) const { return frames()[index]; }
-    u64 frame_count() const { return m_frames.size(); }
-    Vector<ReadonlyBytes> const& frames() const { return m_frames; }
+    size_t data_position() const { return m_data_position; }
+    size_t data_size() const { return m_data_size; }
+    void set_data(size_t position, size_t size)
+    {
+        m_data_position = position;
+        m_data_size = size;
+    }
 
 private:
     u64 m_track_number { 0 };
-    AK::Duration m_timestamp { AK::Duration::zero() };
+    Optional<AK::Duration> m_timestamp;
+    Optional<AK::Duration> m_duration;
     bool m_only_keyframes { false };
     bool m_invisible { false };
     Lacing m_lacing { None };
     bool m_discardable { true };
-    Vector<ReadonlyBytes> m_frames;
+    size_t m_data_position { 0 };
+    size_t m_data_size { 0 };
 };
 
 class Cluster {

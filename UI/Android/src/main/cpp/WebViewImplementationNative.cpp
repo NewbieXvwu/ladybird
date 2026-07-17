@@ -7,7 +7,7 @@
 #include "WebViewImplementationNative.h"
 #include "JNIHelpers.h"
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/Painter.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWebView/ViewImplementation.h>
@@ -61,7 +61,8 @@ void WebViewImplementationNative::initialize_client(WebView::ViewImplementation:
     m_client_state.client_handle = MUST(Web::Crypto::generate_random_uuid());
     client().async_set_window_handle(0, m_client_state.client_handle);
 
-    client().async_set_device_pixels_per_css_pixel(0, m_device_pixel_ratio);
+    client().async_set_viewport(0, viewport_size(), m_device_pixel_ratio, Web::ViewportIsFullscreen::No);
+    client().async_set_zoom_level(0, m_zoom_level);
 
     set_system_visibility_state(Web::HTML::VisibilityState::Visible);
 
@@ -76,7 +77,7 @@ void WebViewImplementationNative::paint_into_bitmap(void* android_bitmap_raw, An
     auto android_bitmap = MUST(Gfx::Bitmap::create_wrapper(to_gfx_bitmap_format(info.format), Gfx::AlphaType::Premultiplied, { info.width, info.height }, info.stride, android_bitmap_raw));
     auto painter = Gfx::Painter::create(android_bitmap);
     if (auto* bitmap = m_client_state.has_usable_bitmap ? m_client_state.front_bitmap.bitmap.ptr() : m_backup_bitmap.ptr())
-        painter->draw_bitmap(android_bitmap->rect().to_type<float>(), Gfx::ImmutableBitmap::create(MUST(bitmap->clone())), bitmap->rect(), Gfx::ScalingMode::NearestNeighbor, {}, 1.0f, Gfx::CompositingAndBlendingOperator::Copy);
+        painter->draw_bitmap(android_bitmap->rect().to_type<float>(), Gfx::DecodedImageFrame { *MUST(bitmap->clone()) }, bitmap->rect(), Gfx::ScalingMode::NearestNeighbor, {}, 1.0f, Gfx::CompositingAndBlendingOperator::Copy);
     else
         painter->fill_rect(android_bitmap->rect().to_type<float>(), Gfx::Color::Magenta);
 }
@@ -87,10 +88,16 @@ void WebViewImplementationNative::set_viewport_geometry(int w, int h)
     handle_resize();
 }
 
-void WebViewImplementationNative::set_device_pixel_ratio(float f)
+void WebViewImplementationNative::set_device_pixel_ratio(double f)
 {
     m_device_pixel_ratio = f;
-    client().async_set_device_pixels_per_css_pixel(0, m_device_pixel_ratio);
+    handle_resize();
+}
+
+void WebViewImplementationNative::set_zoom_level(double f)
+{
+    m_zoom_level = f;
+    client().async_set_zoom_level(0, m_zoom_level);
 }
 
 void WebViewImplementationNative::mouse_event(Web::MouseEvent::Type event_type, float x, float y, float raw_x, float raw_y)

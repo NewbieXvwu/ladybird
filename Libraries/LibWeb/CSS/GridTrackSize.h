@@ -1,13 +1,15 @@
 /*
  * Copyright (c) 2022, Martin Falisse <mfalisse@outlook.com>
  * Copyright (c) 2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/HashMap.h>
+#include <AK/Utf16FlyString.h>
 #include <AK/Vector.h>
 #include <LibWeb/CSS/PercentageOr.h>
 #include <LibWeb/CSS/Size.h>
@@ -17,8 +19,7 @@ namespace Web::CSS {
 
 class GridSize {
 public:
-    GridSize(Size);
-    GridSize(Flex);
+    GridSize(NonnullRefPtr<StyleValue const>);
     ~GridSize();
 
     static GridSize make_auto();
@@ -30,8 +31,10 @@ public:
     bool is_max_content() const;
     bool is_min_content() const;
 
-    Size css_size() const { return m_value.get<Size>(); }
-    double flex_factor() const { return m_value.get<Flex>().to_fr(); }
+    Size css_size() const { return Size::from_style_value(m_value); }
+    double flex_factor() const { return Flex::from_style_value(m_value).to_fr(); }
+
+    NonnullRefPtr<StyleValue const> style_value() const { return m_value; }
 
     // https://www.w3.org/TR/css-grid-2/#layout-algorithm
     // An intrinsic sizing function (min-content, max-content, auto, fit-content()).
@@ -39,11 +42,15 @@ public:
 
     bool is_definite() const;
 
+    void serialize(StringBuilder&, SerializationMode) const;
     String to_string(SerializationMode) const;
+    GridSize absolutized(ComputationContext const&) const;
     bool operator==(GridSize const& other) const = default;
 
+    bool is_computationally_independent() const { return m_value->is_computationally_independent(); }
+
 private:
-    Variant<Size, Flex> m_value;
+    ValueComparingNonnullRefPtr<StyleValue const> m_value;
 };
 
 class GridMinMax {
@@ -53,8 +60,15 @@ public:
     GridSize const& min_grid_size() const& { return m_min_grid_size; }
     GridSize const& max_grid_size() const& { return m_max_grid_size; }
 
+    void serialize(StringBuilder&, SerializationMode) const;
     String to_string(SerializationMode) const;
+    GridMinMax absolutized(ComputationContext const&) const;
     bool operator==(GridMinMax const& other) const = default;
+
+    bool is_computationally_independent() const
+    {
+        return m_min_grid_size.is_computationally_independent() && m_max_grid_size.is_computationally_independent();
+    }
 
 private:
     GridSize m_min_grid_size;
@@ -62,18 +76,38 @@ private:
 };
 
 struct GridLineName {
-    FlyString name;
+    Utf16FlyString name;
     bool implicit { false };
+    bool adopted_from_parent_grid { false };
 
     bool operator==(GridLineName const& other) const = default;
 };
 
+struct GridArea {
+    size_t row_start { 0 };
+    size_t row_end { 1 };
+    size_t column_start { 0 };
+    size_t column_end { 1 };
+
+    bool operator==(GridArea const& other) const = default;
+};
+
+struct GridTemplateAreas {
+    HashMap<Utf16FlyString, GridArea> areas;
+    size_t row_count { 0 };
+    size_t column_count { 0 };
+
+    bool is_empty() const { return row_count == 0; }
+    bool operator==(GridTemplateAreas const& other) const = default;
+};
+
 class GridLineNames {
 public:
-    void append(FlyString const& name) { m_names.append({ name }); }
+    void append(Utf16FlyString const& name) { m_names.append({ name }); }
     bool is_empty() const { return m_names.is_empty(); }
     auto const& names() const& { return m_names; }
 
+    void serialize(StringBuilder&) const;
     String to_string() const;
 
     bool operator==(GridLineNames const& other) const = default;
@@ -85,19 +119,29 @@ private:
 class GridTrackSizeList {
 public:
     static GridTrackSizeList make_none();
+    static GridTrackSizeList make_line_name_list();
+    static GridTrackSizeList make_subgrid();
 
     Vector<CSS::ExplicitGridTrack> track_list() const;
     auto const& list() const { return m_list; }
+    bool is_subgrid() const { return m_is_subgrid; }
 
+    void serialize(StringBuilder&, SerializationMode) const;
     String to_string(SerializationMode) const;
     bool operator==(GridTrackSizeList const& other) const;
 
-    bool is_empty() const { return m_list.is_empty(); }
+    bool is_empty() const { return !m_is_subgrid && m_list.is_empty(); }
 
     void append(GridLineNames&&);
     void append(ExplicitGridTrack&&);
 
+    GridTrackSizeList absolutized(ComputationContext const&) const;
+
+    bool is_computationally_independent() const;
+
 private:
+    bool m_is_subgrid { false };
+    bool m_preserve_line_name_sets { false };
     Vector<Variant<ExplicitGridTrack, GridLineNames>> m_list;
 };
 
@@ -109,11 +153,12 @@ enum class GridRepeatType {
 
 struct GridRepeatParams {
     GridRepeatType type;
-    size_t count { 0 };
+    RefPtr<StyleValue const> count { nullptr };
 };
 
 class GridRepeat {
 public:
+    GridRepeat(GridRepeatType, GridTrackSizeList&&, RefPtr<StyleValue const> repeat_count);
     GridRepeat(GridTrackSizeList&&, GridRepeatParams const&);
 
     bool is_auto_fill() const { return m_type == GridRepeatType::AutoFill; }
@@ -122,18 +167,22 @@ public:
     size_t repeat_count() const
     {
         VERIFY(is_fixed());
-        return m_repeat_count;
+        return int_from_style_value(*m_repeat_count);
     }
     GridTrackSizeList const& grid_track_size_list() const& { return m_grid_track_size_list; }
     GridRepeatType type() const& { return m_type; }
 
+    void serialize(StringBuilder&, SerializationMode) const;
     String to_string(SerializationMode) const;
+    GridRepeat absolutized(ComputationContext const&) const;
     bool operator==(GridRepeat const& other) const = default;
+
+    bool is_computationally_independent() const { return m_grid_track_size_list.is_computationally_independent() && (!m_repeat_count || m_repeat_count->is_computationally_independent()); }
 
 private:
     GridRepeatType m_type;
     GridTrackSizeList m_grid_track_size_list;
-    size_t m_repeat_count { 0 };
+    ValueComparingRefPtr<StyleValue const> m_repeat_count;
 };
 
 class ExplicitGridTrack {
@@ -149,8 +198,15 @@ public:
     bool is_default() const { return m_value.has<GridSize>(); }
     GridSize const& grid_size() const { return m_value.get<GridSize>(); }
 
+    void serialize(StringBuilder&, SerializationMode) const;
     String to_string(SerializationMode) const;
+    ExplicitGridTrack absolutized(ComputationContext const&) const;
     bool operator==(ExplicitGridTrack const& other) const = default;
+
+    bool is_computationally_independent() const
+    {
+        return m_value.visit([](auto const& value) { return value.is_computationally_independent(); });
+    }
 
 private:
     Variant<GridRepeat, GridMinMax, GridSize> m_value;

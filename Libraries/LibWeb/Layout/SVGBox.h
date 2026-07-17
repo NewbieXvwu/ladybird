@@ -13,10 +13,10 @@
 namespace Web::Layout {
 
 class SVGBox : public Box {
-    GC_CELL(SVGBox, Box);
+    LAYOUT_NODE(SVGBox, Box);
 
 public:
-    SVGBox(DOM::Document&, SVG::SVGElement&, GC::Ref<CSS::ComputedProperties>);
+    SVGBox(DOM::Document&, SVG::SVGElement&, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~SVGBox() override = default;
 
     SVG::SVGElement& dom_node() { return as<SVG::SVGElement>(*Box::dom_node()); }

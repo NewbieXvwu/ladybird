@@ -1,0 +1,82 @@
+/*
+ * Copyright (c) 2026-present, the Ladybird developers.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include <LibGC/WeakInlines.h>
+#include <LibWeb/DOM/Element.h>
+#include <LibWeb/Page/ElementResizeAction.h>
+#include <LibWeb/Painting/Paintable.h>
+#include <LibWeb/Painting/ResizeHandle.h>
+#include <LibWeb/UIEvents/EventNames.h>
+#include <LibWeb/UIEvents/MouseButton.h>
+#include <LibWeb/UIEvents/PointerEvent.h>
+
+namespace Web::Painting {
+
+NonnullRefPtr<ResizeHandle> ResizeHandle::create(Paintable& paintable_box)
+{
+    return adopt_ref(*new ResizeHandle(paintable_box));
+}
+
+ResizeHandle::ResizeHandle(Paintable& paintable_box)
+    : ChromeWidget(paintable_box)
+    , m_element(as<DOM::Element>(*paintable_box.dom_node()))
+{
+}
+
+bool ResizeHandle::contains(CSSPixelPoint position, ChromeMetrics const& metrics) const
+{
+    auto paintable_box = paintable();
+    if (!paintable_box)
+        return false;
+    return paintable_box->resizer_contains(position, metrics);
+}
+
+Optional<CSS::CursorPredefined> ResizeHandle::cursor() const
+{
+    auto paintable_box = paintable();
+    if (!paintable_box)
+        return {};
+    auto axes = paintable_box->physical_resize_axes();
+    if (axes.vertical) {
+        if (axes.horizontal) {
+            if (paintable_box->is_chrome_mirrored())
+                return CSS::CursorPredefined::SwResize;
+            return CSS::CursorPredefined::SeResize;
+        }
+        return CSS::CursorPredefined::NsResize;
+    }
+    return CSS::CursorPredefined::EwResize;
+}
+
+MouseAction ResizeHandle::handle_pointer_event(Utf16FlyString const& type, unsigned button, CSSPixelPoint visual_viewport_position)
+{
+    if (type == UIEvents::EventNames::pointermove) {
+        if (!m_resize_action)
+            return MouseAction::None;
+    } else if (button != UIEvents::MouseButton::Primary) {
+        return MouseAction::None;
+    }
+
+    auto element = m_element.ptr();
+    if (!element || !element->is_connected()) {
+        m_resize_action.clear();
+        return MouseAction::None;
+    }
+
+    if (!m_resize_action)
+        m_resize_action = make<ElementResizeAction>(*element, visual_viewport_position);
+    else
+        m_resize_action->handle_pointer_move(visual_viewport_position);
+
+    if (type == UIEvents::EventNames::pointerup) {
+        m_resize_action.clear();
+        return MouseAction::None;
+    }
+
+    return MouseAction::CaptureInput;
+}
+
+}

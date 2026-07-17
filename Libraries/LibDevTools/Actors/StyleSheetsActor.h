@@ -21,14 +21,17 @@ public:
     static NonnullRefPtr<StyleSheetsActor> create(DevToolsServer&, String name, WeakPtr<TabActor>);
     virtual ~StyleSheetsActor() override;
 
+    static String resource_id_for_index(StringView actor_name, size_t index);
+
     void set_style_sheets(Vector<Web::CSS::StyleSheetIdentifier>);
+    Optional<String> resource_id_for(Web::CSS::StyleSheetIdentifier const&) const;
 
 private:
     StyleSheetsActor(DevToolsServer&, String name, WeakPtr<TabActor>);
 
     virtual void handle_message(Message const&) override;
 
-    void style_sheet_source_received(Web::CSS::StyleSheetIdentifier const&, String source);
+    void style_sheet_source_received(Web::CSS::StyleSheetIdentifier const&, Utf16String source);
 
     WeakPtr<TabActor> m_tab;
 

@@ -1,0 +1,78 @@
+Program (script) @2:1
+├─ FunctionDeclaration "hoist_test" @2:1
+│  └─ body
+│     └─ FunctionBody @3:5
+│        ├─ BlockStatement @3:5
+│        │  ├─ VariableDeclaration (var) @4:9
+│        │  │  └─ VariableDeclarator @4:9
+│        │  │     ├─ Identifier "hoisted" [variable:1] (var) @4:13
+│        │  │     └─ NumericLiteral 1 @4:23
+│        │  └─ VariableDeclaration (let) @5:9
+│        │     └─ VariableDeclarator @5:9
+│        │        ├─ Identifier "blocked" [variable:0] (let) @5:13
+│        │        └─ NumericLiteral 2 @5:23
+│        └─ ReturnStatement @7:5
+│           └─ Identifier "hoisted" [variable:1] @7:12
+├─ FunctionDeclaration "for_var" @11:1
+│  └─ body
+│     └─ FunctionBody @12:5
+│        ├─ ForStatement @12:5
+│        │  ├─ init
+│        │  │  └─ VariableDeclaration (var) @12:10
+│        │  │     └─ VariableDeclarator @12:10
+│        │  │        ├─ Identifier "i" [variable:0] (var) @12:14
+│        │  │        └─ NumericLiteral 0 @12:18
+│        │  ├─ test
+│        │  │  └─ BinaryExpression (<) @12:23
+│        │  │     ├─ Identifier "i" [variable:0] (var) @12:21
+│        │  │     └─ NumericLiteral 10 @12:25
+│        │  ├─ update
+│        │  │  └─ UpdateExpression (++, postfix) @12:30
+│        │  │     └─ Identifier "i" [variable:0] (var) @12:29
+│        │  └─ body
+│        │     └─ BlockStatement @12:34
+│        │        └─ VariableDeclaration (var) @13:9
+│        │           └─ VariableDeclarator @13:9
+│        │              ├─ Identifier "inner" [variable:1] (var) @13:13
+│        │              └─ Identifier "i" [variable:0] (var) @13:21
+│        └─ ReturnStatement @15:5
+│           └─ BinaryExpression (+) @15:14
+│              ├─ Identifier "i" [variable:0] @15:12
+│              └─ Identifier "inner" [variable:1] @15:16
+├─ FunctionDeclaration "for_let" @19:1
+│  └─ body
+│     └─ FunctionBody @20:5
+│        └─ ForStatement @20:5
+│           ├─ init
+│           │  └─ VariableDeclaration (let) @20:10
+│           │     └─ VariableDeclarator @20:10
+│           │        ├─ Identifier "j" [variable:0] (let) @20:14
+│           │        └─ NumericLiteral 0 @20:18
+│           ├─ test
+│           │  └─ BinaryExpression (<) @20:23
+│           │     ├─ Identifier "j" [variable:0] (let) @20:21
+│           │     └─ NumericLiteral 10 @20:25
+│           ├─ update
+│           │  └─ UpdateExpression (++, postfix) @20:30
+│           │     └─ Identifier "j" [variable:0] (let) @20:29
+│           └─ body
+│              └─ BlockStatement @20:34
+└─ FunctionDeclaration "catch_var" @24:1
+   └─ body
+      └─ FunctionBody @25:5
+         ├─ TryStatement @25:5
+         │  ├─ block
+         │  │  └─ BlockStatement @25:9
+         │  │     └─ ThrowStatement @26:9
+         │  │        └─ NumericLiteral 1 @26:15
+         │  └─ handler
+         │     └─ CatchClause @27:7
+         │        ├─ parameter
+         │        │  └─ Identifier "e" [variable:0] @27:14
+         │        └─ BlockStatement @27:17
+         │           └─ VariableDeclaration (var) @28:9
+         │              └─ VariableDeclarator @28:9
+         │                 ├─ Identifier "caught" [variable:1] (var) @28:13
+         │                 └─ Identifier "e" [variable:0] @28:22
+         └─ ReturnStatement @30:5
+            └─ Identifier "caught" [variable:1] @30:12

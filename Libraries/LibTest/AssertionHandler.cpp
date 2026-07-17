@@ -8,11 +8,11 @@
 
 namespace Test {
 
-static jmp_buf g_assert_jmp_buf = {};
+static libtest_jmp_buf g_assert_jmp_buf = {};
 
 static bool g_assert_jmp_buf_valid = false;
 
-jmp_buf& assertion_jump_buffer() { return g_assert_jmp_buf; }
+libtest_jmp_buf& assertion_jump_buffer() { return g_assert_jmp_buf; }
 
 void set_assertion_jump_validity(bool validity)
 {
@@ -38,7 +38,7 @@ static void assertion_handler_impl(char const*)
 #if defined(AK_OS_WINDOWS)
 #    define EXPORT __declspec(dllexport)
 #else
-#    define EXPORT __attribute__((visibility("default")))
+#    define EXPORT __attribute__((visibility("default"), retain, used))
 #endif
 
 extern "C" EXPORT void ak_assertion_handler(char const* message);

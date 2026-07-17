@@ -6,12 +6,13 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/MediaQueryListPrototype.h>
+#include <LibWeb/Bindings/MediaQueryList.h>
 #include <LibWeb/CSS/MediaQueryList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/HTML/EventHandler.h>
+#include <LibWeb/HTML/EventNames.h>
 
 namespace Web::CSS {
 
@@ -43,7 +44,7 @@ void MediaQueryList::visit_edges(Cell::Visitor& visitor)
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-mediaquerylist-media
-String MediaQueryList::media() const
+Utf16String MediaQueryList::media() const
 {
     return serialize_a_media_query_list(m_media);
 }
@@ -85,16 +86,12 @@ bool MediaQueryList::matches() const
 
 bool MediaQueryList::evaluate()
 {
-    auto window = m_document->window();
-    if (!window)
-        return false;
-
     if (m_media.is_empty())
         return true;
 
     bool now_matches = false;
     for (auto& media : m_media) {
-        now_matches = now_matches || media->evaluate(*window);
+        now_matches = now_matches || media->evaluate(m_document);
     }
 
     return now_matches;

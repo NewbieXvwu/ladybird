@@ -6,7 +6,7 @@
  */
 
 #include <LibWeb/ARIA/Roles.h>
-#include <LibWeb/Bindings/HTMLAnchorElementPrototype.h>
+#include <LibWeb/Bindings/HTMLAnchorElement.h>
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/HTML/AttributeNames.h>
@@ -40,7 +40,7 @@ void HTMLAnchorElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_rel_list);
 }
 
-void HTMLAnchorElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLAnchorElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -48,23 +48,8 @@ void HTMLAnchorElement::attribute_changed(FlyString const& name, Optional<String
         set_the_url();
     } else if (name == HTML::AttributeNames::rel) {
         if (m_rel_list)
-            m_rel_list->associated_attribute_changed(value.value_or(String {}));
+            m_rel_list->associated_attribute_changed(value.has_value() ? value->utf16_view() : u""sv);
     }
-}
-
-Optional<String> HTMLAnchorElement::hyperlink_element_utils_href() const
-{
-    return attribute(HTML::AttributeNames::href);
-}
-
-WebIDL::ExceptionOr<void> HTMLAnchorElement::set_hyperlink_element_utils_href(String href)
-{
-    return set_attribute(HTML::AttributeNames::href, move(href));
-}
-
-Optional<String> HTMLAnchorElement::hyperlink_element_utils_referrerpolicy() const
-{
-    return attribute(HTML::AttributeNames::referrerpolicy);
 }
 
 bool HTMLAnchorElement::has_activation_behavior() const
@@ -90,7 +75,7 @@ void HTMLAnchorElement::activation_behavior(Web::DOM::Event const& event)
     }
 
     // 2. Let hyperlinkSuffix be null.
-    Optional<String> hyperlink_suffix {};
+    Optional<Utf16String> hyperlink_suffix {};
 
     // 3. If element is an a element, and event's target is an img with an ismap attribute specified, then:
     if (event.target() && is<HTMLImageElement>(*event.target()) && static_cast<HTMLImageElement const&>(*event.target()).has_attribute(AttributeNames::ismap)) {
@@ -114,7 +99,7 @@ void HTMLAnchorElement::activation_behavior(Web::DOM::Event const& event)
 
         // 5. Set hyperlinkSuffix to the concatenation of U+003F (?), the value of x expressed as a base-ten integer using ASCII digits,
         //    U+002C (,), and the value of y expressed as a base-ten integer using ASCII digits.
-        hyperlink_suffix = MUST(String::formatted("?{},{}", x.to_int(), y.to_int()));
+        hyperlink_suffix = Utf16String::formatted("?{},{}", x.to_int(), y.to_int());
     }
 
     // 4. Let userInvolvement be event's user navigation involvement.
@@ -171,7 +156,7 @@ Utf16String HTMLAnchorElement::text() const
 }
 
 // https://html.spec.whatwg.org/multipage/text-level-semantics.html#dom-a-text
-void HTMLAnchorElement::set_text(Utf16String const& text)
+void HTMLAnchorElement::set_text(Utf16View text)
 {
     // The text attribute's setter must string replace all with the given value within this element.
     string_replace_all(text);

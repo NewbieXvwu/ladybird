@@ -1,10 +1,8 @@
-#import <HTML/HTMLElement.idl>
-
 // https://html.spec.whatwg.org/multipage/form-elements.html#htmloptgroupelement
 [Exposed=Window]
 interface HTMLOptGroupElement : HTMLElement {
     [HTMLConstructor] constructor();
 
     [CEReactions, Reflect] attribute boolean disabled;
-    [CEReactions, Reflect] attribute DOMString label;
+    [CEReactions, Reflect] attribute Utf16DOMString label;
 };

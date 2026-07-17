@@ -6,6 +6,7 @@
  */
 
 #include <AK/Debug.h>
+#include <AK/Utf16String.h>
 #include <LibJS/SyntaxHighlighter.h>
 #include <LibJS/Token.h>
 #include <LibWeb/CSS/SyntaxHighlighter/SyntaxHighlighter.h>
@@ -14,24 +15,11 @@
 
 namespace Web::HTML {
 
-bool SyntaxHighlighter::is_identifier(u64) const
-{
-    return false;
-}
-
-bool SyntaxHighlighter::is_navigatable(u64) const
-{
-    return false;
-}
-
 void SyntaxHighlighter::rehighlight(Palette const& palette)
 {
     dbgln_if(SYNTAX_HIGHLIGHTING_DEBUG, "(HTML::SyntaxHighlighter) starting rehighlight");
     auto text = m_client->get_text();
-    clear_nested_token_pairs();
 
-    // FIXME: Add folding regions for start and end tags.
-    Vector<Syntax::TextDocumentFoldingRegion> folding_regions;
     Vector<Syntax::TextDocumentSpan> spans;
     auto highlight = [&](auto start_line, auto start_column, auto end_line, auto end_column, Gfx::TextAttributes attributes, AugmentedTokenKind kind) {
         if (start_line > end_line || (start_line == end_line && start_column >= end_column)) {
@@ -49,7 +37,7 @@ void SyntaxHighlighter::rehighlight(Palette const& palette)
             false);
     };
 
-    HTMLTokenizer tokenizer { text, "utf-8" };
+    HTMLTokenizer tokenizer { Utf16String::from_utf8_without_validation(text) };
     [[maybe_unused]] enum class State {
         HTML,
         Javascript,
@@ -65,23 +53,22 @@ void SyntaxHighlighter::rehighlight(Palette const& palette)
         dbgln_if(SYNTAX_HIGHLIGHTING_DEBUG, "(HTML::SyntaxHighlighter) got token of type {}", token->to_string());
 
         if (token->is_start_tag()) {
-            if (token->tag_name() == "script"sv) {
+            if (token->tag_name() == u"script"sv) {
                 tokenizer.switch_to(HTMLTokenizer::State::ScriptData);
                 state = State::Javascript;
                 // The end position points to the '>' character, but we need the position after it
                 substring_start_position = { token->end_position().line, token->end_position().column + 1 };
-            } else if (token->tag_name() == "style"sv) {
+            } else if (token->tag_name() == u"style"sv) {
                 tokenizer.switch_to(HTMLTokenizer::State::RAWTEXT);
                 state = State::CSS;
                 // The end position points to the '>' character, but we need the position after it
                 substring_start_position = { token->end_position().line, token->end_position().column + 1 };
             }
         } else if (token->is_end_tag()) {
-            if (token->tag_name().is_one_of("script"sv, "style"sv)) {
+            if (token->tag_name().is_one_of(u"script"sv, u"style"sv)) {
                 if (state == State::Javascript) {
-                    VERIFY(static_cast<u64>(AugmentedTokenKind::__Count) + first_free_token_kind_serial_value() < JS_TOKEN_START_VALUE);
+                    VERIFY(static_cast<u64>(AugmentedTokenKind::__Count) < JS_TOKEN_START_VALUE);
                     Syntax::ProxyHighlighterClient proxy_client {
-                        *m_client,
                         substring_start_position,
                         JS_TOKEN_START_VALUE,
                         substring_builder.string_view()
@@ -91,16 +78,13 @@ void SyntaxHighlighter::rehighlight(Palette const& palette)
                         highlighter.attach(proxy_client);
                         highlighter.rehighlight(palette);
                         highlighter.detach();
-                        register_nested_token_pairs(proxy_client.corrected_token_pairs(highlighter.matching_token_pairs()));
                     }
 
                     spans.extend(proxy_client.corrected_spans());
-                    folding_regions.extend(proxy_client.corrected_folding_regions());
                     substring_builder.clear();
                 } else if (state == State::CSS) {
-                    VERIFY(static_cast<u64>(AugmentedTokenKind::__Count) + first_free_token_kind_serial_value() + static_cast<u64>(JS::TokenType::_COUNT_OF_TOKENS) < CSS_TOKEN_START_VALUE);
+                    VERIFY(static_cast<u64>(AugmentedTokenKind::__Count) + static_cast<u64>(JS::TokenType::_COUNT_OF_TOKENS) < CSS_TOKEN_START_VALUE);
                     Syntax::ProxyHighlighterClient proxy_client {
-                        *m_client,
                         substring_start_position,
                         CSS_TOKEN_START_VALUE,
                         substring_builder.string_view()
@@ -110,11 +94,9 @@ void SyntaxHighlighter::rehighlight(Palette const& palette)
                         highlighter.attach(proxy_client);
                         highlighter.rehighlight(palette);
                         highlighter.detach();
-                        register_nested_token_pairs(proxy_client.corrected_token_pairs(highlighter.matching_token_pairs()));
                     }
 
                     spans.extend(proxy_client.corrected_spans());
-                    folding_regions.extend(proxy_client.corrected_folding_regions());
                     substring_builder.clear();
                 }
                 state = State::HTML;
@@ -133,17 +115,12 @@ void SyntaxHighlighter::rehighlight(Palette const& palette)
                 token->end_position().column,
                 { palette.syntax_comment(), {} },
                 AugmentedTokenKind::Comment);
-
-            Syntax::TextDocumentFoldingRegion region;
-            region.range.set_start({ token->start_position().line, token->start_position().column + comment_prefix()->length() });
-            region.range.set_end({ token->end_position().line, token->end_position().column - comment_suffix()->length() });
-            folding_regions.append(move(region));
         } else if (token->is_start_tag() || token->is_end_tag()) {
             highlight(
                 token->start_position().line,
                 token->start_position().column,
                 token->start_position().line,
-                token->start_position().column + token->tag_name().bytes().size(),
+                token->start_position().column + token->tag_name().length_in_code_units(),
                 { palette.syntax_keyword(), {}, true },
                 token->is_start_tag() ? AugmentedTokenKind::OpenTag : AugmentedTokenKind::CloseTag);
 
@@ -183,24 +160,6 @@ void SyntaxHighlighter::rehighlight(Palette const& palette)
     }
 
     m_client->do_set_spans(move(spans));
-    m_client->do_set_folding_regions(move(folding_regions));
-    m_has_brace_buddies = false;
-    highlight_matching_token_pair();
-    m_client->do_update();
-}
-
-Vector<Syntax::Highlighter::MatchingTokenPair> SyntaxHighlighter::matching_token_pairs_impl() const
-{
-    static Vector<MatchingTokenPair> pairs;
-    if (pairs.is_empty()) {
-        pairs.append({ static_cast<u64>(AugmentedTokenKind::OpenTag), static_cast<u64>(AugmentedTokenKind::CloseTag) });
-    }
-    return pairs;
-}
-
-bool SyntaxHighlighter::token_types_equal(u64 token0, u64 token1) const
-{
-    return token0 == token1;
 }
 
 }

@@ -13,6 +13,7 @@ namespace AK {
 struct Utf16FlyStringTableHashTraits : public Traits<Detail::Utf16StringData const*> {
     static u32 hash(Detail::Utf16StringData const* string) { return string->hash(); }
     static bool equals(Detail::Utf16StringData const* a, Detail::Utf16StringData const* b) { return *a == *b; }
+    static constexpr bool may_have_slow_equality_check() { return true; }
 };
 
 static auto& all_utf16_fly_strings()
@@ -55,6 +56,13 @@ Utf16FlyString Utf16FlyString::from_utf8(StringView string)
     if (auto result = create_fly_string_from_cache(string); result.has_value())
         return result.release_value();
     return Utf16String::from_utf8(string);
+}
+
+Utf16FlyString Utf16FlyString::from_ascii_without_validation(StringView string)
+{
+    if (auto result = create_fly_string_from_cache(string); result.has_value())
+        return result.release_value();
+    return Utf16String::from_ascii_without_validation(string.bytes());
 }
 
 Utf16FlyString Utf16FlyString::from_utf8_without_validation(StringView string)

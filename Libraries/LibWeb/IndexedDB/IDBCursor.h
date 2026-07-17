@@ -7,8 +7,8 @@
 #pragma once
 
 #include <LibGC/Heap.h>
-#include <LibWeb/Bindings/IDBCursorPrototype.h>
-#include <LibWeb/Bindings/IDBCursorWithValuePrototype.h>
+#include <LibWeb/Bindings/IDBCursor.h>
+#include <LibWeb/Bindings/IDBCursorWithValue.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/IndexedDB/IDBIndex.h>
 #include <LibWeb/IndexedDB/IDBKeyRange.h>
@@ -47,11 +47,13 @@ public:
     [[nodiscard]] GC::Ptr<IDBRequest> request() { return m_request; }
 
     WebIDL::ExceptionOr<void> advance(WebIDL::UnsignedLong);
-    WebIDL::ExceptionOr<void> continue_(JS::Value);
+    WebIDL::ExceptionOr<void> continue_(Optional<JS::Value>);
     WebIDL::ExceptionOr<void> continue_primary_key(JS::Value, JS::Value);
 
     WebIDL::ExceptionOr<GC::Ref<IDBRequest>> update(JS::Value);
     WebIDL::ExceptionOr<GC::Ref<IDBRequest>> delete_();
+
+    [[nodiscard]] bool is_source_or_object_store_deleted() const;
 
     [[nodiscard]] GC::Ref<IDBKeyRange> range() { return m_range; }
     [[nodiscard]] GC::Ptr<Key> position() { return m_position; }

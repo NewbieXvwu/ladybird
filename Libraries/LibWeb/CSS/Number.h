@@ -7,11 +7,14 @@
 #pragma once
 
 #include <AK/String.h>
+#include <AK/StringBuilder.h>
 #include <AK/Types.h>
 #include <LibWeb/CSS/SerializationMode.h>
 #include <math.h>
 
 namespace Web::CSS {
+
+i32 round_to_nearest_integer(double);
 
 class Number {
 public:
@@ -34,13 +37,14 @@ public:
 
     Type type() const { return m_type; }
     double value() const { return m_value; }
-    i64 integer_value() const
+    i32 integer_value() const
     {
         // https://www.w3.org/TR/css-values-4/#numeric-types
         // When a value cannot be explicitly supported due to range/precision limitations, it must be converted
         // to the closest value supported by the implementation, but how the implementation defines "closest"
         // is explicitly undefined as well.
-        return llround(m_value);
+
+        return round_to_nearest_integer(m_value);
     }
     bool is_integer() const { return m_type == Type::Integer || m_type == Type::IntegerWithExplicitSign; }
     bool is_integer_with_explicit_sign() const { return m_type == Type::IntegerWithExplicitSign; }
@@ -71,6 +75,7 @@ public:
         return { Type::Number, m_value / other.m_value };
     }
 
+    void serialize(StringBuilder&, SerializationMode = SerializationMode::Normal) const;
     String to_string(SerializationMode = SerializationMode::Normal) const;
 
     bool operator==(Number const& other) const

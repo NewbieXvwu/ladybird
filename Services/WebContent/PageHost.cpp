@@ -7,10 +7,13 @@
  */
 
 #include <LibWeb/Bindings/MainThreadVM.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/Compositor/CompositorHost.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
+
 #include <WebContent/ConnectionFromClient.h>
 #include <WebContent/PageClient.h>
 #include <WebContent/PageHost.h>
+#include <WebContent/WebContentCompositorHost.h>
 #include <WebContent/WebDriverConnection.h>
 
 namespace WebContent {
@@ -18,29 +21,66 @@ namespace WebContent {
 PageHost::PageHost(ConnectionFromClient& client)
     : m_client(client)
 {
-    auto& first_page = create_page();
-    Web::HTML::TraversableNavigable::create_a_fresh_top_level_traversable(first_page.page(), URL::about_blank()).release_value_but_fixme_should_propagate_errors();
 }
 
-PageClient& PageHost::create_page()
+void PageHost::initialize(u64 initial_page_id, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::CrossProcessIdAllocator cross_process_id_allocator)
 {
-    m_pages.set(m_next_id, PageClient::create(Web::Bindings::main_thread_vm(), *this, m_next_id));
-    ++m_next_id;
-    return *m_pages.get(m_next_id - 1).value();
+    VERIFY(m_pages.is_empty());
+    m_cross_process_id_allocator = cross_process_id_allocator;
+    auto& first_page = create_page(initial_page_id, root_navigable_id);
+    Web::HTML::LocalTraversableNavigable::create_a_fresh_top_level_traversable(first_page.page(), URL::about_blank());
 }
 
-void PageHost::remove_page(Badge<PageClient>, u64 index)
+PageClient& PageHost::create_page(u64 page_id, Optional<Web::HTML::CrossProcessId> pending_root_navigable_id)
 {
-    m_pages.remove(index);
+    VERIFY(page_id > 0);
+    VERIFY(!m_pages.contains(page_id));
+    m_pages.set(page_id, PageClient::create(Web::Bindings::main_thread_vm(), *this, page_id, pending_root_navigable_id));
+    return *m_pages.get(page_id).value();
 }
 
-Optional<PageClient&> PageHost::page(u64 index)
+Web::HTML::CrossProcessId PageHost::allocate_cross_process_id()
 {
-    return m_pages.get(index).map([](auto& value) -> PageClient& {
+    VERIFY(m_cross_process_id_allocator.has_value());
+    return m_cross_process_id_allocator->allocate();
+}
+
+Web::HTML::CrossProcessId PageHost::allocate_navigable_id()
+{
+    return allocate_cross_process_id();
+}
+
+void PageHost::remove_page(Badge<PageClient>, u64 page_id)
+{
+    m_pages.remove(page_id);
+}
+
+Optional<PageClient&> PageHost::page(u64 page_id)
+{
+    return m_pages.get(page_id).map([](auto& value) -> PageClient& {
         return *value;
     });
 }
 
 PageHost::~PageHost() = default;
+
+void PageHost::ensure_compositor_host()
+{
+    if (m_compositor_host)
+        return;
+    m_compositor_host = create_web_content_compositor_host(m_client);
+}
+
+void PageHost::compositor_process_reconnected()
+{
+    for (auto& [_, page] : m_pages)
+        page->compositor_process_reconnected();
+}
+
+void PageHost::compositor_process_lost()
+{
+    for (auto& [_, page] : m_pages)
+        page->compositor_process_lost();
+}
 
 }

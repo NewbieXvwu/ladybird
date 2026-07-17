@@ -24,7 +24,7 @@ private:
     ErrorOr<JsonValue> parse_json();
     ErrorOr<JsonValue> parse_helper();
 
-    ErrorOr<ByteString> consume_and_unescape_string();
+    ErrorOr<String> consume_and_unescape_string();
     ErrorOr<JsonValue> parse_array();
     ErrorOr<JsonValue> parse_object();
     ErrorOr<JsonValue> parse_number();
@@ -32,6 +32,10 @@ private:
     ErrorOr<JsonValue> parse_false();
     ErrorOr<JsonValue> parse_true();
     ErrorOr<JsonValue> parse_null();
+
+    // Keep recursive parsing depth bounded so untrusted JSON cannot overflow the call stack.
+    static constexpr size_t max_nesting_depth { 512 };
+    size_t m_current_nesting_depth { 0 };
 };
 
 }

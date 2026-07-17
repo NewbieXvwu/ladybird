@@ -16,9 +16,11 @@
 #include <LibCore/TCPServer.h>
 #include <LibCore/Timer.h>
 #include <LibCore/UDPServer.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibTest/TestCase.h>
-#include <LibThreading/BackgroundAction.h>
-#include <fcntl.h>
+#include <LibThreading/Thread.h>
+
+#include <AK/Windows.h>
 
 // File tests
 
@@ -132,8 +134,7 @@ TEST_CASE(file_buffered_write_and_seek)
 
 TEST_CASE(file_adopt_fd)
 {
-    int rc = TRY_OR_FAIL(Core::System::open("./long_lines.txt"sv, O_RDONLY));
-    EXPECT(rc >= 0);
+    int rc = TRY_OR_FAIL(Core::File::open("./long_lines.txt"sv, Core::File::OpenMode::Read))->leak_fd();
 
     auto file = TRY_OR_FAIL(Core::File::adopt_fd(rc, Core::File::OpenMode::Read));
 
@@ -324,7 +325,7 @@ TEST_CASE(udp_socket_read_write)
     auto small_buffer = ByteBuffer::create_uninitialized(8).release_value();
     EXPECT_EQ(client_socket->read_some(small_buffer).error().code(), SMALL_BUFFER_ERROR_CODE);
 
-    // FIXME: This works locally in the Windows_Experimental (Debug) preset, but not in Windows_Sanitizer_Preset
+    // FIXME: This works locally in the Windows Debug preset, but not in Windows Sanitizer preset
 #if !defined(AK_OS_WINDOWS) || defined(_NDEBUG)
     auto client_receive_buffer = TRY_OR_FAIL(ByteBuffer::create_uninitialized(CLIENT_RECEIVE_BUFFER_SIZE));
     auto read_bytes = TRY_OR_FAIL(client_socket->read_some(client_receive_buffer));
@@ -341,6 +342,8 @@ TEST_CASE(local_socket_read)
     Core::EventLoop event_loop;
 
     auto socket_path = ByteString::formatted("{}/{}", Core::StandardPaths::tempfile_directory(), "test-socket"sv);
+    if (FileSystem::exists(socket_path))
+        TRY_OR_FAIL(FileSystem::remove(socket_path, FileSystem::RecursionMode::Disallowed));
 
     auto local_server = Core::LocalServer::construct();
     EXPECT(local_server->listen(socket_path));
@@ -356,8 +359,9 @@ TEST_CASE(local_socket_read)
     //       impasse. LocalSocket::connect blocks because there's nobody to
     //       accept, and LocalServer::accept blocks because there's nobody
     //       connected.
-    auto background_action = Threading::BackgroundAction<int>::construct(
-        [&socket_path](auto&) {
+    auto client_thread = Threading::Thread::construct(
+        "LocalSocketRead"sv,
+        [socket_path] {
             Core::EventLoop event_loop;
 
             auto client_socket = MUST(Core::LocalSocket::connect(socket_path));
@@ -377,10 +381,11 @@ TEST_CASE(local_socket_read)
             EXPECT_EQ(sent_data, received_data);
 
             return 0;
-        },
-        nullptr);
+        });
+    client_thread->start();
 
     event_loop.exec();
+    MUST(client_thread->join());
     ::unlink(socket_path.characters());
 }
 
@@ -389,6 +394,9 @@ TEST_CASE(local_socket_write)
     Core::EventLoop event_loop;
 
     auto socket_path = ByteString::formatted("{}/{}", Core::StandardPaths::tempfile_directory(), "test-socket"sv);
+    if (FileSystem::exists(socket_path))
+        TRY_OR_FAIL(FileSystem::remove(socket_path, FileSystem::RecursionMode::Disallowed));
+
     auto local_server = Core::LocalServer::construct();
     EXPECT(local_server->listen(socket_path));
 
@@ -414,18 +422,20 @@ TEST_CASE(local_socket_write)
     };
 
     // NOTE: Same reason as in the local_socket_read test.
-    auto background_action = Threading::BackgroundAction<int>::construct(
-        [&socket_path](auto&) {
+    auto client_thread = Threading::Thread::construct(
+        "LocalSocketWrite"sv,
+        [socket_path] {
             auto client_socket = MUST(Core::LocalSocket::connect(socket_path));
 
             MUST(client_socket->write_until_depleted({ sent_data.characters_without_null_termination(), sent_data.length() }));
             client_socket->close();
 
             return 0;
-        },
-        nullptr);
+        });
+    client_thread->start();
 
     event_loop.exec();
+    MUST(client_thread->join());
     ::unlink(socket_path.characters());
 }
 

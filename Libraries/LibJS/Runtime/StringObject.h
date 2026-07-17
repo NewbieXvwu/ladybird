@@ -29,10 +29,11 @@ protected:
 
 private:
     virtual ThrowCompletionOr<Optional<PropertyDescriptor>> internal_get_own_property(PropertyKey const&) const override;
-    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const&, PropertyDescriptor const&, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr) override;
+    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const&, PropertyDescriptor&, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr) override;
     virtual ThrowCompletionOr<GC::RootVector<Value>> internal_own_property_keys() const override;
 
     virtual bool is_string_object() const final { return true; }
+    virtual bool eligible_for_own_property_enumeration_fast_path() const override final { return false; }
     virtual void visit_edges(Visitor&) override;
 
     GC::Ref<PrimitiveString> m_string;

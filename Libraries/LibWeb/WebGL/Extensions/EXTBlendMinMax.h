@@ -9,23 +9,23 @@
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Forward.h>
 
-namespace Web::WebGL::Extensions {
+namespace Web::WebGL {
 
 class EXTBlendMinMax : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(EXTBlendMinMax, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(EXTBlendMinMax);
 
 public:
-    static JS::ThrowCompletionOr<GC::Ptr<EXTBlendMinMax>> create(JS::Realm&, GC::Ref<WebGLRenderingContext>);
+    static JS::ThrowCompletionOr<GC::Ref<JS::Object>> create(JS::Realm&, GC::Ref<WebGLRenderingContextBase>);
 
 protected:
     void initialize(JS::Realm&) override;
     void visit_edges(Visitor&) override;
 
 private:
-    EXTBlendMinMax(JS::Realm&, GC::Ref<WebGLRenderingContext>);
+    EXTBlendMinMax(JS::Realm&, GC::Ref<WebGLRenderingContextBase>);
 
-    GC::Ref<WebGLRenderingContext> m_context;
+    GC::Ref<WebGLRenderingContextBase> m_context;
 };
 
 }

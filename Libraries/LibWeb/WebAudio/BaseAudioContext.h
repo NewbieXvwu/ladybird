@@ -8,7 +8,9 @@
 
 #pragma once
 
-#include <LibWeb/Bindings/BaseAudioContextPrototype.h>
+#include <AK/Function.h>
+#include <LibWeb/Bindings/BaseAudioContext.h>
+#include <LibWeb/Bindings/PeriodicWave.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/WebAudio/AnalyserNode.h>
 #include <LibWeb/WebAudio/AudioListener.h>
@@ -16,15 +18,18 @@
 #include <LibWeb/WebAudio/ChannelMergerNode.h>
 #include <LibWeb/WebAudio/ChannelSplitterNode.h>
 #include <LibWeb/WebAudio/ConstantSourceNode.h>
+#include <LibWeb/WebAudio/ControlMessage.h>
 #include <LibWeb/WebAudio/DelayNode.h>
 #include <LibWeb/WebAudio/PeriodicWave.h>
 #include <LibWeb/WebAudio/ScriptProcessorNode.h>
 #include <LibWeb/WebAudio/StereoPannerNode.h>
+#include <LibWeb/WebAudio/Types.h>
 #include <LibWeb/WebIDL/Types.h>
 
 namespace Web::WebAudio {
 
 class AudioDestinationNode;
+class ControlMessageQueue;
 
 // https://webaudio.github.io/web-audio-api/#BaseAudioContext
 class BaseAudioContext : public DOM::EventTarget {
@@ -38,11 +43,11 @@ public:
     // Other browsers appear to only allow 32 channels - so let's limit ourselves to that too.
     static constexpr WebIDL::UnsignedLong MAX_NUMBER_OF_CHANNELS { 32 };
 
-    // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbuffer-samplerate
-    // > An implementation MUST support sample rates in at least the range 8000 to 96000.
-    // This doesn't seem consistent between browsers. We use what firefox accepts from testing BaseAudioContext.createAudioBuffer.
-    static constexpr float MIN_SAMPLE_RATE { 8000 };
-    static constexpr float MAX_SAMPLE_RATE { 192000 };
+    // https://webaudio.github.io/web-audio-api/#sample-rates
+    // Implementations MUST support sample rates between 3000 Hz and 768000 Hz, inclusive. A NotSupportedError MUST
+    // be thrown if a sample rate outside this range is specified.
+    static constexpr float MIN_SAMPLE_RATE { 3000 };
+    static constexpr float MAX_SAMPLE_RATE { 768000 };
 
     static WebIDL::UnsignedLong render_quantum_size() { return s_render_quantum_size; }
 
@@ -77,12 +82,18 @@ public:
     WebIDL::ExceptionOr<GC::Ref<DynamicsCompressorNode>> create_dynamics_compressor();
     WebIDL::ExceptionOr<GC::Ref<GainNode>> create_gain();
     WebIDL::ExceptionOr<GC::Ref<PannerNode>> create_panner();
-    WebIDL::ExceptionOr<GC::Ref<PeriodicWave>> create_periodic_wave(Vector<float> const& real, Vector<float> const& imag, Optional<PeriodicWaveConstraints> const& constraints = {});
-    WebIDL::ExceptionOr<GC::Ref<ScriptProcessorNode>> create_script_processor(WebIDL::UnsignedLong buffer_size,
-        WebIDL::UnsignedLong number_of_input_channels, WebIDL::UnsignedLong number_of_output_channels);
+    WebIDL::ExceptionOr<GC::Ref<PeriodicWave>> create_periodic_wave(Vector<float> const& real, Vector<float> const& imag, Optional<Bindings::PeriodicWaveConstraints> const& constraints = {});
+    WebIDL::ExceptionOr<GC::Ref<ScriptProcessorNode>> create_script_processor(
+        WebIDL::UnsignedLong buffer_size,
+        WebIDL::UnsignedLong number_of_input_channels,
+        WebIDL::UnsignedLong number_of_output_channels);
     WebIDL::ExceptionOr<GC::Ref<StereoPannerNode>> create_stereo_panner();
 
-    GC::Ref<WebIDL::Promise> decode_audio_data(GC::Root<WebIDL::BufferSource>, GC::Ptr<WebIDL::CallbackType>, GC::Ptr<WebIDL::CallbackType>);
+    GC::Ref<WebIDL::Promise> decode_audio_data(GC::Ref<JS::ArrayBuffer>, GC::Ptr<WebIDL::CallbackType>, GC::Ptr<WebIDL::CallbackType>);
+
+    void queue_control_message(ControlMessage);
+
+    NodeID next_node_id(Badge<AudioNode>) { return ++m_next_node_id; }
 
 protected:
     explicit BaseAudioContext(JS::Realm&, float m_sample_rate = 0);
@@ -99,7 +110,9 @@ private:
     // https://webaudio.github.io/web-audio-api/#render-quantum-size
     static constexpr WebIDL::UnsignedLong s_render_quantum_size { 128 };
 
-    void queue_a_decoding_operation(GC::Ref<JS::PromiseCapability>, GC::Root<WebIDL::BufferSource>, GC::Ptr<WebIDL::CallbackType>, GC::Ptr<WebIDL::CallbackType>);
+    void queue_a_decoding_operation(GC::Ref<JS::PromiseCapability>, GC::Ref<JS::ArrayBuffer>, GC::Ptr<WebIDL::CallbackType>, GC::Ptr<WebIDL::CallbackType>);
+
+    u64 m_next_node_id { 0 };
 
     float m_sample_rate { 0 };
     double m_current_time { 0 };
@@ -110,6 +123,8 @@ private:
     Bindings::AudioContextState m_rendering_thread_state = Bindings::AudioContextState::Suspended;
 
     HTML::UniqueTaskSource m_media_element_event_task_source {};
+
+    NonnullOwnPtr<ControlMessageQueue> m_control_message_queue;
 };
 
 }

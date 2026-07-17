@@ -4,11 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibURL/Parser.h>
-#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/CORS.h>
 #include <LibWeb/HTML/Navigator.h>
 #include <LibWeb/HTML/NavigatorBeacon.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -17,7 +16,7 @@
 namespace Web::HTML {
 
 // https://w3c.github.io/beacon/#sendbeacon-method
-WebIDL::ExceptionOr<bool> NavigatorBeaconPartial::send_beacon(String const& url, Optional<Fetch::BodyInit> const& data)
+WebIDL::ExceptionOr<bool> NavigatorBeaconPartial::send_beacon(Utf16View url, Fetch::NullableBodyInit const& data)
 {
     auto& navigator = as<Navigator>(*this);
     auto& realm = navigator.realm();
@@ -25,29 +24,29 @@ WebIDL::ExceptionOr<bool> NavigatorBeaconPartial::send_beacon(String const& url,
     auto& relevant_settings_object = HTML::relevant_settings_object(navigator);
 
     // 1. Set base to this's relevant settings object's API base URL.
-    auto base_url = relevant_settings_object.api_base_url();
+    // NB: This is handled by the encoding_parse_url() call below.
 
     // 2. Set origin to this's relevant settings object's origin.
     auto origin = relevant_settings_object.origin();
 
     // 3. Set parsedUrl to the result of the URL parser steps with url and base. If the algorithm returns an error, or if parsedUrl's scheme is not "http" or "https", throw a "TypeError" exception and terminate these steps.
-    auto parsed_url = URL::Parser::basic_parse(url, base_url);
+    auto parsed_url = relevant_settings_object.encoding_parse_url(url);
     if (!parsed_url.has_value())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Beacon URL {} is invalid.", url)) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Beacon URL {} is invalid.", url) };
     if (parsed_url->scheme() != "http" && parsed_url->scheme() != "https")
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Beacon URL {} must be either http:// or https://.", url)) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Beacon URL {} must be either http:// or https://.", url) };
 
     // 4. Let headerList be an empty list.
-    auto header_list = Fetch::Infrastructure::HeaderList::create(vm);
+    auto header_list = HTTP::HeaderList::create();
 
     // 5. Let corsMode be "no-cors".
     auto cors_mode = Fetch::Infrastructure::Request::Mode::NoCORS;
 
     // 6. If data is not null:
     GC::Ptr<Fetch::Infrastructure::Body> transmitted_data;
-    if (data.has_value()) {
+    if (!data.has<Empty>()) {
         // 6.1 Set transmittedData and contentType to the result of extracting data's byte stream with the keepalive flag set.
-        auto body_with_type = TRY(Fetch::extract_body(realm, data.value(), true));
+        auto body_with_type = TRY(Fetch::extract_body(realm, data.downcast<Fetch::BodyInit>(), true));
         transmitted_data = body_with_type.body;
         auto& content_type = body_with_type.type;
 
@@ -61,12 +60,12 @@ WebIDL::ExceptionOr<bool> NavigatorBeaconPartial::send_beacon(String const& url,
             cors_mode = Fetch::Infrastructure::Request::Mode::CORS;
 
             // If contentType value is a CORS-safelisted request-header value for the Content-Type header, set corsMode to "no-cors".
-            auto content_type_header = Fetch::Infrastructure::Header::from_string_pair("Content-Type"sv, content_type.value());
+            auto content_type_header = HTTP::Header::isomorphic_encode("Content-Type"sv, content_type.value());
             if (Fetch::Infrastructure::is_cors_safelisted_request_header(content_type_header))
                 cors_mode = Fetch::Infrastructure::Request::Mode::NoCORS;
 
             // Append a Content-Type header with value contentType to headerList.
-            header_list->append(content_type_header);
+            header_list->append(move(content_type_header));
         }
     }
 
@@ -74,12 +73,12 @@ WebIDL::ExceptionOr<bool> NavigatorBeaconPartial::send_beacon(String const& url,
 
     // 7.1 Let req be a new request, initialized as follows:
     auto req = Fetch::Infrastructure::Request::create(vm);
-    req->set_method(MUST(ByteBuffer::copy("POST"sv.bytes()))); // method: POST
-    req->set_client(&relevant_settings_object);                // client: this's relevant settings object
-    req->set_url_list({ parsed_url.release_value() });         // url: parsedUrl
-    req->set_header_list(header_list);                         // header list: headerList
-    req->set_origin(origin);                                   // origin: origin
-    req->set_keepalive(true);                                  // keepalive: true
+    req->set_method("POST"sv);                         // method: POST
+    req->set_client(&relevant_settings_object);        // client: this's relevant settings object
+    req->set_url_list({ parsed_url.release_value() }); // url: parsedUrl
+    req->set_header_list(header_list);                 // header list: headerList
+    req->set_origin(origin);                           // origin: origin
+    req->set_keepalive(true);                          // keepalive: true
     if (transmitted_data)
         req->set_body(GC::Ref<Fetch::Infrastructure::Body> { *transmitted_data });       // body: transmittedData
     req->set_mode(cors_mode);                                                            // mode: corsMode

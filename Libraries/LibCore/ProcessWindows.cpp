@@ -8,10 +8,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Assertions.h>
+#include <AK/ScopeGuard.h>
 #include <AK/String.h>
 #include <AK/Utf16View.h>
+#include <AK/Vector.h>
+#include <AK/Windows.h>
 #include <LibCore/Process.h>
-#include <windows.h>
 
 namespace Core {
 
@@ -54,8 +57,6 @@ ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
     builder.append('\0');
     ByteBuffer command_line = TRY(builder.to_byte_buffer());
 
-    auto curdir = options.working_directory.has_value() ? options.working_directory->characters() : 0;
-
     STARTUPINFO startup_info = {};
     PROCESS_INFORMATION process_info = {};
 
@@ -67,7 +68,7 @@ ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
         TRUE, // handles are inherited
         0,    // creation flags
         NULL, // use parent's environment
-        curdir,
+        NULL, // working directory
         &startup_info,
         &process_info);
 
@@ -79,16 +80,15 @@ ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
     return Process(process_info.hProcess);
 }
 
-ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<ByteString> arguments, ByteString working_directory, KeepAsChild)
+ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<ByteString> arguments)
 {
     return spawn({
         .executable = path,
         .arguments = Vector<ByteString> { arguments },
-        .working_directory = working_directory.is_empty() ? Optional<ByteString> {} : working_directory,
     });
 }
 
-ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<StringView> arguments, ByteString working_directory, KeepAsChild)
+ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<StringView> arguments)
 {
     Vector<ByteString> backing_strings;
     backing_strings.ensure_capacity(arguments.size());
@@ -98,26 +98,61 @@ ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<StringView> argume
     return spawn({
         .executable = path,
         .arguments = backing_strings,
-        .working_directory = working_directory.is_empty() ? Optional<ByteString> {} : working_directory,
     });
+}
+
+void Process::terminate_immediately(int status)
+{
+    // TerminateProcess() is stronger than the CRT's _exit(), since it skips
+    // DLL detach notifications and the other ExitProcess() teardown paths.
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(status));
+    VERIFY_NOT_REACHED();
+}
+
+ErrorOr<void> Process::terminate_process(pid_t pid, TerminationMode mode)
+{
+    if (mode == TerminationMode::Graceful) {
+        // There is no SIGTERM equivalent on Windows; the closest honest approximation is
+        // asking every top-level window of the process to close. Console or windowless
+        // processes will not observe this.
+        if (!EnumWindows([](HWND hwnd, LPARAM l_param) -> BOOL {
+                DWORD window_pid = 0;
+                GetWindowThreadProcessId(hwnd, &window_pid);
+                if (window_pid == static_cast<DWORD>(l_param))
+                    PostMessage(hwnd, WM_CLOSE, 0, 0);
+                return TRUE;
+            },
+                pid))
+            return Error::from_windows_error();
+        return {};
+    }
+
+    HANDLE handle = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+    if (!handle)
+        return Error::from_windows_error();
+    ScopeGuard close_handle = [&] { CloseHandle(handle); };
+    if (!TerminateProcess(handle, 1))
+        return Error::from_windows_error();
+    return {};
 }
 
 // Get the full path of the executable file of the current process
 ErrorOr<String> Process::get_name()
 {
-    wchar_t path[MAX_PATH] = {};
+    Vector<wchar_t, MAX_PATH> path;
+    path.resize(MAX_PATH);
 
-    DWORD length = GetModuleFileNameW(NULL, path, MAX_PATH);
+    DWORD length = GetModuleFileNameW(NULL, path.data(), MAX_PATH);
+
+    if (length == path.size() && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+        path.resize(UNICODE_STRING_MAX_CHARS);
+        length = GetModuleFileNameW(NULL, path.data(), UNICODE_STRING_MAX_CHARS);
+    }
+
     if (!length)
         return Error::from_windows_error();
 
-    return MUST(Utf16View { reinterpret_cast<char16_t const*>(path), length }.to_utf8());
-}
-
-ErrorOr<void> Process::set_name(StringView, SetThreadName)
-{
-    // Process::set_name() probably cannot be implemented on Windows.
-    return {};
+    return MUST(Utf16View { reinterpret_cast<char16_t const*>(path.data()), length }.to_utf8());
 }
 
 ErrorOr<bool> Process::is_being_debugged()
@@ -147,7 +182,7 @@ pid_t Process::pid() const
     return GetProcessId(m_handle);
 }
 
-ErrorOr<int> Process::wait_for_termination()
+ErrorOr<int> Process::wait_for_termination() const
 {
     auto result = WaitForSingleObject(m_handle, INFINITE);
     if (result == WAIT_FAILED)

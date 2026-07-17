@@ -7,54 +7,88 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <LibWeb/Export.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/PaintableWithLines.h>
 #include <LibWeb/Painting/ScrollState.h>
 
 namespace Web::Painting {
 
 class WEB_API ViewportPaintable final : public PaintableWithLines {
-    GC_CELL(ViewportPaintable, PaintableWithLines);
-    GC_DECLARE_ALLOCATOR(ViewportPaintable);
-
 public:
-    static GC::Ref<ViewportPaintable> create(Layout::Viewport const&);
+    static NonnullRefPtr<ViewportPaintable> create(Layout::Viewport const&);
     virtual ~ViewportPaintable() override;
+    virtual StringView class_name() const override { return "ViewportPaintable"sv; }
+
+    virtual void reset_for_relayout() override;
 
     void paint_all_phases(DisplayListRecordingContext&);
+    void initialize_async_scrolling_metadata_recording(DisplayListRecordingContext&);
+    void finalize_async_scrolling_metadata_recording(DisplayListRecordingContext&, HTML::LocalNavigable&, Gfx::IntRect viewport_rect);
     void build_stacking_context_tree_if_needed();
 
     void assign_scroll_frames();
+    void reassign_scroll_frames();
     void refresh_scroll_state();
+    void refresh_sticky_constraints();
 
-    HashMap<GC::Ptr<PaintableBox const>, RefPtr<ClipFrame>> clip_state;
-    void assign_clip_frames();
-
-    void resolve_paint_only_properties();
+    void assign_accumulated_visual_contexts();
+    bool update_accumulated_visual_context_values(Paintable&);
+    void update_visual_viewport_accumulated_visual_context();
+    void prune_inspector_overlay_visual_contexts();
+    bool visual_context_tree_needs_compositor_update() const { return m_visual_context_tree_needs_compositor_update; }
+    void did_update_visual_context_tree_in_compositor() { m_visual_context_tree_needs_compositor_update = false; }
+    void set_force_incompatible_visual_context_tree_rebuild_for_testing() { m_force_incompatible_visual_context_tree_rebuild_for_testing = true; }
+    bool has_visual_context_tree() const { return m_visual_context_tree.has_value(); }
+    u64 accumulated_visual_context_tree_build_count() const { return m_accumulated_visual_context_tree_build_count; }
 
     GC::Ptr<Selection::Selection> selection() const;
     void recompute_selection_states(DOM::Range&);
+    void reset_selection_states();
 
-    bool handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned, unsigned, int wheel_delta_x, int wheel_delta_y) override;
+    // Throws away all cached paint output and schedules a repaint. For rare events that change how everything
+    // renders, such as the window focus state changing.
+    void invalidate_all_cached_paint();
+
+    bool handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned, unsigned, double wheel_delta_x, double wheel_delta_y) override;
 
     void set_needs_to_refresh_scroll_state(bool value) { m_needs_to_refresh_scroll_state = value; }
 
     ScrollState const& scroll_state() const { return m_scroll_state; }
+    ScrollStateSnapshot const& scroll_state_snapshot() const { return m_scroll_state_snapshot; }
 
-    void set_paintable_boxes_with_auto_content_visibility(Vector<GC::Ref<PaintableBox>> paintable_boxes) { m_paintable_boxes_with_auto_content_visibility = move(paintable_boxes); }
-    ReadonlySpan<GC::Ref<PaintableBox>> paintable_boxes_with_auto_content_visibility() const { return m_paintable_boxes_with_auto_content_visibility; }
+    void set_paintable_boxes_with_auto_content_visibility(Vector<WeakPtr<Paintable>> paintable_boxes) { m_paintable_boxes_with_auto_content_visibility = move(paintable_boxes); }
+    Vector<WeakPtr<Paintable>> const& paintable_boxes_with_auto_content_visibility() const { return m_paintable_boxes_with_auto_content_visibility; }
+
+    AccumulatedVisualContextTree const& visual_context_tree() const;
+    AccumulatedVisualContextTree& visual_context_tree();
 
 private:
+    friend void update_visual_viewport_accumulated_visual_context(ViewportPaintable&);
+
+    virtual bool is_viewport_paintable() const override { return true; }
+
+    void ensure_visual_context_tree() const;
     void build_stacking_context_tree();
+    void clear_scroll_state();
+    void precompute_sticky_constraints(ScrollFrameIndex, Paintable const&);
 
     explicit ViewportPaintable(Layout::Viewport const&);
 
-    virtual void visit_edges(Visitor&) override;
-
     ScrollState m_scroll_state;
+    ScrollStateSnapshot m_scroll_state_snapshot;
     bool m_needs_to_refresh_scroll_state { true };
 
-    Vector<GC::Ref<PaintableBox>> m_paintable_boxes_with_auto_content_visibility;
+    Vector<WeakPtr<Paintable>> m_paintable_boxes_with_auto_content_visibility;
+
+    Optional<AccumulatedVisualContextTree> m_visual_context_tree;
+    u64 m_accumulated_visual_context_tree_build_count { 0 };
+    size_t m_visual_context_tree_node_count_without_inspector_overlays { 0 };
+    bool m_visual_context_tree_needs_compositor_update { false };
+    bool m_force_incompatible_visual_context_tree_rebuild_for_testing { false };
 };
+
+template<>
+inline bool Paintable::fast_is<ViewportPaintable>() const { return is_viewport_paintable(); }
 
 }

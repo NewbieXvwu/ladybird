@@ -10,6 +10,8 @@
 #include <AK/Format.h>
 #include <AK/Forward.h>
 #include <LibGfx/Forward.h>
+#include <LibGfx/Matrix.h>
+#include <LibIPC/Forward.h>
 
 namespace Gfx {
 
@@ -83,6 +85,8 @@ public:
     float determinant() const;
     Optional<AffineTransform> inverse() const;
 
+    Matrix<4, float> to_matrix() const;
+
 private:
     float m_values[6] { 0 };
 };
@@ -96,3 +100,13 @@ struct AK::Formatter<Gfx::AffineTransform> : Formatter<FormatString> {
         return Formatter<FormatString>::format(builder, "[{} {} {} {} {} {}]"sv, value.a(), value.b(), value.c(), value.d(), value.e(), value.f());
     }
 };
+
+namespace IPC {
+
+template<>
+ErrorOr<void> encode(Encoder&, Gfx::AffineTransform const&);
+
+template<>
+ErrorOr<Gfx::AffineTransform> decode(Decoder&);
+
+}

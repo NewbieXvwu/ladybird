@@ -8,11 +8,14 @@
 
 #include <AK/HashMap.h>
 #include <AK/String.h>
+#include <AK/Time.h>
 #include <AK/Traits.h>
+#include <AK/Utf16String.h>
+#include <LibDatabase/Forward.h>
+#include <LibRequests/CacheSizes.h>
 #include <LibWeb/StorageAPI/StorageEndpoint.h>
-#include <LibWebView/Database.h>
 #include <LibWebView/Forward.h>
-#include <LibWebView/StorageOperationError.h>
+#include <LibWebView/StorageSetResult.h>
 
 namespace WebView {
 
@@ -23,7 +26,7 @@ struct StorageLocation {
 
     StorageEndpointType storage_endpoint;
     String storage_key;
-    String bottle_key;
+    Utf16String bottle_key;
 };
 
 class WEBVIEW_API StorageJar {
@@ -31,47 +34,69 @@ class WEBVIEW_API StorageJar {
     AK_MAKE_NONMOVABLE(StorageJar);
 
 public:
-    static ErrorOr<NonnullOwnPtr<StorageJar>> create(Database&);
+    static ErrorOr<Database::MigrationOutcome> migrate_schema(Database::Database&, Database::MigrationMode = Database::MigrationMode::Apply);
+
+    static ErrorOr<NonnullOwnPtr<StorageJar>> create(Database::Database&);
     static NonnullOwnPtr<StorageJar> create();
 
     ~StorageJar();
 
-    Optional<String> get_item(StorageEndpointType storage_endpoint, String const& storage_key, String const& bottle_key);
-    StorageOperationError set_item(StorageEndpointType storage_endpoint, String const& storage_key, String const& bottle_key, String const& bottle_value);
-    void remove_item(StorageEndpointType storage_endpoint, String const& storage_key, String const& key);
+    Optional<Utf16String> get_item(StorageEndpointType storage_endpoint, String const& storage_key, Utf16String const& bottle_key);
+    StorageSetResult set_item(StorageEndpointType storage_endpoint, String const& storage_key, Utf16String const& bottle_key, Utf16String const& bottle_value);
+    void remove_item(StorageEndpointType storage_endpoint, String const& storage_key, Utf16String const& key);
+    void remove_items_accessed_since(UnixDateTime);
     void clear_storage_key(StorageEndpointType storage_endpoint, String const& storage_key);
-    Vector<String> get_all_keys(StorageEndpointType storage_endpoint, String const& storage_key);
+    Vector<Utf16String> get_all_keys(StorageEndpointType storage_endpoint, String const& storage_key);
+    u64 usage(String const& storage_key);
+    Requests::CacheSizes estimate_storage_size_accessed_since(UnixDateTime since) const;
 
 private:
     struct Statements {
+        Database::StatementID get_item { 0 };
         Database::StatementID set_item { 0 };
         Database::StatementID delete_item { 0 };
-        Database::StatementID get_item { 0 };
+        Database::StatementID delete_items_accessed_since { 0 };
+        Database::StatementID update_last_access_time { 0 };
         Database::StatementID clear { 0 };
         Database::StatementID get_keys { 0 };
-        Database::StatementID calculate_size_excluding_key { 0 };
+        Database::StatementID calculate_size_excluding_bottle_key { 0 };
+        Database::StatementID calculate_size { 0 };
+        Database::StatementID estimate_storage_size_accessed_since { 0 };
     };
 
     class TransientStorage {
     public:
-        StorageOperationError set_item(StorageLocation const& key, String const& value);
-        Optional<String> get_item(StorageLocation const& key);
+        Optional<Utf16String> get_item(StorageLocation const& key);
+        StorageSetResult set_item(StorageLocation const& key, Utf16String const& value);
         void delete_item(StorageLocation const& key);
+        void delete_items_accessed_since(UnixDateTime);
         void clear(StorageEndpointType storage_endpoint, String const& storage_key);
-        Vector<String> get_keys(StorageEndpointType storage_endpoint, String const& storage_key);
+        Vector<Utf16String> get_keys(StorageEndpointType storage_endpoint, String const& storage_key);
+        u64 usage(String const& storage_key);
+        Requests::CacheSizes estimate_storage_size_accessed_since(UnixDateTime since) const;
 
     private:
-        HashMap<StorageLocation, String> m_storage_items;
+        struct Entry {
+            Utf16String value;
+            UnixDateTime last_access_time;
+            // Bytes this entry contributes toward its storage key's quota: Its bottle key plus its value.
+            u64 quota_size { 0 };
+        };
+
+        HashMap<StorageLocation, Entry> m_storage_items;
     };
 
     struct PersistedStorage {
-        StorageOperationError set_item(StorageLocation const& key, String const& value);
-        Optional<String> get_item(StorageLocation const& key);
+        Optional<Utf16String> get_item(StorageLocation const& key);
+        StorageSetResult set_item(StorageLocation const& key, Utf16String const& value);
         void delete_item(StorageLocation const& key);
+        void delete_items_accessed_since(UnixDateTime);
         void clear(StorageEndpointType storage_endpoint, String const& storage_key);
-        Vector<String> get_keys(StorageEndpointType storage_endpoint, String const& storage_key);
+        Vector<Utf16String> get_keys(StorageEndpointType storage_endpoint, String const& storage_key);
+        u64 usage(String const& storage_key);
+        Requests::CacheSizes estimate_storage_size_accessed_since(UnixDateTime since) const;
 
-        Database& database;
+        Database::Database& database;
         Statements statements;
     };
 

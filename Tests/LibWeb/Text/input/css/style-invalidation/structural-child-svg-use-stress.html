@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<script src="../../include.js"></script>
+<script src="structural-matrix.js"></script>
+<script>
+    // Large amount of time spent in flushPendingStyleWork() pushes this high-volume stress test past the harness's
+    // default 120s per-test ceiling on Sanitizer builds. Give it more room.
+    internals.setTestTimeout(300000);
+</script>
+<script>
+    test(() => {
+        const stressModes = ["warm", "cold", "pseudo-warm", "pseudo-cold", "detached", "detached-pseudo"];
+        for (const selectorCase of childMutationCases) {
+            for (const mode of stressModes)
+                runStressCase("document-styled-use-shadow", selectorCase, mode);
+        }
+    });
+</script>

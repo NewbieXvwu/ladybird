@@ -5,6 +5,7 @@
  */
 
 #include <AK/QuickSort.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/ModuleEnvironment.h>
 #include <LibJS/Runtime/ModuleNamespaceObject.h>
@@ -29,7 +30,12 @@ void ModuleNamespaceObject::initialize(Realm& realm)
     Base::initialize(realm);
 
     // 28.3.1 @@toStringTag, https://tc39.es/ecma262/#sec-@@tostringtag
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Module"_string), 0);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Module"_utf16_fly_string), 0);
+}
+
+size_t ModuleNamespaceObject::external_memory_size() const
+{
+    return Object::external_memory_size() + vector_external_memory_size(m_exports);
 }
 
 // 10.4.6.1 [[GetPrototypeOf]] ( ), https://tc39.es/ecma262/#sec-module-namespace-exotic-objects-getprototypeof
@@ -69,7 +75,7 @@ ThrowCompletionOr<Optional<PropertyDescriptor>> ModuleNamespaceObject::internal_
 
     // 2. Let exports be O.[[Exports]].
     // 3. If P is not an element of exports, return undefined.
-    auto export_element = m_exports.find(property_key.to_string());
+    auto export_element = m_exports.find(property_key.to_utf16_string());
     if (export_element.is_end())
         return Optional<PropertyDescriptor> {};
 
@@ -81,7 +87,7 @@ ThrowCompletionOr<Optional<PropertyDescriptor>> ModuleNamespaceObject::internal_
 }
 
 // 10.4.6.6 [[DefineOwnProperty]] ( P, Desc ), https://tc39.es/ecma262/#sec-module-namespace-exotic-objects-defineownproperty-p-desc
-ThrowCompletionOr<bool> ModuleNamespaceObject::internal_define_own_property(PropertyKey const& property_key, PropertyDescriptor const& descriptor, Optional<PropertyDescriptor>* precomputed_get_own_property)
+ThrowCompletionOr<bool> ModuleNamespaceObject::internal_define_own_property(PropertyKey const& property_key, PropertyDescriptor& descriptor, Optional<PropertyDescriptor>* precomputed_get_own_property)
 {
     // 1. If Type(P) is Symbol, return ! OrdinaryDefineOwnProperty(O, P, Desc).
     if (property_key.is_symbol())
@@ -127,7 +133,7 @@ ThrowCompletionOr<bool> ModuleNamespaceObject::internal_has_property(PropertyKey
 
     // 2. Let exports be O.[[Exports]].
     // 3. If P is an element of exports, return true.
-    auto export_element = m_exports.find(property_key.to_string());
+    auto export_element = m_exports.find(property_key.to_utf16_string());
     if (!export_element.is_end())
         return true;
 
@@ -136,7 +142,7 @@ ThrowCompletionOr<bool> ModuleNamespaceObject::internal_has_property(PropertyKey
 }
 
 // 10.4.6.8 [[Get]] ( P, Receiver ), https://tc39.es/ecma262/#sec-module-namespace-exotic-objects-get-p-receiver
-ThrowCompletionOr<Value> ModuleNamespaceObject::internal_get(PropertyKey const& property_key, Value receiver, CacheablePropertyMetadata* cacheable_metadata, PropertyLookupPhase phase) const
+ThrowCompletionOr<Value> ModuleNamespaceObject::internal_get(PropertyKey const& property_key, Value receiver, CacheableGetPropertyMetadata* cacheable_metadata, PropertyLookupPhase phase) const
 {
     auto& vm = this->vm();
 
@@ -148,13 +154,13 @@ ThrowCompletionOr<Value> ModuleNamespaceObject::internal_get(PropertyKey const& 
 
     // 2. Let exports be O.[[Exports]].
     // 3. If P is not an element of exports, return undefined.
-    auto export_element = m_exports.find(property_key.to_string());
+    auto export_element = m_exports.find(property_key.to_utf16_string());
     if (export_element.is_end())
         return js_undefined();
 
     // 4. Let m be O.[[Module]].
     // 5. Let binding be m.ResolveExport(P).
-    auto binding = m_module->resolve_export(vm, property_key.to_string());
+    auto binding = m_module->resolve_export(vm, property_key.to_utf16_string());
 
     // 6. Assert: binding is a ResolvedBinding Record.
     VERIFY(binding.is_valid());
@@ -183,7 +189,7 @@ ThrowCompletionOr<Value> ModuleNamespaceObject::internal_get(PropertyKey const& 
 }
 
 // 10.4.6.9 [[Set]] ( P, V, Receiver ), https://tc39.es/ecma262/#sec-module-namespace-exotic-objects-set-p-v-receiver
-ThrowCompletionOr<bool> ModuleNamespaceObject::internal_set(PropertyKey const&, Value, Value, CacheablePropertyMetadata*, PropertyLookupPhase)
+ThrowCompletionOr<bool> ModuleNamespaceObject::internal_set(PropertyKey const&, Value, Value, CacheableSetPropertyMetadata*, PropertyLookupPhase)
 {
     // 1. Return false.
     return false;
@@ -200,7 +206,7 @@ ThrowCompletionOr<bool> ModuleNamespaceObject::internal_delete(PropertyKey const
 
     // 2. Let exports be O.[[Exports]].
     // 3. If P is an element of exports, return false.
-    auto export_element = m_exports.find(property_key.to_string());
+    auto export_element = m_exports.find(property_key.to_utf16_string());
     if (!export_element.is_end())
         return false;
 
@@ -213,7 +219,7 @@ ThrowCompletionOr<GC::RootVector<Value>> ModuleNamespaceObject::internal_own_pro
 {
     // 1. Let exports be O.[[Exports]].
     // NOTE: We only add the exports after we know the size of symbolKeys
-    GC::RootVector<Value> exports { vm().heap() };
+    GC::RootVector<Value> exports;
 
     // 2. Let symbolKeys be OrdinaryOwnPropertyKeys(O).
     auto symbol_keys = MUST(Object::internal_own_property_keys());

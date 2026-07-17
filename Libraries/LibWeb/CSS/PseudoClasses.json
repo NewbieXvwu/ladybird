@@ -1,8 +1,14 @@
 {
+  "-webkit-autofill": {
+    "legacy-alias-for": "autofill"
+  },
   "active": {
     "argument": ""
   },
   "any-link": {
+    "argument": ""
+  },
+  "autofill": {
     "argument": ""
   },
   "buffering": {
@@ -45,6 +51,9 @@
     "argument": ""
   },
   "focus-within": {
+    "argument": ""
+  },
+  "fullscreen": {
     "argument": ""
   },
   "has": {

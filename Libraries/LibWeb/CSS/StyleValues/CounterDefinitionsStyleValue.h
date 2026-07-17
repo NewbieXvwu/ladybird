@@ -6,13 +6,13 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
 
 struct CounterDefinition {
-    FlyString name;
+    Utf16FlyString name;
     bool is_reversed;
     ValueComparingRefPtr<StyleValue const> value;
 };
@@ -30,9 +30,15 @@ public:
     virtual ~CounterDefinitionsStyleValue() override = default;
 
     auto const& counter_definitions() const { return m_counter_definitions; }
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(CounterDefinitionsStyleValue const& other) const;
+
+    virtual bool is_computationally_independent() const override
+    {
+        return all_of(m_counter_definitions, [](auto const& definition) { return !definition.value || definition.value->is_computationally_independent(); });
+    }
 
 private:
     explicit CounterDefinitionsStyleValue(Vector<CounterDefinition> counter_definitions)

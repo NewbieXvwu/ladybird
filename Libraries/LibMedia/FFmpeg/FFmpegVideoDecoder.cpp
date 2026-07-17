@@ -5,6 +5,8 @@
  */
 
 #include <LibCore/System.h>
+#include <LibGfx/ColorSpace.h>
+#include <LibGfx/YUVData.h>
 #include <LibMedia/VideoFrame.h>
 
 #include "FFmpegHelpers.h"
@@ -60,7 +62,7 @@ DecoderErrorOr<NonnullOwnPtr<FFmpegVideoDecoder>> FFmpegVideoDecoder::try_create
         return DecoderError::format(DecoderErrorCategory::Memory, "Failed to allocate FFmpeg codec context for codec {}", codec_id);
 
     codec_context->get_format = negotiate_output_format;
-
+    codec_context->time_base = { 1, 1'000'000 };
     codec_context->thread_count = static_cast<int>(min(Core::System::hardware_concurrency(), 4));
 
     if (!codec_initialization_data.is_empty()) {
@@ -104,18 +106,24 @@ FFmpegVideoDecoder::~FFmpegVideoDecoder()
     avcodec_free_context(&m_codec_context);
 }
 
-DecoderErrorOr<void> FFmpegVideoDecoder::receive_sample(AK::Duration timestamp, ReadonlyBytes sample)
+DecoderErrorOr<void> FFmpegVideoDecoder::receive_coded_data(AK::Duration timestamp, AK::Duration duration, ReadonlyBytes coded_data, Optional<AK::Duration> decode_timestamp)
 {
-    VERIFY(sample.size() < NumericLimits<int>::max());
+    VERIFY(coded_data.size() < NumericLimits<int>::max());
 
-    m_packet->data = const_cast<u8*>(sample.data());
-    m_packet->size = static_cast<int>(sample.size());
+    m_packet->data = const_cast<u8*>(coded_data.data());
+    m_packet->size = static_cast<int>(coded_data.size());
     m_packet->pts = timestamp.to_microseconds();
-    m_packet->dts = m_packet->pts;
+    m_packet->dts = decode_timestamp.value_or(timestamp).to_microseconds();
+    m_packet->duration = duration.to_microseconds();
+    auto packet_pts = m_packet->pts;
 
     auto result = avcodec_send_packet(m_codec_context, m_packet);
     switch (result) {
     case 0:
+        // Some FFmpeg decoders do not propagate packet duration to decoded frames, so
+        // remember the accepted packet duration by PTS and consume it on output.
+        if (!duration.is_zero())
+            m_frame_durations.set(packet_pts, duration);
         return {};
     case AVERROR(EAGAIN):
         return DecoderError::with_description(DecoderErrorCategory::NeedsMoreInput, "FFmpeg decoder cannot decode any more data until frames have been retrieved"sv);
@@ -130,7 +138,18 @@ DecoderErrorOr<void> FFmpegVideoDecoder::receive_sample(AK::Duration timestamp, 
     }
 }
 
-DecoderErrorOr<NonnullOwnPtr<VideoFrame>> FFmpegVideoDecoder::get_decoded_frame()
+void FFmpegVideoDecoder::signal_end_of_stream()
+{
+    m_packet->data = nullptr;
+    m_packet->size = 0;
+    m_packet->pts = 0;
+    m_packet->dts = 0;
+
+    auto result = avcodec_send_packet(m_codec_context, m_packet);
+    VERIFY(result == 0 || result == AVERROR_EOF);
+}
+
+DecoderErrorOr<NonnullRefPtr<VideoFrame>> FFmpegVideoDecoder::get_decoded_frame(CodingIndependentCodePoints const& container_cicp)
 {
     auto result = avcodec_receive_frame(m_codec_context, m_frame);
 
@@ -150,6 +169,7 @@ DecoderErrorOr<NonnullOwnPtr<VideoFrame>> FFmpegVideoDecoder::get_decoded_frame(
             }
         }();
         auto cicp = CodingIndependentCodePoints { color_primaries, transfer_characteristics, matrix_coefficients, color_range };
+        cicp.adopt_specified_values(container_cicp);
 
         size_t bit_depth = [&] {
             switch (m_frame->format) {
@@ -172,7 +192,6 @@ DecoderErrorOr<NonnullOwnPtr<VideoFrame>> FFmpegVideoDecoder::get_decoded_frame(
                 VERIFY_NOT_REACHED();
             }
         }();
-        size_t component_size = (bit_depth + 7) / 8;
 
         auto subsampling = [&]() -> Subsampling {
             switch (m_frame->format) {
@@ -197,34 +216,51 @@ DecoderErrorOr<NonnullOwnPtr<VideoFrame>> FFmpegVideoDecoder::get_decoded_frame(
         }();
 
         auto size = Gfx::Size<u32> { m_frame->width, m_frame->height };
+        auto gfx_size = Gfx::IntSize { m_frame->width, m_frame->height };
 
         auto timestamp = AK::Duration::from_microseconds(m_frame->pts);
-        auto frame = DECODER_TRY_ALLOC(SubsampledYUVFrame::try_create(timestamp, size, bit_depth, cicp, subsampling));
+        auto duration = AK::Duration::from_microseconds(m_frame->duration);
+        if (duration.is_zero()) {
+            if (auto packet_duration = m_frame_durations.take(m_frame->pts); packet_duration.has_value())
+                duration = *packet_duration;
+        } else {
+            m_frame_durations.remove(m_frame->pts);
+        }
+
+        auto yuv_data = DECODER_TRY_ALLOC(Gfx::YUVData::create(gfx_size, bit_depth, subsampling, cicp));
+
+        auto y_plane_size = size.to_type<size_t>();
+        auto uv_plane_size = subsampling.subsampled_size(size).to_type<size_t>();
+
+        Bytes buffers[] = { yuv_data->y_data(), yuv_data->u_data(), yuv_data->v_data() };
+        Gfx::Size<size_t> plane_sizes[] = { y_plane_size, uv_plane_size, uv_plane_size };
+
+        auto component_size = bit_depth <= 8 ? 1 : 2;
 
         for (u32 plane = 0; plane < 3; plane++) {
             VERIFY(m_frame->linesize[plane] != 0);
             if (m_frame->linesize[plane] < 0)
                 return DecoderError::with_description(DecoderErrorCategory::NotImplemented, "Reversed scanlines are not supported"sv);
 
-            bool const use_subsampling = plane > 0;
-            auto plane_size = (use_subsampling ? subsampling.subsampled_size(size) : size).to_type<size_t>();
+            auto plane_size = plane_sizes[plane];
+            auto const* source = m_frame->data[plane];
+            VERIFY(source != nullptr);
+            auto destination = buffers[plane];
 
             auto output_line_size = plane_size.width() * component_size;
             VERIFY(output_line_size <= static_cast<size_t>(m_frame->linesize[plane]));
 
-            auto const* source = m_frame->data[plane];
-            VERIFY(source != nullptr);
-            auto* destination = frame->get_raw_plane_data(plane);
-            VERIFY(destination != nullptr);
-
+            auto* dest_ptr = destination.data();
             for (size_t row = 0; row < plane_size.height(); row++) {
-                memcpy(destination, source, output_line_size);
+                memcpy(dest_ptr, source, output_line_size);
                 source += m_frame->linesize[plane];
-                destination += output_line_size;
+                dest_ptr += output_line_size;
             }
         }
 
-        return frame;
+        auto color_space = DECODER_TRY_ALLOC(Gfx::ColorSpace::from_cicp(cicp));
+
+        return DECODER_TRY_ALLOC(try_make_ref_counted<VideoFrame>(timestamp, duration, size, bit_depth, move(color_space), move(yuv_data)));
     }
     case AVERROR(EAGAIN):
         return DecoderError::with_description(DecoderErrorCategory::NeedsMoreInput, "FFmpeg decoder has no frames available, send more input"sv);
@@ -239,6 +275,7 @@ DecoderErrorOr<NonnullOwnPtr<VideoFrame>> FFmpegVideoDecoder::get_decoded_frame(
 
 void FFmpegVideoDecoder::flush()
 {
+    m_frame_durations.clear();
     avcodec_flush_buffers(m_codec_context);
 }
 

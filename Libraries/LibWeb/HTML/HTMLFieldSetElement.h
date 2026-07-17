@@ -6,32 +6,32 @@
 
 #pragma once
 
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/ARIA/Roles.h>
 #include <LibWeb/DOM/HTMLCollection.h>
-#include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
 
 namespace Web::HTML {
 
 class HTMLFieldSetElement final
-    : public HTMLElement
-    , public FormAssociatedElement {
+    : public HTMLElement {
     WEB_PLATFORM_OBJECT(HTMLFieldSetElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLFieldSetElement);
-    FORM_ASSOCIATED_ELEMENT(HTMLElement, HTMLFieldSetElement)
 
 public:
     virtual ~HTMLFieldSetElement() override;
 
-    String const& type() const
+    Utf16FlyString type() const
     {
-        static String const fieldset = "fieldset"_string;
-        return fieldset;
+        return "fieldset"_utf16_fly_string;
     }
 
     bool is_disabled() const;
 
     GC::Ptr<DOM::HTMLCollection> const& elements();
+
+    // ^FormAssociatedElement
+    virtual bool is_form_associated_element() const override { return true; }
 
     // ^FormAssociatedElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-listed
@@ -42,7 +42,7 @@ public:
 
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::group; }
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
     Layout::FieldSetBox* layout_node();
     Layout::FieldSetBox const* layout_node() const;
 
@@ -51,6 +51,8 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+
+    virtual void attribute_changed(Utf16FlyString const&, Optional<Utf16String> const&, Optional<Utf16String> const&, Optional<Utf16FlyString> const&) override;
 
     virtual bool is_html_fieldset_element() const override { return true; }
 

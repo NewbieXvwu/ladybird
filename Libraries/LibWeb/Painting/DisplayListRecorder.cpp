@@ -1,67 +1,355 @@
 /*
- * Copyright (c) 2023-2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2023-2026, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/NumericLimits.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListCommand.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
-#include <LibWeb/Painting/ShadowPainting.h>
 
 namespace Web::Painting {
 
-DisplayListRecorder::DisplayListRecorder(DisplayList& command_list)
+DisplayListRecorder::DisplayListRecorder(DisplayList& command_list, AccumulatedVisualContextTree const& visual_context_tree, DisplayListResourceStorage& resource_storage)
     : m_display_list(command_list)
+    , m_visual_context_tree(visual_context_tree)
+    , m_resource_storage(resource_storage)
 {
 }
 
 DisplayListRecorder::~DisplayListRecorder() = default;
 
-template<typename T>
-consteval static int command_nesting_level_change(T const& command)
+DisplayListRecorder::CommandCapture::CommandCapture(DisplayListRecorder& recorder)
+    : m_recorder(&recorder)
 {
-    if constexpr (requires { command.nesting_level_change; })
-        return command.nesting_level_change;
-    return 0;
 }
 
-#define APPEND(...)                                                          \
-    do {                                                                     \
-        auto command = __VA_ARGS__;                                          \
-        Optional<i32> _scroll_frame_id;                                      \
-        if (!m_scroll_frame_id_stack.is_empty())                             \
-            _scroll_frame_id = m_scroll_frame_id_stack.last();               \
-        RefPtr<ClipFrame const> _clip_frame;                                 \
-        if (!m_clip_frame_stack.is_empty())                                  \
-            _clip_frame = m_clip_frame_stack.last();                         \
-        m_save_nesting_level += command_nesting_level_change(command);       \
-        m_display_list.append(move(command), _scroll_frame_id, _clip_frame); \
-    } while (false)
-
-void DisplayListRecorder::paint_nested_display_list(RefPtr<DisplayList> display_list, Gfx::IntRect rect)
+DisplayListRecorder::CommandCapture::~CommandCapture()
 {
-    APPEND(PaintNestedDisplayList { move(display_list), rect });
+    if (m_recorder)
+        m_recorder->end_capture();
 }
 
-void DisplayListRecorder::add_rounded_rect_clip(CornerRadii corner_radii, Gfx::IntRect border_rect, CornerClip corner_clip)
+ByteBuffer DisplayListRecorder::CommandCapture::take()
 {
-    APPEND(AddRoundedRectClip { corner_radii, border_rect, corner_clip });
+    VERIFY(m_recorder);
+    auto commands = m_recorder->m_display_list.copy_command_bytes_from(
+        m_recorder->m_capture_start_command_offset);
+    m_recorder->m_is_capturing = false;
+    m_recorder = nullptr;
+    return commands;
 }
 
-void DisplayListRecorder::add_mask(RefPtr<DisplayList> display_list, Gfx::IntRect rect)
+DisplayListRecorder::CommandCapture DisplayListRecorder::begin_command_capture()
 {
-    if (rect.is_empty())
+    VERIFY(!m_is_capturing);
+    m_is_capturing = true;
+    m_capture_start_command_offset = m_display_list.command_byte_size();
+    return CommandCapture(*this);
+}
+
+void DisplayListRecorder::end_capture()
+{
+    m_is_capturing = false;
+}
+
+template<DisplayListCommand Command>
+class CommandPayloadBuilder {
+public:
+    explicit CommandPayloadBuilder(DisplayList const& display_list)
+        : m_payload_start_offset(display_list.command_byte_size() + sizeof(DisplayListCommandHeader))
+        , m_payload_size(sizeof(Command))
+    {
+        VERIFY(display_list.command_byte_size() % DisplayList::command_alignment == 0);
+    }
+
+    DisplayListDataSpan append_data(ReadonlyBytes bytes, size_t alignment)
+    {
+        VERIFY(alignment > 0);
+        auto absolute_offset = m_payload_start_offset + m_payload_size;
+        auto padded_offset = align_up_to(absolute_offset, alignment);
+        auto padding = padded_offset - absolute_offset;
+        auto payload_relative_offset = m_payload_size + padding;
+        m_inline_payload.resize(m_inline_payload.size() + padding);
+        VERIFY(payload_relative_offset <= NumericLimits<u32>::max());
+        VERIFY(bytes.size() <= NumericLimits<u32>::max());
+        VERIFY(payload_relative_offset + bytes.size() <= NumericLimits<u32>::max());
+        if (!bytes.is_empty())
+            m_inline_payload.append(bytes.data(), bytes.size());
+        m_payload_size = payload_relative_offset + bytes.size();
+        return { static_cast<u32>(payload_relative_offset), static_cast<u32>(bytes.size()) };
+    }
+
+    template<typename T>
+    DisplayListDataSpan append_objects(Span<T> objects)
+    {
+        static_assert(IsTriviallyCopyable<T>);
+        return append_data(ReadonlyBytes { objects.data(), objects.size() * sizeof(T) }, alignof(T));
+    }
+
+    ReadonlyBytes inline_data() const { return m_inline_payload.span(); }
+
+private:
+    size_t m_payload_start_offset { 0 };
+    size_t m_payload_size { 0 };
+    Vector<u8> m_inline_payload;
+};
+
+static Gfx::RectangularColorSpace to_gfx_rectangular_color_space(CSS::RectangularColorSpace color_space)
+{
+    switch (color_space) {
+    case CSS::RectangularColorSpace::Srgb:
+        return Gfx::RectangularColorSpace::Srgb;
+    case CSS::RectangularColorSpace::SrgbLinear:
+        return Gfx::RectangularColorSpace::SrgbLinear;
+    case CSS::RectangularColorSpace::DisplayP3:
+        return Gfx::RectangularColorSpace::DisplayP3;
+    case CSS::RectangularColorSpace::DisplayP3Linear:
+        return Gfx::RectangularColorSpace::DisplayP3Linear;
+    case CSS::RectangularColorSpace::A98Rgb:
+        return Gfx::RectangularColorSpace::A98Rgb;
+    case CSS::RectangularColorSpace::ProphotoRgb:
+        return Gfx::RectangularColorSpace::ProphotoRgb;
+    case CSS::RectangularColorSpace::Rec2020:
+        return Gfx::RectangularColorSpace::Rec2020;
+    case CSS::RectangularColorSpace::Lab:
+        return Gfx::RectangularColorSpace::Lab;
+    case CSS::RectangularColorSpace::Oklab:
+        return Gfx::RectangularColorSpace::Oklab;
+    case CSS::RectangularColorSpace::Xyz:
+        return Gfx::RectangularColorSpace::Xyz;
+    case CSS::RectangularColorSpace::XyzD50:
+        return Gfx::RectangularColorSpace::XyzD50;
+    case CSS::RectangularColorSpace::XyzD65:
+        return Gfx::RectangularColorSpace::XyzD65;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static Gfx::PolarColorSpace to_gfx_polar_color_space(CSS::PolarColorSpace color_space)
+{
+    switch (color_space) {
+    case CSS::PolarColorSpace::Hsl:
+        return Gfx::PolarColorSpace::Hsl;
+    case CSS::PolarColorSpace::Hwb:
+        return Gfx::PolarColorSpace::Hwb;
+    case CSS::PolarColorSpace::Lch:
+        return Gfx::PolarColorSpace::Lch;
+    case CSS::PolarColorSpace::Oklch:
+        return Gfx::PolarColorSpace::Oklch;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static Gfx::HueInterpolationMethod to_gfx_hue_interpolation_method(CSS::HueInterpolationMethod hue_interpolation_method)
+{
+    switch (hue_interpolation_method) {
+    case CSS::HueInterpolationMethod::Shorter:
+        return Gfx::HueInterpolationMethod::Shorter;
+    case CSS::HueInterpolationMethod::Longer:
+        return Gfx::HueInterpolationMethod::Longer;
+    case CSS::HueInterpolationMethod::Increasing:
+        return Gfx::HueInterpolationMethod::Increasing;
+    case CSS::HueInterpolationMethod::Decreasing:
+        return Gfx::HueInterpolationMethod::Decreasing;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static Gfx::GradientInterpolationMethod to_display_list_color_interpolation_method(
+    CSS::ColorInterpolationMethodStyleValue::ColorInterpolationMethod const& interpolation_method)
+{
+    Gfx::GradientInterpolationMethod result;
+    interpolation_method.visit(
+        [&](CSS::RectangularColorSpace color_space) {
+            result.type = Gfx::GradientInterpolationMethod::Type::Rectangular;
+            result.rectangular_color_space = to_gfx_rectangular_color_space(color_space);
+        },
+        [&](CSS::ColorInterpolationMethodStyleValue::PolarColorInterpolationMethod const& color_space) {
+            result.type = Gfx::GradientInterpolationMethod::Type::Polar;
+            result.polar_color_space = to_gfx_polar_color_space(color_space.color_space);
+            result.hue_interpolation_method = to_gfx_hue_interpolation_method(color_space.hue_interpolation_method);
+        });
+    return result;
+}
+
+template<DisplayListCommand Command>
+static DisplayListGradientColorStops append_color_stops(
+    CommandPayloadBuilder<Command>& payload_builder,
+    ReadonlySpan<Color> colors,
+    ReadonlySpan<float> positions,
+    bool repeating = false)
+{
+    VERIFY(colors.size() == positions.size());
+    return {
+        .colors = payload_builder.append_objects(colors),
+        .positions = payload_builder.append_objects(positions),
+        .repeating = repeating,
+    };
+}
+
+template<DisplayListCommand Command>
+static DisplayListDataSpan append_glyphs(
+    CommandPayloadBuilder<Command>& payload_builder,
+    Gfx::GlyphRun const& glyph_run)
+{
+    Vector<DisplayListGlyph> display_list_glyphs;
+    display_list_glyphs.ensure_capacity(glyph_run.glyphs().size());
+    for (auto const& glyph : glyph_run.glyphs()) {
+        display_list_glyphs.unchecked_append({
+            .position = glyph.position,
+            .glyph_id = glyph.glyph_id,
+        });
+    }
+    return payload_builder.append_objects(display_list_glyphs.span());
+}
+
+template<DisplayListCommand Command>
+static DisplayListGradientColorStops append_color_stops(
+    CommandPayloadBuilder<Command>& payload_builder,
+    ColorStopData const& color_stops)
+{
+    return append_color_stops(payload_builder, color_stops.colors.span(), color_stops.positions.span(), color_stops.repeating);
+}
+
+static DisplayListGradientSpreadMethod to_display_list_gradient_spread_method(GradientPaintStyle::SpreadMethod spread_method)
+{
+    switch (spread_method) {
+    case GradientPaintStyle::SpreadMethod::Pad:
+        return DisplayListGradientSpreadMethod::Pad;
+    case GradientPaintStyle::SpreadMethod::Repeat:
+        return DisplayListGradientSpreadMethod::Repeat;
+    case GradientPaintStyle::SpreadMethod::Reflect:
+        return DisplayListGradientSpreadMethod::Reflect;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+template<DisplayListCommand Command>
+static DisplayListGradientPaintStyle to_display_list_gradient_paint_style(
+    CommandPayloadBuilder<Command>& payload_builder,
+    GradientPaintStyle const& paint_style)
+{
+    return {
+        .gradient_transform = paint_style.gradient_transform(),
+        .spread_method = to_display_list_gradient_spread_method(paint_style.spread_method()),
+        .color_space = paint_style.color_space(),
+        .color_stops = append_color_stops(payload_builder, paint_style.color_stop_colors(), paint_style.color_stop_positions()),
+    };
+}
+
+template<DisplayListCommand Command>
+static DisplayListPaintStyle to_display_list_paint_style(
+    CommandPayloadBuilder<Command>& payload_builder,
+    DisplayListResourceStorage& resource_storage,
+    PaintStyle const& paint_style)
+{
+    DisplayListPaintStyle display_list_paint_style;
+    paint_style.visit(
+        [&](LinearGradientPaintStyle const& linear_gradient) {
+            display_list_paint_style.type = DisplayListPaintStyleType::LinearGradient;
+            display_list_paint_style.gradient = to_display_list_gradient_paint_style(payload_builder, linear_gradient);
+            display_list_paint_style.linear_gradient_start_point = linear_gradient.start_point();
+            display_list_paint_style.linear_gradient_end_point = linear_gradient.end_point();
+        },
+        [&](RadialGradientPaintStyle const& radial_gradient) {
+            display_list_paint_style.type = DisplayListPaintStyleType::RadialGradient;
+            display_list_paint_style.gradient = to_display_list_gradient_paint_style(payload_builder, radial_gradient);
+            display_list_paint_style.radial_gradient_start_center = radial_gradient.start_center();
+            display_list_paint_style.radial_gradient_start_radius = radial_gradient.start_radius();
+            display_list_paint_style.radial_gradient_end_center = radial_gradient.end_center();
+            display_list_paint_style.radial_gradient_end_radius = radial_gradient.end_radius();
+        },
+        [&](PatternPaintStyle const& pattern) {
+            display_list_paint_style.type = DisplayListPaintStyleType::Pattern;
+            auto const& tile_display_list = pattern.tile_display_list();
+            display_list_paint_style.pattern_tile_display_list_id = resource_storage.add_display_list(tile_display_list.display_list, tile_display_list.visual_context_tree);
+            display_list_paint_style.pattern_tile_rect = pattern.tile_rect();
+            display_list_paint_style.pattern_transform = pattern.pattern_transform();
+        });
+    return display_list_paint_style;
+}
+
+template<DisplayListCommand Command>
+static DisplayListDataSpan append_path_data(CommandPayloadBuilder<Command>& payload_builder, Gfx::Path const& path)
+{
+    auto path_data = path.serialize_to_bytes();
+    return payload_builder.append_data(path_data.span(), alignof(u32));
+}
+
+template<DisplayListCommand Command>
+static DisplayListDataSpan append_filter_data(
+    CommandPayloadBuilder<Command>& payload_builder,
+    DisplayListResourceStorage& resource_storage,
+    Gfx::Filter const& filter)
+{
+    auto filter_data = Gfx::serialize_filter(filter, [&](Gfx::DecodedImageFrame const& frame) {
+        return resource_storage.add_image_frame(frame).value();
+    });
+    return payload_builder.append_data(filter_data, alignof(u32));
+}
+
+void DisplayListRecorder::replay_cached_commands(ReadonlyBytes command_bytes)
+{
+    if (command_bytes.is_empty())
         return;
-    APPEND(AddMask { move(display_list), rect });
+
+    DisplayList::for_each_command_header(command_bytes, [&](DisplayListCommandHeader const& header, ReadonlyBytes) {
+        m_save_nesting_level += display_list_command_nesting_level_change(header.type);
+    });
+    m_display_list.append_command_sequence(command_bytes, m_visual_context_tree, m_accumulated_visual_context_index);
+}
+
+void DisplayListRecorder::paint_nested_display_list(DisplayListResource const& display_list, Gfx::IntRect rect)
+{
+    auto display_list_id = resource_storage().add_display_list(display_list.display_list, display_list.visual_context_tree);
+    append_command(PaintNestedDisplayList {
+        display_list_id,
+        rect,
+    });
+}
+
+void DisplayListRecorder::add_rounded_rect_clip(Gfx::CornerRadii corner_radii, Gfx::IntRect border_rect, Gfx::CornerClip corner_clip)
+{
+    append_command(AddRoundedRectClip { corner_radii, border_rect, corner_clip });
+}
+
+void DisplayListRecorder::begin_masks(ReadonlySpan<MaskInfo> masks)
+{
+    for (auto const& mask : masks) {
+        save();
+        add_clip_rect(mask.rect);
+        save_layer();
+    }
+}
+
+void DisplayListRecorder::end_masks(ReadonlySpan<MaskInfo> masks)
+{
+    for (size_t i = masks.size(); i-- > 0;) {
+        auto const& mask = masks[i];
+        auto mask_kind = mask.kind == Gfx::MaskKind::Luminance ? Optional<Gfx::MaskKind>(Gfx::MaskKind::Luminance) : Optional<Gfx::MaskKind> {};
+        apply_effects(1.0f, Gfx::CompositingAndBlendingOperator::DestinationIn, {}, mask_kind);
+        paint_nested_display_list(mask.display_list, mask.rect);
+        restore(); // DstIn layer
+        restore(); // content layer
+        restore(); // clip save
+    }
 }
 
 void DisplayListRecorder::fill_rect(Gfx::IntRect const& rect, Color color)
 {
     if (rect.is_empty() || color.alpha() == 0)
         return;
-    APPEND(FillRect { rect, color });
+    append_command(FillRect { rect, color });
+}
+
+void DisplayListRecorder::fill_rect_transparent(Gfx::IntRect const& rect)
+{
+    if (rect.is_empty())
+        return;
+    append_command(FillRect { rect, Color::Transparent });
 }
 
 void DisplayListRecorder::fill_path(FillPathParams params)
@@ -72,13 +360,29 @@ void DisplayListRecorder::fill_path(FillPathParams params)
     auto path_bounding_int_rect = enclosing_int_rect(path_bounding_rect);
     if (path_bounding_int_rect.is_empty())
         return;
-    APPEND(FillPath {
-        .path_bounding_rect = path_bounding_int_rect,
-        .path = move(params.path),
-        .opacity = params.opacity,
-        .paint_style_or_color = params.paint_style_or_color,
-        .winding_rule = params.winding_rule,
-        .should_anti_alias = params.should_anti_alias });
+    CommandPayloadBuilder<FillPath> payload_builder(m_display_list);
+    auto path_span = append_path_data(payload_builder, params.path);
+    auto paint_kind = PathPaintKind::Color;
+    Color color;
+    DisplayListPaintStyle paint_style;
+    if (params.paint_style_or_color.has<PaintStyle>()) {
+        paint_kind = PathPaintKind::PaintStyle;
+        paint_style = to_display_list_paint_style(payload_builder, resource_storage(), params.paint_style_or_color.get<PaintStyle>());
+    } else {
+        color = params.paint_style_or_color.get<Gfx::Color>();
+    }
+    append_command(
+        FillPath {
+            .path_bounding_rect = path_bounding_int_rect,
+            .path_data = path_span,
+            .opacity = params.opacity,
+            .paint_kind = paint_kind,
+            .color = color,
+            .paint_style = paint_style,
+            .winding_rule = params.winding_rule,
+            .should_anti_alias = params.should_anti_alias,
+        },
+        payload_builder.inline_data());
 }
 
 void DisplayListRecorder::stroke_path(StrokePathParams params)
@@ -94,25 +398,42 @@ void DisplayListRecorder::stroke_path(StrokePathParams params)
     auto path_bounding_int_rect = enclosing_int_rect(path_bounding_rect);
     if (path_bounding_int_rect.is_empty())
         return;
-    APPEND(StrokePath {
-        .cap_style = params.cap_style,
-        .join_style = params.join_style,
-        .miter_limit = params.miter_limit,
-        .dash_array = move(params.dash_array),
-        .dash_offset = params.dash_offset,
-        .path_bounding_rect = path_bounding_int_rect,
-        .path = move(params.path),
-        .opacity = params.opacity,
-        .paint_style_or_color = params.paint_style_or_color,
-        .thickness = params.thickness,
-        .should_anti_alias = params.should_anti_alias });
+    CommandPayloadBuilder<StrokePath> payload_builder(m_display_list);
+    auto path_span = append_path_data(payload_builder, params.path);
+    auto dash_array = payload_builder.append_objects(params.dash_array.span());
+    auto paint_kind = PathPaintKind::Color;
+    Color color;
+    DisplayListPaintStyle paint_style;
+    if (params.paint_style_or_color.has<PaintStyle>()) {
+        paint_kind = PathPaintKind::PaintStyle;
+        paint_style = to_display_list_paint_style(payload_builder, resource_storage(), params.paint_style_or_color.get<PaintStyle>());
+    } else {
+        color = params.paint_style_or_color.get<Gfx::Color>();
+    }
+    append_command(
+        StrokePath {
+            .cap_style = params.cap_style,
+            .join_style = params.join_style,
+            .miter_limit = params.miter_limit,
+            .dash_array = dash_array,
+            .dash_offset = params.dash_offset,
+            .path_bounding_rect = path_bounding_int_rect,
+            .path_data = path_span,
+            .opacity = params.opacity,
+            .paint_kind = paint_kind,
+            .color = color,
+            .paint_style = paint_style,
+            .thickness = params.thickness,
+            .should_anti_alias = params.should_anti_alias,
+        },
+        payload_builder.inline_data());
 }
 
 void DisplayListRecorder::draw_ellipse(Gfx::IntRect const& a_rect, Color color, int thickness)
 {
     if (a_rect.is_empty() || color.alpha() == 0 || !thickness)
         return;
-    APPEND(DrawEllipse {
+    append_command(DrawEllipse {
         .rect = a_rect,
         .color = color,
         .thickness = thickness,
@@ -123,79 +444,181 @@ void DisplayListRecorder::fill_ellipse(Gfx::IntRect const& a_rect, Color color)
 {
     if (a_rect.is_empty() || color.alpha() == 0)
         return;
-    APPEND(FillEllipse { a_rect, color });
+    append_command(FillEllipse { a_rect, color });
 }
 
 void DisplayListRecorder::fill_rect_with_linear_gradient(Gfx::IntRect const& gradient_rect, LinearGradientData const& data)
 {
     if (gradient_rect.is_empty())
         return;
-    APPEND(PaintLinearGradient { gradient_rect, data });
+    CommandPayloadBuilder<PaintLinearGradient> payload_builder(m_display_list);
+    auto color_stops = append_color_stops(payload_builder, data.color_stops);
+    auto interpolation_method = to_display_list_color_interpolation_method(data.interpolation_method);
+    append_command(
+        PaintLinearGradient {
+            .gradient_rect = gradient_rect,
+            .gradient_angle = data.gradient_angle,
+            .color_stops = color_stops,
+            .first_stop_position = data.first_stop_position,
+            .repeat_length = data.repeat_length,
+            .interpolation_method = interpolation_method,
+        },
+        payload_builder.inline_data());
 }
 
 void DisplayListRecorder::fill_rect_with_conic_gradient(Gfx::IntRect const& rect, ConicGradientData const& data, Gfx::IntPoint const& position)
 {
     if (rect.is_empty())
         return;
-    APPEND(PaintConicGradient {
-        .rect = rect,
-        .conic_gradient_data = data,
-        .position = position });
+    CommandPayloadBuilder<PaintConicGradient> payload_builder(m_display_list);
+    auto color_stops = append_color_stops(payload_builder, data.color_stops);
+    auto interpolation_method = to_display_list_color_interpolation_method(data.interpolation_method);
+    append_command(
+        PaintConicGradient {
+            .rect = rect,
+            .start_angle = data.start_angle,
+            .color_stops = color_stops,
+            .interpolation_method = interpolation_method,
+            .position = position,
+        },
+        payload_builder.inline_data());
 }
 
 void DisplayListRecorder::fill_rect_with_radial_gradient(Gfx::IntRect const& rect, RadialGradientData const& data, Gfx::IntPoint center, Gfx::IntSize size)
 {
     if (rect.is_empty())
         return;
-    APPEND(PaintRadialGradient {
-        .rect = rect,
-        .radial_gradient_data = data,
-        .center = center,
-        .size = size });
+    CommandPayloadBuilder<PaintRadialGradient> payload_builder(m_display_list);
+    auto color_stops = append_color_stops(payload_builder, data.color_stops);
+    auto interpolation_method = to_display_list_color_interpolation_method(data.interpolation_method);
+    append_command(
+        PaintRadialGradient {
+            .rect = rect,
+            .color_stops = color_stops,
+            .interpolation_method = interpolation_method,
+            .center = center,
+            .size = size,
+        },
+        payload_builder.inline_data());
 }
 
 void DisplayListRecorder::draw_rect(Gfx::IntRect const& rect, Color color, bool rough)
 {
     if (rect.is_empty() || color.alpha() == 0)
         return;
-    APPEND(DrawRect {
+    append_command(DrawRect {
         .rect = rect,
         .color = color,
         .rough = rough });
 }
 
-void DisplayListRecorder::draw_painting_surface(Gfx::IntRect const& dst_rect, NonnullRefPtr<Gfx::PaintingSurface> surface, Gfx::IntRect const& src_rect, Gfx::ScalingMode scaling_mode)
+void DisplayListRecorder::draw_composited_context(Gfx::IntRect const& dst_rect, Web::Compositor::CompositorContextId child_context_id, Gfx::ScalingMode scaling_mode)
 {
     if (dst_rect.is_empty())
         return;
-    APPEND(DrawPaintingSurface {
+    append_command(DrawCompositedContext {
         .dst_rect = dst_rect,
-        .surface = surface,
+        .child_context_id = child_context_id,
+        .scaling_mode = scaling_mode,
+    });
+}
+
+void DisplayListRecorder::draw_canvas(Gfx::IntRect const& dst_rect, CanvasId canvas_id, u64 content_generation, Gfx::ScalingMode scaling_mode)
+{
+    if (dst_rect.is_empty())
+        return;
+    append_command(DrawCanvas {
+        .dst_rect = dst_rect,
+        .canvas_id = canvas_id,
+        .content_generation = content_generation,
+        .scaling_mode = scaling_mode,
+    });
+}
+
+void DisplayListRecorder::draw_video_frame(Gfx::IntRect const& dst_rect, VideoFrameResourceId frame_id, RefPtr<Media::VideoFrame const> frame, u64 content_generation, Gfx::ScalingMode scaling_mode)
+{
+    if (dst_rect.is_empty())
+        return;
+    append_command(DrawVideoFrame {
+        .dst_rect = dst_rect,
+        .video_frame_id = resource_storage().add_video_frame(frame_id, move(frame)),
+        .content_generation = content_generation,
+        .scaling_mode = scaling_mode,
+    });
+}
+
+void DisplayListRecorder::draw_scaled_decoded_image_frame(Gfx::IntRect const& dst_rect, Gfx::DecodedImageFrame frame, Gfx::ScalingMode scaling_mode, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<Color> isolated_backdrop_color)
+{
+    if (dst_rect.is_empty())
+        return;
+    append_command(DrawScaledDecodedImageFrame {
+        .dst_rect = dst_rect,
+        .src_rect = {},
+        .frame_id = resource_storage().add_image_frame(frame),
+        .scaling_mode = scaling_mode,
+        .compositing_and_blending_operator = compositing_and_blending_operator,
+        .isolated_backdrop_color = isolated_backdrop_color,
+    });
+}
+
+void DisplayListRecorder::draw_scaled_decoded_image_frame(Gfx::IntRect const& dst_rect, Gfx::FloatRect const& src_rect, Gfx::DecodedImageFrame frame, Gfx::ScalingMode scaling_mode, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<Color> isolated_backdrop_color)
+{
+    if (dst_rect.is_empty())
+        return;
+    if (src_rect.is_empty())
+        return;
+    append_command(DrawScaledDecodedImageFrame {
+        .dst_rect = dst_rect,
         .src_rect = src_rect,
+        .frame_id = resource_storage().add_image_frame(frame),
         .scaling_mode = scaling_mode,
+        .compositing_and_blending_operator = compositing_and_blending_operator,
+        .isolated_backdrop_color = isolated_backdrop_color,
     });
 }
 
-void DisplayListRecorder::draw_scaled_immutable_bitmap(Gfx::IntRect const& dst_rect, Gfx::IntRect const& clip_rect, Gfx::ImmutableBitmap const& bitmap, Gfx::ScalingMode scaling_mode)
+void DisplayListRecorder::draw_repeated_decoded_image_frame(Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, Gfx::DecodedImageFrame frame, Gfx::ScalingMode scaling_mode, bool repeat_x, bool repeat_y, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<Color> isolated_backdrop_color)
 {
-    if (dst_rect.is_empty())
+    if (dst_rect.is_empty() || clip_rect.is_empty())
         return;
-    APPEND(DrawScaledImmutableBitmap {
+    append_command(DrawRepeatedDecodedImageFrame {
         .dst_rect = dst_rect,
         .clip_rect = clip_rect,
-        .bitmap = bitmap,
-        .scaling_mode = scaling_mode,
-    });
-}
-
-void DisplayListRecorder::draw_repeated_immutable_bitmap(Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, NonnullRefPtr<Gfx::ImmutableBitmap const> bitmap, Gfx::ScalingMode scaling_mode, bool repeat_x, bool repeat_y)
-{
-    APPEND(DrawRepeatedImmutableBitmap {
-        .dst_rect = dst_rect,
-        .clip_rect = clip_rect,
-        .bitmap = move(bitmap),
+        .frame_id = resource_storage().add_image_frame(frame),
         .scaling_mode = scaling_mode,
         .repeat = { repeat_x, repeat_y },
+        .compositing_and_blending_operator = compositing_and_blending_operator,
+        .isolated_backdrop_color = isolated_backdrop_color,
+    });
+}
+
+void DisplayListRecorder::draw_repeated_display_list(Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, DisplayListResource const& display_list, Gfx::ScalingMode scaling_mode, bool repeat_x, bool repeat_y)
+{
+    if (dst_rect.is_empty() || clip_rect.is_empty())
+        return;
+    append_command(DrawRepeatedDisplayList {
+        .dst_rect = dst_rect,
+        .clip_rect = clip_rect,
+        .display_list_id = resource_storage().add_display_list(display_list.display_list, display_list.visual_context_tree),
+        .scaling_mode = scaling_mode,
+        .repeat = { repeat_x, repeat_y },
+    });
+}
+
+void DisplayListRecorder::draw_tiled_decoded_image_frame(DrawTiledDecodedImageFrameParams const& params)
+{
+    if (params.tile_rect.is_empty() || params.clip_rect.is_empty() || params.src_rect.is_empty())
+        return;
+
+    append_command(DrawTiledDecodedImageFrame {
+        .tile_rect = params.tile_rect,
+        .clip_rect = params.clip_rect,
+        .src_rect = params.src_rect,
+        .tile_step = params.tile_step,
+        .frame_id = resource_storage().add_image_frame(params.frame),
+        .scaling_mode = params.scaling_mode,
+        .tile_count_x = params.tile_count_x,
+        .tile_count_y = params.tile_count_y,
     });
 }
 
@@ -203,7 +626,7 @@ void DisplayListRecorder::draw_line(Gfx::IntPoint from, Gfx::IntPoint to, Color 
 {
     if (color.alpha() == 0 || !thickness)
         return;
-    APPEND(DrawLine {
+    append_command(DrawLine {
         .color = color,
         .from = from,
         .to = to,
@@ -213,12 +636,12 @@ void DisplayListRecorder::draw_line(Gfx::IntPoint from, Gfx::IntPoint to, Color 
     });
 }
 
-void DisplayListRecorder::draw_text(Gfx::IntRect const& rect, String raw_text, Gfx::Font const& font, Gfx::TextAlignment alignment, Color color)
+void DisplayListRecorder::draw_text(Gfx::IntRect const& rect, Utf16String const& raw_text, Gfx::Font const& font, Gfx::TextAlignment alignment, Color color)
 {
     if (rect.is_empty() || color.alpha() == 0)
         return;
 
-    auto glyph_run = Gfx::shape_text({}, 0, raw_text.code_points(), font, Gfx::GlyphRun::TextType::Ltr, {});
+    auto glyph_run = Gfx::shape_text({}, 0, raw_text.utf16_view(), font, Gfx::GlyphRun::TextType::Ltr);
     float baseline_x = 0;
     if (alignment == Gfx::TextAlignment::CenterLeft) {
         baseline_x = rect.x();
@@ -239,115 +662,95 @@ void DisplayListRecorder::draw_glyph_run(Gfx::FloatPoint baseline_start, Gfx::Gl
 {
     if (color.alpha() == 0)
         return;
-    APPEND(DrawGlyphRun {
-        .glyph_run = glyph_run,
-        .scale = scale,
-        .rect = rect,
-        .translation = baseline_start,
-        .color = color,
-        .orientation = orientation,
-    });
+    glyph_run.ensure_text_blob(scale);
+    CommandPayloadBuilder<DrawGlyphRun> payload_builder(m_display_list);
+    auto glyphs = append_glyphs(payload_builder, glyph_run);
+    auto glyph_bounding_rect = glyph_run.cached_blob_bounds().translated(baseline_start).to_rounded<int>();
+    append_command(
+        DrawGlyphRun {
+            .font_id = resource_storage().add_font(glyph_run.font()),
+            .glyphs = glyphs,
+            .rect = rect,
+            .glyph_bounding_rect = glyph_bounding_rect,
+            .translation = baseline_start,
+            .scale = static_cast<float>(scale),
+            .color = color,
+            .orientation = orientation,
+        },
+        payload_builder.inline_data());
 }
 
 void DisplayListRecorder::add_clip_rect(Gfx::IntRect const& rect)
 {
-    APPEND(AddClipRect { rect });
+    append_command(AddClipRect { rect });
 }
 
 void DisplayListRecorder::translate(Gfx::IntPoint delta)
 {
-    APPEND(Translate { delta });
+    append_command(Translate { delta });
 }
 
 void DisplayListRecorder::save()
 {
-    APPEND(Save {});
+    append_command(Save {});
 }
 
 void DisplayListRecorder::save_layer()
 {
-    APPEND(SaveLayer {});
+    append_command(SaveLayer {});
 }
 
 void DisplayListRecorder::restore()
 {
-    APPEND(Restore {});
+    append_command(Restore {});
 }
 
-void DisplayListRecorder::push_scroll_frame_id(Optional<i32> id)
-{
-    m_scroll_frame_id_stack.append(id);
-}
-
-void DisplayListRecorder::pop_scroll_frame_id()
-{
-    (void)m_scroll_frame_id_stack.take_last();
-}
-
-void DisplayListRecorder::push_clip_frame(RefPtr<ClipFrame const> clip_frame)
-{
-    m_clip_frame_stack.append(clip_frame);
-}
-
-void DisplayListRecorder::pop_clip_frame()
-{
-    (void)m_clip_frame_stack.take_last();
-}
-
-void DisplayListRecorder::push_stacking_context(PushStackingContextParams params)
-{
-    APPEND(PushStackingContext {
-        .opacity = params.opacity,
-        .compositing_and_blending_operator = params.compositing_and_blending_operator,
-        .isolate = params.isolate,
-        .transform = {
-            .origin = params.transform.origin,
-            .matrix = params.transform.matrix,
-        },
-        .clip_path = params.clip_path });
-    m_clip_frame_stack.append({});
-}
-
-void DisplayListRecorder::pop_stacking_context()
-{
-    APPEND(PopStackingContext {});
-    (void)m_clip_frame_stack.take_last();
-}
-
-void DisplayListRecorder::apply_backdrop_filter(Gfx::IntRect const& backdrop_region, BorderRadiiData const& border_radii_data, Gfx::Filter const& backdrop_filter)
+void DisplayListRecorder::apply_backdrop_filter(Gfx::IntRect const& backdrop_region, Gfx::CornerRadii const& corner_radii, Gfx::Filter const& backdrop_filter)
 {
     if (backdrop_region.is_empty())
         return;
-    APPEND(ApplyBackdropFilter {
-        .backdrop_region = backdrop_region,
-        .border_radii_data = border_radii_data,
-        .backdrop_filter = backdrop_filter,
-    });
+    CommandPayloadBuilder<ApplyBackdropFilter> payload_builder(m_display_list);
+    auto filter_data = append_filter_data(payload_builder, resource_storage(), backdrop_filter);
+    append_command(
+        ApplyBackdropFilter {
+            .backdrop_region = backdrop_region,
+            .corner_radii = corner_radii,
+            .has_backdrop_filter = true,
+            .backdrop_filter_data = filter_data,
+        },
+        payload_builder.inline_data());
 }
 
-void DisplayListRecorder::paint_outer_box_shadow(PaintBoxShadowParams params)
+void DisplayListRecorder::paint_outer_box_shadow(PaintOuterBoxShadow outer_box_shadow)
 {
-    APPEND(PaintOuterBoxShadow { .box_shadow_params = params });
+    append_command(outer_box_shadow);
 }
 
-void DisplayListRecorder::paint_inner_box_shadow(PaintBoxShadowParams params)
+void DisplayListRecorder::paint_inner_box_shadow(PaintInnerBoxShadow inner_box_shadow)
 {
-    APPEND(PaintInnerBoxShadow { .box_shadow_params = params });
+    append_command(inner_box_shadow);
 }
 
 void DisplayListRecorder::paint_text_shadow(int blur_radius, Gfx::IntRect bounding_rect, Gfx::IntRect text_rect, Gfx::GlyphRun const& glyph_run, double glyph_run_scale, Color color, Gfx::FloatPoint draw_location)
 {
-    APPEND(PaintTextShadow {
-        .glyph_run = glyph_run,
-        .glyph_run_scale = glyph_run_scale,
-        .shadow_bounding_rect = bounding_rect,
-        .text_rect = text_rect,
-        .draw_location = draw_location,
-        .blur_radius = blur_radius,
-        .color = color });
+    glyph_run.ensure_text_blob(glyph_run_scale);
+    CommandPayloadBuilder<PaintTextShadow> payload_builder(m_display_list);
+    auto glyphs = append_glyphs(payload_builder, glyph_run);
+    append_command(
+        PaintTextShadow {
+            .font_id = resource_storage().add_font(glyph_run.font()),
+            .glyphs = glyphs,
+            .shadow_bounding_rect = bounding_rect,
+            .text_rect = text_rect,
+            .draw_location = draw_location,
+            .scale = static_cast<float>(glyph_run_scale),
+            .blur_radius = blur_radius,
+            .color = color,
+        },
+        payload_builder.inline_data());
 }
 
-void DisplayListRecorder::fill_rect_with_rounded_corners(Gfx::IntRect const& rect, Color color, CornerRadii const& corner_radii)
+void DisplayListRecorder::fill_rect_with_rounded_corners(Gfx::IntRect const& rect, Color color, Gfx::CornerRadii const& corner_radii)
 {
     if (rect.is_empty() || color.alpha() == 0)
         return;
@@ -357,7 +760,7 @@ void DisplayListRecorder::fill_rect_with_rounded_corners(Gfx::IntRect const& rec
         return;
     }
 
-    APPEND(FillRectWithRoundedCorners {
+    append_command(FillRectWithRoundedCorners {
         .rect = rect,
         .color = color,
         .corner_radii = corner_radii,
@@ -378,10 +781,10 @@ void DisplayListRecorder::fill_rect_with_rounded_corners(Gfx::IntRect const& a_r
             { bottom_left_radius, bottom_left_radius } });
 }
 
-void DisplayListRecorder::paint_scrollbar(int scroll_frame_id, Gfx::IntRect gutter_rect, Gfx::IntRect thumb_rect, CSSPixelFraction scroll_size, Color thumb_color, Color track_color, bool vertical)
+void DisplayListRecorder::paint_scrollbar(ScrollFrameIndex scroll_frame_index, Gfx::IntRect gutter_rect, Gfx::IntRect thumb_rect, double scroll_size, Color thumb_color, Color track_color, bool vertical)
 {
-    APPEND(PaintScrollBar {
-        .scroll_frame_id = scroll_frame_id,
+    append_command(PaintScrollBar {
+        .scroll_frame_index = scroll_frame_index,
         .gutter_rect = gutter_rect,
         .thumb_rect = thumb_rect,
         .scroll_size = scroll_size,
@@ -390,36 +793,61 @@ void DisplayListRecorder::paint_scrollbar(int scroll_frame_id, Gfx::IntRect gutt
         .vertical = vertical });
 }
 
-void DisplayListRecorder::apply_opacity(float opacity)
+void DisplayListRecorder::compositor_scroll_node(CompositorScrollNode const& scroll_node)
 {
-    APPEND(ApplyOpacity { .opacity = opacity });
+    append_command(scroll_node);
 }
 
-void DisplayListRecorder::apply_compositing_and_blending_operator(Gfx::CompositingAndBlendingOperator compositing_and_blending_operator)
+void DisplayListRecorder::compositor_sticky_area(CompositorStickyArea const& sticky_area)
 {
-    APPEND(ApplyCompositeAndBlendingOperator { .compositing_and_blending_operator = compositing_and_blending_operator });
+    append_command(sticky_area);
 }
 
-void DisplayListRecorder::apply_filter(Gfx::Filter filter)
+void DisplayListRecorder::compositor_wheel_hit_test_target(CompositorWheelHitTestTarget const& target)
 {
-    APPEND(ApplyFilter { .filter = move(filter) });
+    append_command(target);
 }
 
-void DisplayListRecorder::apply_transform(Gfx::FloatPoint origin, Gfx::FloatMatrix4x4 matrix)
+void DisplayListRecorder::compositor_wheel_hit_test_target_with_corner_radii(CompositorWheelHitTestTargetWithCornerRadii const& target)
 {
-    APPEND(ApplyTransform {
-        .origin = origin,
-        .matrix = matrix,
-    });
+    append_command(target);
 }
 
-void DisplayListRecorder::apply_mask_bitmap(Gfx::IntPoint origin, Gfx::ImmutableBitmap const& bitmap, Gfx::Bitmap::MaskKind kind)
+void DisplayListRecorder::set_async_scrolling_metadata(DisplayList::AsyncScrollingMetadata metadata)
 {
-    APPEND(ApplyMaskBitmap {
-        .origin = origin,
-        .bitmap = bitmap,
-        .kind = kind,
-    });
+    m_display_list.set_async_scrolling_metadata(metadata);
+}
+
+void DisplayListRecorder::compositor_main_thread_wheel_event_region(CompositorMainThreadWheelEventRegion const& region)
+{
+    append_command(region);
+}
+
+void DisplayListRecorder::compositor_viewport_scrollbar(CompositorViewportScrollbar const& scrollbar)
+{
+    append_command(scrollbar);
+}
+
+void DisplayListRecorder::compositor_blocking_wheel_event_region(CompositorBlockingWheelEventRegion const& region)
+{
+    append_command(region);
+}
+
+void DisplayListRecorder::apply_effects(float opacity, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<Gfx::Filter> filter, Optional<Gfx::MaskKind> mask_kind)
+{
+    CommandPayloadBuilder<ApplyEffects> payload_builder(m_display_list);
+    auto filter_data = filter.has_value()
+        ? append_filter_data(payload_builder, resource_storage(), filter.value())
+        : DisplayListDataSpan {};
+    append_command(
+        ApplyEffects {
+            .opacity = opacity,
+            .compositing_and_blending_operator = compositing_and_blending_operator,
+            .has_filter = filter.has_value(),
+            .filter_data = filter_data,
+            .has_mask_kind = mask_kind.has_value(),
+            .mask_kind = mask_kind.value_or({}) },
+        payload_builder.inline_data());
 }
 
 }

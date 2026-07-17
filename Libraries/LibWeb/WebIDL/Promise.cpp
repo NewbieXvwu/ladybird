@@ -113,7 +113,7 @@ GC::Ref<Promise> react_to_promise(Promise const& promise, GC::Ptr<ReactionSteps>
         return result;
     };
 
-    // 2. Let onFulfilled be CreateBuiltinFunction(onFulfilledSteps, « »):
+    // 2. Let onFulfilled be CreateBuiltinFunction(onFulfilledSteps, 1, "", « »):
     auto on_fulfilled = JS::NativeFunction::create(realm, move(on_fulfilled_steps), 1);
 
     // 3. Let onRejectedSteps be the following steps given argument R:
@@ -130,7 +130,7 @@ GC::Ref<Promise> react_to_promise(Promise const& promise, GC::Ptr<ReactionSteps>
         return result;
     };
 
-    // 4. Let onRejected be CreateBuiltinFunction(onRejectedSteps, « »):
+    // 4. Let onRejected be CreateBuiltinFunction(onRejectedSteps, 1, "", « »):
     auto on_rejected = JS::NativeFunction::create(realm, move(on_rejected_steps), 1);
 
     // 5. Let constructor be promise.[[Promise]].[[Realm]].[[Intrinsics]].[[%Promise%]].
@@ -140,13 +140,12 @@ GC::Ref<Promise> react_to_promise(Promise const& promise, GC::Ptr<ReactionSteps>
     // NOTE: When called with %Promise%, NewPromiseCapability can't throw.
     auto new_capability = MUST(JS::new_promise_capability(vm, constructor));
 
-    // 7. Return PerformPromiseThen(promise.[[Promise]], onFulfilled, onRejected, newCapability).
-    // FIXME: https://github.com/whatwg/webidl/issues/1443
-    //  Returning newCapability instead of newCapability.[[Promise].
+    // 7. Perform PerformPromiseThen(promise.[[Promise]], onFulfilled, onRejected, newCapability).
     auto promise_object = as<JS::Promise>(promise.promise().ptr());
     auto value = promise_object->perform_then(on_fulfilled, on_rejected, new_capability);
-
     VERIFY(value == new_capability->promise());
+
+    // 8. Return newCapability.
     return new_capability;
 }
 
@@ -215,7 +214,7 @@ struct WaitForAllResults : JS::Cell {
 GC_DEFINE_ALLOCATOR(WaitForAllResults);
 
 // https://webidl.spec.whatwg.org/#wait-for-all
-void wait_for_all(JS::Realm& realm, Vector<GC::Ref<Promise>> const& promises, Function<void(Vector<JS::Value> const&)> success_steps, Function<void(JS::Value)> failure_steps)
+void wait_for_all(JS::Realm& realm, ReadonlySpan<GC::Ref<Promise>> promises, Function<void(Vector<JS::Value> const&)> success_steps, Function<void(JS::Value)> failure_steps)
 {
     // FIXME: Fix spec typo, fullfilled --> fulfilled
     // 1. Let fullfilledCount be 0.
@@ -239,7 +238,7 @@ void wait_for_all(JS::Realm& realm, Vector<GC::Ref<Promise>> const& promises, Fu
         return JS::js_undefined();
     };
 
-    // 4. Let rejectionHandler be CreateBuiltinFunction(rejectionHandlerSteps, « »):
+    // 4. Let rejectionHandler be CreateBuiltinFunction(rejectionHandlerSteps, 1, "", « »):
     auto rejection_handler = JS::NativeFunction::create(realm, move(rejection_handler_steps), 1);
 
     // 5. Let total be promises’s size.
@@ -265,7 +264,7 @@ void wait_for_all(JS::Realm& realm, Vector<GC::Ref<Promise>> const& promises, Fu
     auto results = realm.create<WaitForAllResults>(GC::create_function(realm.heap(), move(success_steps)), total);
 
     // 9. For each promise of promises:
-    for (auto const& promise : promises) {
+    for (auto promise : promises) {
         // 1. Let promiseIndex be index.
         auto promise_index = index;
 
@@ -287,7 +286,7 @@ void wait_for_all(JS::Realm& realm, Vector<GC::Ref<Promise>> const& promises, Fu
             return JS::js_undefined();
         };
 
-        // 3. Let fulfillmentHandler be CreateBuiltinFunction(fulfillmentHandler, « »):
+        // 3. Let fulfillmentHandler be CreateBuiltinFunction(fulfillmentHandler, 1, "", « »):
         auto fulfillment_handler = JS::NativeFunction::create(realm, move(fulfillment_handler_steps), 1);
 
         // 4. Perform PerformPromiseThen(promise, fulfillmentHandler, rejectionHandler).
@@ -299,7 +298,7 @@ void wait_for_all(JS::Realm& realm, Vector<GC::Ref<Promise>> const& promises, Fu
 }
 
 // https://webidl.spec.whatwg.org/#waiting-for-all-promise
-GC::Ref<Promise> get_promise_for_wait_for_all(JS::Realm& realm, Vector<GC::Ref<Promise>> const& promises)
+GC::Ref<Promise> get_promise_for_wait_for_all(JS::Realm& realm, ReadonlySpan<GC::Ref<Promise>> promises)
 {
     // 1. Let promise be a new promise of type Promise<sequence<T>> in realm.
     auto promise = create_promise(realm);
@@ -332,6 +331,12 @@ GC::Ref<Promise> create_rejected_promise_from_exception(JS::Realm& realm, Except
 {
     auto throw_completion = Bindings::exception_to_throw_completion(realm.vm(), move(exception));
     return WebIDL::create_rejected_promise(realm, throw_completion.value());
+}
+
+void reject_promise_with_exception(JS::Realm& realm, Promise const& promise, Exception exception)
+{
+    auto throw_completion = Bindings::exception_to_throw_completion(realm.vm(), move(exception));
+    WebIDL::reject_promise(realm, promise, throw_completion.value());
 }
 
 }

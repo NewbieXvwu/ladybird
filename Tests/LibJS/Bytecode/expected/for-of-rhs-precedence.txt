@@ -1,0 +1,8 @@
+$ccf7ed9d
+  Registers: 5
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] End value:Undefined

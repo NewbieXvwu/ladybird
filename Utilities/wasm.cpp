@@ -10,19 +10,19 @@
 #include <AK/MemoryStream.h>
 #include <AK/StackInfo.h>
 #include <AK/Utf16String.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
 #include <LibCore/MappedFile.h>
 #include <LibCrypto/BigInt/SignedBigInteger.h>
 #include <LibFileSystem/FileSystem.h>
-#include <LibJS/Bytecode/Interpreter.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/BigInt.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibJS/Script.h>
-#if !defined(AK_OS_WINDOWS)
-#    include <LibLine/Editor.h>
+#if defined(AK_OS_WINDOWS)
+#    include <AK/Windows.h>
 #endif
 #include <LibMain/Main.h>
 #include <LibWasm/AbstractMachine/AbstractMachine.h>
@@ -32,8 +32,11 @@
 #if !defined(AK_OS_WINDOWS)
 #    include <LibWasm/Wasi.h>
 #endif
+#include <LibCore/Process.h>
 #include <math.h>
-#include <signal.h>
+#if !defined(AK_OS_WINDOWS)
+#    include <unistd.h>
+#endif
 
 static OwnPtr<Stream> g_stdout {};
 static OwnPtr<Wasm::Printer> g_printer {};
@@ -231,8 +234,21 @@ static ErrorOr<ParsedValue> parse_value(StringView spec)
                 width = sizeof(u64);
                 break;
             case Wasm::ValueType::V128:
+            case Wasm::ValueType::I8:
+            case Wasm::ValueType::I16:
             case Wasm::ValueType::FunctionReference:
+            case Wasm::ValueType::NoFunctionReference:
             case Wasm::ValueType::ExternReference:
+            case Wasm::ValueType::NoExternReference:
+            case Wasm::ValueType::ExceptionReference:
+            case Wasm::ValueType::NoExceptionReference:
+            case Wasm::ValueType::AnyReference:
+            case Wasm::ValueType::EqReference:
+            case Wasm::ValueType::I31Reference:
+            case Wasm::ValueType::StructReference:
+            case Wasm::ValueType::ArrayReference:
+            case Wasm::ValueType::NoneReference:
+            case Wasm::ValueType::TypeUseReference:
                 VERIFY_NOT_REACHED();
             }
             last_value = parsed.value.value();
@@ -289,7 +305,7 @@ static ErrorOr<T, Wasm::Result> trap_for_js_exception(JS::VM& vm, JS::ThrowCompl
 
     auto const& completion = result.error();
     auto& exception = completion.value();
-    warnln("JS exception: {}", MUST(exception.to_string(vm)));
+    warnln("JS exception: {}", MUST(exception.to_utf16_string(vm)));
     return Wasm::Trap { ByteString("JS exception") };
 }
 
@@ -298,6 +314,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     StringView filename;
     bool print = false;
     bool print_compiled = false;
+    bool dump_native = false;
     bool attempt_instantiate = false;
     bool export_all_imports = false;
     [[maybe_unused]] bool wasi = false;
@@ -318,6 +335,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     parser.add_positional_argument(filename, "File name to parse", "file");
     parser.add_option(print, "Print the parsed module", "print", 'p');
     parser.add_option(print_compiled, "Print the compiled module", "print-compiled");
+    parser.add_option(dump_native, "Disassemble Cranelift-compiled native code for each function", "dump-native");
     parser.add_option(specific_function_address, "Optional compiled function address to print", "print-function", 'f', "address");
     parser.add_option(attempt_instantiate, "Attempt to instantiate the module", "instantiate", 'i');
     parser.add_option(exported_function_to_execute, "Attempt to execute the named exported function from the module (implies -i)", "execute", 'e', "name");
@@ -341,7 +359,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             }
             auto fn_name = lexer.consume_until(is_any_of("(=:"sv));
             struct Arg {
-                Wasm::ValueType::Kind type;
+                Wasm::ValueType type;
                 StringView name;
             };
             Vector<Arg> formal_params;
@@ -352,24 +370,24 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                         warnln("Invalid JS export argument name in '{}'", str);
                         return false;
                     }
-                    auto type = Wasm::ValueType::I32;
+                    auto type_kind = Wasm::ValueType::I32;
                     if (lexer.consume_specific(':')) {
                         if (lexer.consume_specific("i32"sv)) {
-                            type = Wasm::ValueType::I32;
+                            type_kind = Wasm::ValueType::I32;
                         } else if (lexer.consume_specific("i64"sv)) {
-                            type = Wasm::ValueType::I64;
+                            type_kind = Wasm::ValueType::I64;
                         } else if (lexer.consume_specific("f32"sv)) {
-                            type = Wasm::ValueType::F32;
+                            type_kind = Wasm::ValueType::F32;
                         } else if (lexer.consume_specific("f64"sv)) {
-                            type = Wasm::ValueType::F64;
+                            type_kind = Wasm::ValueType::F64;
                         } else if (lexer.consume_specific("v128"sv)) {
-                            type = Wasm::ValueType::V128;
+                            type_kind = Wasm::ValueType::V128;
                         } else {
                             warnln("Invalid JS export argument type in '{}'", str);
                             return false;
                         }
                     }
-                    formal_params.append(Arg { type, name });
+                    formal_params.append(Arg { Wasm::ValueType(type_kind), name });
                     lexer.consume_specific(',');
                 }
             }
@@ -397,17 +415,20 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             }
 
             auto source_text = lexer.consume_all().trim_whitespace();
-            StringBuilder builder;
-            builder.append("("sv);
+            Utf16StringBuilder builder;
+            builder.append_ascii("("sv);
             auto first = true;
             for (auto& arg : formal_params) {
                 if (!first)
-                    builder.append(", "sv);
+                    builder.append_ascii(", "sv);
                 first = false;
-                builder.append(arg.name);
+                auto argument_name = Utf16String::from_utf8(arg.name);
+                builder.append(argument_name.utf16_view());
             }
-            builder.appendff(") => {}", source_text);
-            auto js_function = builder.to_byte_string();
+            builder.append_ascii(") => "sv);
+            auto source_text_utf16 = Utf16String::from_utf8(source_text);
+            builder.append(source_text_utf16.utf16_view());
+            auto js_function = builder.to_string();
             auto name = ByteString::formatted("{}.{}", module, fn_name);
             auto script = JS::Script::parse(js_function, realm, name);
             if (script.is_error()) {
@@ -416,8 +437,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             }
 
             auto js_script = script.release_value();
-            JS::Bytecode::Interpreter interp(vm);
-            auto maybe_function = interp.run(*js_script);
+            auto maybe_function = vm->run(*js_script);
             if (maybe_function.is_error()) {
                 warnln("Failed to run JS export source '{}'", js_function);
                 return false;
@@ -439,7 +459,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
             Wasm::FunctionType function_type = { move(params), move(results) };
             auto host_function = Wasm::HostFunction {
-                [&vm, &function, formal_params, returns, name](Wasm::Configuration&, Vector<Wasm::Value>& args) mutable -> Wasm::Result {
+                [&vm, &function, formal_params, returns, name](Wasm::Configuration&, Span<Wasm::Value> args) mutable -> Wasm::Result {
                     Vector<JS::Value> js_args;
                     js_args.ensure_capacity(args.size());
                     for (size_t i = 0; i < formal_params.size(); ++i) {
@@ -449,7 +469,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                             return Wasm::Trap { ByteString("Not enough arguments") };
                         }
                         auto& arg = args[i];
-                        switch (type) {
+                        switch (type.kind()) {
                         case Wasm::ValueType::I32:
                             js_args.append(JS::Value(arg.to<u32>()));
                             break;
@@ -469,7 +489,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                             break;
                         }
                         default:
-                            warnln("Unsupported argument type '{}' for JS export function '{}'", Wasm::ValueType::kind_name(type), name);
+                            warnln("Unsupported argument type '{}' for JS export function '{}'", type.kind_name(), name);
                             return Wasm::Trap { ByteString("Unsupported argument type") };
                         }
                     }
@@ -578,7 +598,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         printer.print(*parse_result);
     }
 
-    if (attempt_instantiate || print_compiled) {
+    if (attempt_instantiate || print_compiled || dump_native) {
 #if !defined(AK_OS_WINDOWS)
         Optional<Wasm::Wasi::Implementation> wasi_impl;
 
@@ -609,9 +629,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         }
 #endif
 
-        Core::EventLoop main_loop;
+        Core::EventLoop::initialize_for_current_thread();
         // First, resolve the linked modules
-        Vector<NonnullOwnPtr<Wasm::ModuleInstance>> linked_instances;
+        Vector<NonnullRefPtr<Wasm::ModuleInstance>> linked_instances;
         Vector<NonnullRefPtr<Wasm::Module>> linked_modules;
         for (auto& name : modules_to_link_in) {
             auto parse_result = parse(name);
@@ -664,18 +684,16 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
         if (export_all_imports) {
             HashMap<Wasm::Linker::Name, Wasm::ExternValue> exports;
-            for (auto& entry : linker.unresolved_imports()) {
-                if (!entry.type.has<Wasm::TypeIndex>())
-                    continue;
-                auto type = parse_result->type_section().types()[entry.type.get<Wasm::TypeIndex>().value()];
-                auto address = machine.store().allocate(Wasm::HostFunction(
-                    [name = entry.name, type = type](auto&, auto& arguments) -> Wasm::Result {
+
+            auto allocate_function_stub = [&](Wasm::FunctionType const& func, ByteString const& name) {
+                return *machine.store().allocate(Wasm::HostFunction(
+                    [name, func](auto&, auto arguments) -> Wasm::Result {
                         StringBuilder argument_builder;
                         bool first = true;
                         size_t index = 0;
                         for (auto& argument : arguments) {
                             AllocatingMemoryStream stream;
-                            auto value_type = type.parameters()[index];
+                            auto value_type = func.parameters()[index];
                             Wasm::Printer { stream }.print(argument, value_type);
                             if (first)
                                 first = false;
@@ -688,14 +706,50 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                         }
                         dbgln("[wasm runtime] Stub function {} was called with the following arguments: {}", name, argument_builder.to_byte_string());
                         Vector<Wasm::Value> result;
-                        result.ensure_capacity(type.results().size());
-                        for (auto expect_result : type.results())
+                        result.ensure_capacity(func.results().size());
+                        for (auto expect_result : func.results())
                             result.append(Wasm::Value(expect_result));
                         return Wasm::Result { move(result) };
                     },
-                    type,
-                    entry.name));
-                exports.set(entry, *address);
+                    func,
+                    name));
+            };
+
+            for (auto& entry : linker.unresolved_imports()) {
+                Optional<Wasm::ExternValue> address;
+                entry.type.visit(
+                    [&](Wasm::TypeIndex const& type_index) {
+                        auto& type = parse_result->type_section().types()[type_index.value()];
+                        if (!type.is_function()) {
+                            dbgln("[wasm runtime] Cannot stub import {}::{} of non-function {}", entry.module, entry.name, type.name());
+                            return;
+                        }
+                        address = allocate_function_stub(type.function(), entry.name);
+                    },
+                    [&](Wasm::FunctionType const& func) {
+                        address = allocate_function_stub(func, entry.name);
+                    },
+                    [&](Wasm::TableType const& table_type) {
+                        address = *machine.store().allocate(table_type);
+                    },
+                    [&](Wasm::MemoryType const& memory_type) {
+                        address = *machine.store().allocate(memory_type);
+                    },
+                    [&](Wasm::GlobalType const& global_type) {
+                        address = *machine.store().allocate(global_type, Wasm::Value(global_type.type()));
+                    },
+                    [&](Wasm::TagType const& tag_type) {
+                        auto& type = parse_result->type_section().types()[tag_type.type().value()];
+                        if (!type.is_function()) {
+                            dbgln("[wasm runtime] Cannot stub tag import {}::{}: type is not a function", entry.module, entry.name);
+                            return;
+                        }
+                        // The module is not yet validated here, so its canonical types may not be known.
+                        address = *machine.store().allocate(type.function(), nullptr, tag_type.flags());
+                    });
+
+                if (address.has_value())
+                    exports.set(entry, address.release_value());
             }
 
             linker.link(exports);
@@ -738,17 +792,19 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                 }
 
                 TRY(g_stdout->write_until_depleted(ByteString::formatted("Function #{}{} (stack usage = {}):\n", address.value(), export_name, expression.stack_usage_hint())));
+
                 Wasm::Printer printer { *g_stdout, 1 };
                 for (size_t ip = 0; ip < expression.compiled_instructions.dispatches.size(); ++ip) {
                     auto& dispatch = expression.compiled_instructions.dispatches[ip];
+                    auto& addresses = expression.compiled_instructions.src_dst_mappings[ip];
                     ByteString regs;
                     auto first = true;
                     ssize_t in_count = 0;
-                    bool has_out = false;
+                    ssize_t out_count = 0;
 #define M(name, _, ins, outs)              \
     case Wasm::Instructions::name.value(): \
         in_count = ins;                    \
-        has_out = outs != 0;               \
+        out_count = outs;                  \
         break;
                     switch (dispatch.instruction->opcode().value()) {
                         ENUMERATE_WASM_OPCODES(M)
@@ -757,31 +813,43 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                     constexpr auto reg_name = [](Wasm::Dispatch::RegisterOrStack reg) -> ByteString {
                         if (reg == Wasm::Dispatch::RegisterOrStack::Stack)
                             return "stack"sv;
+                        if (reg >= Wasm::Dispatch::RegisterOrStack::CallRecord)
+                            return ByteString::formatted("cr{}", to_underlying(reg) - to_underlying(Wasm::Dispatch::RegisterOrStack::CallRecord));
                         return ByteString::formatted("reg{}", to_underlying(reg));
                     };
                     if (in_count > -1) {
                         for (ssize_t index = 0; index < in_count; ++index) {
                             if (first)
-                                regs = ByteString::formatted("{} ({}", regs, reg_name(dispatch.sources[index]));
+                                regs = ByteString::formatted("{} ({}", regs, reg_name(addresses.sources[index]));
                             else
-                                regs = ByteString::formatted("{}, {}", regs, reg_name(dispatch.sources[index]));
+                                regs = ByteString::formatted("{}, {}", regs, reg_name(addresses.sources[index]));
                             first = false;
                         }
-                        if (has_out) {
+                        if (out_count > 0) {
                             if (first)
-                                regs = ByteString::formatted(" () -> {}", reg_name(dispatch.destination));
+                                regs = ByteString::formatted(" () -> {}", reg_name(addresses.destination));
                             else
-                                regs = ByteString::formatted("{}) -> {}", regs, reg_name(dispatch.destination));
-                        } else {
+                                regs = ByteString::formatted("{}) -> {}", regs, reg_name(addresses.destination));
+                        } else if (out_count == 0) {
                             if (first)
                                 regs = ByteString::formatted(" () -x");
                             else
                                 regs = ByteString::formatted("{}) -x", regs);
+                        } else {
+                            if (first)
+                                regs = ByteString::formatted(" () -?");
+                            else
+                                regs = ByteString::formatted("{}) -?", regs);
                         }
+                    } else if (dispatch.instruction->opcode() == Wasm::Instructions::call || dispatch.instruction->opcode() == Wasm::Instructions::call_indirect) {
+                        if (addresses.destination != Wasm::Dispatch::RegisterOrStack::Stack)
+                            regs = ByteString::formatted("(?) -> {}", reg_name(addresses.destination));
                     }
 
-                    if (!regs.is_empty())
-                        regs = ByteString::formatted(" {{{:<33} }}", regs);
+                    if (regs.is_empty())
+                        regs = ByteString::formatted(" {{{:-<34}}}", regs);
+                    else
+                        regs = ByteString::formatted(" {{{: <33} }}", regs);
 
                     TRY(g_stdout->write_until_depleted(ByteString::formatted("  [{:>03}]", ip)));
                     TRY(g_stdout->write_until_depleted(regs.bytes()));
@@ -789,6 +857,158 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                 }
 
                 TRY(g_stdout->write_until_depleted("\n"sv.bytes()));
+            }
+        }
+
+        if (dump_native) {
+            Span<Wasm::FunctionAddress const> functions = module_instance->functions();
+            Wasm::FunctionAddress spec = specific_function_address.value_or(0);
+
+            if (specific_function_address.has_value())
+                functions = { &spec, 1 };
+            for (auto address : functions) {
+                auto* function = machine.store().get(address)->get_pointer<Wasm::WasmFunction>();
+                if (!function)
+                    continue;
+                auto& ci = function->code().func().body().compiled_instructions;
+                if (!ci.cranelift_compiled || ci.cranelift_code_size == 0)
+                    continue;
+
+                ByteString export_name;
+                for (auto& entry : function->module().exports()) {
+                    if (entry.value() == address) {
+                        export_name = ByteString::formatted(" '{}'", entry.name());
+                        break;
+                    }
+                }
+
+                auto const* code_ptr = bit_cast<u8 const*>(ci.dispatches[0].handler_ptr);
+                auto code_size = ci.cranelift_code_size;
+
+#if defined(AK_OS_WINDOWS)
+                char tmp_path[MAX_PATH];
+                {
+                    char tmp_dir[MAX_PATH];
+                    GetTempPathA(MAX_PATH, tmp_dir);
+                    GetTempFileNameA(tmp_dir, "wn", 0, tmp_path);
+                }
+                {
+                    auto tmp_file = Core::File::open(StringView { tmp_path, strlen(tmp_path) }, Core::File::OpenMode::Write);
+                    if (tmp_file.is_error()) {
+                        warnln("Failed to create temp file for function #{}", address.value());
+                        continue;
+                    }
+                    (void)tmp_file.value()->write_until_depleted({ code_ptr, code_size });
+                }
+#else
+                char tmp_path[] = "/tmp/wasm-native-XXXXXX";
+                int fd = mkstemp(tmp_path);
+                if (fd < 0) {
+                    warnln("Failed to create temp file for function #{}", address.value());
+                    continue;
+                }
+
+                {
+                    auto tmp_file = MUST(Core::File::adopt_fd(fd, Core::File::OpenMode::Write));
+
+#    if ARCH(AARCH64) && defined(AK_OS_MACOS)
+                    // Write a minimal Mach-O object file so objdump can disassemble it.
+                    struct [[gnu::packed]] {
+                        u32 magic = 0xFEEDFACF;
+                        u32 cputype = 0x0100000C; // CPU_TYPE_ARM64
+                        u32 cpusubtype = 0;
+                        u32 filetype = 1; // MH_OBJECT
+                        u32 ncmds = 1;
+                        u32 sizeofcmds = 72 + 80; // segment + section
+                        u32 flags = 0;
+                        u32 reserved = 0;
+                    } mach_header;
+
+                    struct [[gnu::packed]] {
+                        u32 cmd = 0x19; // LC_SEGMENT_64
+                        u32 cmdsize = 72 + 80;
+                        char segname[16] = {};
+                        u64 vmaddr = 0;
+                        u64 vmsize;
+                        u64 fileoff;
+                        u64 filesize;
+                        u32 maxprot = 7;
+                        u32 initprot = 7;
+                        u32 nsects = 1;
+                        u32 flags = 0;
+                    } segment;
+                    segment.vmsize = code_size;
+                    segment.fileoff = sizeof(mach_header) + sizeof(segment) + 80;
+                    segment.filesize = code_size;
+
+                    struct [[gnu::packed]] {
+                        char sectname[16] = "__text";
+                        char segname[16] = "__TEXT";
+                        u64 addr = 0;
+                        u64 size;
+                        u32 offset;
+                        u32 align = 2;
+                        u32 reloff = 0;
+                        u32 nreloc = 0;
+                        u32 flags = 0x80000400; // S_REGULAR | S_ATTR_PURE_INSTRUCTIONS
+                        u32 reserved1 = 0;
+                        u32 reserved2 = 0;
+                        u32 reserved3 = 0;
+                    } section;
+                    static_assert(sizeof(section) == 80);
+                    section.size = code_size;
+                    section.offset = static_cast<u32>(segment.fileoff);
+
+                    (void)tmp_file->write_until_depleted({ &mach_header, sizeof(mach_header) });
+                    (void)tmp_file->write_until_depleted({ &segment, sizeof(segment) });
+                    (void)tmp_file->write_until_depleted({ &section, sizeof(section) });
+#    endif
+                    (void)tmp_file->write_until_depleted({ code_ptr, code_size });
+                }
+#endif
+
+                outln("Function #{}{} ({} bytes):", address.value(), export_name, code_size);
+                fflush(stdout);
+
+#if defined(AK_OS_WINDOWS)
+                auto result = Core::Process::spawn({
+                    .name = "ndisasm"sv,
+                    .executable = "ndisasm"sv,
+                    .search_for_executable_in_path = true,
+                    .arguments = { "-b"sv, (sizeof(void*) == sizeof(u64) ? "64"sv : "32"sv), tmp_path },
+                });
+#elif defined(AK_OS_MACOS)
+                auto cmd = ByteString::formatted("/usr/bin/objdump -d {} | tail -n +7", tmp_path);
+                auto result = Core::Process::spawn({
+                    .name = "sh"sv,
+                    .executable = "/bin/sh"sv,
+                    .arguments = { "-c"sv, cmd },
+                });
+#else
+#    if ARCH(X86_64)
+                auto cmd = ByteString::formatted("/usr/bin/objdump -D -b binary -m i386:x86-64 {} | tail -n +8", tmp_path);
+#    elif ARCH(AARCH64)
+                auto cmd = ByteString::formatted("/usr/bin/objdump -D -b binary -m aarch64 {} | tail -n +8", tmp_path);
+#    else
+                auto cmd = ByteString::formatted("/usr/bin/objdump -D -b binary {} | tail -n +8", tmp_path);
+#    endif
+                auto result = Core::Process::spawn({
+                    .name = "sh"sv,
+                    .executable = "/bin/sh"sv,
+                    .arguments = { "-c"sv, cmd },
+                });
+#endif
+                if (!result.is_error())
+                    (void)result.release_value().wait_for_termination();
+                else
+                    warnln("Failed to run disassembler: {}", result.error());
+
+#if defined(AK_OS_WINDOWS)
+                DeleteFileA(tmp_path);
+#else
+                unlink(tmp_path);
+#endif
+                outln();
             }
         }
 
@@ -843,7 +1063,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                 } else if (param == values_to_push.last().type) {
                     values.append(values_to_push.take_last().value);
                 } else {
-                    warnln("Type mismatch in argument: expected {}, but got {}", Wasm::ValueType::kind_name(param.kind()), Wasm::ValueType::kind_name(values_to_push.last().type.kind()));
+                    warnln("Type mismatch in argument: expected {}, but got {}", param.kind_name(), values_to_push.last().type.kind_name());
                     return 1;
                 }
             }

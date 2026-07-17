@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<script src="../../include.js"></script>
+<script src="structural-matrix.js"></script>
+<script>
+    // Large amount of time spent in flushPendingStyleWork() pushes this high-volume stress test past the harness's
+    // default 120s per-test ceiling on Sanitizer builds. Give it more room.
+    internals.setTestTimeout(300000);
+</script>
+<script>
+    test(() => {
+        const scopes = [
+            "document",
+            "document-styled-use-shadow",
+            "shadow-internal",
+            "shadow-host",
+            "slotted-default",
+            "slotted-named",
+            "slotted-shadow-host-default",
+            "slotted-shadow-host-named",
+        ];
+
+        for (const scope of scopes) {
+            for (const selectorCase of childMutationCases) {
+                if (scope === "document-styled-use-shadow" && selectorCase.selector.startsWith(":dir("))
+                    continue;
+
+                runCase({
+                    suite: "child mutation",
+                    scope,
+                    initial: selectorCase.initial,
+                    after: selectorCase.after,
+                    ...selectorCase,
+                });
+            }
+        }
+
+        for (const scope of ["document", "shadow-internal", "shadow-host"]) {
+            for (const selectorCase of childMutationCases) {
+                runCase({
+                    suite: "pseudo-element child mutation",
+                    scope,
+                    initial: selectorCase.initial,
+                    after: selectorCase.after,
+                    pseudoElement: "::before",
+                    ...selectorCase,
+                });
+                if (!selectorCase.initial && selectorCase.after) {
+                    runCase({
+                        suite: "pseudo-element child mutation without warmup",
+                        scope,
+                        initial: selectorCase.initial,
+                        after: selectorCase.after,
+                        pseudoElement: "::before",
+                        skipInitialRead: true,
+                        ...selectorCase,
+                    });
+                }
+            }
+        }
+    });
+</script>

@@ -1,19 +1,25 @@
 /*
- * Copyright (c) 2021, Ali Mohammad Pur <mpfard@serenityos.org>
+ * Copyright (c) 2021-2025, Ali Mohammad Pur <mpfard@serenityos.org>
  * Copyright (c) 2023, Sam Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Bitmap.h>
 #include <AK/ByteReader.h>
 #include <AK/Debug.h>
 #include <AK/Endian.h>
+#include <AK/GenericShorthands.h>
 #include <AK/MemoryStream.h>
 #include <AK/NumericLimits.h>
 #include <AK/QuickSort.h>
 #include <AK/RedBlackTree.h>
 #include <AK/SIMDExtras.h>
+#include <AK/SaturatingMath.h>
+#include <AK/ScopedValueRollback.h>
 #include <AK/Time.h>
+#include <AK/TypeCasts.h>
+#include <LibCore/File.h>
 #include <LibWasm/AbstractMachine/AbstractMachine.h>
 #include <LibWasm/AbstractMachine/BytecodeInterpreter.h>
 #include <LibWasm/AbstractMachine/Configuration.h>
@@ -21,10 +27,303 @@
 #include <LibWasm/Opcode.h>
 #include <LibWasm/Printer/Printer.h>
 #include <LibWasm/Types.h>
+#include <setjmp.h>
+
+#if defined(AK_OS_WINDOWS)
+#    include <AK/Windows.h>
+#else
+#    include <signal.h>
+#    include <unistd.h>
+#    if defined(AK_OS_MACOS)
+#        include <sys/ucontext.h>
+#    else
+#        include <ucontext.h>
+#    endif
+#endif
 
 using namespace AK::SIMD;
 
+namespace {
+
+enum class CompiledFaultKind : u8 {
+    None,
+    Memory,
+    CraneliftTrap,
+};
+
+struct CompiledFaultRecoveryContext {
+    Wasm::BytecodeInterpreter* interpreter { nullptr };
+    Wasm::Configuration* configuration { nullptr };
+    CompiledFaultRecoveryContext* previous { nullptr };
+    jmp_buf jump_buffer;
+    bool faulted { false };
+    CompiledFaultKind fault_kind { CompiledFaultKind::None };
+    u8 cranelift_trap_code { 0 };
+};
+
+thread_local CompiledFaultRecoveryContext* s_compiled_fault_recovery = nullptr;
+
+#if WASM_COMPILED_FAULT_RECOVERY_SUPPORTED
+
+static StringView cranelift_trap_message(u8 trap_code)
+{
+    // Cranelift reserves trap codes at the high end of u8:
+    // stack_overflow=251, int_overflow=252, heap_oob=253, int_divz=254, bad_toint=255.
+    switch (trap_code) {
+    case 251:
+        return Wasm::Constants::stack_exhaustion_message;
+    case 252:
+    case 254:
+        return "Integer division overflow"sv;
+    case 253:
+        return "Memory access out of bounds"sv;
+    case 255:
+        return "Truncation out of range"sv;
+    default:
+        return "unreachable executed"sv;
+    }
+}
+
+static bool is_wasm_memory_fault(Wasm::Configuration& configuration, void* address)
+{
+    auto const& memories = configuration.frame().module().memories();
+    for (auto const& memory_address : memories) {
+        auto* memory = configuration.store().unsafe_get(memory_address);
+        if (memory && memory->contains_virtual_address(address))
+            return true;
+    }
+    return false;
+}
+
+extern "C" {
+[[noreturn, gnu::used]] static void wasm_compiled_fault_trampoline()
+{
+    auto* recovery = s_compiled_fault_recovery;
+    // NOTE: The segfault handler redirects sigreturn flow to here, which then runs on the normal stack.
+    longjmp(recovery->jump_buffer, 1);
+}
+}
+
+#    if defined(AK_OS_WINDOWS)
+
+static LONG WINAPI compiled_fault_exception_handler(EXCEPTION_POINTERS* exception_info)
+{
+    if (exception_info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION
+        && exception_info->ExceptionRecord->ExceptionCode != EXCEPTION_IN_PAGE_ERROR)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    auto* fault_address = reinterpret_cast<void*>(exception_info->ExceptionRecord->ExceptionInformation[1]);
+    if (auto* recovery = s_compiled_fault_recovery; recovery && is_wasm_memory_fault(*recovery->configuration, fault_address)) {
+        recovery->faulted = true;
+        auto* ctx = exception_info->ContextRecord;
+#        if ARCH(AARCH64)
+        ctx->Pc = reinterpret_cast<DWORD64>(&wasm_compiled_fault_trampoline);
+#        elif ARCH(X86_64)
+        ctx->Rip = reinterpret_cast<DWORD64>(&wasm_compiled_fault_trampoline);
+#        endif
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void install_compiled_fault_handlers()
+{
+    static bool s_installed = false;
+    if (s_installed)
+        return;
+    s_installed = true;
+    AddVectoredExceptionHandler(1, compiled_fault_exception_handler);
+}
+
+#    else
+
+static struct sigaction s_old_sigsegv;
+static struct sigaction s_old_sigbus;
+static struct sigaction s_old_sigill;
+static struct sigaction s_old_sigfpe;
+
+[[noreturn]] static void chain_fault_signal(int signal, siginfo_t* info, void* context, struct sigaction const& previous_action)
+{
+    if (previous_action.sa_flags & SA_SIGINFO) {
+        previous_action.sa_sigaction(signal, info, context);
+        __builtin_unreachable();
+    }
+
+    if (previous_action.sa_handler == SIG_IGN)
+        goto no_handler;
+
+    if (previous_action.sa_handler != SIG_DFL) {
+        previous_action.sa_handler(signal);
+        __builtin_unreachable();
+    }
+
+    {
+        struct sigaction default_action {};
+        default_action.sa_handler = SIG_DFL;
+        sigemptyset(&default_action.sa_mask);
+        sigaction(signal, &default_action, nullptr);
+        raise(signal);
+    }
+
+no_handler:
+    _exit(128 + signal);
+}
+
+static void compiled_fault_signal_handler(int signal, siginfo_t* info, void* context)
+{
+    auto* recovery = s_compiled_fault_recovery;
+    auto* uc = static_cast<ucontext_t*>(context);
+
+    auto redirect_to_trampoline = [&] {
+#        if defined(AK_OS_MACOS)
+#            if ARCH(AARCH64)
+        uc->uc_mcontext->__ss.__pc = reinterpret_cast<uintptr_t>(&wasm_compiled_fault_trampoline);
+#            elif ARCH(X86_64)
+        uc->uc_mcontext->__ss.__rip = reinterpret_cast<uintptr_t>(&wasm_compiled_fault_trampoline);
+#            endif
+#        else
+#            if ARCH(AARCH64)
+        uc->uc_mcontext.pc = reinterpret_cast<uintptr_t>(&wasm_compiled_fault_trampoline);
+#            elif ARCH(X86_64)
+        uc->uc_mcontext.gregs[REG_RIP] = reinterpret_cast<greg_t>(&wasm_compiled_fault_trampoline);
+#            endif
+#        endif
+    };
+
+    if (recovery && info && (signal == SIGSEGV || signal == SIGBUS) && is_wasm_memory_fault(*recovery->configuration, info->si_addr)) {
+        recovery->faulted = true;
+        recovery->fault_kind = CompiledFaultKind::Memory;
+        // Redirect the resumed PC to our trampoline and return.
+        // sigreturn (or the platform equivalent) will take the flow to the trampoline on the faulting thread's "normal" stack,
+        // from where we can then longjmp to the recovery code.
+        redirect_to_trampoline();
+        return;
+    }
+
+    if (recovery && (signal == SIGILL || signal == SIGFPE)) {
+#        if defined(AK_OS_MACOS)
+#            if ARCH(AARCH64)
+        auto pc = static_cast<FlatPtr>(uc->uc_mcontext->__ss.__pc);
+#            elif ARCH(X86_64)
+        auto pc = static_cast<FlatPtr>(uc->uc_mcontext->__ss.__rip);
+#            else
+        auto pc = static_cast<FlatPtr>(0);
+#            endif
+#        else
+#            if ARCH(AARCH64)
+        auto pc = static_cast<FlatPtr>(uc->uc_mcontext.pc);
+#            elif ARCH(X86_64)
+        auto pc = static_cast<FlatPtr>(uc->uc_mcontext.gregs[REG_RIP]);
+#            else
+        auto pc = static_cast<FlatPtr>(0);
+#            endif
+#        endif
+
+        auto const& compiled = recovery->configuration->frame().expression().compiled_instructions;
+        auto const code_start = compiled.cranelift_entry;
+        auto const code_size = compiled.cranelift_code_size;
+        if (compiled.cranelift_compiled && code_start != 0 && pc >= code_start && pc < code_start + code_size) {
+            auto const offset = static_cast<u32>(pc - code_start);
+            for (size_t i = 0; i < compiled.cranelift_trap_count; ++i) {
+                auto const& trap = compiled.cranelift_traps[i];
+                if (trap.offset != offset)
+                    continue;
+
+                recovery->faulted = true;
+                recovery->fault_kind = CompiledFaultKind::CraneliftTrap;
+                recovery->cranelift_trap_code = trap.code;
+                redirect_to_trampoline();
+                return;
+            }
+        }
+    }
+
+    if (signal == SIGSEGV)
+        chain_fault_signal(signal, info, context, s_old_sigsegv);
+    if (signal == SIGILL)
+        chain_fault_signal(signal, info, context, s_old_sigill);
+    if (signal == SIGFPE)
+        chain_fault_signal(signal, info, context, s_old_sigfpe);
+    chain_fault_signal(signal, info, context, s_old_sigbus);
+}
+
+static void install_compiled_fault_handlers()
+{
+    static bool s_installed = false;
+    if (s_installed)
+        return;
+    s_installed = true;
+    struct sigaction action {};
+    action.sa_sigaction = compiled_fault_signal_handler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGSEGV, &action, &s_old_sigsegv);
+    sigaction(SIGBUS, &action, &s_old_sigbus);
+    sigaction(SIGILL, &action, &s_old_sigill);
+    sigaction(SIGFPE, &action, &s_old_sigfpe);
+}
+
+#    endif
+
+#else
+
+static void install_compiled_fault_handlers() { }
+
+#endif
+
+}
+
+#ifdef AK_COMPILER_CLANG
+#    define TAILCALL [[clang::musttail]]
+#    define HAS_TAILCALL
+#elif defined(AK_COMPILER_GCC)
+#    if ((__GNUC__ > 15) || ((__GNUC__ == 15) && defined(NDEBUG) && !defined(HAS_ADDRESS_SANITIZER)))
+#        define TAILCALL [[gnu::musttail]]
+#        define HAS_TAILCALL
+#    else
+#        define TAILCALL
+#    endif
+#else
+#    define TAILCALL
+#endif
+
+// Disable direct threading when tail calls are not supported at all (gcc < 15);
+// as without guaranteed tailcall optimization we cannot ensure that the stack
+// will not grow uncontrollably.
+#if !defined(HAS_TAILCALL) || defined(HAS_ADDRESS_SANITIZER)
+constexpr static auto should_try_to_use_direct_threading = false;
+#else
+constexpr static auto should_try_to_use_direct_threading = true;
+#endif
+
 namespace Wasm {
+
+struct InstructionOperandCounts {
+    ssize_t inputs;
+    ssize_t outputs;
+};
+
+static InstructionOperandCounts instruction_operand_counts(OpCode opcode)
+{
+    switch (opcode.value()) {
+#define XM(name, _, ins, outs)             \
+    case Wasm::Instructions::name.value(): \
+        return { ins, outs };
+
+        ENUMERATE_WASM_OPCODES(XM)
+#undef XM
+    }
+
+    VERIFY_NOT_REACHED();
+}
+
+constexpr auto regname = [](auto regnum) -> ByteString {
+    if (regnum == Dispatch::Stack)
+        return "stack";
+    if (regnum >= Dispatch::CallRecord)
+        return ByteString::formatted("cr{}", to_underlying(regnum) - to_underlying(Dispatch::CallRecord));
+    return ByteString::formatted("reg{}", to_underlying(regnum));
+};
 
 template<typename T>
 struct ConvertToRaw {
@@ -44,54 +343,6026 @@ struct ConvertToRaw<double> {
     u64 operator()(double value) const { return bit_cast<LittleEndian<u64>>(value); }
 };
 
+// Memory address operands are typed as the memory's address type (proposal 'memory64').
+// 32-bit addresses are stored sign-extended in the Value, so they must be truncated back to u32; 64-bit addresses are used as-is.
+static ALWAYS_INLINE u64 memory_base_address(MemoryInstance const& memory, Value const& entry)
+{
+    auto base = entry.to<u64>();
+    if (memory.type().limits().address_type() == AddressType::I32)
+        return static_cast<u32>(base);
+    return base;
+}
+
 #define TRAP_IF_NOT(x, ...)                                                                    \
     do {                                                                                       \
         if (trap_if_not(x, #x##sv __VA_OPT__(, ) __VA_ARGS__)) {                               \
             dbgln_if(WASM_TRACE_DEBUG, "Trapped because {} failed, at line {}", #x, __LINE__); \
-            return true;                                                                       \
+            return Outcome::Return;                                                            \
         }                                                                                      \
     } while (false)
 
-#define TRAP_IN_LOOP_IF_NOT(x, ...)                                                            \
-    do {                                                                                       \
-        if (trap_if_not(x, #x##sv __VA_OPT__(, ) __VA_ARGS__)) {                               \
-            dbgln_if(WASM_TRACE_DEBUG, "Trapped because {} failed, at line {}", #x, __LINE__); \
-            return;                                                                            \
-        }                                                                                      \
+#define TRAP_IN_LOOP_IF_NOT(x, ...)                                                                    \
+    do {                                                                                               \
+        if (interpreter.trap_if_not(x, #x##sv __VA_OPT__(, ) __VA_ARGS__)) {                           \
+            dbgln_if(WASM_TRACE_DEBUG, "Trapped in loop because {} failed, at line {}", #x, __LINE__); \
+            return Outcome::Return;                                                                    \
+        }                                                                                              \
     } while (false)
+
+static constexpr u64 trace_missing = NumericLimits<u64>::max();
+
+#define LOG_INSN_UNGUARDED                                                                                                                                                                                                    \
+    do {                                                                                                                                                                                                                      \
+        LOAD_ADDRESSES();                                                                                                                                                                                                     \
+        auto [in_count, out_count] = instruction_operand_counts(instruction->opcode());                                                                                                                                       \
+        u64 src_lows[3] { trace_missing, trace_missing, trace_missing };                                                                                                                                                      \
+        u64 src_highs[3] { trace_missing, trace_missing, trace_missing };                                                                                                                                                     \
+        ScopedValueRollback stack { configuration.value_stack() };                                                                                                                                                            \
+        for (ssize_t i = 0; i < in_count; ++i) {                                                                                                                                                                              \
+            auto value = configuration.take_source<source_address_mix>(i, addresses.sources);                                                                                                                                 \
+            src_lows[i] = value.value().low();                                                                                                                                                                                \
+            src_highs[i] = value.value().high();                                                                                                                                                                              \
+        }                                                                                                                                                                                                                     \
+        warnln("WASMTRACE ip={} op={} in={} out={} depth={} stack={} dst={} s0={} s0l={:x} s0h={:x} s1={} s1l={:x} s1h={:x} s2={} s2l={:x} s2h={:x} r0l={:x} r0h={:x} r1l={:x} r1h={:x} r2l={:x} r2h={:x} r3l={:x} r3h={:x}", \
+            short_ip.current_ip_value, instruction_name(instruction->opcode()), in_count, out_count, configuration.depth(), configuration.value_stack().size(),                                                               \
+            to_underlying(addresses.destination),                                                                                                                                                                             \
+            to_underlying(addresses.sources[0]), src_lows[0], src_highs[0],                                                                                                                                                   \
+            to_underlying(addresses.sources[1]), src_lows[1], src_highs[1],                                                                                                                                                   \
+            to_underlying(addresses.sources[2]), src_lows[2], src_highs[2],                                                                                                                                                   \
+            configuration.regs[0].value().low(), configuration.regs[0].value().high(),                                                                                                                                        \
+            configuration.regs[1].value().low(), configuration.regs[1].value().high(),                                                                                                                                        \
+            configuration.regs[2].value().low(), configuration.regs[2].value().high(),                                                                                                                                        \
+            configuration.regs[3].value().low(), configuration.regs[3].value().high());                                                                                                                                       \
+    } while (0)
+
+#define LOG_INSN                          \
+    do {                                  \
+        if constexpr (WASM_TRACE_DEBUG) { \
+            LOG_INSN_UNGUARDED;           \
+        }                                 \
+    } while (0)
+
+#define LOAD_ADDRESSES() auto addresses = addresses_ptr[short_ip.current_ip_value]
 
 void BytecodeInterpreter::interpret(Configuration& configuration)
 {
     m_trap = Empty {};
     auto& expression = configuration.frame().expression();
-    auto const should_limit_instruction_count = configuration.should_limit_instruction_count();
-    if (!expression.compiled_instructions.dispatches.is_empty()) {
-        if (should_limit_instruction_count)
-            return interpret_impl<true, true>(configuration, expression);
-        return interpret_impl<true, false>(configuration, expression);
+    auto const native_entry = cranelift_entry_acquire(expression.compiled_instructions);
+    // We may end up running native code either at entry (native_entry != 0) or mid-loop via a tier-up checkpoint, so install fault recovery in either case.
+    bool const may_run_native = native_entry != 0 || expression.compiled_instructions.has_tier_up_checkpoints;
+    CompiledFaultRecoveryContext compiled_fault_recovery;
+    bool did_install_compiled_fault_recovery = false;
+    if (may_run_native && !s_compiled_fault_recovery) {
+        install_compiled_fault_handlers();
+        compiled_fault_recovery.interpreter = this;
+        compiled_fault_recovery.configuration = &configuration;
+        compiled_fault_recovery.previous = s_compiled_fault_recovery;
+        s_compiled_fault_recovery = &compiled_fault_recovery;
+        did_install_compiled_fault_recovery = true;
+        if (setjmp(compiled_fault_recovery.jump_buffer) != 0) {
+            s_compiled_fault_recovery = compiled_fault_recovery.previous;
+            if (compiled_fault_recovery.fault_kind == CompiledFaultKind::CraneliftTrap)
+                m_trap = Trap::from_string(cranelift_trap_message(compiled_fault_recovery.cranelift_trap_code));
+            else
+                m_trap = Trap::from_string("Memory access out of bounds");
+            return;
+        }
     }
-    if (should_limit_instruction_count)
-        return interpret_impl<false, true>(configuration, expression);
-    return interpret_impl<false, false>(configuration, expression);
+    if (native_entry != 0) {
+        (void)run_native_entry(configuration);
+        goto done;
+    }
+    {
+        auto const should_limit_instruction_count = configuration.should_limit_instruction_count();
+        if (!expression.compiled_instructions.dispatches.is_empty()) {
+            if (expression.compiled_instructions.direct) {
+                if (should_limit_instruction_count) {
+                    interpret_impl<true, true, true>(configuration, expression);
+                    goto done;
+                }
+                interpret_impl<true, false, true>(configuration, expression);
+                goto done;
+            }
+            interpret_impl<true, false, false>(configuration, expression);
+            goto done;
+        }
+        if (should_limit_instruction_count) {
+            interpret_impl<false, true, false>(configuration, expression);
+            goto done;
+        }
+        interpret_impl<false, false, false>(configuration, expression);
+    }
+
+done:
+    if (did_install_compiled_fault_recovery)
+        s_compiled_fault_recovery = compiled_fault_recovery.previous;
 }
 
-template<bool HasCompiledList, bool HasDynamicInsnLimit>
-void BytecodeInterpreter::interpret_impl(Configuration& configuration, Expression const& expression)
+constexpr static u32 default_sources_and_destination = (to_underlying(Dispatch::RegisterOrStack::Stack) | (to_underlying(Dispatch::RegisterOrStack::Stack) << 2) | (to_underlying(Dispatch::RegisterOrStack::Stack) << 4));
+
+template<u64 opcode>
+struct InstructionHandler { };
+
+struct ShortenedIP {
+    u32 current_ip_value;
+};
+
+static_assert(sizeof(ShortenedIP) == sizeof(u32));
+
+#define HANDLER_PARAMS(S)                   \
+    S(BytecodeInterpreter&, interpreter),   \
+        S(Configuration&, configuration),   \
+        S(Instruction const*, instruction), \
+        S(ShortenedIP, short_ip),           \
+        S(Dispatch const*, cc),             \
+        S(SourcesAndDestination const*, addresses_ptr)
+
+#define DECOMPOSE_PARAMS(t, n) [[maybe_unused]] t n
+#define DECOMPOSE_PARAMS_NAME_ONLY(t, n) n
+#define DECOMPOSE_PARAMS_TYPE_ONLY(t, ...) t
+
+Outcome BytecodeInterpreter::run_compiled_function_direct(Configuration& configuration)
 {
-    auto& instructions = expression.instructions();
-    u64 max_ip_value = (HasCompiledList ? expression.compiled_instructions.dispatches.size() : instructions.size()) - 1;
-    auto current_ip_value = configuration.ip();
-    u64 executed_instructions = 0;
+    m_trap = Empty {};
+    auto& expression = configuration.frame().expression();
+    VERIFY(expression.compiled_instructions.direct);
+    auto const* cc = expression.compiled_instructions.dispatches.data();
+    auto const* addresses_ptr = expression.compiled_instructions.src_dst_mappings.data();
+    ShortenedIP short_ip { .current_ip_value = 0 };
+    auto const instruction = cc[0].instruction;
+    auto const handler = bit_cast<Outcome (*)(HANDLER_PARAMS(DECOMPOSE_PARAMS_TYPE_ONLY))>(cc[0].handler_ptr);
+    return handler(*this, configuration, instruction, short_ip, cc, addresses_ptr);
+}
 
-    constexpr static u32 default_sources_and_destination = (to_underlying(Dispatch::RegisterOrStack::Stack) | (to_underlying(Dispatch::RegisterOrStack::Stack) << 2) | (to_underlying(Dispatch::RegisterOrStack::Stack) << 4));
-    SourcesAndDestination addresses { .sources_and_destination = default_sources_and_destination };
+// Enter the Cranelift-compiled native code for this function. The native entry conforms to the
+// same handler ABI as the direct-threaded interpreter, but lives in CompiledInstructions::cranelift_entry
+// (dispatches[0].handler_ptr stays the C++ handler). Caller must have confirmed the entry is non-zero.
+Outcome BytecodeInterpreter::run_native_entry(Configuration& configuration)
+{
+    m_trap = Empty {};
+    auto& expression = configuration.frame().expression();
+    auto const* cc = expression.compiled_instructions.dispatches.data();
+    auto const* addresses_ptr = expression.compiled_instructions.src_dst_mappings.data();
+    ShortenedIP short_ip { .current_ip_value = 0 };
+    auto const instruction = cc[0].instruction;
+    auto const handler = bit_cast<Outcome (*)(HANDLER_PARAMS(DECOMPOSE_PARAMS_TYPE_ONLY))>(cranelift_entry_acquire(expression.compiled_instructions));
+    return handler(*this, configuration, instruction, short_ip, cc, addresses_ptr);
+}
 
-    enum class CouldHaveChangedIP {
-        No,
-        Yes
+#define HANDLE_INSTRUCTION(name, ...)                                                              \
+    template<>                                                                                     \
+    struct InstructionHandler<Instructions::name.value()> {                                        \
+        template<bool HasDynamicInsnLimit, typename Continue, SourceAddressMix source_address_mix> \
+        static Outcome operator()(HANDLER_PARAMS(DECOMPOSE_PARAMS));                               \
+    };                                                                                             \
+    template<bool HasDynamicInsnLimit, typename Continue, SourceAddressMix source_address_mix>     \
+    FLATTEN Outcome InstructionHandler<Instructions::name.value()>::operator()(HANDLER_PARAMS(DECOMPOSE_PARAMS))
+#define ALIAS_INSTRUCTION(new_name, existing_name)                                                                                                  \
+    template<>                                                                                                                                      \
+    struct InstructionHandler<Instructions::new_name.value()> {                                                                                     \
+        template<bool HasDynamicInsnLimit, typename Continue, SourceAddressMix source_address_mix>                                                  \
+        FLATTEN static Outcome operator()(HANDLER_PARAMS(DECOMPOSE_PARAMS))                                                                         \
+        {                                                                                                                                           \
+            TAILCALL return InstructionHandler<Instructions::existing_name.value()>::operator()<HasDynamicInsnLimit, Continue, source_address_mix>( \
+                HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));                                                                                        \
+        }                                                                                                                                           \
     };
 
-    auto const cc = expression.compiled_instructions.dispatches.data();
+struct Continue {
+    ALWAYS_INLINE FLATTEN static Outcome operator()(BytecodeInterpreter& interpreter, Configuration& configuration, Instruction const*, ShortenedIP short_ip, Dispatch const* cc, SourcesAndDestination const* addresses_ptr)
+    {
+        short_ip.current_ip_value++;
+
+        auto const instruction = cc[short_ip.current_ip_value].instruction;
+        auto const handler = bit_cast<Outcome (*)(HANDLER_PARAMS(DECOMPOSE_PARAMS_TYPE_ONLY))>(cc[short_ip.current_ip_value].handler_ptr);
+        TAILCALL return handler(interpreter, configuration, instruction, short_ip, cc, addresses_ptr);
+    }
+};
+
+struct Skip {
+    static Outcome operator()(BytecodeInterpreter&, Configuration&, Instruction const*, ShortenedIP short_ip, Dispatch const*, SourcesAndDestination const*)
+    {
+        return static_cast<Outcome>(short_ip.current_ip_value);
+    }
+};
+
+#define continue_(...) Continue::operator()(__VA_ARGS__)
+
+HANDLE_INSTRUCTION(synthetic_end_expression)
+{
+    LOG_INSN;
+    return Outcome::Return;
+}
+
+HANDLE_INSTRUCTION(f64_reinterpret_i64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, double, Operators::Reinterpret<double>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_extend8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, i32, Operators::SignExtend<i8>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_extend16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, i32, Operators::SignExtend<i16>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_extend8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, i64, Operators::SignExtend<i8>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_extend16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, i64, Operators::SignExtend<i16>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_extend32_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, i64, Operators::SignExtend<i32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_trunc_sat_f32_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, i32, Operators::SaturatingTruncate<i32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_trunc_sat_f32_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, i32, Operators::SaturatingTruncate<u32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_trunc_sat_f64_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, i32, Operators::SaturatingTruncate<i32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_trunc_sat_f64_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, i32, Operators::SaturatingTruncate<u32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_trunc_sat_f32_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, i64, Operators::SaturatingTruncate<i64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_trunc_sat_f32_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, i64, Operators::SaturatingTruncate<u64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_trunc_sat_f64_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, i64, Operators::SaturatingTruncate<i64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_trunc_sat_f64_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, i64, Operators::SaturatingTruncate<u64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_const)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(Value(instruction->arguments().get<u128>()), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<u128, u128, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load8x8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_mxn<8, 8, MakeSigned>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load8x8_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_mxn<8, 8, MakeUnsigned>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load16x4_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_mxn<16, 4, MakeSigned>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load16x4_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_mxn<16, 4, MakeUnsigned>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load32x2_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_mxn<32, 2, MakeSigned>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load32x2_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_mxn<32, 2, MakeUnsigned>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load8_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_m_splat<8>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load16_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_m_splat<16>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load32_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_m_splat<32>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load64_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_m_splat<64>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    interpreter.pop_and_push_m_splat<8, NativeIntegralType>(configuration, *instruction, addresses);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    interpreter.pop_and_push_m_splat<16, NativeIntegralType>(configuration, *instruction, addresses);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    interpreter.pop_and_push_m_splat<32, NativeIntegralType>(configuration, *instruction, addresses);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    interpreter.pop_and_push_m_splat<64, NativeIntegralType>(configuration, *instruction, addresses);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    interpreter.pop_and_push_m_splat<32, NativeFloatingType>(configuration, *instruction, addresses);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_splat)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    interpreter.pop_and_push_m_splat<64, NativeFloatingType>(configuration, *instruction, addresses);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_shuffle)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& arg = instruction->arguments().get<Instruction::ShuffleArgument>();
+    auto b = interpreter.pop_vector<u8, MakeUnsigned>(configuration, 0, addresses);
+    auto a = interpreter.pop_vector<u8, MakeUnsigned>(configuration, 1, addresses);
+    using VectorType = Native128ByteVectorOf<u8, MakeUnsigned>;
+    VectorType result;
+    for (size_t i = 0; i < 16; ++i)
+        if (arg.lanes[i] < 16)
+            result[i] = a[arg.lanes[i]];
+        else
+            result[i] = b[arg.lanes[i] - 16];
+    configuration.push_to_destination<source_address_mix>(Value(bit_cast<u128>(result)), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_store)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<u128, u128>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_ge)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, i32, Operators::GreaterThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_clz)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, i32, Operators::CountLeadingZeros, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_ctz)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, i32, Operators::CountTrailingZeros, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_popcnt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, i32, Operators::PopCount, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::Add, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::Subtract, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_mul)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::Multiply, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_divs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::Divide, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_divu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::Divide, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_rems)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::Modulo, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_remu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::Modulo, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_and)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::BitAnd, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_or)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::BitOr, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_xor)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::BitXor, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_shl)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::BitShiftLeft, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_shrs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::BitShiftRight, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_shru)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::BitShiftRight, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_rotl)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::BitRotateLeft, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_rotr)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::BitRotateRight, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_clz)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, i64, Operators::CountLeadingZeros, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_ctz)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, i64, Operators::CountTrailingZeros, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_popcnt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, i64, Operators::PopCount, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i64, Operators::Add, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i64, Operators::Subtract, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_mul)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i64, Operators::Multiply, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_divs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i64, Operators::Divide, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_divu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i64, Operators::Divide, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_rems)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i64, Operators::Modulo, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_remu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i64, Operators::Modulo, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_and)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i64, Operators::BitAnd, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_or)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i64, Operators::BitOr, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_xor)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i64, Operators::BitXor, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_shl)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i64, Operators::BitShiftLeft, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_shrs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i64, Operators::BitShiftRight, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_shru)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i64, Operators::BitShiftRight, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_rotl)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i64, Operators::BitRotateLeft, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_rotr)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i64, Operators::BitRotateRight, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_abs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, float, Operators::Absolute, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_neg)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, float, Operators::Negate, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_ceil)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, float, Operators::Ceil, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_floor)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, float, Operators::Floor, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_trunc)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, float, Operators::Truncate, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_nearest)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, float, Operators::NearbyIntegral, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_sqrt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, float, Operators::SquareRoot, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, float, Operators::Add, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, float, Operators::Subtract, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_mul)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, float, Operators::Multiply, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_div)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, float, Operators::Divide, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_min)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, float, Operators::Minimum, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_max)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, float, Operators::Maximum, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_copysign)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, float, Operators::CopySign, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_abs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, double, Operators::Absolute, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_neg)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, double, Operators::Negate, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_ceil)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, double, Operators::Ceil, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_floor)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, double, Operators::Floor, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_trunc)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, double, Operators::Truncate, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_nearest)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, double, Operators::NearbyIntegral, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_sqrt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, double, Operators::SquareRoot, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, double, Operators::Add, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, double, Operators::Subtract, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_mul)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, double, Operators::Multiply, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_div)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, double, Operators::Divide, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_min)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, double, Operators::Minimum, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_max)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, double, Operators::Maximum, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_copysign)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, double, Operators::CopySign, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_wrap_i64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, i32, Operators::Wrap<i32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_trunc_sf32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, i32, Operators::CheckedTruncate<i32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_trunc_uf32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, i32, Operators::CheckedTruncate<u32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_trunc_sf64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, i32, Operators::CheckedTruncate<i32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_trunc_uf64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, i32, Operators::CheckedTruncate<u32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_trunc_sf32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, i64, Operators::CheckedTruncate<i64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_trunc_uf32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, i64, Operators::CheckedTruncate<u64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_trunc_sf64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, i64, Operators::CheckedTruncate<i64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_trunc_uf64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, i64, Operators::CheckedTruncate<u64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_extend_si32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, i64, Operators::Extend<i64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_extend_ui32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u32, i64, Operators::Extend<i64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_convert_si32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, float, Operators::Convert<float>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_convert_ui32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u32, float, Operators::Convert<float>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_convert_si64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, float, Operators::Convert<float>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_convert_ui64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u64, float, Operators::Convert<float>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_demote_f64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, float, Operators::Demote, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_convert_si32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, double, Operators::Convert<double>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_convert_ui32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u32, double, Operators::Convert<double>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_convert_si64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, double, Operators::Convert<double>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_convert_ui64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u64, double, Operators::Convert<double>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_promote_f32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, double, Operators::Promote, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_reinterpret_f32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<float, i32, Operators::Reinterpret<i32>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_reinterpret_f64)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<double, i64, Operators::Reinterpret<i64>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_reinterpret_i32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, float, Operators::Reinterpret<float>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(local_get)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(configuration.local(instruction->local_index()), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+#define HANDLE_SPECIALIZED_LOCAL_GET(N)                                                                       \
+    HANDLE_INSTRUCTION(synthetic_local_get_##N)                                                               \
+    {                                                                                                         \
+        LOG_INSN;                                                                                             \
+        LOAD_ADDRESSES();                                                                                     \
+        configuration.push_to_destination<source_address_mix>(configuration.local(N), addresses.destination); \
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));                                \
+    }
+
+HANDLE_SPECIALIZED_LOCAL_GET(0)
+HANDLE_SPECIALIZED_LOCAL_GET(1)
+HANDLE_SPECIALIZED_LOCAL_GET(2)
+HANDLE_SPECIALIZED_LOCAL_GET(3)
+HANDLE_SPECIALIZED_LOCAL_GET(4)
+HANDLE_SPECIALIZED_LOCAL_GET(5)
+HANDLE_SPECIALIZED_LOCAL_GET(6)
+HANDLE_SPECIALIZED_LOCAL_GET(7)
+
+HANDLE_INSTRUCTION(synthetic_argument_get)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(configuration.local(instruction->local_index()), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_const)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(Value(instruction->arguments().unsafe_get<i32>()), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_add2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(static_cast<i32>(Operators::Add {}(
+            configuration.local(instruction->local_index()).to<u32>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u32>()))),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_addconstlocal)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(Value(static_cast<i32>(Operators::Add {}(configuration.local(instruction->local_index()).to<u32>(), instruction->arguments().unsafe_get<i32>()))), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_andconstlocal)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(Value(Operators::BitAnd {}(configuration.local(instruction->local_index()).to<i32>(), instruction->arguments().unsafe_get<i32>())), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_sub2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(static_cast<i32>(Operators::Subtract {}(
+            configuration.local(instruction->local_index()).to<u32>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u32>()))),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_mul2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(static_cast<i32>(Operators::Multiply {}(
+            configuration.local(instruction->local_index()).to<u32>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u32>()))),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_and2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitAnd {}(
+            configuration.local(instruction->local_index()).to<i32>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<i32>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_or2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitOr {}(
+            configuration.local(instruction->local_index()).to<i32>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<i32>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_xor2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitXor {}(
+            configuration.local(instruction->local_index()).to<i32>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<i32>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_shl2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitShiftLeft {}(
+            configuration.local(instruction->local_index()).to<u32>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u32>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_shru2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitShiftRight {}(
+            configuration.local(instruction->local_index()).to<u32>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u32>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_shrs2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitShiftRight {}(
+            configuration.local(instruction->local_index()).to<i32>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u32>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i32_storelocal)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.store_value(configuration, *instruction, ConvertToRaw<i32> {}(configuration.local(instruction->local_index()).to<i32>()), 0, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_storelocal)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.store_value(configuration, *instruction, ConvertToRaw<i64> {}(configuration.local(instruction->local_index()).to<i64>()), 0, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_add2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(static_cast<i64>(Operators::Add {}(
+            configuration.local(instruction->local_index()).to<u64>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u64>()))),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_addconstlocal)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(Value(static_cast<i64>(Operators::Add {}(configuration.local(instruction->local_index()).to<u64>(), instruction->arguments().unsafe_get<i64>()))), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_andconstlocal)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(Value(Operators::BitAnd {}(configuration.local(instruction->local_index()).to<i64>(), instruction->arguments().unsafe_get<i64>())), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_sub2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(static_cast<i64>(Operators::Subtract {}(
+            configuration.local(instruction->local_index()).to<u64>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u64>()))),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_mul2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(static_cast<i64>(Operators::Multiply {}(
+            configuration.local(instruction->local_index()).to<u64>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u64>()))),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_and2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitAnd {}(
+            configuration.local(instruction->local_index()).to<i64>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<i64>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_or2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitOr {}(
+            configuration.local(instruction->local_index()).to<i64>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<i64>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_xor2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitXor {}(
+            configuration.local(instruction->local_index()).to<i64>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<i64>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_shl2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitShiftLeft {}(
+            configuration.local(instruction->local_index()).to<u64>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u64>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_shru2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitShiftRight {}(
+            configuration.local(instruction->local_index()).to<u64>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u64>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_i64_shrs2local)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(
+        Value(Operators::BitShiftRight {}(
+            configuration.local(instruction->local_index()).to<i64>(),
+            configuration.local(instruction->arguments().get<LocalIndex>()).to<u64>())),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_local_seti32_const)
+{
+    LOG_INSN;
+    configuration.local(instruction->local_index()) = Value(instruction->arguments().unsafe_get<i32>());
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_local_seti64_const)
+{
+    LOG_INSN;
+    configuration.local(instruction->local_index()) = Value(instruction->arguments().unsafe_get<i64>());
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_br_table_cont)
+{
+    VERIFY_NOT_REACHED();
+}
+
+HANDLE_INSTRUCTION(synthetic_tier_up)
+{
+    LOG_INSN;
+    auto& ci = configuration.frame().expression().compiled_instructions;
+    auto const native_entry = cranelift_entry_acquire(ci);
+    if (native_entry != 0) {
+        // If we have native code for this block, jump into it.
+        // The code is set up such that the target checkpoint is recovered from short_ip and nothing else needs to be passed as the stack is empty and all live state is in the shared locals.
+        auto const handler = bit_cast<Outcome (*)(HANDLER_PARAMS(DECOMPOSE_PARAMS_TYPE_ONLY))>(native_entry);
+        return handler(interpreter, configuration, cc[short_ip.current_ip_value].instruction, short_ip, cc, addresses_ptr);
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_call_00)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "[{}] call_00(#{} -> {})", short_ip.current_ip_value, index.value(), address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingRegisters)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(synthetic_call_01)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "[{}] call_01(#{} -> {})", short_ip.current_ip_value, index.value(), address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingRegisters)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(synthetic_call_10)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "[{}] call_10(#{} -> {})", short_ip.current_ip_value, index.value(), address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingRegisters)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(synthetic_call_11)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "[{}] call_11(#{} -> {})", short_ip.current_ip_value, index.value(), address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingRegisters)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(synthetic_call_20)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "[{}] call_20(#{} -> {})", short_ip.current_ip_value, index.value(), address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingRegisters)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(synthetic_call_21)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "[{}] call_21(#{} -> {})", short_ip.current_ip_value, index.value(), address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingRegisters)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(synthetic_call_30)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "[{}] call_30(#{} -> {})", short_ip.current_ip_value, index.value(), address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingRegisters)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(synthetic_call_31)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "[{}] call_31(#{} -> {})", short_ip.current_ip_value, index.value(), address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingRegisters)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(unreachable)
+{
+    LOG_INSN;
+    interpreter.set_trap("Unreachable"sv);
+    return Outcome::Return;
+}
+
+HANDLE_INSTRUCTION(nop)
+{
+    LOG_INSN;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(local_set)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    configuration.local(instruction->local_index()) = configuration.take_source<source_address_mix>(0, addresses.sources);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_argument_set)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    configuration.local(instruction->local_index()) = configuration.take_source<source_address_mix>(0, addresses.sources);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+#define HANDLE_SPECIALIZED_LOCAL_SET(N)                                                               \
+    HANDLE_INSTRUCTION(synthetic_local_set_##N)                                                       \
+    {                                                                                                 \
+        LOG_INSN;                                                                                     \
+        LOAD_ADDRESSES();                                                                             \
+        configuration.local(N) = configuration.take_source<source_address_mix>(0, addresses.sources); \
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));                        \
+    }
+
+HANDLE_SPECIALIZED_LOCAL_SET(0)
+HANDLE_SPECIALIZED_LOCAL_SET(1)
+HANDLE_SPECIALIZED_LOCAL_SET(2)
+HANDLE_SPECIALIZED_LOCAL_SET(3)
+HANDLE_SPECIALIZED_LOCAL_SET(4)
+HANDLE_SPECIALIZED_LOCAL_SET(5)
+HANDLE_SPECIALIZED_LOCAL_SET(6)
+HANDLE_SPECIALIZED_LOCAL_SET(7)
+
+HANDLE_INSTRUCTION(synthetic_local_copy)
+{
+    LOG_INSN;
+    // local.get a; local.set b -> copy local a to local b directly
+    configuration.local(instruction->arguments().get<LocalIndex>()) = configuration.local(instruction->local_index());
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_const)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(Value(instruction->arguments().unsafe_get<i64>()), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_const)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(Value(instruction->arguments().unsafe_get<float>()), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_const)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    configuration.push_to_destination<source_address_mix>(Value(instruction->arguments().unsafe_get<double>()), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(block)
+{
+    LOG_INSN;
+    auto& args = instruction->arguments().unsafe_get<Instruction::StructuredInstructionArgs>();
+    auto& meta = args.meta;
+    auto label = Label(meta.arity, args.end_ip, configuration.value_stack().size() - meta.parameter_count);
+    configuration.label_stack().unchecked_append(move(label));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(loop)
+{
+    LOG_INSN;
+    auto& args = instruction->arguments().get<Instruction::StructuredInstructionArgs>();
+    size_t params = args.meta.parameter_count;
+    configuration.label_stack().unchecked_append(Label(params, short_ip.current_ip_value + 1, configuration.value_stack().size() - params));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(if_)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().unsafe_get<Instruction::StructuredInstructionArgs>();
+    auto& meta = args.meta;
+
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources).template to<i32>();
+    auto end_label = Label(meta.arity, args.end_ip.value(), configuration.value_stack().size() - meta.parameter_count);
+    if (value == 0) {
+        if (args.else_ip().has_value()) {
+            short_ip.current_ip_value = args.else_ip()->value() - 1;
+            configuration.label_stack().unchecked_append(end_label);
+        } else {
+            short_ip.current_ip_value = args.end_ip.value();
+        }
+    } else {
+        configuration.label_stack().unchecked_append(end_label);
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(structured_end)
+{
+    LOG_INSN;
+    configuration.label_stack().take_last();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(structured_else)
+{
+    LOG_INSN;
+    auto label = configuration.label_stack().take_last();
+    // Jump to the end label
+    short_ip.current_ip_value = label.continuation().value() - 1;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(return_)
+{
+    LOG_INSN;
+    configuration.label_stack().shrink(configuration.frame().label_index() + 1, true);
+    // Clear intermediate working values from the value stack, keeping only the top .arity() (the return values) above
+    // the function-level label's recorded stack_height. Without this, residual values pushed before the return are
+    // leaked to the caller’s value stack — and accumulate across nested calls until heap-buffer-overflow.
+    auto const& label = configuration.label_stack().unsafe_last();
+    auto& vs = configuration.value_stack();
+    if (vs.size() > label.stack_height() + label.arity())
+        vs.remove(label.stack_height(), vs.size() - label.stack_height() - label.arity());
+    return Outcome::Return;
+}
+
+HANDLE_INSTRUCTION(br)
+{
+    LOG_INSN;
+    short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, instruction->arguments().unsafe_get<Instruction::BranchArgs>().label, short_ip.current_ip_value).value();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_br_nostack)
+{
+    LOG_INSN;
+    auto& branch_args = instruction->arguments().unsafe_get<Instruction::BranchArgs>();
+    auto label_idx = branch_args.label.value();
+    auto& label_stack = configuration.label_stack();
+    auto label_pos = label_stack.size() - 1 - label_idx;
+    auto& label = label_stack.data()[label_pos];
+    auto expected = label.stack_height() + label.arity();
+    auto current = configuration.value_stack().size();
+    if (current != expected) [[unlikely]]
+        TAILCALL return InstructionHandler<Instructions::br.value()>::operator()<HasDynamicInsnLimit, Continue, source_address_mix>(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    label_stack.unsafe_shrink(label_pos + 1);
+    short_ip.current_ip_value = label.continuation().value() - 1;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(br_if)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto cond = configuration.take_source<source_address_mix>(0, addresses.sources).template to<i32>();
+    short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, instruction->arguments().unsafe_get<Instruction::BranchArgs>().label, short_ip.current_ip_value, cond != 0).value();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+NEVER_INLINE static Outcome synthetic_br_if_nostack_not_taken(HANDLER_PARAMS(DECOMPOSE_PARAMS))
+{
+    short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, instruction->arguments().unsafe_get<Instruction::BranchArgs>().label, short_ip.current_ip_value).value();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_br_if_nostack)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto cond = configuration.take_source<source_address_mix>(0, addresses.sources).template to<i32>();
+    if (cond == 0) {
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+    auto& branch_args = instruction->arguments().unsafe_get<Instruction::BranchArgs>();
+    auto label_idx = branch_args.label.value();
+    auto& label_stack = configuration.label_stack();
+    auto label_pos = label_stack.size() - 1 - label_idx;
+    auto& label = label_stack.data()[label_pos];
+    auto expected = label.stack_height() + label.arity();
+    auto current = configuration.value_stack().size();
+    if (current != expected) [[unlikely]]
+        return synthetic_br_if_nostack_not_taken(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    label_stack.unsafe_shrink(label_pos + 1);
+    short_ip.current_ip_value = label.continuation().value() - 1;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(br_table)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().get<Instruction::TableBranchArgs>();
+    auto i = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u32>();
+
+    if (i >= args.labels.size()) {
+        short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, args.default_, short_ip.current_ip_value).value();
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+    short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, args.labels[i], short_ip.current_ip_value).value();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(call)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "call({})", address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(synthetic_call_with_record_0)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "call.with_record.0({})", address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingCallRecord)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(synthetic_call_with_record_1)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "call.with_record.1({})", address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectCall, BytecodeInterpreter::CallType::UsingCallRecord)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(return_call)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>();
+    auto address = configuration.frame().module().functions()[index.value()];
+    configuration.label_stack().shrink(configuration.frame().label_index(), true);
+    dbgln_if(WASM_TRACE_DEBUG, "tail call({})", address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::DirectTailCall)) {
+    default:
+        // Some IP we have to continue from.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        addresses = { .sources_and_destination = default_sources_and_destination };
+        cc = configuration.frame().expression().compiled_instructions.dispatches.data();
+        addresses_ptr = configuration.frame().expression().compiled_instructions.src_dst_mappings.data();
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    case Outcome::Return:
+        return Outcome::Return;
+    }
+}
+
+HANDLE_INSTRUCTION(call_indirect)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().get<Instruction::IndirectCallArgs>();
+    auto table_address = configuration.frame().module().tables()[args.table.value()];
+    auto table_instance = configuration.store().get(table_address);
+    // bounds checked by verifier.
+    auto src_value = configuration.take_source<source_address_mix>(0, addresses.sources);
+    auto index = src_value.template to<i32>();
+    TRAP_IN_LOOP_IF_NOT(index >= 0);
+    TRAP_IN_LOOP_IF_NOT(static_cast<size_t>(index) < table_instance->elements().size());
+    auto& element = table_instance->elements()[index];
+    TRAP_IN_LOOP_IF_NOT(element.ref().template has<Reference::Func>());
+    auto address = element.ref().template get<Reference::Func>().address;
+    // https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-call-indirect-x-y
+    auto const* type_actual = configuration.store().get(address)->visit([](auto& f) { return f.defined_type(); });
+    auto const* type_expected = configuration.frame().module().canonical_types()[args.type.value()];
+    TRAP_IN_LOOP_IF_NOT(type_actual && matches_defined_type(*type_actual, *type_expected));
+
+    dbgln_if(WASM_TRACE_DEBUG, "call_indirect({} -> {})", index, address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::IndirectCall)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(return_call_indirect)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().get<Instruction::IndirectCallArgs>();
+    auto table_address = configuration.frame().module().tables()[args.table.value()];
+    auto table_instance = configuration.store().get(table_address);
+    // bounds checked by verifier.
+    auto index = configuration.take_source<source_address_mix>(0, addresses.sources).template to<i32>();
+    TRAP_IN_LOOP_IF_NOT(index >= 0);
+    TRAP_IN_LOOP_IF_NOT(static_cast<size_t>(index) < table_instance->elements().size());
+    auto& element = table_instance->elements()[index];
+    TRAP_IN_LOOP_IF_NOT(element.ref().template has<Reference::Func>());
+    auto address = element.ref().template get<Reference::Func>().address;
+    // https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-call-indirect-x-y
+    auto const* type_actual = configuration.store().get(address)->visit([](auto& f) { return f.defined_type(); });
+    auto const* type_expected = configuration.frame().module().canonical_types()[args.type.value()];
+    TRAP_IN_LOOP_IF_NOT(type_actual && matches_defined_type(*type_actual, *type_expected));
+
+    configuration.label_stack().shrink(configuration.frame().label_index(), true);
+    dbgln_if(WASM_TRACE_DEBUG, "tail call_indirect({} -> {})", index, address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::IndirectTailCall)) {
+    default:
+        // Some IP we have to continue from.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        addresses = { .sources_and_destination = default_sources_and_destination };
+        cc = configuration.frame().expression().compiled_instructions.dispatches.data();
+        addresses_ptr = configuration.frame().expression().compiled_instructions.src_dst_mappings.data();
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    case Outcome::Return:
+        return Outcome::Return;
+    }
+}
+
+HANDLE_INSTRUCTION(call_ref)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto type_index = instruction->arguments().get<TypeIndex>();
+    FunctionAddress address;
+    {
+        auto value = configuration.take_source<source_address_mix>(0, addresses.sources);
+        auto reference = value.template to<Reference>();
+        TRAP_IN_LOOP_IF_NOT(!reference.ref().template has<Reference::Null>());
+        address = reference.ref().template get<Reference::Func>().address;
+    }
+    // https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-call-ref-x
+    auto const* type_actual = configuration.store().get(address)->visit([](auto& f) { return f.defined_type(); });
+    auto const* type_expected = configuration.frame().module().canonical_types()[type_index.value()];
+    TRAP_IN_LOOP_IF_NOT(type_actual && matches_defined_type(*type_actual, *type_expected));
+
+    dbgln_if(WASM_TRACE_DEBUG, "call_ref({})", address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::IndirectCall)) {
+    case Outcome::Return:
+        return Outcome::Return;
+    default:
+        // A callee's thrown exception was caught by a try_table in this frame; continue at the catch's branch target.
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+}
+
+HANDLE_INSTRUCTION(return_call_ref)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto type_index = instruction->arguments().get<TypeIndex>();
+    FunctionAddress address;
+    {
+        auto value = configuration.take_source<source_address_mix>(0, addresses.sources);
+        auto reference = value.template to<Reference>();
+        TRAP_IN_LOOP_IF_NOT(!reference.ref().template has<Reference::Null>());
+        address = reference.ref().template get<Reference::Func>().address;
+    }
+    auto const* type_actual = configuration.store().get(address)->visit([](auto& f) { return f.defined_type(); });
+    auto const* type_expected = configuration.frame().module().canonical_types()[type_index.value()];
+    TRAP_IN_LOOP_IF_NOT(type_actual && matches_defined_type(*type_actual, *type_expected));
+
+    configuration.label_stack().shrink(configuration.frame().label_index(), true);
+    dbgln_if(WASM_TRACE_DEBUG, "tail call_ref({})", address.value());
+    switch (auto const outcome = interpreter.call_address(configuration, address, addresses, BytecodeInterpreter::CallAddressSource::IndirectTailCall)) {
+    default:
+        short_ip.current_ip_value = to_underlying(outcome) - 1;
+        addresses = { .sources_and_destination = default_sources_and_destination };
+        cc = configuration.frame().expression().compiled_instructions.dispatches.data();
+        addresses_ptr = configuration.frame().expression().compiled_instructions.src_dst_mappings.data();
+        [[fallthrough]];
+    case Outcome::Continue:
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    case Outcome::Return:
+        return Outcome::Return;
+    }
+}
+
+HANDLE_INSTRUCTION(i32_load)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<i32, i32, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_load)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<i64, i64, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_load)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<float, float, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_load)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<double, double, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_load8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<i8, i32, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_load8_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<u8, i32, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_load16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<i16, i32, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_load16_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<u16, i32, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_load8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<i8, i64, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_load8_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<u8, i64, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_load16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<i16, i64, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_load16_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<u16, i64, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_load32_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<i32, i64, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_load32_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push<u32, i64, source_address_mix>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_store)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<i32, i32>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_store)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<i64, i64>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_store)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<float, float>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_store)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<double, double>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_store8)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<i32, i8>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_store16)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<i32, i16>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_store8)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<i64, i8>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_store16)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<i64, i16>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_store32)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store<i64, i32>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(local_tee)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto value = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    auto local_index = instruction->local_index();
+    dbgln_if(WASM_TRACE_DEBUG, "stack:peek -> locals({})", local_index.value());
+    configuration.local(local_index) = value;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(synthetic_argument_tee)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto value = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    auto local_index = instruction->local_index();
+    dbgln_if(WASM_TRACE_DEBUG, "stack:peek -> locals({})", local_index.value());
+    configuration.local(local_index) = value;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(global_get)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto global_index = instruction->arguments().get<GlobalIndex>();
+    // This check here is for const expressions. In non-const expressions,
+    // a validation error would have been thrown.
+    TRAP_IN_LOOP_IF_NOT(global_index < configuration.frame().module().globals().size());
+    auto address = configuration.frame().module().globals()[global_index.value()];
+    dbgln_if(WASM_TRACE_DEBUG, "global({}) -> stack", address.value());
+    auto global = configuration.store().get(address);
+    configuration.push_to_destination<source_address_mix>(global->value(), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(global_set)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto global_index = instruction->arguments().get<GlobalIndex>();
+    auto address = configuration.frame().module().globals()[global_index.value()];
+    // bounds checked by verifier.
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources);
+    dbgln_if(WASM_TRACE_DEBUG, "stack -> global({})", address.value());
+    auto global = configuration.store().get(address);
+    global->set_value(value);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(memory_size)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().unsafe_get<Instruction::MemoryIndexArgument>();
+    auto address = configuration.frame().module().memories().data()[args.memory_index.value()];
+    auto instance = configuration.store().get(address);
+    auto pages = instance->size() / Constants::page_size;
+    dbgln_if(WASM_TRACE_DEBUG, "memory.size -> stack({})", pages);
+    auto result = instance->type().limits().address_type() == AddressType::I32
+        ? Value(static_cast<i32>(pages))
+        : Value(static_cast<i64>(pages));
+    configuration.push_to_destination<source_address_mix>(result, addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(memory_grow)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().unsafe_get<Instruction::MemoryIndexArgument>();
+    auto address = configuration.frame().module().memories().data()[args.memory_index.value()];
+    auto instance = configuration.store().get(address);
+    u64 old_pages = instance->size() / Constants::page_size;
+    auto& entry = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    bool const is_address32 = instance->type().limits().address_type() == AddressType::I32;
+    auto new_pages = entry.template to<u64>();
+    if (is_address32)
+        new_pages = static_cast<u32>(new_pages);
+    dbgln_if(WASM_TRACE_DEBUG, "memory.grow({}), previously {} pages...", new_pages, old_pages);
+    Checked<u64> size_to_grow { new_pages };
+    size_to_grow *= Constants::page_size;
+    if (!size_to_grow.has_overflow() && instance->grow(size_to_grow.value()))
+        entry = is_address32 ? Value(static_cast<i32>(old_pages)) : Value(static_cast<i64>(old_pages));
+    else
+        entry = is_address32 ? Value(static_cast<i32>(-1)) : Value(static_cast<i64>(-1));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(memory_fill)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    {
+        auto& args = instruction->arguments().unsafe_get<Instruction::MemoryIndexArgument>();
+        auto address = configuration.frame().module().memories().data()[args.memory_index.value()];
+        auto instance = configuration.store().get(address);
+        // bounds checked by verifier.
+        auto const count = memory_base_address(*instance, configuration.take_source<source_address_mix>(0, addresses.sources));
+        auto const value = static_cast<u8>(configuration.take_source<source_address_mix>(1, addresses.sources).template to<u32>());
+        auto const destination_offset = memory_base_address(*instance, configuration.take_source<source_address_mix>(2, addresses.sources));
+
+        Checked<u64> checked_end = destination_offset;
+        checked_end += count;
+        TRAP_IN_LOOP_IF_NOT(!checked_end.has_overflow() && static_cast<size_t>(checked_end.value()) <= instance->data().size());
+
+        if (count == 0)
+            TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+
+        instance->data().fill(destination_offset, value, count);
+    }
+
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(memory_copy)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().unsafe_get<Instruction::MemoryCopyArgs>();
+    auto source_address = configuration.frame().module().memories().data()[args.src_index.value()];
+    auto destination_address = configuration.frame().module().memories().data()[args.dst_index.value()];
+    auto source_instance = configuration.store().get(source_address);
+    auto destination_instance = configuration.store().get(destination_address);
+
+    auto const& count_memory = source_instance->type().limits().address_type() == AddressType::I32 ? *source_instance : *destination_instance;
+    auto count = memory_base_address(count_memory, configuration.take_source<source_address_mix>(0, addresses.sources));
+    auto source_offset = memory_base_address(*source_instance, configuration.take_source<source_address_mix>(1, addresses.sources));
+    auto destination_offset = memory_base_address(*destination_instance, configuration.take_source<source_address_mix>(2, addresses.sources));
+
+    auto source_position = saturating_add<u64>(source_offset, count);
+    auto destination_position = saturating_add<u64>(destination_offset, count);
+    TRAP_IN_LOOP_IF_NOT(source_position <= source_instance->data().size());
+    TRAP_IN_LOOP_IF_NOT(destination_position <= destination_instance->data().size());
+
+    if (count == 0)
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+
+    destination_instance->data().copy_from(source_instance->data(), source_offset, destination_offset, count);
+
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(memory_init)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().unsafe_get<Instruction::MemoryInitArgs>();
+    auto& data_address = configuration.frame().module().datas()[args.data_index.value()];
+    auto& data = *configuration.store().get(data_address);
+    auto memory_address = configuration.frame().module().memories().data()[args.memory_index.value()];
+    auto memory = configuration.store().unsafe_get(memory_address);
+    // bounds checked by verifier.
+    // The count and source offset are always i32; the destination is typed as the memory's address type.
+    auto count = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u32>();
+    auto source_offset = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u32>();
+    auto destination_offset = memory_base_address(*memory, configuration.take_source<source_address_mix>(2, addresses.sources));
+
+    auto source_position = saturating_add<u64>(source_offset, count);
+    auto destination_position = saturating_add<u64>(destination_offset, count);
+    TRAP_IN_LOOP_IF_NOT(source_position <= data.data().size());
+    TRAP_IN_LOOP_IF_NOT(destination_position <= memory->data().size());
+
+    if (count == 0)
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+
+    memory->data().overwrite(destination_offset, data.data().data() + source_offset, count);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(data_drop)
+{
+    LOG_INSN;
+    auto data_index = instruction->arguments().get<DataIndex>();
+    auto data_address = configuration.frame().module().datas()[data_index.value()];
+    *configuration.store().get(data_address) = DataInstance({});
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(elem_drop)
+{
+    LOG_INSN;
+    auto elem_index = instruction->arguments().get<ElementIndex>();
+    auto address = configuration.frame().module().elements()[elem_index.value()];
+    auto elem = configuration.store().get(address);
+    *configuration.store().get(address) = ElementInstance(elem->type(), {});
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(table_init)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().get<Instruction::TableElementArgs>();
+    auto table_address = configuration.frame().module().tables()[args.table_index.value()];
+    auto table = configuration.store().get(table_address);
+    auto element_address = configuration.frame().module().elements()[args.element_index.value()];
+    auto element = configuration.store().get(element_address);
+    // bounds checked by verifier.
+    auto count = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u32>();
+    auto source_offset = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u32>();
+    auto destination_offset = configuration.take_source<source_address_mix>(2, addresses.sources).template to<u32>();
+
+    Checked<u32> checked_source_offset = source_offset;
+    Checked<u32> checked_destination_offset = destination_offset;
+    checked_source_offset += count;
+    checked_destination_offset += count;
+    TRAP_IN_LOOP_IF_NOT(!checked_source_offset.has_overflow() && checked_source_offset <= (u32)element->references().size());
+    TRAP_IN_LOOP_IF_NOT(!checked_destination_offset.has_overflow() && checked_destination_offset <= (u32)table->elements().size());
+
+    for (u32 i = 0; i < count; ++i) {
+        auto const& ref = element->references()[source_offset + i];
+        RefPtr<ModuleInstance const> anchor;
+        if (auto const* func = ref.ref().template get_pointer<Reference::Func>())
+            anchor = configuration.store().get_module_instance_for(func->address);
+        table->set_element(destination_offset + i, ref, move(anchor));
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(table_copy)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().get<Instruction::TableTableArgs>();
+    auto source_address = configuration.frame().module().tables()[args.rhs.value()];
+    auto destination_address = configuration.frame().module().tables()[args.lhs.value()];
+    auto source_instance = configuration.store().get(source_address);
+    auto destination_instance = configuration.store().get(destination_address);
+
+    // bounds checked by verifier.
+    auto count = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u32>();
+    auto source_offset = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u32>();
+    auto destination_offset = configuration.take_source<source_address_mix>(2, addresses.sources).template to<u32>();
+
+    auto source_position = saturating_add(static_cast<size_t>(source_offset), static_cast<size_t>(count));
+    auto destination_position = saturating_add(static_cast<size_t>(destination_offset), static_cast<size_t>(count));
+    TRAP_IN_LOOP_IF_NOT(source_position <= source_instance->elements().size());
+    TRAP_IN_LOOP_IF_NOT(destination_position <= destination_instance->elements().size());
+
+    if (count == 0)
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+
+    if (destination_offset <= source_offset) {
+        for (u32 i = 0; i < count; ++i) {
+            destination_instance->set_element(destination_offset + i,
+                source_instance->elements()[source_offset + i],
+                source_instance->module_anchor_at(source_offset + i));
+        }
+    } else {
+        for (u32 i = count - 1; i != NumericLimits<u32>::max(); --i) {
+            destination_instance->set_element(destination_offset + i,
+                source_instance->elements()[source_offset + i],
+                source_instance->module_anchor_at(source_offset + i));
+        }
+    }
+
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(table_fill)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto table_index = instruction->arguments().get<TableIndex>();
+    auto address = configuration.frame().module().tables()[table_index.value()];
+    auto table = configuration.store().get(address);
+    // bounds checked by verifier.
+    auto count = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u32>();
+    auto value = configuration.take_source<source_address_mix>(1, addresses.sources);
+    auto start = configuration.take_source<source_address_mix>(2, addresses.sources).template to<u32>();
+
+    Checked<u32> checked_offset = start;
+    checked_offset += count;
+    TRAP_IN_LOOP_IF_NOT(!checked_offset.has_overflow() && checked_offset <= (u32)table->elements().size());
+
+    // Don't leak the RefPtr to the sibling call.
+    {
+        auto ref = value.template to<Reference>();
+        RefPtr<ModuleInstance const> anchor;
+        if (auto const* func = ref.ref().template get_pointer<Reference::Func>())
+            anchor = configuration.store().get_module_instance_for(func->address);
+        for (u32 i = 0; i < count; ++i)
+            table->set_element(start + i, ref, anchor);
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(table_set)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto ref = configuration.take_source<source_address_mix>(0, addresses.sources);
+    auto index = static_cast<size_t>(configuration.take_source<source_address_mix>(1, addresses.sources).template to<u32>());
+    auto table_index = instruction->arguments().get<TableIndex>();
+    auto address = configuration.frame().module().tables()[table_index.value()];
+    auto table = configuration.store().get(address);
+    TRAP_IN_LOOP_IF_NOT(index < table->elements().size());
+    {
+        auto reference = ref.template to<Reference>();
+        RefPtr<ModuleInstance const> anchor;
+        if (auto const* func = reference.ref().template get_pointer<Reference::Func>())
+            anchor = configuration.store().get_module_instance_for(func->address);
+        table->set_element(index, reference, move(anchor));
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(table_get)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto& index_value = configuration.source_value<source_address_mix>(0, addresses.sources);
+    auto index = static_cast<size_t>(index_value.template to<u32>());
+    auto table_index = instruction->arguments().get<TableIndex>();
+    auto address = configuration.frame().module().tables()[table_index.value()];
+    auto table = configuration.store().get(address);
+    TRAP_IN_LOOP_IF_NOT(index < table->elements().size());
+    index_value = Value(table->elements()[index]);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(table_grow)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto size = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u32>();
+    auto fill_value = configuration.take_source<source_address_mix>(1, addresses.sources);
+    auto table_index = instruction->arguments().get<TableIndex>();
+    auto address = configuration.frame().module().tables()[table_index.value()];
+    auto table = configuration.store().get(address);
+    auto previous_size = table->elements().size();
+    auto did_grow = table->grow(size, fill_value.template to<Reference>());
+    if (!did_grow) {
+        configuration.push_to_destination<source_address_mix>(Value(-1), addresses.destination);
+    } else {
+        configuration.push_to_destination<source_address_mix>(Value(static_cast<i32>(previous_size)), addresses.destination);
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(table_size)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto table_index = instruction->arguments().get<TableIndex>();
+    auto address = configuration.frame().module().tables()[table_index.value()];
+    auto table = configuration.store().get(address);
+    configuration.push_to_destination<source_address_mix>(Value(static_cast<i32>(table->elements().size())), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(ref_null)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto type = instruction->arguments().get<ValueType>();
+    configuration.push_to_destination<source_address_mix>(Value(Reference(Reference::Null { type })), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(ref_func)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto index = instruction->arguments().get<FunctionIndex>().value();
+    auto& functions = configuration.frame().module().functions();
+    auto address = functions[index];
+    configuration.push_to_destination<source_address_mix>(Value(Reference { Reference::Func { address, configuration.store().get_module_for(address) } }), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(ref_is_null)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto ref = configuration.take_source<source_address_mix>(0, addresses.sources);
+    configuration.push_to_destination<source_address_mix>(
+        Value(static_cast<i32>(ref.template to<Reference>().ref().template has<Reference::Null>() ? 1 : 0)),
+        addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(drop)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    configuration.take_source<source_address_mix>(0, addresses.sources);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(select)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // Note: The type seems to only be used for validation.
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources).template to<i32>(); // bounds checked by verifier.
+    dbgln_if(WASM_TRACE_DEBUG, "select({})", value);
+    auto rhs = configuration.take_source<source_address_mix>(1, addresses.sources);
+    auto& lhs = configuration.source_value<source_address_mix>(2, addresses.sources); // bounds checked by verifier.
+    lhs = value != 0 ? lhs : rhs;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(select_typed)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // Note: The type seems to only be used for validation.
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources).template to<i32>(); // bounds checked by verifier.
+    dbgln_if(WASM_TRACE_DEBUG, "select_typed({})", value);
+    auto rhs = configuration.take_source<source_address_mix>(1, addresses.sources);
+    auto& lhs = configuration.source_value<source_address_mix>(2, addresses.sources); // bounds checked by verifier.
+    lhs = value != 0 ? lhs : rhs;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_eqz)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i32, i32, Operators::EqualsZero, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::Equals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::NotEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_lts)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::LessThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_ltu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::LessThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_gts)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::GreaterThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_gtu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::GreaterThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_les)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::LessThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_leu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::LessThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_ges)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i32, i32, Operators::GreaterThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32_geu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u32, i32, Operators::GreaterThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_eqz)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<i64, i32, Operators::EqualsZero, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i32, Operators::Equals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i32, Operators::NotEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_lts)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i32, Operators::LessThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_ltu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i32, Operators::LessThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_gts)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i32, Operators::GreaterThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_gtu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i32, Operators::GreaterThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_les)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i32, Operators::LessThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_leu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i32, Operators::LessThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_ges)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<i64, i32, Operators::GreaterThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64_geu)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u64, i32, Operators::GreaterThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, i32, Operators::Equals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, i32, Operators::NotEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_lt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, i32, Operators::LessThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_gt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, i32, Operators::GreaterThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_le)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, i32, Operators::LessThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32_ge)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<float, i32, Operators::GreaterThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, i32, Operators::Equals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, i32, Operators::NotEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_lt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, i32, Operators::LessThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_gt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, i32, Operators::GreaterThan, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64_le)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<double, i32, Operators::LessThanOrEquals, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extmul_high_i16x8_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<4, Operators::Multiply, Operators::VectorExt::High, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extmul_low_i16x8_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<4, Operators::Multiply, Operators::VectorExt::Low, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::Equals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::NotEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_lt_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::LessThan, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_gt_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::GreaterThan, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_le_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::LessThanOrEquals, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_ge_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::GreaterThanOrEquals, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_abs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<2, Operators::Absolute>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_neg)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<2, Operators::Negate, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_all_true)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i32, Operators::VectorAllTrue<2>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<2, Operators::Add, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<2, Operators::Subtract, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_mul)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<2, Operators::Multiply, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_extend_low_i32x4_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<2, Operators::VectorExt::Low, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_extend_high_i32x4_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<2, Operators::VectorExt::High, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_extend_low_i32x4_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<2, Operators::VectorExt::Low, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_extend_high_i32x4_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<2, Operators::VectorExt::High, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_extmul_low_i32x4_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<2, Operators::Multiply, Operators::VectorExt::Low, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_extmul_high_i32x4_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<2, Operators::Multiply, Operators::VectorExt::High, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_extmul_low_i32x4_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<2, Operators::Multiply, Operators::VectorExt::Low, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_extmul_high_i32x4_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<2, Operators::Multiply, Operators::VectorExt::High, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::Equals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::NotEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_lt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::LessThan>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_gt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::GreaterThan>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_le)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::LessThanOrEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_ge)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::GreaterThanOrEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_min)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Minimum>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_max)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Maximum>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::Equals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::NotEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_lt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::LessThan>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_gt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::GreaterThan>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_le)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::LessThanOrEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_ge)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::GreaterThanOrEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_min)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Minimum>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_max)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Maximum>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_div)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Divide>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_mul)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Multiply>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Subtract>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Add>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_pmin)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::PseudoMinimum>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_pmax)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::PseudoMaximum>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_div)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Divide>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_mul)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Multiply>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Subtract>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Add>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_pmin)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::PseudoMinimum>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_pmax)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::PseudoMaximum>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_ceil)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Ceil>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_floor)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Floor>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_trunc)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Truncate>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_nearest)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::NearbyIntegral>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_sqrt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::SquareRoot>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_neg)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Negate>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_abs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Absolute>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_ceil)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Ceil>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_floor)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Floor>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_trunc)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Truncate>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_nearest)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::NearbyIntegral>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_sqrt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::SquareRoot>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_neg)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Negate>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_abs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Absolute>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_and)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::BitAnd, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_or)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::BitOr, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_xor)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::BitXor, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_not)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::BitNot, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_andnot)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::BitAndNot, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_bitselect)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto mask = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u128>();
+    auto false_vector = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u128>();
+    auto true_vector = configuration.take_source<source_address_mix>(2, addresses.sources).template to<u128>();
+    u128 result = (true_vector & mask) | (false_vector & ~mask);
+    configuration.push_to_destination<source_address_mix>(Value(result), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_any_true)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto vector = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u128>(); // bounds checked by verifier.
+    configuration.push_to_destination<source_address_mix>(Value(static_cast<i32>(vector != 0)), addresses.destination);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load8_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_lane_n<8>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load16_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_lane_n<16>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load32_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_lane_n<32>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load64_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_lane_n<64>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load32_zero)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_zero_n<32>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_load64_zero)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.load_and_push_zero_n<64>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_store8_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store_lane_n<8>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_store16_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store_lane_n<16>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_store32_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store_lane_n<32>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(v128_store64_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.pop_and_store_lane_n<64>(configuration, *instruction, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_trunc_sat_f32x4_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<4, 4, u32, f32, Operators::SaturatingTruncate<i32>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_trunc_sat_f32x4_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<4, 4, u32, f32, Operators::SaturatingTruncate<u32>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_bitmask)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i32, Operators::VectorBitmask<16>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_bitmask)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i32, Operators::VectorBitmask<8>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_bitmask)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i32, Operators::VectorBitmask<4>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_bitmask)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i32, Operators::VectorBitmask<2>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_dot_i16x8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorDotProduct<4>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_narrow_i16x8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorNarrow<16, i8>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_narrow_i16x8_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorNarrow<16, u8>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_narrow_i32x4_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorNarrow<8, i16>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_narrow_i32x4_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorNarrow<8, u16>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_q15mulr_sat_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<i16, Operators::Q15Mul>, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_convert_i32x4_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<4, 4, u32, i32, Operators::Convert<f32>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_convert_i32x4_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<4, 4, u32, u32, Operators::Convert<f32>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_convert_low_i32x4_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<2, 4, u64, i32, Operators::Convert<f64>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_convert_low_i32x4_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<2, 4, u64, u32, Operators::Convert<f64>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_demote_f64x2_zero)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<4, 2, u32, f64, Operators::Convert<f32>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_promote_low_f32x4)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<2, 4, u64, f32, Operators::Convert<f64>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_trunc_sat_f64x2_s_zero)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<4, 2, u32, f64, Operators::SaturatingTruncate<i32>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_trunc_sat_f64x2_u_zero)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorConvertOp<4, 2, u32, f64, Operators::SaturatingTruncate<u32>>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+HANDLE_INSTRUCTION(i8x16_shl)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftLeft<16>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_shr_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftRight<16, MakeUnsigned>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_shr_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftRight<16, MakeSigned>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_shl)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftLeft<8>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_shr_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftRight<8, MakeUnsigned>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_shr_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftRight<8, MakeSigned>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_shl)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftLeft<4>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_shr_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftRight<4, MakeUnsigned>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_shr_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftRight<4, MakeSigned>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_shl)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftLeft<2>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_shr_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftRight<2, MakeUnsigned>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_shr_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorShiftRight<2, MakeSigned>, source_address_mix, i32>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_swizzle)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorSwizzle, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_extract_lane_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i8, Operators::VectorExtractLane<16, MakeSigned>, source_address_mix>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_extract_lane_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u8, Operators::VectorExtractLane<16, MakeUnsigned>, source_address_mix>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extract_lane_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i16, Operators::VectorExtractLane<8, MakeSigned>, source_address_mix>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extract_lane_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u16, Operators::VectorExtractLane<8, MakeUnsigned>, source_address_mix>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extract_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i32, Operators::VectorExtractLane<4, MakeSigned>, source_address_mix>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_extract_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i64, Operators::VectorExtractLane<2, MakeSigned>, source_address_mix>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_extract_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, float, Operators::VectorExtractLaneFloat<4>, source_address_mix>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_extract_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, double, Operators::VectorExtractLaneFloat<2>, source_address_mix>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_replace_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<16, i32>, source_address_mix, i32>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_replace_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<8, i32>, source_address_mix, i32>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_replace_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<4>, source_address_mix, i32>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i64x2_replace_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<2>, source_address_mix, i64>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_replace_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<4, float>, source_address_mix, float>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_replace_lane)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<2, double>, source_address_mix, double>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::Equals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::NotEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_lt_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThan, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_lt_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThan, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_gt_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThan, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_gt_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThan, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_le_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThanOrEquals, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_le_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThanOrEquals, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_ge_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThanOrEquals, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_ge_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThanOrEquals, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_abs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<16, Operators::Absolute>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_neg)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<16, Operators::Negate>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_all_true)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i32, Operators::VectorAllTrue<16>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_popcnt)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<16, Operators::PopCount>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Add>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Subtract>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_avgr_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Average, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_add_sat_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::SaturatingOp<i8, Operators::Add>, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_add_sat_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::SaturatingOp<u8, Operators::Add>, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_sub_sat_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::SaturatingOp<i8, Operators::Subtract>, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_sub_sat_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::SaturatingOp<u8, Operators::Subtract>, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_min_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Minimum, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_min_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Minimum, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_max_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Maximum, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i8x16_max_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Maximum, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::Equals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::NotEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_lt_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThan, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_lt_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThan, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_gt_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThan, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_gt_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThan, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_le_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThanOrEquals, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_le_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThanOrEquals, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_ge_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThanOrEquals, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_ge_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThanOrEquals, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_abs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<8, Operators::Absolute>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_neg)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<8, Operators::Negate>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_all_true)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i32, Operators::VectorAllTrue<8>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Add>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Subtract>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_mul)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Multiply>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_avgr_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Average, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_add_sat_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<i16, Operators::Add>, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_add_sat_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<u16, Operators::Add>, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_sub_sat_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<i16, Operators::Subtract>, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_sub_sat_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<u16, Operators::Subtract>, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_min_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Minimum, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_min_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Minimum, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_max_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Maximum, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_max_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Maximum, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extend_low_i8x16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<8, Operators::VectorExt::Low, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extend_high_i8x16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<8, Operators::VectorExt::High, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extend_low_i8x16_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<8, Operators::VectorExt::Low, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extend_high_i8x16_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<8, Operators::VectorExt::High, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extadd_pairwise_i8x16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExtOpPairwise<8, Operators::Add, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extadd_pairwise_i8x16_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExtOpPairwise<8, Operators::Add, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extmul_low_i8x16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<8, Operators::Multiply, Operators::VectorExt::Low, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extmul_high_i8x16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<8, Operators::Multiply, Operators::VectorExt::High, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extmul_low_i8x16_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<8, Operators::Multiply, Operators::VectorExt::Low, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i16x8_extmul_high_i8x16_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<8, Operators::Multiply, Operators::VectorExt::High, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::Equals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_ne)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::NotEquals>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_lt_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThan, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_lt_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThan, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_gt_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThan, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_gt_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThan, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_le_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThanOrEquals, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_le_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThanOrEquals, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_ge_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThanOrEquals, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_ge_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThanOrEquals, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_abs)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<4, Operators::Absolute>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_neg)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<4, Operators::Negate, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_all_true)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, i32, Operators::VectorAllTrue<4>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_add)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Add, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_sub)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Subtract, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_mul)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Multiply, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_min_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Minimum, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_min_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Minimum, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_max_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Maximum, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_max_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Maximum, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extend_low_i16x8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<4, Operators::VectorExt::Low, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extend_high_i16x8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<4, Operators::VectorExt::High, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extend_low_i16x8_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<4, Operators::VectorExt::Low, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extend_high_i16x8_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExt<4, Operators::VectorExt::High, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extadd_pairwise_i16x8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExtOpPairwise<4, Operators::Add, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extadd_pairwise_i16x8_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.unary_operation<u128, u128, Operators::VectorIntegerExtOpPairwise<4, Operators::Add, MakeUnsigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extmul_low_i16x8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<4, Operators::Multiply, Operators::VectorExt::Low, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_extmul_high_i16x8_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<4, Operators::Multiply, Operators::VectorExt::High, MakeSigned>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+ALIAS_INSTRUCTION(i8x16_relaxed_swizzle, i8x16_swizzle)
+ALIAS_INSTRUCTION(i32x4_relaxed_trunc_f32x4_s, i32x4_trunc_sat_f32x4_s)
+ALIAS_INSTRUCTION(i32x4_relaxed_trunc_f32x4_u, i32x4_trunc_sat_f32x4_u)
+ALIAS_INSTRUCTION(i32x4_relaxed_trunc_f64x2_s_zero, i32x4_trunc_sat_f64x2_s_zero)
+ALIAS_INSTRUCTION(i32x4_relaxed_trunc_f64x2_u_zero, i32x4_trunc_sat_f64x2_u_zero)
+
+HANDLE_INSTRUCTION(f32x4_relaxed_madd)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto c = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u128>();
+    auto a = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u128>();
+    auto& b_slot = configuration.source_value<source_address_mix>(2, addresses.sources);
+    auto b = b_slot.template to<u128>();
+    b_slot = Value { Operators::VectorMultiplyAdd<4> {}(a, b, c) };
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f32x4_relaxed_nmadd)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto c = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u128>();
+    auto a = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u128>();
+    auto& b_slot = configuration.source_value<source_address_mix>(2, addresses.sources);
+    auto b = b_slot.template to<u128>();
+    b_slot = Value { Operators::VectorMultiplySub<4> {}(a, b, c) };
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_relaxed_madd)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto c = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u128>();
+    auto a = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u128>();
+    auto& b_slot = configuration.source_value<source_address_mix>(2, addresses.sources);
+    auto b = b_slot.template to<u128>();
+    b_slot = Value { Operators::VectorMultiplyAdd<2> {}(a, b, c) };
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(f64x2_relaxed_nmadd)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto c = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u128>();
+    auto a = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u128>();
+    auto& b_slot = configuration.source_value<source_address_mix>(2, addresses.sources);
+    auto b = b_slot.template to<u128>();
+    b_slot = Value { Operators::VectorMultiplySub<2> {}(a, b, c) };
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+ALIAS_INSTRUCTION(i8x16_relaxed_laneselect, v128_bitselect)
+ALIAS_INSTRUCTION(i16x8_relaxed_laneselect, v128_bitselect)
+ALIAS_INSTRUCTION(i32x4_relaxed_laneselect, v128_bitselect)
+ALIAS_INSTRUCTION(i64x2_relaxed_laneselect, v128_bitselect)
+ALIAS_INSTRUCTION(f32x4_relaxed_min, f32x4_min)
+ALIAS_INSTRUCTION(f32x4_relaxed_max, f32x4_max)
+ALIAS_INSTRUCTION(f64x2_relaxed_min, f64x2_min)
+ALIAS_INSTRUCTION(f64x2_relaxed_max, f64x2_max)
+ALIAS_INSTRUCTION(i16x8_relaxed_q15mulr_s, i16x8_q15mulr_sat_s)
+
+HANDLE_INSTRUCTION(i16x8_relaxed_dot_i8x16_i7x16_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (interpreter.binary_numeric_operation<u128, u128, Operators::VectorDotProduct<8>, source_address_mix>(configuration, addresses))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i32x4_relaxed_dot_i8x16_i7x16_add_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto acc = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u128>();
+    auto rhs = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u128>(); // bounds checked by verifier.
+    auto& lhs_slot = configuration.source_value<source_address_mix>(2, addresses.sources);
+    lhs_slot = Value { Operators::VectorRelaxedDotI8I7AddS {}(lhs_slot.template to<u128>(), rhs, acc) };
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-throw-ref
+HANDLE_INSTRUCTION(throw_ref)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto const value = configuration.take_source<source_address_mix>(0, addresses.sources);
+    // 4. If val' is ref.null, then trap. (See the encoding table in Value(Reference const&): 4 is a null exnref.)
+    if (value.value().high() == 4) [[unlikely]] {
+        interpreter.set_trap("null exception reference"sv);
+        return Outcome::Return;
+    }
+    auto const exception_address = bit_cast<ExceptionAddress>(value.value().low());
+    if (auto continuation = interpreter.unwind_to_throw_handler(configuration, exception_address); continuation.has_value()) {
+        short_ip.current_ip_value = continuation->value() - 1;
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+    // 5.5.2. "...the first non-value entry of the stack is not a handler: Throw the exception val' as a result."
+    interpreter.set_trap(Trap { UncaughtException { exception_address } });
+    return Outcome::Return;
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-throw-x
+HANDLE_INSTRUCTION(throw_)
+{
+    LOG_INSN;
+    {
+        auto tag_address = configuration.frame().module().tags()[instruction->arguments().get<TagIndex>().value()];
+        auto& tag_instance = *configuration.store().get(tag_address);
+        auto& type = tag_instance.type();
+        auto values = Vector<Value>(configuration.value_stack().span().slice_from_end(type.parameters().size()));
+        configuration.value_stack().shrink(configuration.value_stack().size() - type.parameters().size());
+        auto exception_address = configuration.store().allocate(tag_address, move(values));
+        if (!exception_address.has_value()) {
+            interpreter.set_trap("Out of memory"sv);
+            return Outcome::Return;
+        }
+        configuration.value_stack().append(Value(Reference { Reference::Exception { *exception_address } }));
+    }
+    TAILCALL return InstructionHandler<Instructions::throw_ref.value()>::operator()<HasDynamicInsnLimit, Continue, SourceAddressMix::Any>(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-try-table-xref-syntax-instructions-syntax-blocktype-mathit-blocktype-xref-syntax-instructions-syntax-catch-mathit-catch-ast-xref-syntax-instructions-syntax-instr-mathit-instr-ast
+HANDLE_INSTRUCTION(try_table)
+{
+    LOG_INSN;
+    auto& args = instruction->arguments().unsafe_get<Instruction::TryTableArgs>();
+    auto& meta = args.meta;
+    auto label = Label(meta.arity, args.end_ip, configuration.value_stack().size() - meta.parameter_count, instruction);
+    configuration.label_stack().unchecked_append(move(label));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// Proposal "gc".
+
+#define GC_TRAP_IF(condition, message)         \
+    do {                                       \
+        if (condition) [[unlikely]] {          \
+            interpreter.set_trap(message##sv); \
+            return Outcome::Return;            \
+        }                                      \
+    } while (false)
+
+static ALWAYS_INLINE bool is_null_gc_reference(Value const& value)
+{
+    auto const tag = value.value().high();
+    return tag == 2 || tag == 3 || tag == 4 || tag == 8;
+}
+
+// https://webassembly.github.io/spec/core/exec/runtime.html#aggregate-instances
+static Value pack_into_field(ValueType const& storage_type, Value const& value)
+{
+    switch (storage_type.kind()) {
+    case ValueType::I8:
+        return Value(static_cast<u32>(value.to<u32>() & 0xff));
+    case ValueType::I16:
+        return Value(static_cast<u32>(value.to<u32>() & 0xffff));
+    default:
+        return value;
+    }
+}
+
+// https://webassembly.github.io/spec/core/exec/runtime.html#aggregate-instances
+// unpack^sx?_zt(val) = val                     if zt is a valtype
+//                    = extend^sx_|zt|,32(val)  if zt is a packtype
+static Value unpack_from_field(ValueType const& storage_type, Value const& value, bool sign_extend)
+{
+    switch (storage_type.kind()) {
+    case ValueType::I8:
+        return sign_extend
+            ? Value(static_cast<i32>(static_cast<i8>(value.to<u32>() & 0xff)))
+            : Value(static_cast<u32>(value.to<u32>() & 0xff));
+    case ValueType::I16:
+        return sign_extend
+            ? Value(static_cast<i32>(static_cast<i16>(value.to<u32>() & 0xffff)))
+            : Value(static_cast<u32>(value.to<u32>() & 0xffff));
+    default:
+        return value;
+    }
+}
+
+static size_t storage_type_byte_width(ValueType const& storage_type)
+{
+    switch (storage_type.kind()) {
+    case ValueType::I8:
+        return 1;
+    case ValueType::I16:
+        return 2;
+    case ValueType::I32:
+    case ValueType::F32:
+        return 4;
+    case ValueType::I64:
+    case ValueType::F64:
+        return 8;
+    case ValueType::V128:
+        return 16;
+    default:
+        // References cannot be read out of a data segment (checked by the validator).
+        VERIFY_NOT_REACHED();
+    }
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+static Value value_from_segment_bytes(ValueType const& storage_type, ReadonlyBytes bytes)
+{
+    auto read_le = []<typename T>(ReadonlyBytes data) {
+        T value {};
+        __builtin_memcpy(&value, data.data(), sizeof(T));
+        return AK::convert_between_host_and_little_endian(value);
+    };
+    switch (storage_type.kind()) {
+    case ValueType::I8:
+        // Packed fields are stored pre-truncated; reads sign- or zero-extend, see unpack_from_field() above.
+        return Value(static_cast<u32>(bytes[0]));
+    case ValueType::I16:
+        return Value(static_cast<u32>(read_le.operator()<u16>(bytes)));
+    case ValueType::I32:
+        return Value(static_cast<i32>(read_le.operator()<u32>(bytes)));
+    case ValueType::I64:
+        return Value(static_cast<i64>(read_le.operator()<u64>(bytes)));
+    case ValueType::F32:
+        return Value(bit_cast<f32>(read_le.operator()<u32>(bytes)));
+    case ValueType::F64:
+        return Value(bit_cast<f64>(read_le.operator()<u64>(bytes)));
+    case ValueType::V128: {
+        u128 value {};
+        __builtin_memcpy(&value, bytes.data(), sizeof(u128));
+        return Value(value);
+    }
+    default:
+        VERIFY_NOT_REACHED();
+    }
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+static bool reference_matches_type(Value const& value, ValueType const& target, Configuration& configuration)
+{
+    // See the encoding table in Value(Reference const&).
+    switch (value.value().high()) {
+    case 2: // null funcref / nofuncref
+    case 3: // null externref / noexternref
+    case 4: // null exnref / noexnref
+    case 8: // null in the any hierarchy
+        // "ref.null matches (ref null ht)": null only matches nullable targets. Validation
+        // keeps the hierarchies apart, so the target heap type always agrees with the null;
+        // in particular this is the only way to match the bottom (none/nofunc/...) types.
+        return target.is_nullable();
+    case 1: // a host externref
+        // Matches extern; also any, for an internalized host reference (tag 10) that lost its
+        // wrapper crossing a Reference boundary (e.g. an anyref table), see Value::to<Reference>().
+        return target.kind() == ValueType::ExternReference || target.kind() == ValueType::AnyReference;
+    case 5: // an exception
+        return target.kind() == ValueType::ExceptionReference;
+    case 6: { // a struct or array instance
+        auto& cell = *bit_cast<GC::Cell*>(value.value().low());
+        switch (target.kind()) {
+        case ValueType::AnyReference:
+        case ValueType::EqReference:
+            return true;
+        case ValueType::ExternReference:
+            // An externalized aggregate (tag 9) that lost its wrapper crossing a Reference boundary (e.g. an externref table); it is still in the extern hierarchy.
+            return true;
+        case ValueType::StructReference:
+            return is<StructInstance>(cell);
+        case ValueType::ArrayReference:
+            return is<ArrayInstance>(cell);
+        case ValueType::TypeUseReference: {
+            DefinedType const* actual = nullptr;
+            if (auto* struct_instance = as_if<StructInstance>(cell))
+                actual = &struct_instance->type();
+            else if (auto* array_instance = as_if<ArrayInstance>(cell))
+                actual = &array_instance->type();
+            return actual && matches_defined_type(*actual, *configuration.frame().module().canonical_types()[target.unsafe_typeindex().value()]);
+        }
+        default:
+            return false;
+        }
+    }
+    case 7: // an i31
+        // ExternReference covers an externalized i31 (tag 9) that lost its wrapper crossing a Reference boundary, as for tag 6 above.
+        return first_is_one_of(target.kind(), ValueType::I31Reference, ValueType::EqReference, ValueType::AnyReference, ValueType::ExternReference);
+    case 9 | (6 << 8): // an externalized struct or array instance
+    case 9 | (7 << 8): // an externalized i31
+        return target.kind() == ValueType::ExternReference;
+    case 10: // a host externref internalized into the any hierarchy
+        return target.kind() == ValueType::AnyReference;
+    default: { // a funcref; high is the defining Module* (null for host functions)
+        if (target.kind() == ValueType::FunctionReference)
+            return true;
+        if (target.kind() != ValueType::TypeUseReference)
+            return false;
+        auto* function = configuration.store().get(FunctionAddress { value.value().low() });
+        auto const* actual = function ? function->visit([](auto& f) { return f.defined_type(); }) : nullptr;
+        return actual && matches_defined_type(*actual, *configuration.frame().module().canonical_types()[target.unsafe_typeindex().value()]);
+    }
+    }
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(ref_eq)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto rhs = configuration.take_source<source_address_mix>(0, addresses.sources);
+    auto& lhs_slot = configuration.source_value<source_address_mix>(1, addresses.sources);
+    // Both operands are in the eq hierarchy: nulls are uniformly tag 8, i31s carry their payload and aggregates their cell pointer, so reference equality is bit equality.
+    auto const equal = lhs_slot.value() == rhs.value();
+    lhs_slot = Value(static_cast<i32>(equal ? 1 : 0));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(ref_as_non_null)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto const& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    GC_TRAP_IF(is_null_gc_reference(slot), "null reference");
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions
+HANDLE_INSTRUCTION(br_on_null)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources);
+    auto const is_null = is_null_gc_reference(value);
+    // The branched-to label's arity does not include the reference; it is only put back when falling through.
+    if (!is_null)
+        configuration.value_stack().append(value);
+    short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, instruction->arguments().unsafe_get<Instruction::BranchArgs>().label, short_ip.current_ip_value, is_null).value();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions
+HANDLE_INSTRUCTION(br_on_non_null)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources);
+    auto const is_null = is_null_gc_reference(value);
+    if (!is_null)
+        configuration.value_stack().append(value);
+    short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, instruction->arguments().unsafe_get<Instruction::BranchArgs>().label, short_ip.current_ip_value, !is_null).value();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(struct_new)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    {
+        auto const& type = *configuration.frame().module().canonical_types()[instruction->arguments().get<TypeIndex>().value()];
+        auto const& field_types = type.expansion().get<StructType>().fields();
+        auto const field_count = field_types.size();
+        auto operands = configuration.value_stack().span().slice_from_end(field_count);
+        Vector<Value> fields;
+        fields.ensure_capacity(field_count);
+        for (size_t i = 0; i < field_count; ++i)
+            fields.unchecked_append(pack_into_field(field_types[i].type(), operands[i]));
+        auto instance = configuration.store().heap().allocate<StructInstance>(type, move(fields));
+        configuration.value_stack().shrink(configuration.value_stack().size() - field_count);
+        configuration.push_to_destination<source_address_mix>(Value(Reference { Reference::GcObject { instance.ptr() } }), addresses.destination);
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(struct_new_default)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    {
+        auto const& type = *configuration.frame().module().canonical_types()[instruction->arguments().get<TypeIndex>().value()];
+        auto const& field_types = type.expansion().get<StructType>().fields();
+        Vector<Value> fields;
+        fields.ensure_capacity(field_types.size());
+        for (auto const& field_type : field_types)
+            fields.unchecked_append(Value(field_type.type().unpacked()));
+        auto instance = configuration.store().heap().allocate<StructInstance>(type, move(fields));
+        configuration.push_to_destination<source_address_mix>(Value(Reference { Reference::GcObject { instance.ptr() } }), addresses.destination);
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+template<SourceAddressMix mix>
+static bool struct_get_impl(BytecodeInterpreter& interpreter, Configuration& configuration, Instruction const* instruction, SourcesAndDestination const& addresses, bool sign_extend)
+{
+    auto& args = instruction->arguments().get<Instruction::StructFieldArgs>();
+    auto& slot = configuration.source_value<mix>(0, addresses.sources); // bounds checked by verifier.
+    if (is_null_gc_reference(slot)) [[unlikely]]
+        return interpreter.set_trap("null structure reference"sv);
+    auto& instance = *static_cast<StructInstance*>(bit_cast<GC::Cell*>(slot.value().low()));
+    auto const& field_types = configuration.frame().module().canonical_types()[args.type_index.value()]->expansion().get<StructType>().fields();
+    slot = unpack_from_field(field_types[args.field_index].type(), instance.fields()[args.field_index], sign_extend);
+    return false;
+}
+
+HANDLE_INSTRUCTION(struct_get)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (struct_get_impl<source_address_mix>(interpreter, configuration, instruction, addresses, false))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(struct_get_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (struct_get_impl<source_address_mix>(interpreter, configuration, instruction, addresses, true))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(struct_get_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (struct_get_impl<source_address_mix>(interpreter, configuration, instruction, addresses, false))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(struct_set)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().get<Instruction::StructFieldArgs>();
+    // bounds checked by verifier.
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources);
+    auto reference = configuration.take_source<source_address_mix>(1, addresses.sources);
+    GC_TRAP_IF(is_null_gc_reference(reference), "null structure reference");
+    auto& instance = *static_cast<StructInstance*>(bit_cast<GC::Cell*>(reference.value().low()));
+    auto const& field_types = configuration.frame().module().canonical_types()[args.type_index.value()]->expansion().get<StructType>().fields();
+    instance.fields()[args.field_index] = pack_into_field(field_types[args.field_index].type(), value);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_new)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    {
+        auto const& type = *configuration.frame().module().canonical_types()[instruction->arguments().get<TypeIndex>().value()];
+        auto const& field_type = type.expansion().get<ArrayType>().type();
+        // bounds checked by verifier.
+        auto count = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u32>();
+        auto& slot = configuration.source_value<source_address_mix>(1, addresses.sources);
+        Vector<Value> elements;
+        GC_TRAP_IF(elements.try_ensure_capacity(count).is_error(), "Out of memory");
+        // The initializer stays live in `slot` (a scanned location) if the allocation below triggers a collection.
+        auto const element = pack_into_field(field_type.type(), slot);
+        for (u32 i = 0; i < count; ++i)
+            elements.unchecked_append(element);
+        auto instance = configuration.store().heap().allocate<ArrayInstance>(type, move(elements));
+        slot = Value(Reference { Reference::GcObject { instance.ptr() } });
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_new_default)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    {
+        auto const& type = *configuration.frame().module().canonical_types()[instruction->arguments().get<TypeIndex>().value()];
+        auto const& field_type = type.expansion().get<ArrayType>().type();
+        auto& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+        auto count = slot.template to<u32>();
+        Vector<Value> elements;
+        GC_TRAP_IF(elements.try_ensure_capacity(count).is_error(), "Out of memory");
+        auto const element = Value(field_type.type().unpacked());
+        for (u32 i = 0; i < count; ++i)
+            elements.unchecked_append(element);
+        auto instance = configuration.store().heap().allocate<ArrayInstance>(type, move(elements));
+        slot = Value(Reference { Reference::GcObject { instance.ptr() } });
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_new_fixed)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    {
+        auto& args = instruction->arguments().get<Instruction::ArrayNewFixedArgs>();
+        auto const& type = *configuration.frame().module().canonical_types()[args.type_index.value()];
+        auto const& field_type = type.expansion().get<ArrayType>().type();
+        auto operands = configuration.value_stack().span().slice_from_end(args.count);
+        Vector<Value> elements;
+        elements.ensure_capacity(args.count);
+        for (auto const& operand : operands)
+            elements.unchecked_append(pack_into_field(field_type.type(), operand));
+        auto instance = configuration.store().heap().allocate<ArrayInstance>(type, move(elements));
+        configuration.value_stack().shrink(configuration.value_stack().size() - args.count);
+        configuration.push_to_destination<source_address_mix>(Value(Reference { Reference::GcObject { instance.ptr() } }), addresses.destination);
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_new_data)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    {
+        auto& args = instruction->arguments().get<Instruction::ArrayDataArgs>();
+        auto const& type = *configuration.frame().module().canonical_types()[args.type_index.value()];
+        auto const& field_type = type.expansion().get<ArrayType>().type();
+        auto const element_size = storage_type_byte_width(field_type.type());
+        // bounds checked by verifier.
+        auto count = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u32>();
+        auto& slot = configuration.source_value<source_address_mix>(1, addresses.sources);
+        auto offset = slot.template to<u32>();
+        auto const& data = *configuration.store().get(configuration.frame().module().datas()[args.data_index.value()]);
+        GC_TRAP_IF(static_cast<u64>(offset) + static_cast<u64>(count) * element_size > data.size(), "out of bounds memory access");
+        Vector<Value> elements;
+        GC_TRAP_IF(elements.try_ensure_capacity(count).is_error(), "Out of memory");
+        auto bytes = data.data().span();
+        for (u32 i = 0; i < count; ++i)
+            elements.unchecked_append(value_from_segment_bytes(field_type.type(), bytes.slice(offset + static_cast<size_t>(i) * element_size, element_size)));
+        auto instance = configuration.store().heap().allocate<ArrayInstance>(type, move(elements));
+        slot = Value(Reference { Reference::GcObject { instance.ptr() } });
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_new_elem)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    {
+        auto& args = instruction->arguments().get<Instruction::ArrayElemArgs>();
+        auto const& type = *configuration.frame().module().canonical_types()[args.type_index.value()];
+        // bounds checked by verifier.
+        auto count = configuration.take_source<source_address_mix>(0, addresses.sources).template to<u32>();
+        auto& slot = configuration.source_value<source_address_mix>(1, addresses.sources);
+        auto offset = slot.template to<u32>();
+        auto const& references = configuration.store().get(configuration.frame().module().elements()[args.element_index.value()])->references();
+        GC_TRAP_IF(static_cast<u64>(offset) + count > references.size(), "out of bounds table access");
+        Vector<Value> elements;
+        GC_TRAP_IF(elements.try_ensure_capacity(count).is_error(), "Out of memory");
+        for (u32 i = 0; i < count; ++i)
+            elements.unchecked_append(Value(references[offset + i]));
+        auto instance = configuration.store().heap().allocate<ArrayInstance>(type, move(elements));
+        slot = Value(Reference { Reference::GcObject { instance.ptr() } });
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+template<SourceAddressMix mix>
+static bool array_get_impl(BytecodeInterpreter& interpreter, Configuration& configuration, Instruction const* instruction, SourcesAndDestination const& addresses, bool sign_extend)
+{
+    // bounds checked by verifier.
+    auto index = configuration.take_source<mix>(0, addresses.sources).template to<u32>();
+    auto& slot = configuration.source_value<mix>(1, addresses.sources);
+    if (is_null_gc_reference(slot)) [[unlikely]]
+        return interpreter.set_trap("null array reference"sv);
+    auto& instance = *static_cast<ArrayInstance*>(bit_cast<GC::Cell*>(slot.value().low()));
+    if (index >= instance.elements().size()) [[unlikely]]
+        return interpreter.set_trap("out of bounds array access"sv);
+    auto const& field_type = configuration.frame().module().canonical_types()[instruction->arguments().get<TypeIndex>().value()]->expansion().get<ArrayType>().type();
+    slot = unpack_from_field(field_type.type(), instance.elements()[index], sign_extend);
+    return false;
+}
+
+HANDLE_INSTRUCTION(array_get)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (array_get_impl<source_address_mix>(interpreter, configuration, instruction, addresses, false))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(array_get_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (array_get_impl<source_address_mix>(interpreter, configuration, instruction, addresses, true))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(array_get_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    if (array_get_impl<source_address_mix>(interpreter, configuration, instruction, addresses, false))
+        return Outcome::Return;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_set)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    // bounds checked by verifier.
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources);
+    auto index = configuration.take_source<source_address_mix>(1, addresses.sources).template to<u32>();
+    auto reference = configuration.take_source<source_address_mix>(2, addresses.sources);
+    GC_TRAP_IF(is_null_gc_reference(reference), "null array reference");
+    auto& instance = *static_cast<ArrayInstance*>(bit_cast<GC::Cell*>(reference.value().low()));
+    GC_TRAP_IF(index >= instance.elements().size(), "out of bounds array access");
+    auto const& field_type = configuration.frame().module().canonical_types()[instruction->arguments().get<TypeIndex>().value()]->expansion().get<ArrayType>().type();
+    instance.elements()[index] = pack_into_field(field_type.type(), value);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_len)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    GC_TRAP_IF(is_null_gc_reference(slot), "null array reference");
+    auto& instance = *static_cast<ArrayInstance*>(bit_cast<GC::Cell*>(slot.value().low()));
+    slot = Value(static_cast<i32>(instance.elements().size()));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_fill)
+{
+    LOG_INSN;
+    auto& value_stack = configuration.value_stack();
+    auto count = value_stack.take_last().to<u32>();
+    auto value = value_stack.take_last();
+    auto offset = value_stack.take_last().to<u32>();
+    auto reference = value_stack.take_last();
+    GC_TRAP_IF(is_null_gc_reference(reference), "null array reference");
+    auto& instance = *static_cast<ArrayInstance*>(bit_cast<GC::Cell*>(reference.value().low()));
+    GC_TRAP_IF(static_cast<u64>(offset) + count > instance.elements().size(), "out of bounds array access");
+    auto const& field_type = configuration.frame().module().canonical_types()[instruction->arguments().get<TypeIndex>().value()]->expansion().get<ArrayType>().type();
+    auto const element = pack_into_field(field_type.type(), value);
+    for (u32 i = 0; i < count; ++i)
+        instance.elements()[offset + i] = element;
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_copy)
+{
+    LOG_INSN;
+    auto& value_stack = configuration.value_stack();
+    auto count = value_stack.take_last().to<u32>();
+    auto source_offset = value_stack.take_last().to<u32>();
+    auto source_reference = value_stack.take_last();
+    auto destination_offset = value_stack.take_last().to<u32>();
+    auto destination_reference = value_stack.take_last();
+    GC_TRAP_IF(is_null_gc_reference(destination_reference), "null array reference");
+    GC_TRAP_IF(is_null_gc_reference(source_reference), "null array reference");
+    auto& destination = *static_cast<ArrayInstance*>(bit_cast<GC::Cell*>(destination_reference.value().low()));
+    auto& source = *static_cast<ArrayInstance*>(bit_cast<GC::Cell*>(source_reference.value().low()));
+    GC_TRAP_IF(static_cast<u64>(destination_offset) + count > destination.elements().size(), "out of bounds array access");
+    GC_TRAP_IF(static_cast<u64>(source_offset) + count > source.elements().size(), "out of bounds array access");
+    if (destination_offset <= source_offset) {
+        for (u32 i = 0; i < count; ++i)
+            destination.elements()[destination_offset + i] = source.elements()[source_offset + i];
+    } else {
+        for (u32 i = count; i > 0; --i)
+            destination.elements()[destination_offset + i - 1] = source.elements()[source_offset + i - 1];
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_init_data)
+{
+    LOG_INSN;
+    auto& args = instruction->arguments().get<Instruction::ArrayDataArgs>();
+    auto& value_stack = configuration.value_stack();
+    auto count = value_stack.take_last().to<u32>();
+    auto source_offset = value_stack.take_last().to<u32>();
+    auto destination_offset = value_stack.take_last().to<u32>();
+    auto reference = value_stack.take_last();
+    GC_TRAP_IF(is_null_gc_reference(reference), "null array reference");
+    auto& instance = *static_cast<ArrayInstance*>(bit_cast<GC::Cell*>(reference.value().low()));
+    GC_TRAP_IF(static_cast<u64>(destination_offset) + count > instance.elements().size(), "out of bounds array access");
+    auto const& field_type = configuration.frame().module().canonical_types()[args.type_index.value()]->expansion().get<ArrayType>().type();
+    auto const element_size = storage_type_byte_width(field_type.type());
+    auto const& data = *configuration.store().get(configuration.frame().module().datas()[args.data_index.value()]);
+    GC_TRAP_IF(static_cast<u64>(source_offset) + static_cast<u64>(count) * element_size > data.size(), "out of bounds memory access");
+    auto bytes = data.data().span();
+    for (u32 i = 0; i < count; ++i)
+        instance.elements()[destination_offset + i] = value_from_segment_bytes(field_type.type(), bytes.slice(source_offset + static_cast<size_t>(i) * element_size, element_size));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(array_init_elem)
+{
+    LOG_INSN;
+    auto& args = instruction->arguments().get<Instruction::ArrayElemArgs>();
+    auto& value_stack = configuration.value_stack();
+    auto count = value_stack.take_last().to<u32>();
+    auto source_offset = value_stack.take_last().to<u32>();
+    auto destination_offset = value_stack.take_last().to<u32>();
+    auto reference = value_stack.take_last();
+    GC_TRAP_IF(is_null_gc_reference(reference), "null array reference");
+    auto& instance = *static_cast<ArrayInstance*>(bit_cast<GC::Cell*>(reference.value().low()));
+    GC_TRAP_IF(static_cast<u64>(destination_offset) + count > instance.elements().size(), "out of bounds array access");
+    auto const& references = configuration.store().get(configuration.frame().module().elements()[args.element_index.value()])->references();
+    GC_TRAP_IF(static_cast<u64>(source_offset) + count > references.size(), "out of bounds table access");
+    for (u32 i = 0; i < count; ++i)
+        instance.elements()[destination_offset + i] = Value(references[source_offset + i]);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(ref_test)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    slot = Value(static_cast<i32>(reference_matches_type(slot, instruction->arguments().get<ValueType>(), configuration) ? 1 : 0));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+ALIAS_INSTRUCTION(ref_test_null, ref_test)
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(ref_cast)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto const& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    GC_TRAP_IF(!reference_matches_type(slot, instruction->arguments().get<ValueType>(), configuration), "cast failure");
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+ALIAS_INSTRUCTION(ref_cast_null, ref_cast)
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions
+HANDLE_INSTRUCTION(br_on_cast)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().get<Instruction::BranchOnCastArgs>();
+    // bounds checked by verifier.
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources);
+    auto const matches = reference_matches_type(value, args.target_type, configuration);
+    configuration.value_stack().append(value);
+    short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, args.branch.label, short_ip.current_ip_value, matches).value();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions
+HANDLE_INSTRUCTION(br_on_cast_fail)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& args = instruction->arguments().get<Instruction::BranchOnCastArgs>();
+    // bounds checked by verifier.
+    auto value = configuration.take_source<source_address_mix>(0, addresses.sources);
+    auto const matches = reference_matches_type(value, args.target_type, configuration);
+    configuration.value_stack().append(value);
+    short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, args.branch.label, short_ip.current_ip_value, !matches).value();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(any_convert_extern)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    auto const low = slot.value().low();
+    switch (slot.value().high()) {
+    case 3:
+        slot = Value(u128(0, 8));
+        break;
+    case 1:
+        slot = Value(u128(low, 10));
+        break;
+    case 9 | (6 << 8):
+        slot = Value(u128(low, 6));
+        break;
+    case 9 | (7 << 8):
+        slot = Value(u128(low, 7));
+        break;
+    default:
+        break;
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(extern_convert_any)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    auto const low = slot.value().low();
+    switch (slot.value().high()) {
+    case 8:
+        slot = Value(u128(0, 3));
+        break;
+    case 6:
+        slot = Value(u128(low, 9 | (6 << 8)));
+        break;
+    case 7:
+        slot = Value(u128(low, 9 | (7 << 8)));
+        break;
+    case 10:
+        slot = Value(u128(low, 1));
+        break;
+    default:
+        break;
+    }
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(ref_i31)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    slot = Value(u128(static_cast<u64>(slot.template to<u32>() & 0x7fffffff), 7));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+// https://webassembly.github.io/spec/core/exec/instructions.html#reference-instructions
+HANDLE_INSTRUCTION(i31_get_s)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    GC_TRAP_IF(is_null_gc_reference(slot), "null i31 reference");
+    auto const payload = static_cast<u32>(slot.value().low() & 0x7fffffff);
+    slot = Value(static_cast<i32>(payload << 1) >> 1);
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+HANDLE_INSTRUCTION(i31_get_u)
+{
+    LOG_INSN;
+    LOAD_ADDRESSES();
+    auto& slot = configuration.source_value<source_address_mix>(0, addresses.sources); // bounds checked by verifier.
+    GC_TRAP_IF(is_null_gc_reference(slot), "null i31 reference");
+    slot = Value(static_cast<u32>(slot.value().low() & 0x7fffffff));
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
+#undef GC_TRAP_IF
+
+bool BytecodeInterpreter::trap_if_insufficient_native_stack_space(size_t minimum_native_stack_space_to_keep_free)
+{
+    return trap_if_not(m_stack_info.size_free() >= minimum_native_stack_space_to_keep_free, Constants::stack_exhaustion_message);
+}
+
+template<u64 opcode, bool HasDynamicInsnLimit, typename Continue, SourceAddressMix mix, typename... Args>
+constexpr static auto handle_instruction(Args&&... a)
+{
+    return InstructionHandler<opcode>::template operator()<HasDynamicInsnLimit, Continue, mix>(forward<Args>(a)...);
+}
+
+template<bool HasCompiledList, bool HasDynamicInsnLimit, bool HaveDirectThreadingInfo>
+FLATTEN void BytecodeInterpreter::interpret_impl(Configuration& configuration, Expression const& expression)
+{
+    auto& instructions = expression.instructions();
+    u64 executed_instructions = 0;
+    ShortenedIP short_ip { .current_ip_value = static_cast<u32>(configuration.ip()) };
+
+    auto cc = expression.compiled_instructions.dispatches.data();
+    auto addresses_ptr = expression.compiled_instructions.src_dst_mappings.data();
+
+    if constexpr (HaveDirectThreadingInfo) {
+        static_assert(HasCompiledList, "Direct threading requires a compiled instruction list");
+        auto const instruction = cc[short_ip.current_ip_value].instruction;
+        auto const handler = bit_cast<Outcome (*)(HANDLER_PARAMS(DECOMPOSE_PARAMS_TYPE_ONLY))>(cc[short_ip.current_ip_value].handler_ptr);
+        handler(*this, configuration, instruction, short_ip, cc, addresses_ptr);
+        return;
+    }
 
     while (true) {
         if constexpr (HasDynamicInsnLimit) {
@@ -101,2159 +6372,126 @@ void BytecodeInterpreter::interpret_impl(Configuration& configuration, Expressio
             }
         }
         // bounds checked by loop condition.
-        addresses.sources_and_destination = HasCompiledList
-            ? cc[current_ip_value].sources_and_destination
-            : default_sources_and_destination;
         auto const instruction = HasCompiledList
-            ? cc[current_ip_value].instruction
-            : &instructions.data()[current_ip_value];
-        auto const opcode = (HasCompiledList
-                ? cc[current_ip_value].instruction_opcode
+            ? cc[short_ip.current_ip_value].instruction
+            : &instructions.data()[short_ip.current_ip_value];
+        auto const opcode = (HasCompiledList && !HaveDirectThreadingInfo
+                ? cc[short_ip.current_ip_value].instruction_opcode
                 : instruction->opcode())
                                 .value();
 
-#define RUN_NEXT_INSTRUCTION() \
-    {                          \
-        ++current_ip_value;    \
-        break;                 \
+#define RUN_NEXT_INSTRUCTION()       \
+    {                                \
+        ++short_ip.current_ip_value; \
+        break;                       \
     }
 
-        dbgln_if(WASM_TRACE_DEBUG, "Executing instruction {} at current_ip_value {}", instruction_name(instruction->opcode()), current_ip_value);
+#define HANDLE_INSTRUCTION_NEW(name, ...)                                                                                                                                                \
+    case Instructions::name.value(): {                                                                                                                                                   \
+        auto outcome = handle_instruction<Instructions::name.value(), HasDynamicInsnLimit, Skip, SourceAddressMix::Any>(*this, configuration, instruction, short_ip, cc, addresses_ptr); \
+        if (outcome == Outcome::Return)                                                                                                                                                  \
+            return;                                                                                                                                                                      \
+        short_ip.current_ip_value = to_underlying(outcome);                                                                                                                              \
+        if constexpr (first_is_one_of(Instructions::name, Instructions::return_call, Instructions::return_call_indirect, Instructions::return_call_ref)) {                               \
+            cc = configuration.frame().expression().compiled_instructions.dispatches.data();                                                                                             \
+            addresses_ptr = configuration.frame().expression().compiled_instructions.src_dst_mappings.data();                                                                            \
+        }                                                                                                                                                                                \
+        RUN_NEXT_INSTRUCTION();                                                                                                                                                          \
+    }
+
+        dbgln_if(WASM_TRACE_DEBUG, "Executing instruction {} at current_ip_value {}", instruction_name(instruction->opcode()), short_ip.current_ip_value);
         if ((opcode & Instructions::SyntheticInstructionBase.value()) != Instructions::SyntheticInstructionBase.value())
             __builtin_prefetch(&instruction->arguments(), /* read */ 0, /* low temporal locality */ 1);
 
         switch (opcode) {
-        case Instructions::local_get.value():
-            configuration.push_to_destination(configuration.local(instruction->local_index()), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_const.value():
-            configuration.push_to_destination(Value(instruction->arguments().unsafe_get<i32>()), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::synthetic_i32_add2local.value():
-            configuration.push_to_destination(Value(static_cast<i32>(Operators::Add {}(configuration.local(instruction->local_index()).to<u32>(), configuration.local(instruction->arguments().get<LocalIndex>()).to<u32>()))), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::synthetic_i32_addconstlocal.value():
-            configuration.push_to_destination(Value(static_cast<i32>(Operators::Add {}(configuration.local(instruction->local_index()).to<u32>(), instruction->arguments().unsafe_get<i32>()))), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::synthetic_i32_andconstlocal.value():
-            configuration.push_to_destination(Value(Operators::BitAnd {}(configuration.local(instruction->local_index()).to<i32>(), instruction->arguments().unsafe_get<i32>())), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::synthetic_i32_storelocal.value():
-            if (store_value(configuration, *instruction, ConvertToRaw<i32> {}(configuration.local(instruction->local_index()).to<i32>()), 0, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::synthetic_i64_storelocal.value():
-            if (store_value(configuration, *instruction, ConvertToRaw<i64> {}(configuration.local(instruction->local_index()).to<i64>()), 0, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::synthetic_local_seti32_const.value():
-            configuration.local(instruction->local_index()) = Value(instruction->arguments().unsafe_get<i32>());
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::synthetic_call_00.value():
-        case Instructions::synthetic_call_01.value():
-        case Instructions::synthetic_call_10.value():
-        case Instructions::synthetic_call_11.value():
-        case Instructions::synthetic_call_20.value():
-        case Instructions::synthetic_call_21.value():
-        case Instructions::synthetic_call_30.value():
-        case Instructions::synthetic_call_31.value(): {
-            auto regs_copy = configuration.regs;
-            auto index = instruction->arguments().get<FunctionIndex>();
-            auto address = configuration.frame().module().functions()[index.value()];
-            dbgln_if(WASM_TRACE_DEBUG, "[{}] call(#{} -> {})", current_ip_value, index.value(), address.value());
-            if (call_address(configuration, address))
-                return;
-            configuration.regs = regs_copy;
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::unreachable.value():
-            m_trap = Trap::from_string("Unreachable");
-            return;
-        case Instructions::nop.value():
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::local_set.value(): {
-            // bounds checked by verifier.
-            configuration.local(instruction->local_index()) = configuration.take_source(0, addresses.sources);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::i64_const.value():
-            configuration.push_to_destination(Value(instruction->arguments().unsafe_get<i64>()), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_const.value():
-            configuration.push_to_destination(Value(instruction->arguments().unsafe_get<float>()), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_const.value():
-            configuration.push_to_destination(Value(instruction->arguments().unsafe_get<double>()), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::block.value(): {
-            size_t arity = 0;
-            size_t param_arity = 0;
-            auto& args = instruction->arguments().unsafe_get<Instruction::StructuredInstructionArgs>();
-            if (args.block_type.kind() != BlockType::Empty) [[unlikely]] {
-                switch (args.block_type.kind()) {
-                case BlockType::Type:
-                    arity = 1;
-                    break;
-                case BlockType::Index: {
-                    auto& type = configuration.frame().module().types()[args.block_type.type_index().value()];
-                    arity = type.results().size();
-                    param_arity = type.parameters().size();
-                    break;
-                }
-                case BlockType::Empty:
-                    VERIFY_NOT_REACHED();
-                }
-            }
-
-            configuration.label_stack().append(Label(arity, args.end_ip, configuration.value_stack().size() - param_arity));
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::loop.value(): {
-            auto& args = instruction->arguments().get<Instruction::StructuredInstructionArgs>();
-            size_t arity = 0;
-            if (args.block_type.kind() == BlockType::Index) {
-                auto& type = configuration.frame().module().types()[args.block_type.type_index().value()];
-                arity = type.parameters().size();
-            }
-            configuration.label_stack().append(Label(arity, current_ip_value + 1, configuration.value_stack().size() - arity));
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::if_.value(): {
-            size_t arity = 0;
-            size_t param_arity = 0;
-            auto& args = instruction->arguments().unsafe_get<Instruction::StructuredInstructionArgs>();
-            switch (args.block_type.kind()) {
-            case BlockType::Empty:
-                break;
-            case BlockType::Type:
-                arity = 1;
-                break;
-            case BlockType::Index: {
-                auto& type = configuration.frame().module().types()[args.block_type.type_index().value()];
-                arity = type.results().size();
-                param_arity = type.parameters().size();
-            }
-            }
-
-            auto value = configuration.take_source(0, addresses.sources).to<i32>();
-            auto end_label = Label(arity, args.end_ip.value(), configuration.value_stack().size() - param_arity);
-            if (value == 0) {
-                if (args.else_ip.has_value()) {
-                    current_ip_value = args.else_ip->value() - 1;
-                    configuration.label_stack().append(end_label);
-                } else {
-                    current_ip_value = args.end_ip.value();
-                }
-            } else {
-                configuration.label_stack().append(end_label);
-            }
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::structured_end.value():
-            configuration.label_stack().take_last();
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::structured_else.value(): {
-            auto label = configuration.label_stack().take_last();
-            // Jump to the end label
-            current_ip_value = label.continuation().value() - 1;
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::return_.value(): {
-            configuration.label_stack().shrink(configuration.frame().label_index() + 1, true);
-            current_ip_value = max_ip_value - 1;
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::br.value():
-            current_ip_value = branch_to_label(configuration, instruction->arguments().get<LabelIndex>()).value();
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::br_if.value(): {
-            // bounds checked by verifier.
-            auto cond = configuration.take_source(0, addresses.sources).to<i32>();
-            if (cond == 0)
-                RUN_NEXT_INSTRUCTION();
-            current_ip_value = branch_to_label(configuration, instruction->arguments().get<LabelIndex>()).value();
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::br_table.value(): {
-            auto& arguments = instruction->arguments().get<Instruction::TableBranchArgs>();
-            auto i = configuration.take_source(0, addresses.sources).to<u32>();
-
-            if (i >= arguments.labels.size()) {
-                current_ip_value = branch_to_label(configuration, arguments.default_).value();
-                RUN_NEXT_INSTRUCTION();
-            }
-            current_ip_value = branch_to_label(configuration, arguments.labels[i]).value();
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::call.value(): {
-            auto index = instruction->arguments().get<FunctionIndex>();
-            auto address = configuration.frame().module().functions()[index.value()];
-            dbgln_if(WASM_TRACE_DEBUG, "call({})", address.value());
-            if (call_address(configuration, address))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::call_indirect.value(): {
-            auto& args = instruction->arguments().get<Instruction::IndirectCallArgs>();
-            auto table_address = configuration.frame().module().tables()[args.table.value()];
-            auto table_instance = configuration.store().get(table_address);
-            // bounds checked by verifier.
-            auto index = configuration.take_source(0, addresses.sources).to<i32>();
-            TRAP_IN_LOOP_IF_NOT(index >= 0);
-            TRAP_IN_LOOP_IF_NOT(static_cast<size_t>(index) < table_instance->elements().size());
-            auto& element = table_instance->elements()[index];
-            TRAP_IN_LOOP_IF_NOT(element.ref().has<Reference::Func>());
-            auto address = element.ref().get<Reference::Func>().address;
-            auto const& type_actual = configuration.store().get(address)->visit([](auto& f) -> decltype(auto) { return f.type(); });
-            auto const& type_expected = configuration.frame().module().types()[args.type.value()];
-            TRAP_IN_LOOP_IF_NOT(type_actual.parameters().size() == type_expected.parameters().size());
-            TRAP_IN_LOOP_IF_NOT(type_actual.results().size() == type_expected.results().size());
-            TRAP_IN_LOOP_IF_NOT(type_actual.parameters() == type_expected.parameters());
-            TRAP_IN_LOOP_IF_NOT(type_actual.results() == type_expected.results());
-
-            dbgln_if(WASM_TRACE_DEBUG, "call_indirect({} -> {})", index, address.value());
-            if (call_address(configuration, address, CallAddressSource::IndirectCall))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::i32_load.value():
-            if (load_and_push<i32, i32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_load.value():
-            if (load_and_push<i64, i64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_load.value():
-            if (load_and_push<float, float>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_load.value():
-            if (load_and_push<double, double>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_load8_s.value():
-            if (load_and_push<i8, i32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_load8_u.value():
-            if (load_and_push<u8, i32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_load16_s.value():
-            if (load_and_push<i16, i32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_load16_u.value():
-            if (load_and_push<u16, i32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_load8_s.value():
-            if (load_and_push<i8, i64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_load8_u.value():
-            if (load_and_push<u8, i64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_load16_s.value():
-            if (load_and_push<i16, i64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_load16_u.value():
-            if (load_and_push<u16, i64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_load32_s.value():
-            if (load_and_push<i32, i64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_load32_u.value():
-            if (load_and_push<u32, i64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_store.value():
-            if (pop_and_store<i32, i32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_store.value():
-            if (pop_and_store<i64, i64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_store.value():
-            if (pop_and_store<float, float>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_store.value():
-            if (pop_and_store<double, double>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_store8.value():
-            if (pop_and_store<i32, i8>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_store16.value():
-            if (pop_and_store<i32, i16>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_store8.value():
-            if (pop_and_store<i64, i8>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_store16.value():
-            if (pop_and_store<i64, i16>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_store32.value():
-            if (pop_and_store<i64, i32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::local_tee.value(): {
-            auto value = configuration.source_value(0, addresses.sources); // bounds checked by verifier.
-            auto local_index = instruction->local_index();
-            dbgln_if(WASM_TRACE_DEBUG, "stack:peek -> locals({})", local_index.value());
-            configuration.frame().locals()[local_index.value()] = value;
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::global_get.value(): {
-            auto global_index = instruction->arguments().get<GlobalIndex>();
-            // This check here is for const expressions. In non-const expressions,
-            // a validation error would have been thrown.
-            TRAP_IN_LOOP_IF_NOT(global_index < configuration.frame().module().globals().size());
-            auto address = configuration.frame().module().globals()[global_index.value()];
-            dbgln_if(WASM_TRACE_DEBUG, "global({}) -> stack", address.value());
-            auto global = configuration.store().get(address);
-            configuration.push_to_destination(global->value(), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::global_set.value(): {
-            auto global_index = instruction->arguments().get<GlobalIndex>();
-            auto address = configuration.frame().module().globals()[global_index.value()];
-            // bounds checked by verifier.
-            auto value = configuration.take_source(0, addresses.sources);
-            dbgln_if(WASM_TRACE_DEBUG, "stack -> global({})", address.value());
-            auto global = configuration.store().get(address);
-            global->set_value(value);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::memory_size.value(): {
-            auto& args = instruction->arguments().get<Instruction::MemoryIndexArgument>();
-            auto address = configuration.frame().module().memories().data()[args.memory_index.value()];
-            auto instance = configuration.store().get(address);
-            auto pages = instance->size() / Constants::page_size;
-            dbgln_if(WASM_TRACE_DEBUG, "memory.size -> stack({})", pages);
-            configuration.push_to_destination(Value(static_cast<i32>(pages)), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::memory_grow.value(): {
-            auto& args = instruction->arguments().get<Instruction::MemoryIndexArgument>();
-            auto address = configuration.frame().module().memories().data()[args.memory_index.value()];
-            auto instance = configuration.store().get(address);
-            i32 old_pages = instance->size() / Constants::page_size;
-            auto& entry = configuration.source_value(0, addresses.sources); // bounds checked by verifier.
-            auto new_pages = entry.to<i32>();
-            dbgln_if(WASM_TRACE_DEBUG, "memory.grow({}), previously {} pages...", new_pages, old_pages);
-            if (instance->grow(new_pages * Constants::page_size))
-                entry = Value(old_pages);
-            else
-                entry = Value(-1);
-            RUN_NEXT_INSTRUCTION();
-        }
-        // https://webassembly.github.io/spec/core/bikeshed/#exec-memory-fill
-        case Instructions::memory_fill.value(): {
-            auto& args = instruction->arguments().get<Instruction::MemoryIndexArgument>();
-            auto address = configuration.frame().module().memories().data()[args.memory_index.value()];
-            auto instance = configuration.store().get(address);
-            // bounds checked by verifier.
-            auto count = configuration.take_source(0, addresses.sources).to<u32>();
-            u8 value = static_cast<u8>(configuration.take_source(1, addresses.sources).to<u32>());
-            auto destination_offset = configuration.take_source(2, addresses.sources).to<u32>();
-
-            Checked<u32> checked_end = destination_offset;
-            checked_end += count;
-            TRAP_IN_LOOP_IF_NOT(!checked_end.has_overflow() && static_cast<size_t>(checked_end.value()) <= instance->data().size());
-
-            if (count == 0)
-                RUN_NEXT_INSTRUCTION();
-
-            Instruction::MemoryArgument memarg { 0, 0, args.memory_index };
-            for (u32 i = 0; i < count; ++i) {
-                if (store_to_memory(configuration, memarg, { &value, sizeof(value) }, destination_offset + i))
-                    return;
-            }
-
-            RUN_NEXT_INSTRUCTION();
-        }
-        // https://webassembly.github.io/spec/core/bikeshed/#exec-memory-copy
-        case Instructions::memory_copy.value(): {
-            auto& args = instruction->arguments().get<Instruction::MemoryCopyArgs>();
-            auto source_address = configuration.frame().module().memories().data()[args.src_index.value()];
-            auto destination_address = configuration.frame().module().memories().data()[args.dst_index.value()];
-            auto source_instance = configuration.store().get(source_address);
-            auto destination_instance = configuration.store().get(destination_address);
-
-            // bounds checked by verifier.
-            auto count = configuration.take_source(0, addresses.sources).to<i32>();
-            auto source_offset = configuration.take_source(1, addresses.sources).to<i32>();
-            auto destination_offset = configuration.take_source(2, addresses.sources).to<i32>();
-
-            Checked<size_t> source_position = source_offset;
-            source_position.saturating_add(count);
-            Checked<size_t> destination_position = destination_offset;
-            destination_position.saturating_add(count);
-            TRAP_IN_LOOP_IF_NOT(source_position <= source_instance->data().size());
-            TRAP_IN_LOOP_IF_NOT(destination_position <= destination_instance->data().size());
-
-            if (count == 0)
-                RUN_NEXT_INSTRUCTION();
-
-            Instruction::MemoryArgument memarg { 0, 0, args.dst_index };
-            if (destination_offset <= source_offset) {
-                for (auto i = 0; i < count; ++i) {
-                    auto value = source_instance->data()[source_offset + i];
-                    if (store_to_memory(configuration, memarg, { &value, sizeof(value) }, destination_offset + i))
-                        return;
-                }
-            } else {
-                for (auto i = count - 1; i >= 0; --i) {
-                    auto value = source_instance->data()[source_offset + i];
-                    if (store_to_memory(configuration, memarg, { &value, sizeof(value) }, destination_offset + i))
-                        return;
-                }
-            }
-
-            RUN_NEXT_INSTRUCTION();
-        }
-        // https://webassembly.github.io/spec/core/bikeshed/#exec-memory-init
-        case Instructions::memory_init.value(): {
-            auto& args = instruction->arguments().get<Instruction::MemoryInitArgs>();
-            auto& data_address = configuration.frame().module().datas()[args.data_index.value()];
-            auto& data = *configuration.store().get(data_address);
-            auto memory_address = configuration.frame().module().memories().data()[args.memory_index.value()];
-            auto memory = configuration.store().unsafe_get(memory_address);
-            // bounds checked by verifier.
-            auto count = configuration.take_source(0, addresses.sources).to<u32>();
-            auto source_offset = configuration.take_source(1, addresses.sources).to<u32>();
-            auto destination_offset = configuration.take_source(2, addresses.sources).to<u32>();
-
-            Checked<size_t> source_position = source_offset;
-            source_position.saturating_add(count);
-            Checked<size_t> destination_position = destination_offset;
-            destination_position.saturating_add(count);
-            TRAP_IN_LOOP_IF_NOT(source_position <= data.data().size());
-            TRAP_IN_LOOP_IF_NOT(destination_position <= memory->data().size());
-
-            if (count == 0)
-                RUN_NEXT_INSTRUCTION();
-
-            Instruction::MemoryArgument memarg { 0, 0, args.memory_index };
-            for (size_t i = 0; i < (size_t)count; ++i) {
-                auto value = data.data()[source_offset + i];
-                if (store_to_memory(configuration, memarg, { &value, sizeof(value) }, destination_offset + i))
-                    return;
-            }
-            RUN_NEXT_INSTRUCTION();
-        }
-        // https://webassembly.github.io/spec/core/bikeshed/#exec-data-drop
-        case Instructions::data_drop.value(): {
-            auto data_index = instruction->arguments().get<DataIndex>();
-            auto data_address = configuration.frame().module().datas()[data_index.value()];
-            *configuration.store().get(data_address) = DataInstance({});
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::elem_drop.value(): {
-            auto elem_index = instruction->arguments().get<ElementIndex>();
-            auto address = configuration.frame().module().elements()[elem_index.value()];
-            auto elem = configuration.store().get(address);
-            *configuration.store().get(address) = ElementInstance(elem->type(), {});
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::table_init.value(): {
-            auto& args = instruction->arguments().get<Instruction::TableElementArgs>();
-            auto table_address = configuration.frame().module().tables()[args.table_index.value()];
-            auto table = configuration.store().get(table_address);
-            auto element_address = configuration.frame().module().elements()[args.element_index.value()];
-            auto element = configuration.store().get(element_address);
-            // bounds checked by verifier.
-            auto count = configuration.take_source(0, addresses.sources).to<u32>();
-            auto source_offset = configuration.take_source(1, addresses.sources).to<u32>();
-            auto destination_offset = configuration.take_source(2, addresses.sources).to<u32>();
-
-            Checked<u32> checked_source_offset = source_offset;
-            Checked<u32> checked_destination_offset = destination_offset;
-            checked_source_offset += count;
-            checked_destination_offset += count;
-            TRAP_IN_LOOP_IF_NOT(!checked_source_offset.has_overflow() && checked_source_offset <= (u32)element->references().size());
-            TRAP_IN_LOOP_IF_NOT(!checked_destination_offset.has_overflow() && checked_destination_offset <= (u32)table->elements().size());
-
-            for (u32 i = 0; i < count; ++i)
-                table->elements()[destination_offset + i] = element->references()[source_offset + i];
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::table_copy.value(): {
-            auto& args = instruction->arguments().get<Instruction::TableTableArgs>();
-            auto source_address = configuration.frame().module().tables()[args.rhs.value()];
-            auto destination_address = configuration.frame().module().tables()[args.lhs.value()];
-            auto source_instance = configuration.store().get(source_address);
-            auto destination_instance = configuration.store().get(destination_address);
-
-            // bounds checked by verifier.
-            auto count = configuration.take_source(0, addresses.sources).to<u32>();
-            auto source_offset = configuration.take_source(1, addresses.sources).to<u32>();
-            auto destination_offset = configuration.take_source(2, addresses.sources).to<u32>();
-
-            Checked<size_t> source_position = source_offset;
-            source_position.saturating_add(count);
-            Checked<size_t> destination_position = destination_offset;
-            destination_position.saturating_add(count);
-            TRAP_IN_LOOP_IF_NOT(source_position <= source_instance->elements().size());
-            TRAP_IN_LOOP_IF_NOT(destination_position <= destination_instance->elements().size());
-
-            if (count == 0)
-                RUN_NEXT_INSTRUCTION();
-
-            if (destination_offset <= source_offset) {
-                for (u32 i = 0; i < count; ++i) {
-                    auto value = source_instance->elements()[source_offset + i];
-                    destination_instance->elements()[destination_offset + i] = value;
-                }
-            } else {
-                for (u32 i = count - 1; i != NumericLimits<u32>::max(); --i) {
-                    auto value = source_instance->elements()[source_offset + i];
-                    destination_instance->elements()[destination_offset + i] = value;
-                }
-            }
-
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::table_fill.value(): {
-            auto table_index = instruction->arguments().get<TableIndex>();
-            auto address = configuration.frame().module().tables()[table_index.value()];
-            auto table = configuration.store().get(address);
-            // bounds checked by verifier.
-            auto count = configuration.take_source(0, addresses.sources).to<u32>();
-            auto value = configuration.take_source(1, addresses.sources);
-            auto start = configuration.take_source(2, addresses.sources).to<u32>();
-
-            Checked<u32> checked_offset = start;
-            checked_offset += count;
-            TRAP_IN_LOOP_IF_NOT(!checked_offset.has_overflow() && checked_offset <= (u32)table->elements().size());
-
-            for (u32 i = 0; i < count; ++i)
-                table->elements()[start + i] = value.to<Reference>();
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::table_set.value(): {
-            // bounds checked by verifier.
-            auto ref = configuration.take_source(0, addresses.sources);
-            auto index = (size_t)(configuration.take_source(1, addresses.sources).to<i32>());
-            auto table_index = instruction->arguments().get<TableIndex>();
-            auto address = configuration.frame().module().tables()[table_index.value()];
-            auto table = configuration.store().get(address);
-            TRAP_IN_LOOP_IF_NOT(index < table->elements().size());
-            table->elements()[index] = ref.to<Reference>();
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::table_get.value(): {
-            // bounds checked by verifier.
-            auto& index_value = configuration.source_value(0, addresses.sources);
-            auto index = static_cast<size_t>(index_value.to<i32>());
-            auto table_index = instruction->arguments().get<TableIndex>();
-            auto address = configuration.frame().module().tables()[table_index.value()];
-            auto table = configuration.store().get(address);
-            TRAP_IN_LOOP_IF_NOT(index < table->elements().size());
-            index_value = Value(table->elements()[index]);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::table_grow.value(): {
-            // bounds checked by verifier.
-            auto size = configuration.take_source(0, addresses.sources).to<u32>();
-            auto fill_value = configuration.take_source(1, addresses.sources);
-            auto table_index = instruction->arguments().get<TableIndex>();
-            auto address = configuration.frame().module().tables()[table_index.value()];
-            auto table = configuration.store().get(address);
-            auto previous_size = table->elements().size();
-            auto did_grow = table->grow(size, fill_value.to<Reference>());
-            if (!did_grow) {
-                configuration.push_to_destination(Value(-1), addresses.destination);
-            } else {
-                configuration.push_to_destination(Value(static_cast<i32>(previous_size)), addresses.destination);
-            }
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::table_size.value(): {
-            auto table_index = instruction->arguments().get<TableIndex>();
-            auto address = configuration.frame().module().tables()[table_index.value()];
-            auto table = configuration.store().get(address);
-            configuration.push_to_destination(Value(static_cast<i32>(table->elements().size())), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::ref_null.value(): {
-            auto type = instruction->arguments().get<ValueType>();
-            configuration.push_to_destination(Value(Reference(Reference::Null { type })), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        };
-        case Instructions::ref_func.value(): {
-            auto index = instruction->arguments().get<FunctionIndex>().value();
-            auto& functions = configuration.frame().module().functions();
-            auto address = functions[index];
-            configuration.push_to_destination(Value(Reference { Reference::Func { address, configuration.store().get_module_for(address) } }), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::ref_is_null.value(): {
-            // bounds checked by verifier.
-            auto ref = configuration.take_source(0, addresses.sources);
-            configuration.push_to_destination(Value(static_cast<i32>(ref.to<Reference>().ref().has<Reference::Null>() ? 1 : 0)), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::drop.value():
-            // bounds checked by verifier.
-            configuration.take_source(0, addresses.sources);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::select.value():
-        case Instructions::select_typed.value(): {
-            // Note: The type seems to only be used for validation.
-            auto value = configuration.take_source(0, addresses.sources).to<i32>(); // bounds checked by verifier.
-            dbgln_if(WASM_TRACE_DEBUG, "select({})", value);
-            auto rhs = configuration.take_source(1, addresses.sources);
-            auto& lhs = configuration.source_value(2, addresses.sources); // bounds checked by verifier.
-            lhs = value != 0 ? lhs : rhs;
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::i32_eqz.value():
-            if (unary_operation<i32, i32, Operators::EqualsZero>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_eq.value():
-            if (binary_numeric_operation<i32, i32, Operators::Equals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_ne.value():
-            if (binary_numeric_operation<i32, i32, Operators::NotEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_lts.value():
-            if (binary_numeric_operation<i32, i32, Operators::LessThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_ltu.value():
-            if (binary_numeric_operation<u32, i32, Operators::LessThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_gts.value():
-            if (binary_numeric_operation<i32, i32, Operators::GreaterThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_gtu.value():
-            if (binary_numeric_operation<u32, i32, Operators::GreaterThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_les.value():
-            if (binary_numeric_operation<i32, i32, Operators::LessThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_leu.value():
-            if (binary_numeric_operation<u32, i32, Operators::LessThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_ges.value():
-            if (binary_numeric_operation<i32, i32, Operators::GreaterThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_geu.value():
-            if (binary_numeric_operation<u32, i32, Operators::GreaterThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_eqz.value():
-            if (unary_operation<i64, i32, Operators::EqualsZero>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_eq.value():
-            if (binary_numeric_operation<i64, i32, Operators::Equals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_ne.value():
-            if (binary_numeric_operation<i64, i32, Operators::NotEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_lts.value():
-            if (binary_numeric_operation<i64, i32, Operators::LessThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_ltu.value():
-            if (binary_numeric_operation<u64, i32, Operators::LessThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_gts.value():
-            if (binary_numeric_operation<i64, i32, Operators::GreaterThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_gtu.value():
-            if (binary_numeric_operation<u64, i32, Operators::GreaterThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_les.value():
-            if (binary_numeric_operation<i64, i32, Operators::LessThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_leu.value():
-            if (binary_numeric_operation<u64, i32, Operators::LessThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_ges.value():
-            if (binary_numeric_operation<i64, i32, Operators::GreaterThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_geu.value():
-            if (binary_numeric_operation<u64, i32, Operators::GreaterThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_eq.value():
-            if (binary_numeric_operation<float, i32, Operators::Equals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_ne.value():
-            if (binary_numeric_operation<float, i32, Operators::NotEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_lt.value():
-            if (binary_numeric_operation<float, i32, Operators::LessThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_gt.value():
-            if (binary_numeric_operation<float, i32, Operators::GreaterThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_le.value():
-            if (binary_numeric_operation<float, i32, Operators::LessThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_ge.value():
-            if (binary_numeric_operation<float, i32, Operators::GreaterThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_eq.value():
-            if (binary_numeric_operation<double, i32, Operators::Equals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_ne.value():
-            if (binary_numeric_operation<double, i32, Operators::NotEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_lt.value():
-            if (binary_numeric_operation<double, i32, Operators::LessThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_gt.value():
-            if (binary_numeric_operation<double, i32, Operators::GreaterThan>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_le.value():
-            if (binary_numeric_operation<double, i32, Operators::LessThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_ge.value():
-            if (binary_numeric_operation<double, i32, Operators::GreaterThanOrEquals>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_clz.value():
-            if (unary_operation<i32, i32, Operators::CountLeadingZeros>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_ctz.value():
-            if (unary_operation<i32, i32, Operators::CountTrailingZeros>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_popcnt.value():
-            if (unary_operation<i32, i32, Operators::PopCount>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_add.value():
-            if (binary_numeric_operation<u32, i32, Operators::Add>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_sub.value():
-            if (binary_numeric_operation<u32, i32, Operators::Subtract>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_mul.value():
-            if (binary_numeric_operation<u32, i32, Operators::Multiply>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_divs.value():
-            if (binary_numeric_operation<i32, i32, Operators::Divide>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_divu.value():
-            if (binary_numeric_operation<u32, i32, Operators::Divide>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_rems.value():
-            if (binary_numeric_operation<i32, i32, Operators::Modulo>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_remu.value():
-            if (binary_numeric_operation<u32, i32, Operators::Modulo>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_and.value():
-            if (binary_numeric_operation<i32, i32, Operators::BitAnd>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_or.value():
-            if (binary_numeric_operation<i32, i32, Operators::BitOr>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_xor.value():
-            if (binary_numeric_operation<i32, i32, Operators::BitXor>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_shl.value():
-            if (binary_numeric_operation<u32, i32, Operators::BitShiftLeft>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_shrs.value():
-            if (binary_numeric_operation<i32, i32, Operators::BitShiftRight>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_shru.value():
-            if (binary_numeric_operation<u32, i32, Operators::BitShiftRight>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_rotl.value():
-            if (binary_numeric_operation<u32, i32, Operators::BitRotateLeft>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_rotr.value():
-            if (binary_numeric_operation<u32, i32, Operators::BitRotateRight>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_clz.value():
-            if (unary_operation<i64, i64, Operators::CountLeadingZeros>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_ctz.value():
-            if (unary_operation<i64, i64, Operators::CountTrailingZeros>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_popcnt.value():
-            if (unary_operation<i64, i64, Operators::PopCount>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_add.value():
-            if (binary_numeric_operation<u64, i64, Operators::Add>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_sub.value():
-            if (binary_numeric_operation<u64, i64, Operators::Subtract>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_mul.value():
-            if (binary_numeric_operation<u64, i64, Operators::Multiply>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_divs.value():
-            if (binary_numeric_operation<i64, i64, Operators::Divide>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_divu.value():
-            if (binary_numeric_operation<u64, i64, Operators::Divide>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_rems.value():
-            if (binary_numeric_operation<i64, i64, Operators::Modulo>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_remu.value():
-            if (binary_numeric_operation<u64, i64, Operators::Modulo>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_and.value():
-            if (binary_numeric_operation<i64, i64, Operators::BitAnd>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_or.value():
-            if (binary_numeric_operation<i64, i64, Operators::BitOr>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_xor.value():
-            if (binary_numeric_operation<i64, i64, Operators::BitXor>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_shl.value():
-            if (binary_numeric_operation<u64, i64, Operators::BitShiftLeft>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_shrs.value():
-            if (binary_numeric_operation<i64, i64, Operators::BitShiftRight>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_shru.value():
-            if (binary_numeric_operation<u64, i64, Operators::BitShiftRight>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_rotl.value():
-            if (binary_numeric_operation<u64, i64, Operators::BitRotateLeft>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_rotr.value():
-            if (binary_numeric_operation<u64, i64, Operators::BitRotateRight>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_abs.value():
-            if (unary_operation<float, float, Operators::Absolute>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_neg.value():
-            if (unary_operation<float, float, Operators::Negate>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_ceil.value():
-            if (unary_operation<float, float, Operators::Ceil>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_floor.value():
-            if (unary_operation<float, float, Operators::Floor>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_trunc.value():
-            if (unary_operation<float, float, Operators::Truncate>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_nearest.value():
-            if (unary_operation<float, float, Operators::NearbyIntegral>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_sqrt.value():
-            if (unary_operation<float, float, Operators::SquareRoot>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_add.value():
-            if (binary_numeric_operation<float, float, Operators::Add>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_sub.value():
-            if (binary_numeric_operation<float, float, Operators::Subtract>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_mul.value():
-            if (binary_numeric_operation<float, float, Operators::Multiply>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_div.value():
-            if (binary_numeric_operation<float, float, Operators::Divide>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_min.value():
-            if (binary_numeric_operation<float, float, Operators::Minimum>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_max.value():
-            if (binary_numeric_operation<float, float, Operators::Maximum>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_copysign.value():
-            if (binary_numeric_operation<float, float, Operators::CopySign>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_abs.value():
-            if (unary_operation<double, double, Operators::Absolute>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_neg.value():
-            if (unary_operation<double, double, Operators::Negate>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_ceil.value():
-            if (unary_operation<double, double, Operators::Ceil>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_floor.value():
-            if (unary_operation<double, double, Operators::Floor>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_trunc.value():
-            if (unary_operation<double, double, Operators::Truncate>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_nearest.value():
-            if (unary_operation<double, double, Operators::NearbyIntegral>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_sqrt.value():
-            if (unary_operation<double, double, Operators::SquareRoot>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_add.value():
-            if (binary_numeric_operation<double, double, Operators::Add>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_sub.value():
-            if (binary_numeric_operation<double, double, Operators::Subtract>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_mul.value():
-            if (binary_numeric_operation<double, double, Operators::Multiply>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_div.value():
-            if (binary_numeric_operation<double, double, Operators::Divide>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_min.value():
-            if (binary_numeric_operation<double, double, Operators::Minimum>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_max.value():
-            if (binary_numeric_operation<double, double, Operators::Maximum>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_copysign.value():
-            if (binary_numeric_operation<double, double, Operators::CopySign>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_wrap_i64.value():
-            if (unary_operation<i64, i32, Operators::Wrap<i32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_trunc_sf32.value():
-            if (unary_operation<float, i32, Operators::CheckedTruncate<i32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_trunc_uf32.value():
-            if (unary_operation<float, i32, Operators::CheckedTruncate<u32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_trunc_sf64.value():
-            if (unary_operation<double, i32, Operators::CheckedTruncate<i32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_trunc_uf64.value():
-            if (unary_operation<double, i32, Operators::CheckedTruncate<u32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_trunc_sf32.value():
-            if (unary_operation<float, i64, Operators::CheckedTruncate<i64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_trunc_uf32.value():
-            if (unary_operation<float, i64, Operators::CheckedTruncate<u64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_trunc_sf64.value():
-            if (unary_operation<double, i64, Operators::CheckedTruncate<i64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_trunc_uf64.value():
-            if (unary_operation<double, i64, Operators::CheckedTruncate<u64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_extend_si32.value():
-            if (unary_operation<i32, i64, Operators::Extend<i64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_extend_ui32.value():
-            if (unary_operation<u32, i64, Operators::Extend<i64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_convert_si32.value():
-            if (unary_operation<i32, float, Operators::Convert<float>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_convert_ui32.value():
-            if (unary_operation<u32, float, Operators::Convert<float>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_convert_si64.value():
-            if (unary_operation<i64, float, Operators::Convert<float>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_convert_ui64.value():
-            if (unary_operation<u64, float, Operators::Convert<float>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_demote_f64.value():
-            if (unary_operation<double, float, Operators::Demote>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_convert_si32.value():
-            if (unary_operation<i32, double, Operators::Convert<double>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_convert_ui32.value():
-            if (unary_operation<u32, double, Operators::Convert<double>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_convert_si64.value():
-            if (unary_operation<i64, double, Operators::Convert<double>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_convert_ui64.value():
-            if (unary_operation<u64, double, Operators::Convert<double>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_promote_f32.value():
-            if (unary_operation<float, double, Operators::Promote>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_reinterpret_f32.value():
-            if (unary_operation<float, i32, Operators::Reinterpret<i32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_reinterpret_f64.value():
-            if (unary_operation<double, i64, Operators::Reinterpret<i64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32_reinterpret_i32.value():
-            if (unary_operation<i32, float, Operators::Reinterpret<float>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64_reinterpret_i64.value():
-            if (unary_operation<i64, double, Operators::Reinterpret<double>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_extend8_s.value():
-            if (unary_operation<i32, i32, Operators::SignExtend<i8>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_extend16_s.value():
-            if (unary_operation<i32, i32, Operators::SignExtend<i16>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_extend8_s.value():
-            if (unary_operation<i64, i64, Operators::SignExtend<i8>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_extend16_s.value():
-            if (unary_operation<i64, i64, Operators::SignExtend<i16>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_extend32_s.value():
-            if (unary_operation<i64, i64, Operators::SignExtend<i32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_trunc_sat_f32_s.value():
-            if (unary_operation<float, i32, Operators::SaturatingTruncate<i32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_trunc_sat_f32_u.value():
-            if (unary_operation<float, i32, Operators::SaturatingTruncate<u32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_trunc_sat_f64_s.value():
-            if (unary_operation<double, i32, Operators::SaturatingTruncate<i32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32_trunc_sat_f64_u.value():
-            if (unary_operation<double, i32, Operators::SaturatingTruncate<u32>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_trunc_sat_f32_s.value():
-            if (unary_operation<float, i64, Operators::SaturatingTruncate<i64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_trunc_sat_f32_u.value():
-            if (unary_operation<float, i64, Operators::SaturatingTruncate<u64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_trunc_sat_f64_s.value():
-            if (unary_operation<double, i64, Operators::SaturatingTruncate<i64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64_trunc_sat_f64_u.value():
-            if (unary_operation<double, i64, Operators::SaturatingTruncate<u64>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_const.value():
-            configuration.push_to_destination(Value(instruction->arguments().get<u128>()), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load.value():
-            if (load_and_push<u128, u128>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load8x8_s.value():
-            if (load_and_push_mxn<8, 8, MakeSigned>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load8x8_u.value():
-            if (load_and_push_mxn<8, 8, MakeUnsigned>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load16x4_s.value():
-            if (load_and_push_mxn<16, 4, MakeSigned>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load16x4_u.value():
-            if (load_and_push_mxn<16, 4, MakeUnsigned>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load32x2_s.value():
-            if (load_and_push_mxn<32, 2, MakeSigned>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load32x2_u.value():
-            if (load_and_push_mxn<32, 2, MakeUnsigned>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load8_splat.value():
-            if (load_and_push_m_splat<8>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load16_splat.value():
-            if (load_and_push_m_splat<16>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load32_splat.value():
-            if (load_and_push_m_splat<32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load64_splat.value():
-            if (load_and_push_m_splat<64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_splat.value():
-            pop_and_push_m_splat<8, NativeIntegralType>(configuration, *instruction, addresses);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_splat.value():
-            pop_and_push_m_splat<16, NativeIntegralType>(configuration, *instruction, addresses);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_splat.value():
-            pop_and_push_m_splat<32, NativeIntegralType>(configuration, *instruction, addresses);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_splat.value():
-            pop_and_push_m_splat<64, NativeIntegralType>(configuration, *instruction, addresses);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_splat.value():
-            pop_and_push_m_splat<32, NativeFloatingType>(configuration, *instruction, addresses);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_splat.value():
-            pop_and_push_m_splat<64, NativeFloatingType>(configuration, *instruction, addresses);
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_shuffle.value(): {
-            auto& arg = instruction->arguments().get<Instruction::ShuffleArgument>();
-            auto b = pop_vector<u8, MakeUnsigned>(configuration, 0, addresses);
-            auto a = pop_vector<u8, MakeUnsigned>(configuration, 1, addresses);
-            using VectorType = Native128ByteVectorOf<u8, MakeUnsigned>;
-            VectorType result;
-            for (size_t i = 0; i < 16; ++i)
-                if (arg.lanes[i] < 16)
-                    result[i] = a[arg.lanes[i]];
-                else
-                    result[i] = b[arg.lanes[i] - 16];
-            configuration.push_to_destination(Value(bit_cast<u128>(result)), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::v128_store.value():
-            if (pop_and_store<u128, u128>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_shl.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftLeft<16>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_shr_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftRight<16, MakeUnsigned>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_shr_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftRight<16, MakeSigned>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_shl.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftLeft<8>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_shr_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftRight<8, MakeUnsigned>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_shr_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftRight<8, MakeSigned>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_shl.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftLeft<4>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_shr_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftRight<4, MakeUnsigned>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_shr_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftRight<4, MakeSigned>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_shl.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftLeft<2>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_shr_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftRight<2, MakeUnsigned>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_shr_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorShiftRight<2, MakeSigned>, i32>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_swizzle.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorSwizzle>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_extract_lane_s.value():
-            if (unary_operation<u128, i8, Operators::VectorExtractLane<16, MakeSigned>>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_extract_lane_u.value():
-            if (unary_operation<u128, u8, Operators::VectorExtractLane<16, MakeUnsigned>>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extract_lane_s.value():
-            if (unary_operation<u128, i16, Operators::VectorExtractLane<8, MakeSigned>>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extract_lane_u.value():
-            if (unary_operation<u128, u16, Operators::VectorExtractLane<8, MakeUnsigned>>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extract_lane.value():
-            if (unary_operation<u128, i32, Operators::VectorExtractLane<4, MakeSigned>>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_extract_lane.value():
-            if (unary_operation<u128, i64, Operators::VectorExtractLane<2, MakeSigned>>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_extract_lane.value():
-            if (unary_operation<u128, float, Operators::VectorExtractLaneFloat<4>>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_extract_lane.value():
-            if (unary_operation<u128, double, Operators::VectorExtractLaneFloat<2>>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_replace_lane.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<16, i32>, i32>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_replace_lane.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<8, i32>, i32>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_replace_lane.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<4>, i32>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_replace_lane.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<2>, i64>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_replace_lane.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<4, float>, float>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_replace_lane.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<2, double>, double>(configuration, addresses, instruction->arguments().get<Instruction::LaneIndex>().lane))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_eq.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::Equals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_ne.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::NotEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_lt_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThan, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_lt_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThan, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_gt_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThan, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_gt_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThan, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_le_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThanOrEquals, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_le_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThanOrEquals, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_ge_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThanOrEquals, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_ge_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThanOrEquals, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_abs.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<16, Operators::Absolute>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_neg.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<16, Operators::Negate>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_all_true.value():
-            if (unary_operation<u128, i32, Operators::VectorAllTrue<16>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_popcnt.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<16, Operators::PopCount>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_add.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Add>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_sub.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Subtract>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_avgr_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Average, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_add_sat_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::SaturatingOp<i8, Operators::Add>, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_add_sat_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::SaturatingOp<u8, Operators::Add>, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_sub_sat_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::SaturatingOp<i8, Operators::Subtract>, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_sub_sat_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::SaturatingOp<u8, Operators::Subtract>, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_min_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Minimum, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_min_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Minimum, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_max_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Maximum, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_max_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<16, Operators::Maximum, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_eq.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::Equals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_ne.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::NotEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_lt_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThan, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_lt_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThan, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_gt_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThan, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_gt_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThan, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_le_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThanOrEquals, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_le_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThanOrEquals, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_ge_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThanOrEquals, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_ge_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThanOrEquals, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_abs.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<8, Operators::Absolute>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_neg.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<8, Operators::Negate>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_all_true.value():
-            if (unary_operation<u128, i32, Operators::VectorAllTrue<8>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_add.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Add>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_sub.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Subtract>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_mul.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Multiply>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_avgr_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Average, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_add_sat_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<i16, Operators::Add>, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_add_sat_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<u16, Operators::Add>, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_sub_sat_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<i16, Operators::Subtract>, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_sub_sat_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<u16, Operators::Subtract>, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_min_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Minimum, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_min_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Minimum, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_max_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Maximum, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_max_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::Maximum, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extend_low_i8x16_s.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<8, Operators::VectorExt::Low, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extend_high_i8x16_s.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<8, Operators::VectorExt::High, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extend_low_i8x16_u.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<8, Operators::VectorExt::Low, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extend_high_i8x16_u.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<8, Operators::VectorExt::High, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extadd_pairwise_i8x16_s.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExtOpPairwise<8, Operators::Add, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extadd_pairwise_i8x16_u.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExtOpPairwise<8, Operators::Add, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extmul_low_i8x16_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<8, Operators::Multiply, Operators::VectorExt::Low, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extmul_high_i8x16_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<8, Operators::Multiply, Operators::VectorExt::High, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extmul_low_i8x16_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<8, Operators::Multiply, Operators::VectorExt::Low, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_extmul_high_i8x16_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<8, Operators::Multiply, Operators::VectorExt::High, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_eq.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::Equals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_ne.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::NotEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_lt_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThan, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_lt_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThan, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_gt_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThan, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_gt_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThan, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_le_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThanOrEquals, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_le_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThanOrEquals, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_ge_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThanOrEquals, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_ge_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThanOrEquals, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_abs.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<4, Operators::Absolute>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_neg.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<4, Operators::Negate, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_all_true.value():
-            if (unary_operation<u128, i32, Operators::VectorAllTrue<4>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_add.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Add, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_sub.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Subtract, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_mul.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Multiply, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_min_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Minimum, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_min_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Minimum, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_max_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Maximum, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_max_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<4, Operators::Maximum, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extend_low_i16x8_s.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<4, Operators::VectorExt::Low, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extend_high_i16x8_s.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<4, Operators::VectorExt::High, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extend_low_i16x8_u.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<4, Operators::VectorExt::Low, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extend_high_i16x8_u.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<4, Operators::VectorExt::High, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extadd_pairwise_i16x8_s.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExtOpPairwise<4, Operators::Add, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extadd_pairwise_i16x8_u.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExtOpPairwise<4, Operators::Add, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extmul_low_i16x8_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<4, Operators::Multiply, Operators::VectorExt::Low, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extmul_high_i16x8_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<4, Operators::Multiply, Operators::VectorExt::High, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extmul_low_i16x8_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<4, Operators::Multiply, Operators::VectorExt::Low, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_extmul_high_i16x8_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<4, Operators::Multiply, Operators::VectorExt::High, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_eq.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::Equals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_ne.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::NotEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_lt_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::LessThan, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_gt_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::GreaterThan, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_le_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::LessThanOrEquals, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_ge_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorCmpOp<2, Operators::GreaterThanOrEquals, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_abs.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<2, Operators::Absolute>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_neg.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerUnaryOp<2, Operators::Negate, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_all_true.value():
-            if (unary_operation<u128, i32, Operators::VectorAllTrue<2>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_add.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<2, Operators::Add, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_sub.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<2, Operators::Subtract, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_mul.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<2, Operators::Multiply, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_extend_low_i32x4_s.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<2, Operators::VectorExt::Low, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_extend_high_i32x4_s.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<2, Operators::VectorExt::High, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_extend_low_i32x4_u.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<2, Operators::VectorExt::Low, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_extend_high_i32x4_u.value():
-            if (unary_operation<u128, u128, Operators::VectorIntegerExt<2, Operators::VectorExt::High, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_extmul_low_i32x4_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<2, Operators::Multiply, Operators::VectorExt::Low, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_extmul_high_i32x4_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<2, Operators::Multiply, Operators::VectorExt::High, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_extmul_low_i32x4_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<2, Operators::Multiply, Operators::VectorExt::Low, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_extmul_high_i32x4_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerExtOp<2, Operators::Multiply, Operators::VectorExt::High, MakeUnsigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_eq.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::Equals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_ne.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::NotEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_lt.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::LessThan>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_gt.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::GreaterThan>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_le.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::LessThanOrEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_ge.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::GreaterThanOrEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_min.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Minimum>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_max.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Maximum>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_eq.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::Equals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_ne.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::NotEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_lt.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::LessThan>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_gt.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::GreaterThan>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_le.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::LessThanOrEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_ge.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::GreaterThanOrEquals>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_min.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Minimum>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_max.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Maximum>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_div.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Divide>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_mul.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Multiply>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_sub.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Subtract>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_add.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Add>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_pmin.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::PseudoMinimum>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_pmax.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::PseudoMaximum>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_div.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Divide>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_mul.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Multiply>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_sub.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Subtract>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_add.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Add>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_pmin.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::PseudoMinimum>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_pmax.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::PseudoMaximum>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_ceil.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Ceil>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_floor.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Floor>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_trunc.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Truncate>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_nearest.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::NearbyIntegral>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_sqrt.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::SquareRoot>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_neg.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Negate>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_abs.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Absolute>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_ceil.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Ceil>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_floor.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Floor>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_trunc.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Truncate>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_nearest.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::NearbyIntegral>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_sqrt.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::SquareRoot>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_neg.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Negate>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_abs.value():
-            if (unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Absolute>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_and.value():
-            if (binary_numeric_operation<u128, u128, Operators::BitAnd>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_or.value():
-            if (binary_numeric_operation<u128, u128, Operators::BitOr>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_xor.value():
-            if (binary_numeric_operation<u128, u128, Operators::BitXor>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_not.value():
-            if (unary_operation<u128, u128, Operators::BitNot>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_andnot.value():
-            if (binary_numeric_operation<u128, u128, Operators::BitAndNot>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_bitselect.value(): {
-            // bounds checked by verifier.
-            auto mask = configuration.take_source(0, addresses.sources).to<u128>();
-            auto false_vector = configuration.take_source(1, addresses.sources).to<u128>();
-            auto true_vector = configuration.take_source(2, addresses.sources).to<u128>();
-            u128 result = (true_vector & mask) | (false_vector & ~mask);
-            configuration.push_to_destination(Value(result), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::v128_any_true.value(): {
-            auto vector = configuration.take_source(0, addresses.sources).to<u128>(); // bounds checked by verifier.
-            configuration.push_to_destination(Value(static_cast<i32>(vector != 0)), addresses.destination);
-            RUN_NEXT_INSTRUCTION();
-        }
-        case Instructions::v128_load8_lane.value():
-            if (load_and_push_lane_n<8>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load16_lane.value():
-            if (load_and_push_lane_n<16>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load32_lane.value():
-            if (load_and_push_lane_n<32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load64_lane.value():
-            if (load_and_push_lane_n<64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load32_zero.value():
-            if (load_and_push_zero_n<32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_load64_zero.value():
-            if (load_and_push_zero_n<64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_store8_lane.value():
-            if (pop_and_store_lane_n<8>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_store16_lane.value():
-            if (pop_and_store_lane_n<16>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_store32_lane.value():
-            if (pop_and_store_lane_n<32>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::v128_store64_lane.value():
-            if (pop_and_store_lane_n<64>(configuration, *instruction, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_trunc_sat_f32x4_s.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<4, 4, u32, f32, Operators::SaturatingTruncate<i32>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_trunc_sat_f32x4_u.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<4, 4, u32, f32, Operators::SaturatingTruncate<u32>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_bitmask.value():
-            if (unary_operation<u128, i32, Operators::VectorBitmask<16>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_bitmask.value():
-            if (unary_operation<u128, i32, Operators::VectorBitmask<8>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_bitmask.value():
-            if (unary_operation<u128, i32, Operators::VectorBitmask<4>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i64x2_bitmask.value():
-            if (unary_operation<u128, i32, Operators::VectorBitmask<2>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_dot_i16x8_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorDotProduct<4>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_narrow_i16x8_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorNarrow<16, i8>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i8x16_narrow_i16x8_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorNarrow<16, u8>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_narrow_i32x4_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorNarrow<8, i16>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_narrow_i32x4_u.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorNarrow<8, u16>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i16x8_q15mulr_sat_s.value():
-            if (binary_numeric_operation<u128, u128, Operators::VectorIntegerBinaryOp<8, Operators::SaturatingOp<i16, Operators::Q15Mul>, MakeSigned>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_convert_i32x4_s.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<4, 4, u32, i32, Operators::Convert<f32>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_convert_i32x4_u.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<4, 4, u32, u32, Operators::Convert<f32>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_convert_low_i32x4_s.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<2, 4, u64, i32, Operators::Convert<f64>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_convert_low_i32x4_u.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<2, 4, u64, u32, Operators::Convert<f64>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f32x4_demote_f64x2_zero.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<4, 2, u32, f64, Operators::Convert<f32>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::f64x2_promote_low_f32x4.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<2, 4, u64, f32, Operators::Convert<f64>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_trunc_sat_f64x2_s_zero.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<4, 2, u32, f64, Operators::SaturatingTruncate<i32>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::i32x4_trunc_sat_f64x2_u_zero.value():
-            if (unary_operation<u128, u128, Operators::VectorConvertOp<4, 2, u32, f64, Operators::SaturatingTruncate<u32>>>(configuration, addresses))
-                return;
-            RUN_NEXT_INSTRUCTION();
-        case Instructions::synthetic_end_expression.value():
-            return;
+            ENUMERATE_WASM_OPCODES(HANDLE_INSTRUCTION_NEW)
         default:
+            dbgln("Bad opcode {} in insn {} (ip {})", opcode, instruction_name(instruction->opcode()), short_ip.current_ip_value);
             VERIFY_NOT_REACHED();
         }
     }
 }
 
-InstructionPointer BytecodeInterpreter::branch_to_label(Configuration& configuration, LabelIndex index)
+template<bool NeedsStackAdjustment>
+InstructionPointer BytecodeInterpreter::branch_to_label(Configuration& configuration, LabelIndex index, InstructionPointer current_ip, bool actually_branching)
 {
     dbgln_if(WASM_TRACE_DEBUG, "Branch to label with index {}...", index.value());
     auto& label_stack = configuration.label_stack();
-    label_stack.shrink(label_stack.size() - index.value(), true);
-    auto label = configuration.label_stack().last();
+    label_stack.unsafe_shrink(actually_branching ? label_stack.size() - index.value() : label_stack.size());
+    auto const& label = configuration.label_stack().unsafe_last();
     dbgln_if(WASM_TRACE_DEBUG, "...which is actually IP {}, and has {} result(s)", label.continuation().value(), label.arity());
 
-    configuration.value_stack().remove(label.stack_height(), configuration.value_stack().size() - label.stack_height() - label.arity());
-    return label.continuation().value() - 1;
+    if constexpr (NeedsStackAdjustment) {
+        if (actually_branching)
+            configuration.value_stack().remove(label.stack_height(), configuration.value_stack().size() - label.stack_height() - label.arity());
+    }
+    return actually_branching ? label.continuation().value() - 1 : current_ip;
 }
 
-template<typename ReadType, typename PushType>
+// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-throw-ref
+Optional<InstructionPointer> BytecodeInterpreter::unwind_to_throw_handler(Configuration& configuration, ExceptionAddress exception_address)
+{
+    auto& exception = *configuration.store().get(exception_address);
+    auto& label_stack = configuration.label_stack();
+    auto& frame = configuration.frame();
+    auto const frame_label_index = frame.label_index();
+    for (size_t label_index = label_stack.size(); label_index > frame_label_index + 1;) {
+        --label_index;
+        auto const& label = label_stack.data()[label_index];
+        auto const* try_table_instruction = label.try_table_instruction();
+        if (!try_table_instruction)
+            continue;
+        auto& args = try_table_instruction->arguments().unsafe_get<Instruction::TryTableArgs>();
+        for (auto& catch_ : args.catches()) {
+            // catch x l / catch_ref x l match if exns[a].tag = z.module.tags[x];
+            // catch_all l / catch_all_ref l match any exception.
+            if (auto tag_index = catch_.matching_tag_index(); tag_index.has_value()) {
+                if (frame.module().tags()[tag_index->value()] != exception.tag())
+                    continue;
+            }
+            // Matched: the handler and its label should be removed, and the exception's fields (plus the exnref for the _ref forms) replace them...
+            auto& value_stack = configuration.value_stack();
+            value_stack.shrink(label.stack_height(), true);
+            if (catch_.matching_tag_index().has_value()) {
+                value_stack.ensure_capacity(value_stack.size() + exception.params().size());
+                for (auto& field : exception.params())
+                    value_stack.unchecked_append(field);
+            }
+            if (catch_.is_ref())
+                value_stack.append(Value(Reference { Reference::Exception { exception_address } }));
+            label_stack.unsafe_shrink(label_index);
+            // ...followed by (br l), with l relative to the context outside the try_table.
+            label_stack.unsafe_shrink(label_stack.size() - catch_.target_label().value());
+            auto const& target = label_stack.unsafe_last();
+            value_stack.remove(target.stack_height(), value_stack.size() - target.stack_height() - target.arity());
+            return target.continuation();
+        }
+    }
+    // No handler in this frame matched; drop its labels (the frame is being unwound) so that a re-dispatch in the calling frame only ever sees that frame's own (still active) handlers.
+    label_stack.shrink(frame_label_index, true);
+    return {};
+}
+
+template<typename ReadType, typename PushType, SourceAddressMix mix>
 bool BytecodeInterpreter::load_and_push(Configuration& configuration, Instruction const& instruction, SourcesAndDestination const& addresses)
 {
-    auto& arg = instruction.arguments().get<Instruction::MemoryArgument>();
-    auto& address = configuration.frame().module().memories()[arg.memory_index.value()];
-    auto memory = configuration.store().get(address);
-    auto& entry = configuration.source_value(0, addresses.sources); // bounds checked by verifier.
-    auto base = entry.to<i32>();
-    u64 instance_address = static_cast<u64>(bit_cast<u32>(base)) + arg.offset;
-    if (instance_address + sizeof(ReadType) > memory->size()) {
+    auto& arg = instruction.arguments().unsafe_get<Instruction::MemoryArgument>();
+    auto& address = configuration.frame().module().memories().data()[arg.memory_index.value()];
+    auto memory = configuration.store().unsafe_get(address);
+    auto& entry = configuration.source_value<mix>(0, addresses.sources); // bounds checked by verifier.
+    auto base = memory_base_address(*memory, entry);
+    Checked<u64> end_address { base };
+    end_address += arg.offset;
+    end_address += sizeof(ReadType);
+    u64 instance_address = base + arg.offset;
+    dbgln_if(WASM_TRACE_DEBUG, "load({} : {}) -> stack", instance_address, sizeof(ReadType));
+    if (end_address.has_overflow() || end_address.value() > memory->size()) {
         m_trap = Trap::from_string("Memory access out of bounds");
-        dbgln_if(WASM_TRACE_DEBUG, "LibWasm: Memory access out of bounds (expected {} to be less than or equal to {})", instance_address + sizeof(ReadType), memory->size());
+        dbgln_if(WASM_TRACE_DEBUG, "LibWasm: load_and_push - Memory access out of bounds (expected {} to be less than or equal to {})", instance_address + sizeof(ReadType), memory->size());
         return true;
     }
-    dbgln_if(WASM_TRACE_DEBUG, "load({} : {}) -> stack", instance_address, sizeof(ReadType));
-    auto slice = memory->data().bytes().slice(instance_address, sizeof(ReadType));
-    entry = Value(static_cast<PushType>(read_value<ReadType>(slice)));
+    entry = Value(static_cast<PushType>(read_value<ReadType>({ memory->data().offset_pointer(instance_address), sizeof(ReadType) })));
+    dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", entry.value());
     return false;
 }
 
@@ -2266,90 +6504,103 @@ ALWAYS_INLINE static TDst convert_vector(TSrc v)
 template<size_t M, size_t N, template<typename> typename SetSign>
 bool BytecodeInterpreter::load_and_push_mxn(Configuration& configuration, Instruction const& instruction, SourcesAndDestination const& addresses)
 {
-    auto& arg = instruction.arguments().get<Instruction::MemoryArgument>();
-    auto& address = configuration.frame().module().memories()[arg.memory_index.value()];
-    auto memory = configuration.store().get(address);
-    auto& entry = configuration.source_value(0, addresses.sources); // bounds checked by verifier.
-    auto base = entry.to<i32>();
-    u64 instance_address = static_cast<u64>(bit_cast<u32>(base)) + arg.offset;
-    if (instance_address + M * N / 8 > memory->size()) {
+    auto& arg = instruction.arguments().unsafe_get<Instruction::MemoryArgument>();
+    auto& address = configuration.frame().module().memories().data()[arg.memory_index.value()];
+    auto memory = configuration.store().unsafe_get(address);
+    auto& entry = configuration.source_value<SourceAddressMix::Any>(0, addresses.sources); // bounds checked by verifier.
+    auto base = memory_base_address(*memory, entry);
+    Checked<u64> end_address { base };
+    end_address += arg.offset;
+    end_address += M * N / 8;
+    u64 instance_address = base + arg.offset;
+    dbgln_if(WASM_TRACE_DEBUG, "vec-load({} : {}) -> stack", instance_address, M * N / 8);
+    if (end_address.has_overflow() || end_address.value() > memory->size()) {
         m_trap = Trap::from_string("Memory access out of bounds");
-        dbgln_if(WASM_TRACE_DEBUG, "LibWasm: Memory access out of bounds (expected {} to be less than or equal to {})", instance_address + M * N / 8, memory->size());
         return true;
     }
-    dbgln_if(WASM_TRACE_DEBUG, "vec-load({} : {}) -> stack", instance_address, M * N / 8);
-    auto slice = memory->data().bytes().slice(instance_address, M * N / 8);
+    auto const* data = memory->data().offset_pointer(instance_address);
     using V64 = NativeVectorType<M, N, SetSign>;
     using V128 = NativeVectorType<M * 2, N, SetSign>;
 
     V64 bytes { 0 };
-    if (bit_cast<FlatPtr>(slice.data()) % sizeof(V64) == 0)
-        bytes = *bit_cast<V64*>(slice.data());
+    if (bit_cast<FlatPtr>(data) % sizeof(V64) == 0)
+        bytes = *bit_cast<V64 const*>(data);
     else
-        ByteReader::load(slice.data(), bytes);
+        ByteReader::load(data, bytes);
 
     entry = Value(bit_cast<u128>(convert_vector<V128>(bytes)));
+    dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", entry.value());
     return false;
 }
 
 template<size_t N>
 bool BytecodeInterpreter::load_and_push_lane_n(Configuration& configuration, Instruction const& instruction, SourcesAndDestination const& addresses)
 {
-    auto memarg_and_lane = instruction.arguments().get<Instruction::MemoryAndLaneArgument>();
-    auto& address = configuration.frame().module().memories()[memarg_and_lane.memory.memory_index.value()];
-    auto memory = configuration.store().get(address);
+    auto memarg_and_lane = instruction.arguments().unsafe_get<Instruction::MemoryAndLaneArgument>();
+    auto& address = configuration.frame().module().memories().data()[memarg_and_lane.memory.memory_index.value()];
+    auto memory = configuration.store().unsafe_get(address);
     // bounds checked by verifier.
-    auto vector = configuration.take_source(0, addresses.sources).to<u128>();
-    auto base = configuration.take_source(1, addresses.sources).to<u32>();
-    u64 instance_address = static_cast<u64>(bit_cast<u32>(base)) + memarg_and_lane.memory.offset;
-    if (instance_address + N / 8 > memory->size()) {
+    auto vector = configuration.take_source<SourceAddressMix::Any>(0, addresses.sources).template to<u128>();
+    auto base = memory_base_address(*memory, configuration.take_source<SourceAddressMix::Any>(1, addresses.sources));
+    Checked<u64> end_address { base };
+    end_address += memarg_and_lane.memory.offset;
+    end_address += N / 8;
+    u64 instance_address = base + memarg_and_lane.memory.offset;
+    dbgln_if(WASM_TRACE_DEBUG, "load-lane({} : {}, lane {}) -> stack", instance_address, N / 8, memarg_and_lane.lane);
+    if (end_address.has_overflow() || end_address.value() > memory->size()) {
         m_trap = Trap::from_string("Memory access out of bounds");
         return true;
     }
-    auto slice = memory->data().bytes().slice(instance_address, N / 8);
     auto dst = bit_cast<u8*>(&vector) + memarg_and_lane.lane * N / 8;
-    memcpy(dst, slice.data(), N / 8);
-    configuration.push_to_destination(Value(vector), addresses.destination);
+    memory->data().copy_to(instance_address, { dst, N / 8 });
+    dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", vector);
+    configuration.push_to_destination<SourceAddressMix::Any>(Value(vector), addresses.destination);
     return false;
 }
 
 template<size_t N>
 bool BytecodeInterpreter::load_and_push_zero_n(Configuration& configuration, Instruction const& instruction, SourcesAndDestination const& addresses)
 {
-    auto memarg_and_lane = instruction.arguments().get<Instruction::MemoryArgument>();
-    auto& address = configuration.frame().module().memories()[memarg_and_lane.memory_index.value()];
-    auto memory = configuration.store().get(address);
+    auto memarg_and_lane = instruction.arguments().unsafe_get<Instruction::MemoryArgument>();
+    auto& address = configuration.frame().module().memories().data()[memarg_and_lane.memory_index.value()];
+    auto memory = configuration.store().unsafe_get(address);
     // bounds checked by verifier.
-    auto base = configuration.take_source(0, addresses.sources).to<u32>();
-    u64 instance_address = static_cast<u64>(bit_cast<u32>(base)) + memarg_and_lane.offset;
-    if (instance_address + N / 8 > memory->size()) {
+    auto base = memory_base_address(*memory, configuration.take_source<SourceAddressMix::Any>(0, addresses.sources));
+    Checked<u64> end_address { base };
+    end_address += memarg_and_lane.offset;
+    end_address += N / 8;
+    u64 instance_address = base + memarg_and_lane.offset;
+    dbgln_if(WASM_TRACE_DEBUG, "load-zero({} : {}) -> stack", instance_address, N / 8);
+    if (end_address.has_overflow() || end_address.value() > memory->size()) {
         m_trap = Trap::from_string("Memory access out of bounds");
         return true;
     }
-    auto slice = memory->data().bytes().slice(instance_address, N / 8);
     u128 vector = 0;
-    memcpy(&vector, slice.data(), N / 8);
-    configuration.push_to_destination(Value(vector), addresses.destination);
+    memory->data().copy_to(instance_address, { bit_cast<u8*>(&vector), N / 8 });
+    dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", vector);
+    configuration.push_to_destination<SourceAddressMix::Any>(Value(vector), addresses.destination);
     return false;
 }
 
 template<size_t M>
 bool BytecodeInterpreter::load_and_push_m_splat(Configuration& configuration, Instruction const& instruction, SourcesAndDestination const& addresses)
 {
-    auto& arg = instruction.arguments().get<Instruction::MemoryArgument>();
-    auto& address = configuration.frame().module().memories()[arg.memory_index.value()];
-    auto memory = configuration.store().get(address);
-    auto& entry = configuration.source_value(0, addresses.sources); // bounds checked by verifier.
-    auto base = entry.to<i32>();
-    u64 instance_address = static_cast<u64>(bit_cast<u32>(base)) + arg.offset;
-    if (instance_address + M / 8 > memory->size()) {
+    auto& arg = instruction.arguments().unsafe_get<Instruction::MemoryArgument>();
+    auto& address = configuration.frame().module().memories().data()[arg.memory_index.value()];
+    auto memory = configuration.store().unsafe_get(address);
+    auto& entry = configuration.source_value<SourceAddressMix::Any>(0, addresses.sources); // bounds checked by verifier.
+    auto base = memory_base_address(*memory, entry);
+    Checked<u64> end_address { base };
+    end_address += arg.offset;
+    end_address += M / 8;
+    u64 instance_address = base + arg.offset;
+    dbgln_if(WASM_TRACE_DEBUG, "vec-splat({} : {}) -> stack", instance_address, M / 8);
+    if (end_address.has_overflow() || end_address.value() > memory->size()) {
         m_trap = Trap::from_string("Memory access out of bounds");
-        dbgln_if(WASM_TRACE_DEBUG, "LibWasm: Memory access out of bounds (expected {} to be less than or equal to {})", instance_address + M / 8, memory->size());
         return true;
     }
-    dbgln_if(WASM_TRACE_DEBUG, "vec-splat({} : {}) -> stack", instance_address, M / 8);
-    auto slice = memory->data().bytes().slice(instance_address, M / 8);
-    auto value = read_value<NativeIntegralType<M>>(slice);
+    auto value = read_value<NativeIntegralType<M>>({ memory->data().offset_pointer(instance_address), M / 8 });
+    dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", value);
     set_top_m_splat<M, NativeIntegralType>(configuration, value, addresses);
     return false;
 }
@@ -2358,7 +6609,7 @@ template<size_t M, template<size_t> typename NativeType>
 void BytecodeInterpreter::set_top_m_splat(Wasm::Configuration& configuration, NativeType<M> value, SourcesAndDestination const& addresses)
 {
     auto push = [&](auto result) {
-        configuration.source_value(0, addresses.sources) = Value(bit_cast<u128>(result));
+        configuration.source_value<SourceAddressMix::Any>(0, addresses.sources) = Value(bit_cast<u128>(result));
     };
 
     if constexpr (IsFloatingPoint<NativeType<32>>) {
@@ -2387,8 +6638,8 @@ void BytecodeInterpreter::pop_and_push_m_splat(Wasm::Configuration& configuratio
 {
     using PopT = Conditional<M <= 32, NativeType<32>, NativeType<64>>;
     using ReadT = NativeType<M>;
-    auto entry = configuration.source_value(0, addresses.sources);
-    auto value = static_cast<ReadT>(entry.to<PopT>());
+    auto entry = configuration.source_value<SourceAddressMix::Any>(0, addresses.sources);
+    auto value = static_cast<ReadT>(entry.template to<PopT>());
     dbgln_if(WASM_TRACE_DEBUG, "stack({}) -> splat({})", value, M);
     set_top_m_splat<M, NativeType>(configuration, value, addresses);
 }
@@ -2397,57 +6648,112 @@ template<typename M, template<typename> typename SetSign, typename VectorType>
 VectorType BytecodeInterpreter::pop_vector(Configuration& configuration, size_t source, SourcesAndDestination const& addresses)
 {
     // bounds checked by verifier.
-    return bit_cast<VectorType>(configuration.take_source(source, addresses.sources).to<u128>());
+    return bit_cast<VectorType>(configuration.take_source<SourceAddressMix::Any>(source, addresses.sources).template to<u128>());
 }
 
-bool BytecodeInterpreter::call_address(Configuration& configuration, FunctionAddress address, CallAddressSource source)
+Outcome BytecodeInterpreter::call_address(Configuration& configuration, FunctionAddress address, SourcesAndDestination const& addresses, CallAddressSource source, CallType call_type)
 {
     TRAP_IF_NOT(m_stack_info.size_free() >= Constants::minimum_stack_space_to_keep_free, "{}: {}", Constants::stack_exhaustion_message);
-
-    auto instance = configuration.store().get(address);
-    FunctionType const* type { nullptr };
-    instance->visit([&](auto const& function) { type = &function.type(); });
-    if (source == CallAddressSource::IndirectCall) {
-        TRAP_IF_NOT(type->parameters().size() <= configuration.value_stack().size());
-    }
-    Vector<Value> args;
-    if (!type->parameters().is_empty()) {
-        args.ensure_capacity(type->parameters().size());
-        auto span = configuration.value_stack().span().slice_from_end(type->parameters().size());
-        for (auto& value : span)
-            args.unchecked_append(value);
-
-        configuration.value_stack().remove(configuration.value_stack().size() - span.size(), span.size());
-    }
-
     Result result { Trap::from_string("") };
-    if (instance->has<WasmFunction>()) {
-        CallFrameHandle handle { *this, configuration };
-        result = configuration.call(*this, address, move(args));
-    } else {
-        result = configuration.call(*this, address, move(args));
-    }
+    Outcome final_outcome = Outcome::Continue;
+    {
+        Optional<ScopedValueRollback<decltype(configuration.regs)>> regs_rollback;
 
-    if (result.is_trap()) {
-        m_trap = move(result.trap());
-        return true;
+        if (call_type == CallType::UsingRegisters || call_type == CallType::UsingCallRecord)
+            regs_rollback = ScopedValueRollback { configuration.regs };
+
+        auto instance = configuration.store().get(address);
+        FunctionType const* type { nullptr };
+        instance->visit([&](auto const& function) { type = &function.type(); });
+        if (source == CallAddressSource::IndirectCall || source == CallAddressSource::IndirectTailCall) {
+            TRAP_IF_NOT(type->parameters().size() <= configuration.value_stack().size());
+        }
+        Vector<Value, ArgumentsStaticSize> args;
+
+        if (call_type == CallType::UsingCallRecord) {
+            configuration.take_call_record(args);
+            args.shrink(type->parameters().size(), true);
+        } else {
+            configuration.get_arguments_allocation_if_possible(args, type->parameters().size());
+
+            {
+                auto param_count = type->parameters().size();
+                if (param_count) {
+                    args.ensure_capacity(param_count);
+                    if (call_type == CallType::UsingRegisters) {
+                        args.resize_and_keep_capacity(param_count);
+                        for (size_t i = 0; i < param_count; ++i)
+                            args[param_count - i - 1] = configuration.take_source<SourceAddressMix::Any>(i, addresses.sources);
+                    } else {
+                        auto span = configuration.value_stack().span().slice_from_end(param_count);
+                        for (auto& value : span)
+                            args.unchecked_append(value);
+
+                        configuration.value_stack().remove(configuration.value_stack().size() - span.size(), span.size());
+                    }
+                }
+            }
+        }
+
+        if (source == CallAddressSource::DirectTailCall || source == CallAddressSource::IndirectTailCall) {
+            auto prep_outcome = configuration.prepare_call(address, args, true);
+            if (prep_outcome.is_error()) {
+                m_trap = prep_outcome.release_error();
+                return Outcome::Return;
+            }
+
+            final_outcome = Outcome::Return; // At this point we can only ever return (unless we succeed in tail-calling).
+            if (prep_outcome.value().has_value()) {
+                result = prep_outcome.value()->function()(configuration, args);
+                configuration.release_arguments_allocation(args);
+            } else {
+                configuration.ip() = 0;
+                return static_cast<Outcome>(0); // Continue from IP 0 in the new frame.
+            }
+        } else {
+            if (instance->has<WasmFunction>()) {
+                CallFrameHandle handle { *this, configuration };
+                result = configuration.call(*this, address, args);
+            } else {
+                result = configuration.call(*this, address, args);
+                configuration.release_arguments_allocation(args);
+            }
+        }
+
+        if (result.is_trap()) {
+            // https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-throw-ref
+            if (auto const* uncaught_exception = result.trap().data.get_pointer<UncaughtException>(); uncaught_exception && final_outcome == Outcome::Continue) {
+                if (auto continuation = unwind_to_throw_handler(configuration, uncaught_exception->address); continuation.has_value()) {
+                    // The callee's interpret() left the exception in m_trap; it's handled now.
+                    m_trap = Empty {};
+                    return static_cast<Outcome>(continuation->value());
+                }
+            }
+            m_trap = move(result.trap());
+            return Outcome::Return;
+        }
     }
 
     if (!result.values().is_empty()) {
-        configuration.value_stack().ensure_capacity(configuration.value_stack().size() + result.values().size());
-        for (auto& entry : result.values().in_reverse())
-            configuration.value_stack().unchecked_append(entry);
+        if (call_type == CallType::UsingRegisters || call_type == CallType::UsingCallRecord || result.values().size() == 1) {
+            configuration.push_to_destination<SourceAddressMix::Any>(result.values().take_first(), addresses.destination);
+        } else {
+            configuration.value_stack().ensure_capacity(configuration.value_stack().size() + result.values().size());
+            for (auto& entry : result.values().in_reverse())
+                configuration.value_stack().unchecked_append(entry);
+        }
     }
 
-    return false;
+    return final_outcome;
 }
 
-template<typename PopTypeLHS, typename PushType, typename Operator, typename PopTypeRHS, typename... Args>
+template<typename PopTypeLHS, typename PushType, typename Operator, SourceAddressMix mix, typename PopTypeRHS, typename... Args>
 bool BytecodeInterpreter::binary_numeric_operation(Configuration& configuration, SourcesAndDestination const& addresses, Args&&... args)
 {
     // bounds checked by Nor.
-    auto rhs = configuration.take_source(0, addresses.sources).to<PopTypeRHS>();
-    auto lhs = configuration.take_source(1, addresses.sources).to<PopTypeLHS>(); // bounds checked by verifier.
+    auto rhs = configuration.take_source<mix>(0, addresses.sources).template to<PopTypeRHS>();
+    auto& lhs_slot = configuration.source_value<mix>(1, addresses.sources); // bounds checked by verifier.
+    auto lhs = lhs_slot.template to<PopTypeLHS>();
     PushType result;
     auto call_result = Operator { forward<Args>(args)... }(lhs, rhs);
     if constexpr (IsSpecializationOf<decltype(call_result), AK::ErrorOr>) {
@@ -2458,15 +6764,15 @@ bool BytecodeInterpreter::binary_numeric_operation(Configuration& configuration,
         result = call_result;
     }
     dbgln_if(WASM_TRACE_DEBUG, "{} {} {} = {}", lhs, Operator::name(), rhs, result);
-    configuration.push_to_destination(Value(result), addresses.destination);
+    lhs_slot = Value(result);
     return false;
 }
 
-template<typename PopType, typename PushType, typename Operator, typename... Args>
+template<typename PopType, typename PushType, typename Operator, SourceAddressMix mix, size_t input_arg, typename... Args>
 bool BytecodeInterpreter::unary_operation(Configuration& configuration, SourcesAndDestination const& addresses, Args&&... args)
 {
-    auto& entry = configuration.source_value(0, addresses.sources); // bounds checked by verifier.
-    auto value = entry.to<PopType>();
+    auto& entry = configuration.source_value<mix>(input_arg, addresses.sources); // bounds checked by verifier.
+    auto value = entry.template to<PopType>();
     auto call_result = Operator { forward<Args>(args)... }(value);
     PushType result;
     if constexpr (IsSpecializationOf<decltype(call_result), AK::ErrorOr>) {
@@ -2485,8 +6791,8 @@ template<typename PopT, typename StoreT>
 bool BytecodeInterpreter::pop_and_store(Configuration& configuration, Instruction const& instruction, SourcesAndDestination const& addresses)
 {
     // bounds checked by verifier.
-    auto entry = configuration.take_source(0, addresses.sources);
-    auto value = ConvertToRaw<StoreT> {}(entry.to<PopT>());
+    auto entry = configuration.take_source<SourceAddressMix::Any>(0, addresses.sources);
+    auto value = ConvertToRaw<StoreT> {}(entry.template to<PopT>());
     return store_value(configuration, instruction, value, 1, addresses);
 }
 
@@ -2495,35 +6801,55 @@ bool BytecodeInterpreter::store_value(Configuration& configuration, Instruction 
 {
     auto& memarg = instruction.arguments().unsafe_get<Instruction::MemoryArgument>();
     dbgln_if(WASM_TRACE_DEBUG, "stack({}) -> temporary({}b)", value, sizeof(StoreT));
-    auto base = configuration.take_source(address_source, addresses.sources).to<i32>();
+    auto base = configuration.take_source<SourceAddressMix::Any>(address_source, addresses.sources);
     return store_to_memory(configuration, memarg, { &value, sizeof(StoreT) }, base);
 }
 
 template<size_t N>
 bool BytecodeInterpreter::pop_and_store_lane_n(Configuration& configuration, Instruction const& instruction, SourcesAndDestination const& addresses)
 {
-    auto& memarg_and_lane = instruction.arguments().get<Instruction::MemoryAndLaneArgument>();
+    auto& memarg_and_lane = instruction.arguments().unsafe_get<Instruction::MemoryAndLaneArgument>();
     // bounds checked by verifier.
-    auto vector = configuration.take_source(0, addresses.sources).to<u128>();
+    auto vector = configuration.take_source<SourceAddressMix::Any>(0, addresses.sources).template to<u128>();
     auto src = bit_cast<u8*>(&vector) + memarg_and_lane.lane * N / 8;
-    auto base = configuration.take_source(1, addresses.sources).to<u32>();
+    auto base = configuration.take_source<SourceAddressMix::Any>(1, addresses.sources);
     return store_to_memory(configuration, memarg_and_lane.memory, { src, N / 8 }, base);
 }
 
-bool BytecodeInterpreter::store_to_memory(Configuration& configuration, Instruction::MemoryArgument const& arg, ReadonlyBytes data, u32 base)
+bool BytecodeInterpreter::store_to_memory(Configuration& configuration, Instruction::MemoryArgument const& arg, ReadonlyBytes data, Value const& base_value)
 {
-    auto& address = configuration.frame().module().memories().data()[arg.memory_index.value()];
-    auto memory = configuration.store().get(address);
-    u64 instance_address = static_cast<u64>(base) + arg.offset;
-    Checked addition { instance_address };
-    addition += data.size();
-    if (addition.has_overflow() || addition.value() > memory->size()) [[unlikely]] {
+    auto const& address = configuration.frame().module().memories().data()[arg.memory_index.value()];
+    auto memory = configuration.store().unsafe_get(address);
+    Checked<u64> instance_address { memory_base_address(*memory, base_value) };
+    instance_address += arg.offset;
+    if (instance_address.has_overflow()) [[unlikely]] {
         m_trap = Trap::from_string("Memory access out of bounds");
-        dbgln_if(WASM_TRACE_DEBUG, "LibWasm: Memory access out of bounds (expected 0 <= {} and {} <= {})", instance_address, instance_address + data.size(), memory->size());
         return true;
     }
-    dbgln_if(WASM_TRACE_DEBUG, "temporary({}b) -> store({})", data.size(), instance_address);
-    (void)data.copy_to(memory->data().bytes().slice(instance_address, data.size()));
+    return store_to_memory(*memory, instance_address.value(), data);
+}
+
+template<typename T>
+bool BytecodeInterpreter::store_to_memory(MemoryInstance& memory, u64 address, T value)
+{
+    Checked addition { address };
+    size_t data_size;
+    if constexpr (IsSame<ReadonlyBytes, T>)
+        data_size = value.size();
+    else
+        data_size = sizeof(T);
+
+    addition += data_size;
+    if (addition.has_overflow() || addition.value() > memory.size()) [[unlikely]] {
+        m_trap = Trap::from_string("Memory access out of bounds");
+        return true;
+    }
+
+    dbgln_if(WASM_TRACE_DEBUG, "temporary({}b) -> store({})", data_size, address);
+    if constexpr (IsSame<ReadonlyBytes, T>)
+        memory.data().overwrite(address, value.data(), data_size);
+    else
+        memory.data().overwrite(address, &value, data_size);
     return false;
 }
 
@@ -2551,29 +6877,66 @@ double BytecodeInterpreter::read_value<double>(ReadonlyBytes data)
     return bit_cast<double>(read_value<u64>(data));
 }
 
+void InstructionStorage::add_chunk()
+{
+    static constexpr size_t initial_chunk_capacity = 8;
+    static constexpr size_t max_chunk_capacity = 512;
+    auto chunk_capacity = clamp(m_capacity, initial_chunk_capacity, max_chunk_capacity);
+    m_chunks.append(Chunk::must_create_but_fixme_should_propagate_errors(chunk_capacity));
+    m_capacity += chunk_capacity;
+    m_next_index_in_last_chunk = 0;
+}
+
+Instruction& InstructionStorage::append(Instruction instruction)
+{
+    if (m_chunks.is_empty() || m_next_index_in_last_chunk == m_chunks.unsafe_last().size())
+        add_chunk();
+
+    auto& slot = m_chunks.unsafe_last()[m_next_index_in_last_chunk++];
+    slot = move(instruction);
+    ++m_size;
+    return slot.value();
+}
+
 CompiledInstructions try_compile_instructions(Expression const& expression, Span<FunctionType const> functions)
 {
     CompiledInstructions result;
-    result.dispatches.ensure_capacity(expression.instructions().size());
-    result.extra_instruction_storage.ensure_capacity(expression.instructions().size());
+
+    auto instruction_count = expression.instructions().size();
+    result.dispatches.ensure_capacity(instruction_count);
+    result.src_dst_mappings.ensure_capacity(instruction_count);
+
     i32 i32_const_value { 0 };
+    i64 i64_const_value { 0 };
     LocalIndex local_index_0 { 0 };
     LocalIndex local_index_1 { 0 };
     enum class InsnPatternState {
         Nothing,
         GetLocal,
         GetLocalI32Const,
+        GetLocalI64Const,
         GetLocalx2,
         I32Const,
         I32ConstGetLocal,
+        I64Const,
+        I64ConstGetLocal,
     } pattern_state { InsnPatternState::Nothing };
-    static Instruction nop { Instructions::nop };
-    constexpr auto default_dispatch = [](Instruction const& instruction) {
-        return Dispatch {
-            instruction.opcode(),
-            &instruction,
-            { .sources = { Dispatch::Stack, Dispatch::Stack, Dispatch::Stack }, .destination = Dispatch::Stack }
-        };
+    static auto& nop = *new Instruction { Instructions::nop };
+
+    size_t calls_in_expression = 0;
+
+    auto append_extra_instruction = [&result](auto&&... args) -> Instruction& {
+        return result.extra_instruction_storage.append(Instruction(forward<decltype(args)>(args)...));
+    };
+
+    auto const set_default_dispatch = [&result](Instruction const& instruction, size_t index = NumericLimits<size_t>::max()) {
+        if (index < result.dispatches.size()) {
+            result.dispatches[index] = { { .instruction_opcode = instruction.opcode() }, &instruction };
+            result.src_dst_mappings[index] = { .sources = { Dispatch::Stack, Dispatch::Stack, Dispatch::Stack }, .destination = Dispatch::Stack };
+        } else {
+            result.dispatches.append({ { .instruction_opcode = instruction.opcode() }, &instruction });
+            result.src_dst_mappings.append({ .sources = { Dispatch::Stack, Dispatch::Stack, Dispatch::Stack }, .destination = Dispatch::Stack });
+        }
     };
 
     for (auto& instruction : expression.instructions()) {
@@ -2581,13 +6944,15 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
             auto& function = functions[instruction.arguments().get<FunctionIndex>().value()];
             if (function.results().size() <= 1 && function.parameters().size() < 4) {
                 pattern_state = InsnPatternState::Nothing;
-                OpCode op { Instructions::synthetic_call_00.value() + function.parameters().size() * 2 + function.results().size() };
-                result.extra_instruction_storage.unchecked_append(Instruction(
+                OpCode op { static_cast<OpCode::Type>(Instructions::synthetic_call_00.value() + function.parameters().size() * 2 + function.results().size()) };
+                auto& extra_instruction = append_extra_instruction(
                     op,
-                    instruction.arguments()));
-                result.dispatches.unchecked_append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
+                    instruction.arguments());
+                set_default_dispatch(extra_instruction);
                 continue;
             }
+
+            calls_in_expression++;
         }
 
         switch (pattern_state) {
@@ -2598,6 +6963,9 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
             } else if (instruction.opcode() == Instructions::i32_const) {
                 i32_const_value = instruction.arguments().get<i32>();
                 pattern_state = InsnPatternState::I32Const;
+            } else if (instruction.opcode() == Instructions::i64_const) {
+                i64_const_value = instruction.arguments().get<i64>();
+                pattern_state = InsnPatternState::I64Const;
             }
             break;
         case InsnPatternState::GetLocal:
@@ -2607,68 +6975,168 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
             } else if (instruction.opcode() == Instructions::i32_const) {
                 i32_const_value = instruction.arguments().get<i32>();
                 pattern_state = InsnPatternState::GetLocalI32Const;
+            } else if (instruction.opcode() == Instructions::i64_const) {
+                i64_const_value = instruction.arguments().get<i64>();
+                pattern_state = InsnPatternState::GetLocalI64Const;
             } else if (instruction.opcode() == Instructions::i32_store) {
                 // `local.get a; i32.store m` -> `i32.storelocal a m`.
-                result.dispatches[result.dispatches.size() - 1] = default_dispatch(nop);
-                result.extra_instruction_storage.append(Instruction(
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                auto& extra_instruction = append_extra_instruction(
                     Instructions::synthetic_i32_storelocal,
                     local_index_0,
-                    instruction.arguments()));
+                    instruction.arguments());
 
-                result.dispatches.append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
+                set_default_dispatch(extra_instruction);
                 pattern_state = InsnPatternState::Nothing;
                 continue;
             } else if (instruction.opcode() == Instructions::i64_store) {
                 // `local.get a; i64.store m` -> `i64.storelocal a m`.
-                result.dispatches[result.dispatches.size() - 1] = default_dispatch(nop);
-                result.extra_instruction_storage.append(Instruction(
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                auto& extra_instruction = append_extra_instruction(
                     Instructions::synthetic_i64_storelocal,
                     local_index_0,
-                    instruction.arguments()));
+                    instruction.arguments());
 
-                result.dispatches.append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
+                set_default_dispatch(extra_instruction);
+                pattern_state = InsnPatternState::Nothing;
+                continue;
+            } else if (instruction.opcode() == Instructions::local_set) {
+                // `local.get a; local.set b` -> `local_copy a b`.
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                auto& extra_instruction = append_extra_instruction(
+                    Instructions::synthetic_local_copy,
+                    local_index_0,
+                    instruction.local_index());
+
+                set_default_dispatch(extra_instruction);
                 pattern_state = InsnPatternState::Nothing;
                 continue;
             } else {
                 pattern_state = InsnPatternState::Nothing;
             }
             break;
-        case InsnPatternState::GetLocalx2:
+        case InsnPatternState::GetLocalx2: {
+            auto make_2local_synthetic = [&](OpCode synthetic_op) {
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                set_default_dispatch(nop, result.dispatches.size() - 2);
+                auto& extra_instruction = append_extra_instruction(
+                    synthetic_op,
+                    local_index_0,
+                    local_index_1);
+                set_default_dispatch(extra_instruction);
+                pattern_state = InsnPatternState::Nothing;
+            };
             if (instruction.opcode() == Instructions::i32_add) {
                 // `local.get a; local.get b; i32.add` -> `i32.add_2local a b`.
-                // Replace the previous two ops with noops, and add i32.add_2local.
-                result.dispatches[result.dispatches.size() - 1] = default_dispatch(nop);
-                result.dispatches[result.dispatches.size() - 2] = default_dispatch(nop);
-                result.extra_instruction_storage.append(Instruction {
-                    Instructions::synthetic_i32_add2local,
-                    local_index_0,
-                    local_index_1,
-                });
-                result.dispatches.append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
-                pattern_state = InsnPatternState::Nothing;
+                make_2local_synthetic(Instructions::synthetic_i32_add2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i32_sub) {
+                // `local.get a; local.get b; i32.sub` -> `i32.sub_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i32_sub2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i32_mul) {
+                // `local.get a; local.get b; i32.mul` -> `i32.mul_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i32_mul2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i32_and) {
+                // `local.get a; local.get b; i32.and` -> `i32.and_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i32_and2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i32_or) {
+                // `local.get a; local.get b; i32.or` -> `i32.or_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i32_or2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i32_xor) {
+                // `local.get a; local.get b; i32.xor` -> `i32.xor_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i32_xor2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i32_shl) {
+                // `local.get a; local.get b; i32.shl` -> `i32.shl_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i32_shl2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i32_shru) {
+                // `local.get a; local.get b; i32.shr_u` -> `i32.shru_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i32_shru2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i32_shrs) {
+                // `local.get a; local.get b; i32.shr_s` -> `i32.shrs_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i32_shrs2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i64_add) {
+                // `local.get a; local.get b; i64.add` -> `i64.add_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i64_add2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i64_sub) {
+                // `local.get a; local.get b; i64.sub` -> `i64.sub_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i64_sub2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i64_mul) {
+                // `local.get a; local.get b; i64.mul` -> `i64.mul_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i64_mul2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i64_and) {
+                // `local.get a; local.get b; i64.and` -> `i64.and_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i64_and2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i64_or) {
+                // `local.get a; local.get b; i64.or` -> `i64.or_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i64_or2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i64_xor) {
+                // `local.get a; local.get b; i64.xor` -> `i64.xor_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i64_xor2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i64_shl) {
+                // `local.get a; local.get b; i64.shl` -> `i64.shl_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i64_shl2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i64_shru) {
+                // `local.get a; local.get b; i64.shr_u` -> `i64.shru_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i64_shru2local);
+                continue;
+            }
+            if (instruction.opcode() == Instructions::i64_shrs) {
+                // `local.get a; local.get b; i64.shr_s` -> `i64.shrs_2local a b`.
+                make_2local_synthetic(Instructions::synthetic_i64_shrs2local);
                 continue;
             }
             if (instruction.opcode() == Instructions::i32_store) {
                 // `local.get a; i32.store m` -> `i32.storelocal a m`.
-                result.dispatches[result.dispatches.size() - 1] = default_dispatch(nop);
-                result.extra_instruction_storage.append(Instruction(
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                auto& extra_instruction = append_extra_instruction(
                     Instructions::synthetic_i32_storelocal,
                     local_index_1,
-                    instruction.arguments()));
+                    instruction.arguments());
 
-                result.dispatches.append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
+                set_default_dispatch(extra_instruction);
                 pattern_state = InsnPatternState::Nothing;
                 continue;
             }
             if (instruction.opcode() == Instructions::i64_store) {
                 // `local.get a; i64.store m` -> `i64.storelocal a m`.
-                result.dispatches[result.dispatches.size() - 1] = default_dispatch(nop);
-                result.extra_instruction_storage.append(Instruction(
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                auto& extra_instruction = append_extra_instruction(
                     Instructions::synthetic_i64_storelocal,
                     local_index_1,
-                    instruction.arguments()));
+                    instruction.arguments());
 
-                result.dispatches.append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
+                set_default_dispatch(extra_instruction);
                 pattern_state = InsnPatternState::Nothing;
                 continue;
             }
@@ -2676,10 +7144,14 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
                 swap(local_index_0, local_index_1);
                 i32_const_value = instruction.arguments().get<i32>();
                 pattern_state = InsnPatternState::GetLocalI32Const;
+            } else if (instruction.opcode() == Instructions::i64_const) {
+                swap(local_index_0, local_index_1);
+                i64_const_value = instruction.arguments().get<i64>();
+                pattern_state = InsnPatternState::GetLocalI64Const;
             } else {
                 pattern_state = InsnPatternState::Nothing;
             }
-            break;
+        } break;
         case InsnPatternState::I32Const:
             if (instruction.opcode() == Instructions::local_get) {
                 local_index_0 = instruction.local_index();
@@ -2688,12 +7160,12 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
                 i32_const_value = instruction.arguments().get<i32>();
             } else if (instruction.opcode() == Instructions::local_set) {
                 // `i32.const a; local.set b` -> `local.seti32_const b a`.
-                result.dispatches[result.dispatches.size() - 1] = default_dispatch(nop);
-                result.extra_instruction_storage.append(Instruction(
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                auto& extra_instruction = append_extra_instruction(
                     Instructions::synthetic_local_seti32_const,
                     instruction.local_index(),
-                    i32_const_value));
-                result.dispatches.append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
+                    i32_const_value);
+                set_default_dispatch(extra_instruction);
                 pattern_state = InsnPatternState::Nothing;
                 continue;
             } else {
@@ -2703,12 +7175,12 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
         case InsnPatternState::GetLocalI32Const:
             if (instruction.opcode() == Instructions::local_set) {
                 // `i32.const a; local.set b` -> `local.seti32_const b a`.
-                result.dispatches[result.dispatches.size() - 1] = default_dispatch(nop);
-                result.extra_instruction_storage.append(Instruction(
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                auto& extra_instruction = append_extra_instruction(
                     Instructions::synthetic_local_seti32_const,
                     instruction.local_index(),
-                    i32_const_value));
-                result.dispatches.append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
+                    i32_const_value);
+                set_default_dispatch(extra_instruction);
                 pattern_state = InsnPatternState::Nothing;
                 continue;
             }
@@ -2728,94 +7200,277 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
                 i32_const_value = instruction.arguments().get<i32>();
                 pattern_state = InsnPatternState::GetLocalI32Const;
             } else if (instruction.opcode() == Instructions::local_get) {
-                swap(local_index_0, local_index_1);
                 local_index_1 = instruction.local_index();
                 pattern_state = InsnPatternState::GetLocalx2;
             } else if (instruction.opcode() == Instructions::i32_add) {
                 // `i32.const a; local.get b; i32.add` -> `i32.add_constlocal b a`.
                 // Replace the previous two ops with noops, and add i32.add_constlocal.
-                result.dispatches[result.dispatches.size() - 1] = default_dispatch(nop);
-                result.dispatches[result.dispatches.size() - 2] = default_dispatch(nop);
-                result.extra_instruction_storage.append(Instruction(
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                set_default_dispatch(nop, result.dispatches.size() - 2);
+                auto& extra_instruction = append_extra_instruction(
                     Instructions::synthetic_i32_addconstlocal,
                     local_index_0,
-                    i32_const_value));
+                    i32_const_value);
 
-                result.dispatches.append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
+                set_default_dispatch(extra_instruction);
                 pattern_state = InsnPatternState::Nothing;
                 continue;
-            }
-            if (instruction.opcode() == Instructions::i32_and) {
-                // `i32.const a; local.get b; i32.add` -> `i32.and_constlocal b a`.
+            } else if (instruction.opcode() == Instructions::i32_and) {
+                // `i32.const a; local.get b; i32.and` -> `i32.and_constlocal b a`.
                 // Replace the previous two ops with noops, and add i32.and_constlocal.
-                result.dispatches[result.dispatches.size() - 1] = default_dispatch(nop);
-                result.dispatches[result.dispatches.size() - 2] = default_dispatch(nop);
-                result.extra_instruction_storage.append(Instruction(
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                set_default_dispatch(nop, result.dispatches.size() - 2);
+                auto& extra_instruction = append_extra_instruction(
                     Instructions::synthetic_i32_andconstlocal,
                     local_index_0,
-                    i32_const_value));
+                    i32_const_value);
 
-                result.dispatches.append(default_dispatch(result.extra_instruction_storage.unsafe_last()));
+                set_default_dispatch(extra_instruction);
+                pattern_state = InsnPatternState::Nothing;
+                continue;
+            } else {
+                pattern_state = InsnPatternState::Nothing;
+            }
+            break;
+        case InsnPatternState::I64Const:
+            if (instruction.opcode() == Instructions::local_get) {
+                local_index_0 = instruction.local_index();
+                pattern_state = InsnPatternState::I64ConstGetLocal;
+            } else if (instruction.opcode() == Instructions::i64_const) {
+                i64_const_value = instruction.arguments().get<i64>();
+            } else if (instruction.opcode() == Instructions::local_set) {
+                // `i64.const a; local.set b` -> `local.seti64_const b a`.
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                auto& extra_instruction = append_extra_instruction(
+                    Instructions::synthetic_local_seti64_const,
+                    instruction.local_index(),
+                    i64_const_value);
+                set_default_dispatch(extra_instruction);
+                pattern_state = InsnPatternState::Nothing;
+                continue;
+            } else {
+                pattern_state = InsnPatternState::Nothing;
+            }
+            break;
+        case InsnPatternState::GetLocalI64Const:
+            if (instruction.opcode() == Instructions::local_set) {
+                // `i64.const a; local.set b` -> `local.seti64_const b a`.
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                auto& extra_instruction = append_extra_instruction(
+                    Instructions::synthetic_local_seti64_const,
+                    instruction.local_index(),
+                    i64_const_value);
+                set_default_dispatch(extra_instruction);
                 pattern_state = InsnPatternState::Nothing;
                 continue;
             }
-            pattern_state = InsnPatternState::Nothing;
+            if (instruction.opcode() == Instructions::i64_const) {
+                i64_const_value = instruction.arguments().get<i64>();
+                pattern_state = InsnPatternState::I64Const;
+                break;
+            }
+            if (instruction.opcode() == Instructions::local_get) {
+                local_index_0 = instruction.local_index();
+                pattern_state = InsnPatternState::I64ConstGetLocal;
+                break;
+            }
+            [[fallthrough]];
+        case InsnPatternState::I64ConstGetLocal:
+            if (instruction.opcode() == Instructions::i64_const) {
+                i64_const_value = instruction.arguments().get<i64>();
+                pattern_state = InsnPatternState::GetLocalI64Const;
+            } else if (instruction.opcode() == Instructions::local_get) {
+                local_index_1 = instruction.local_index();
+                pattern_state = InsnPatternState::GetLocalx2;
+            } else if (instruction.opcode() == Instructions::i64_add) {
+                // `i64.const a; local.get b; i64.add` -> `i64.add_constlocal b a`.
+                // Replace the previous two ops with noops, and add i64.add_constlocal.
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                set_default_dispatch(nop, result.dispatches.size() - 2);
+                auto& extra_instruction = append_extra_instruction(
+                    Instructions::synthetic_i64_addconstlocal,
+                    local_index_0,
+                    i64_const_value);
+
+                set_default_dispatch(extra_instruction);
+                pattern_state = InsnPatternState::Nothing;
+                continue;
+            } else if (instruction.opcode() == Instructions::i64_and) {
+                // `i64.const a; local.get b; i64.and` -> `i64.and_constlocal b a`.
+                // Replace the previous two ops with noops, and add i64.and_constlocal.
+                set_default_dispatch(nop, result.dispatches.size() - 1);
+                set_default_dispatch(nop, result.dispatches.size() - 2);
+                auto& extra_instruction = append_extra_instruction(
+                    Instructions::synthetic_i64_andconstlocal,
+                    local_index_0,
+                    i64_const_value);
+
+                set_default_dispatch(extra_instruction);
+                pattern_state = InsnPatternState::Nothing;
+                continue;
+            } else {
+                pattern_state = InsnPatternState::Nothing;
+            }
             break;
         }
-        result.dispatches.unchecked_append(default_dispatch(instruction));
+        set_default_dispatch(instruction);
     }
 
     // Remove all nops (that were either added by the above patterns or were already present in the original instructions),
     // and adjust jumps accordingly.
-    Vector<size_t> nops_to_remove;
+    RedBlackTree<size_t, Empty> nops_to_remove;
     for (size_t i = 0; i < result.dispatches.size(); ++i) {
         if (result.dispatches[i].instruction->opcode() == Instructions::nop)
-            nops_to_remove.append(i);
+            nops_to_remove.insert(i, {});
     }
 
-    auto nops_to_remove_span = nops_to_remove.span();
+    auto nops_to_remove_it = nops_to_remove.begin();
     size_t offset_accumulated = 0;
     for (size_t i = 0; i < result.dispatches.size(); ++i) {
         if (result.dispatches[i].instruction->opcode() == Instructions::nop) {
             offset_accumulated++;
-            nops_to_remove_span = nops_to_remove_span.slice(1);
+            ++nops_to_remove_it;
             continue;
         }
 
         auto& args = result.dispatches[i].instruction->arguments();
+        auto offset_to = [&](InstructionPointer ip) {
+            size_t offset = 0;
+            auto it = nops_to_remove_it;
+            while (it != nops_to_remove.end() && it.key() < ip.value()) {
+                ++offset;
+                ++it;
+            }
+            return offset;
+        };
         if (auto ptr = args.get_pointer<Instruction::StructuredInstructionArgs>()) {
-            auto offset_to = [&](InstructionPointer ip) {
-                size_t offset = 0;
-                for (auto nop_ip : nops_to_remove_span) {
-                    if (nop_ip < ip.value())
-                        ++offset;
-                    else
-                        break;
-                }
-                return offset;
-            };
-
-            InstructionPointer end_ip = ptr->end_ip.value() - offset_accumulated - offset_to(ptr->end_ip - ptr->else_ip.has_value());
-            auto else_ip = ptr->else_ip.map([&](InstructionPointer const& ip) -> InstructionPointer { return ip.value() - offset_accumulated - offset_to(ip - 1); });
+            InstructionPointer end_ip = ptr->end_ip.value() - offset_accumulated - offset_to(ptr->end_ip - ptr->else_ip().has_value());
+            auto else_ip = ptr->else_ip().map([&](InstructionPointer const& ip) -> InstructionPointer { return ip.value() - offset_accumulated - offset_to(ip - 1); });
             auto instruction = *result.dispatches[i].instruction;
-            instruction.arguments() = Instruction::StructuredInstructionArgs {
-                .block_type = ptr->block_type,
-                .end_ip = end_ip,
-                .else_ip = else_ip,
-            };
-            result.extra_instruction_storage.append(move(instruction));
-            result.dispatches[i].instruction = &result.extra_instruction_storage.unsafe_last();
+            instruction.arguments() = Instruction::StructuredInstructionArgs { ptr->block_type, end_ip, else_ip, ptr->meta };
+            auto& extra_instruction = append_extra_instruction(move(instruction));
+            result.dispatches[i].instruction = &extra_instruction;
+            result.dispatches[i].instruction_opcode = result.dispatches[i].instruction->opcode();
+        } else if (auto try_table_ptr = args.get_pointer<Instruction::TryTableArgs>()) {
+            InstructionPointer end_ip = try_table_ptr->end_ip.value() - offset_accumulated - offset_to(try_table_ptr->end_ip);
+            auto instruction = *result.dispatches[i].instruction;
+            instruction.arguments() = Instruction::TryTableArgs { try_table_ptr->block_type, end_ip, try_table_ptr->catches(), try_table_ptr->meta };
+            auto& extra_instruction = append_extra_instruction(move(instruction));
+            result.dispatches[i].instruction = &extra_instruction;
             result.dispatches[i].instruction_opcode = result.dispatches[i].instruction->opcode();
         }
     }
-    for (auto index : nops_to_remove.in_reverse())
-        result.dispatches.remove(index);
+
+    result.dispatches.remove_all(nops_to_remove, [](auto const& it) { return it.key(); });
+    result.src_dst_mappings.remove_all(nops_to_remove, [](auto const& it) { return it.key(); });
+
+    // Every time we have a large-enough function, drop a synthetic_tier_up checkpoint right after each loop header that's eligible for tier-up (empty stack at the header, so the back-edge hits it every iteration).
+    // This allows us to start running code immediately in the interpreter, and switch to native code on paths that matter (or eventually) once compiled code is ready and the tier-up check hits.
+    constexpr size_t tier_up_instruction_threshold = 32;
+    if (result.dispatches.size() >= tier_up_instruction_threshold) {
+        Vector<size_t> loop_positions;
+        for (size_t i = 0; i < result.dispatches.size(); ++i) {
+            if (result.dispatches[i].instruction->opcode() != Instructions::loop)
+                continue;
+            auto& sa = result.dispatches[i].instruction->arguments().get<Instruction::StructuredInstructionArgs>();
+            if (sa.meta.tier_up_eligible)
+                loop_positions.append(i);
+        }
+
+        if (!loop_positions.is_empty()) {
+            // Number of tier-up ops inserted strictly before a given old dispatch index. A tier-up
+            // sits between its loop (at L) and L+1, so it precedes any old index > L.
+            auto shift_before = [&](size_t old_index) {
+                size_t shift = 0;
+                for (auto position : loop_positions) {
+                    if (position < old_index)
+                        ++shift;
+                    else
+                        break;
+                }
+                return shift;
+            };
+
+            Vector<Dispatch> new_dispatches;
+            Vector<SourcesAndDestination> new_src_dst;
+            new_dispatches.ensure_capacity(result.dispatches.size() + loop_positions.size());
+            new_src_dst.ensure_capacity(result.src_dst_mappings.size() + loop_positions.size());
+
+            size_t next_loop = 0;
+            for (size_t i = 0; i < result.dispatches.size(); ++i) {
+                new_dispatches.append(result.dispatches[i]);
+                new_src_dst.append(result.src_dst_mappings[i]);
+                if (next_loop < loop_positions.size() && loop_positions[next_loop] == i) {
+                    auto& tier_up = append_extra_instruction(Instructions::synthetic_tier_up);
+                    new_dispatches.append({ { .instruction_opcode = tier_up.opcode() }, &tier_up });
+                    new_src_dst.append({ .sources = { Dispatch::Stack, Dispatch::Stack, Dispatch::Stack }, .destination = Dispatch::Stack });
+                    ++next_loop;
+                }
+            }
+
+            // Re-point absolute IPs in structured args (end_ip / else_ip) past the inserted ops.
+            for (size_t i = 0; i < new_dispatches.size(); ++i) {
+                if (auto* sa = new_dispatches[i].instruction->arguments().get_pointer<Instruction::StructuredInstructionArgs>()) {
+                    InstructionPointer new_end_ip = sa->end_ip.value() + shift_before(sa->end_ip.value());
+                    auto new_else_ip = sa->else_ip().map([&](InstructionPointer ip) -> InstructionPointer { return ip.value() + shift_before(ip.value()); });
+                    auto rebuilt = *new_dispatches[i].instruction;
+                    rebuilt.arguments() = Instruction::StructuredInstructionArgs { sa->block_type, new_end_ip, new_else_ip, sa->meta };
+                    auto& extra_instruction = append_extra_instruction(move(rebuilt));
+                    new_dispatches[i].instruction = &extra_instruction;
+                    new_dispatches[i].instruction_opcode = extra_instruction.opcode();
+                } else if (auto* tta = new_dispatches[i].instruction->arguments().get_pointer<Instruction::TryTableArgs>()) {
+                    InstructionPointer new_end_ip = tta->end_ip.value() + shift_before(tta->end_ip.value());
+                    auto rebuilt = *new_dispatches[i].instruction;
+                    rebuilt.arguments() = Instruction::TryTableArgs { tta->block_type, new_end_ip, tta->catches(), tta->meta };
+                    auto& extra_instruction = append_extra_instruction(move(rebuilt));
+                    new_dispatches[i].instruction = &extra_instruction;
+                    new_dispatches[i].instruction_opcode = extra_instruction.opcode();
+                }
+            }
+
+            result.dispatches = move(new_dispatches);
+            result.src_dst_mappings = move(new_src_dst);
+            result.has_tier_up_checkpoints = true;
+        }
+    }
+
+    // Rewrite local.* of arguments to argument.* to keep local.* for locals only.
+    for (size_t i = 0; i < result.dispatches.size(); ++i) {
+        auto& dispatch = result.dispatches[i];
+        if (dispatch.instruction->opcode() == Instructions::local_get) {
+            auto local_index = dispatch.instruction->local_index();
+            if (local_index.value() & LocalArgumentMarker) {
+                auto& extra_instruction = append_extra_instruction(
+                    Instructions::synthetic_argument_get,
+                    local_index);
+                result.dispatches[i].instruction = &extra_instruction;
+                result.dispatches[i].instruction_opcode = result.dispatches[i].instruction->opcode();
+            }
+        } else if (dispatch.instruction->opcode() == Instructions::local_set) {
+            auto local_index = dispatch.instruction->local_index();
+            if (local_index.value() & LocalArgumentMarker) {
+                auto& extra_instruction = append_extra_instruction(
+                    Instructions::synthetic_argument_set,
+                    local_index);
+                result.dispatches[i].instruction = &extra_instruction;
+                result.dispatches[i].instruction_opcode = result.dispatches[i].instruction->opcode();
+            }
+        } else if (dispatch.instruction->opcode() == Instructions::local_tee) {
+            auto local_index = dispatch.instruction->local_index();
+            if (local_index.value() & LocalArgumentMarker) {
+                auto& extra_instruction = append_extra_instruction(
+                    Instructions::synthetic_argument_tee,
+                    local_index);
+                result.dispatches[i].instruction = &extra_instruction;
+                result.dispatches[i].instruction_opcode = result.dispatches[i].instruction->opcode();
+            }
+        }
+    }
 
     // Allocate registers for instructions, meeting the following constraints:
     // - Any instruction that produces polymorphic stack, or requires its inputs on the stack must sink all active values to the stack.
     // - All instructions must have the same location for their last input and their destination value (if any).
     // - Any value left at the end of the expression must be on the stack.
-    // - All inputs and outputs of call instructions with <4 inputs and <=1 output must be on the stack.
 
     using ValueID = DistinctNumeric<size_t, struct ValueIDTag, AK::DistinctNumericFeature::Comparison, AK::DistinctNumericFeature::Arithmetic, AK::DistinctNumericFeature::Increment>;
     using IP = DistinctNumeric<size_t, struct IPTag, AK::DistinctNumericFeature::Comparison>;
@@ -2825,6 +7480,7 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
         IP definition_index;
         Vector<IP> uses;
         IP last_use = 0;
+        bool was_created_as_a_result_of_polymorphic_stack = false;
     };
 
     struct ActiveReg {
@@ -2840,6 +7496,10 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
     HashMap<IP, Vector<ValueID>> instr_to_input_values;
     HashMap<IP, Vector<ValueID>> instr_to_dependent_values;
 
+    instr_to_output_value.ensure_capacity(result.dispatches.size());
+    instr_to_input_values.ensure_capacity(result.dispatches.size());
+    instr_to_dependent_values.ensure_capacity(result.dispatches.size());
+
     Vector<ValueID> forced_stack_values;
 
     Vector<ValueID> parent;      // parent[id] -> parent ValueID of id in the alias tree
@@ -2849,9 +7509,9 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
     auto ensure_id_space = [&](ValueID id) {
         if (id >= parent.size()) {
             size_t old_size = parent.size();
-            parent.resize(id.value() + 1);
-            rank.resize(id.value() + 1);
-            final_roots.resize(id.value() + 1);
+            parent.resize_with_default_value(id.value() + 1, {});
+            rank.resize_with_default_value(id.value() + 1, {});
+            final_roots.resize_with_default_value(id.value() + 1, {});
             for (size_t i = old_size; i <= id; ++i) {
                 parent[i] = i;
                 rank[i] = 0;
@@ -2890,6 +7550,20 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
     Vector<Vector<ValueID>> live_at_instr;
     live_at_instr.resize(result.dispatches.size());
 
+    // Track call record constraints
+    HashMap<ValueID, u8> value_to_callrec_slot;
+
+    struct CallInfo {
+        size_t call_index;
+        size_t param_count;
+        size_t result_count;
+        size_t earliest_arg_index;
+        Vector<ValueID> arg_values;
+    };
+    Vector<CallInfo> eligible_calls;
+
+    eligible_calls.ensure_capacity(calls_in_expression);
+
     for (size_t i = 0; i < result.dispatches.size(); ++i) {
         auto& dispatch = result.dispatches[i];
         auto opcode = dispatch.instruction->opcode();
@@ -2898,24 +7572,129 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
         Vector<ValueID> dependent_ids;
 
         bool variadic_or_unknown = false;
-        auto const is_known_call = opcode == Instructions::synthetic_call_00 || opcode == Instructions::synthetic_call_01
-            || opcode == Instructions::synthetic_call_10 || opcode == Instructions::synthetic_call_11
-            || opcode == Instructions::synthetic_call_20 || opcode == Instructions::synthetic_call_21
-            || opcode == Instructions::synthetic_call_30 || opcode == Instructions::synthetic_call_31;
+        bool requires_aliased_destination = true;
 
         switch (opcode.value()) {
 #define M(name, _, ins, outs)                    \
     case Instructions::name.value():             \
         if constexpr (ins == -1 || outs == -1) { \
             variadic_or_unknown = true;          \
-        } else {                                 \
-            inputs = ins;                        \
-            outputs = outs;                      \
         }                                        \
+        inputs = max(ins, 0);                    \
+        outputs = max(outs, 0);                  \
         break;
             ENUMERATE_WASM_OPCODES(M)
 #undef M
         }
+
+        Vector<ValueID> input_ids;
+
+        if (opcode == Instructions::call) {
+            auto& type = functions[dispatch.instruction->arguments().get<FunctionIndex>().value()];
+
+            if (type.parameters().size() <= (Dispatch::LastCallRecord - Dispatch::CallRecord + 1)
+                && type.results().size() <= 1
+                && type.parameters().size() <= value_stack.size()) {
+
+                inputs = type.parameters().size();
+                outputs = type.results().size();
+                variadic_or_unknown = false;
+                requires_aliased_destination = false;
+
+                auto value_stack_copy = value_stack;
+
+                for (size_t j = 0; j < inputs; ++j) {
+                    auto input_value = value_stack.take_last();
+                    auto& value = values.get(input_value).value();
+
+                    // if this value was created as a result of a polymorphic stack,
+                    // we can't actually go and force it to a call record again, so disqualify this call.
+                    if (value.was_created_as_a_result_of_polymorphic_stack) {
+                        inputs = 0;
+                        outputs = 0;
+                        variadic_or_unknown = true;
+                        value_stack = move(value_stack_copy);
+                        goto avoid_optimizing_this_call;
+                    }
+
+                    input_ids.append(input_value);
+                    dependent_ids.append(input_value);
+                    value.uses.append(i);
+                    value.last_use = max(value.last_use, i);
+                    forced_stack_values.append(input_value);
+                }
+                instr_to_input_values.set(i, input_ids);
+                instr_to_dependent_values.set(i, dependent_ids);
+
+                for (size_t j = 0; j < outputs; ++j) {
+                    auto id = next_value_id++;
+                    values.set(id, Value { id, i, {}, i });
+                    value_stack.append(id);
+                    instr_to_output_value.set(i, id);
+                    ensure_id_space(id);
+                }
+
+                size_t earliest = i;
+                ValueID earliest_arg_value = NumericLimits<size_t>::max();
+                for (auto value_id : input_ids) {
+                    auto& value = values.get(value_id).value();
+                    if (earliest > value.definition_index.value()) {
+                        earliest = value.definition_index.value();
+                        earliest_arg_value = value_id;
+                    }
+                }
+
+                // Reverse the input_ids to match stack order
+                Vector<ValueID> reversed_args;
+                for (size_t j = 0; j < inputs; ++j) {
+                    reversed_args.append(input_ids[inputs - 1 - j]);
+                }
+
+                // Follow the alias root of the earliest arg value to find the first instruction that produced it.
+                auto new_earliest = earliest;
+                while (true) {
+                    auto maybe_inputs = instr_to_input_values.get(new_earliest);
+                    if (!maybe_inputs.has_value())
+                        break;
+                    bool found_earliest = false;
+                    for (auto val : maybe_inputs.value()) {
+                        auto root = find_root(val);
+                        if (root == find_root(earliest_arg_value)) {
+                            auto& value = values.get(val).value();
+                            if (value.definition_index.value() < new_earliest) {
+                                new_earliest = value.definition_index.value();
+                                found_earliest = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!found_earliest)
+                        break;
+                }
+
+                eligible_calls.append({ .call_index = i,
+                    .param_count = inputs,
+                    .result_count = outputs,
+                    .earliest_arg_index = new_earliest,
+                    .arg_values = reversed_args });
+
+                continue;
+            }
+        }
+    avoid_optimizing_this_call:;
+
+        // Handle the inputs we actually know about.
+        size_t j = 0;
+        for (; j < inputs && !value_stack.is_empty(); ++j) {
+            auto input_value = value_stack.take_last();
+            input_ids.append(input_value);
+            dependent_ids.append(input_value);
+            auto& value = values.get(input_value).value();
+            value.uses.append(i);
+            value.last_use = max(value.last_use, i);
+        }
+
+        inputs -= j;
 
         if (variadic_or_unknown) {
             for (auto val : value_stack) {
@@ -2929,8 +7708,7 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
             value_stack.clear_with_capacity();
         }
 
-        Vector<ValueID> input_ids;
-        if (!variadic_or_unknown && value_stack.size() < inputs) {
+        if (value_stack.size() < inputs) {
             size_t j = 0;
             for (; j < inputs && !value_stack.is_empty(); ++j) {
                 auto input_value = value_stack.take_last();
@@ -2943,7 +7721,7 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
 
             for (; j < inputs; ++j) {
                 auto val_id = next_value_id++;
-                values.set(val_id, Value { val_id, i, {}, i });
+                values.set(val_id, Value { val_id, i, {}, i, true });
                 input_ids.append(val_id);
                 forced_stack_values.append(val_id);
                 ensure_id_space(val_id);
@@ -2959,9 +7737,6 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
             auto& value = values.get(input_value).value();
             value.uses.append(i);
             value.last_use = max(value.last_use, i);
-
-            if (is_known_call)
-                forced_stack_values.append(input_value);
         }
         instr_to_input_values.set(i, input_ids);
         instr_to_dependent_values.set(i, dependent_ids);
@@ -2974,19 +7749,22 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
             instr_to_output_value.set(i, id);
             output_id = id;
             ensure_id_space(id);
-
-            if (is_known_call)
-                forced_stack_values.append(id);
         }
 
         // Alias the output with the last input, if one exists.
-        if (outputs > 0) {
+        if (outputs > 0 && requires_aliased_destination) {
             auto maybe_input_ids = instr_to_input_values.get(i);
             if (maybe_input_ids.has_value() && !maybe_input_ids->is_empty()) {
                 auto last_input_id = maybe_input_ids->last();
                 union_alias(output_id, last_input_id);
 
                 auto alias_root = find_root(last_input_id);
+
+                // If the last input was created as a result of polymorphic stack, propagate that to the output (as they're aliased).
+                auto& output_value = values.get(output_id).value();
+                auto const& input_value = values.get(last_input_id).value();
+                if (input_value.was_created_as_a_result_of_polymorphic_stack)
+                    output_value.was_created_as_a_result_of_polymorphic_stack = true;
 
                 // If any *other* input is forced to alias the output, we have no choice but to place all three on the stack.
                 for (size_t j = 0; j < maybe_input_ids->size() - 1; ++j) {
@@ -3002,31 +7780,101 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
 
     forced_stack_values.extend(value_stack);
 
+    // Build conflict graph and select maximum set of non-conflicting calls
+    // Prefer calls with more arguments, and among those with equal args, prefer shorter spans
+
+    struct CallScore {
+        size_t index;
+        size_t param_count;
+        size_t span;
+    };
+
+    Vector<CallScore> scored_calls;
+    for (size_t i = 0; i < eligible_calls.size(); ++i) {
+        auto& call = eligible_calls[i];
+        size_t span = call.call_index - call.earliest_arg_index;
+        scored_calls.append({ i, call.param_count, span });
+    }
+
+    // Sort by: more params first, then shorter span
+    quick_sort(scored_calls, [](auto const& a, auto const& b) {
+        if (a.param_count != b.param_count)
+            return a.param_count > b.param_count;
+        return a.span < b.span;
+    });
+
+    // Greedily select non-conflicting calls in priority order
+    Vector<CallInfo*> valid_calls;
+    HashTable<size_t> selected_indices;
+    size_t max_call_record_size = 0;
+
+    for (auto const& score : scored_calls) {
+        auto& call_info = eligible_calls[score.index];
+        size_t call_start = call_info.earliest_arg_index;
+        size_t call_end = call_info.call_index;
+
+        bool conflicts = false;
+        for (auto* other_call : valid_calls) {
+            size_t other_start = other_call->earliest_arg_index;
+            size_t other_end = other_call->call_index;
+
+            // Check if the ranges overlap
+            // Two ranges [a,b] and [c,d] overlap if: NOT (b < c OR d < a)
+            if (!(call_end < other_start || other_end < call_start)) {
+                conflicts = true;
+                break;
+            }
+        }
+
+        if (!conflicts) {
+            valid_calls.append(&call_info);
+            selected_indices.set(score.index);
+            max_call_record_size = max(max_call_record_size, call_info.param_count);
+        }
+    }
+
+    // Only apply call record optimization to non-conflicting calls
+    HashTable<size_t> calls_with_records;
+    for (auto* call_info : valid_calls) {
+        calls_with_records.set(call_info->call_index);
+
+        // Mark values for call record slots
+        for (size_t j = 0; j < call_info->param_count; ++j) {
+            value_to_callrec_slot.set(call_info->arg_values[j], Dispatch::CallRecord + j);
+        }
+
+        auto new_call_opcode = call_info->result_count == 0
+            ? Instructions::synthetic_call_with_record_0
+            : Instructions::synthetic_call_with_record_1;
+
+        auto new_call_insn = Instruction(
+            new_call_opcode,
+            result.dispatches[call_info->call_index].instruction->arguments());
+
+        auto& extra_instruction = append_extra_instruction(move(new_call_insn));
+        result.dispatches[call_info->call_index].instruction = &extra_instruction;
+        result.dispatches[call_info->call_index].instruction_opcode = new_call_opcode;
+    }
+
+    result.max_call_rec_size = max_call_record_size;
+
     for (size_t i = 0; i < final_roots.size(); ++i)
         final_roots[i] = find_root(i);
 
-    // One more pass to ensure that all inputs and outputs of known calls are forced to the stack after aliases are resolved.
-    for (size_t i = 0; i < result.dispatches.size(); ++i) {
-        auto const opcode = result.dispatches[i].instruction->opcode();
-        auto const is_known_call = opcode == Instructions::synthetic_call_00 || opcode == Instructions::synthetic_call_01
-            || opcode == Instructions::synthetic_call_10 || opcode == Instructions::synthetic_call_11
-            || opcode == Instructions::synthetic_call_20 || opcode == Instructions::synthetic_call_21
-            || opcode == Instructions::synthetic_call_30 || opcode == Instructions::synthetic_call_31;
+    HashMap<ValueID, u8> root_to_callrec_slot;
+    for (auto const& [value_id, slot] : value_to_callrec_slot) {
+        auto root = final_roots[value_id.value()];
+        if (auto existing = root_to_callrec_slot.get(root); existing.has_value()) {
+            VERIFY(*existing == slot);
+        }
+        root_to_callrec_slot.set(root, slot);
+    }
 
-        if (is_known_call) {
-            if (auto input_ids = instr_to_input_values.get(i); input_ids.has_value()) {
-                for (auto input_id : *input_ids) {
-                    if (input_id.value() < final_roots.size()) {
-                        stack_forced_roots.set(final_roots[input_id.value()]);
-                    }
-                }
-            }
-
-            if (auto output_id = instr_to_output_value.get(i); output_id.has_value()) {
-                if (output_id->value() < final_roots.size()) {
-                    stack_forced_roots.set(final_roots[output_id->value()]);
-                }
-            }
+    value_to_callrec_slot.clear_with_capacity();
+    for (size_t i = 0; i < final_roots.size(); ++i) {
+        auto root = final_roots[i];
+        if (auto slot = root_to_callrec_slot.get(root); slot.has_value()) {
+            value_to_callrec_slot.set(ValueID { i }, *slot);
         }
     }
 
@@ -3073,10 +7921,74 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
         alias_groups.ensure(root).append(&interval);
     }
 
-    Array<Vector<LiveInterval const*>, Dispatch::CountRegisters> reg_intervals;
-    reg_intervals.fill({});
+    struct RegisterOccupancy {
+        Bitmap occupied;
+        Vector<ValueID> roots_at_position;
+
+        bool can_place(IP start, IP end, ValueID root) const
+        {
+            for (size_t i = start.value(); i <= end.value(); ++i) {
+                if (occupied.get(i)) {
+                    if (roots_at_position.size() > i && roots_at_position[i].value() != root.value())
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        void place(IP start, IP end, ValueID root)
+        {
+            if (roots_at_position.size() <= end.value())
+                roots_at_position.resize_with_default_value(end.value() + 1, {});
+
+            occupied.set_range<true>(start.value(), end.value() - start.value() + 1);
+            for (size_t i = start.value(); i <= end.value(); ++i)
+                roots_at_position[i] = root;
+        }
+    };
+
+    Array<RegisterOccupancy, Dispatch::CountRegisters> reg_occupancy;
+
+    for (u8 r = 0; r < Dispatch::CountRegisters; ++r) {
+        auto bitmap_result = Bitmap::create(result.dispatches.size(), false);
+        if (bitmap_result.is_error()) {
+            dbgln("Failed to allocate register bitmap of size {} ({}), bailing on register allocation", result.dispatches.size(), bitmap_result.error());
+            return {};
+        }
+        reg_occupancy[r].occupied = bitmap_result.release_value();
+    }
 
     for (auto& [key, group] : alias_groups) {
+        // Check if any value in this group needs a call record slot
+        Dispatch::RegisterOrStack forced_slot = Dispatch::RegisterOrStack::Stack;
+        bool has_callrec_constraint = false;
+
+        for (auto* interval : group) {
+            if (auto slot = value_to_callrec_slot.get(interval->value_id); slot.has_value()) {
+                forced_slot = static_cast<Dispatch::RegisterOrStack>(*slot);
+                has_callrec_constraint = true;
+                break;
+            }
+        }
+
+        if (has_callrec_constraint) {
+            // Force all values in this alias group to use the call record slot
+            for (auto* interval : group) {
+                value_alloc.set(interval->value_id, forced_slot);
+            }
+            continue;
+        }
+
+        auto has_fixed_allocation = false;
+        for (auto* interval : group) {
+            if (value_alloc.contains(interval->value_id)) {
+                has_fixed_allocation = true;
+                break;
+            }
+        }
+        if (has_fixed_allocation)
+            continue;
+
         IP group_start = NumericLimits<size_t>::max();
         IP group_end = 0;
         auto group_forced_to_stack = false;
@@ -3100,33 +8012,16 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
                     used_regs[to_underlying(active_entry.reg)] = true;
             }
 
+            auto group_root = final_roots[key.value()];
+
             for (u8 r = 0; r < Dispatch::CountRegisters; ++r) {
-                if (used_regs[r]) // There's no hope of using this register, it was already used earlier.
+                if (used_regs[r])
                     continue;
 
-                // We can assign to "live" registers, but only if we know there will be no overlap, or that they're aliasing values anyway.
-                auto can_assign = true;
-                for (auto* interval : group) {
-                    auto interval_root = final_roots[interval->value_id.value()];
-
-                    for (auto const* other_interval : reg_intervals[r]) {
-                        if (interval_root == final_roots[other_interval->value_id.value()])
-                            continue;
-                        if (interval->end >= other_interval->start && other_interval->end >= interval->start) {
-                            can_assign = false;
-                            break;
-                        }
-                    }
-                    if (!can_assign)
-                        break;
-                }
-
-                if (can_assign) {
+                if (reg_occupancy[r].can_place(group_start, group_end, group_root)) {
                     reg = static_cast<Dispatch::RegisterOrStack>(r);
                     active_by_end.insert(group_end.value(), { key, group_end, reg });
-
-                    for (auto* interval : group)
-                        reg_intervals[r].append(interval);
+                    reg_occupancy[r].place(group_start, group_end, group_root);
                     break;
                 }
             }
@@ -3136,17 +8031,273 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
             value_alloc.set(interval->value_id, reg);
     }
 
+    size_t max_call_arg_count = 0;
     for (size_t i = 0; i < result.dispatches.size(); ++i) {
         auto& dispatch = result.dispatches[i];
-        auto input_ids = instr_to_input_values.get(i).value_or({});
+        if (dispatch.instruction->opcode() == Instructions::call
+            || dispatch.instruction->opcode() == Instructions::synthetic_call_00
+            || dispatch.instruction->opcode() == Instructions::synthetic_call_10
+            || dispatch.instruction->opcode() == Instructions::synthetic_call_11
+            || dispatch.instruction->opcode() == Instructions::synthetic_call_20
+            || dispatch.instruction->opcode() == Instructions::synthetic_call_21
+            || dispatch.instruction->opcode() == Instructions::synthetic_call_30
+            || dispatch.instruction->opcode() == Instructions::synthetic_call_31) {
 
-        for (size_t j = 0; j < input_ids.size(); ++j) {
-            auto reg = value_alloc.get(input_ids[j]).value_or(Dispatch::RegisterOrStack::Stack);
-            dispatch.sources[j] = reg;
+            auto target = dispatch.instruction->arguments().get<FunctionIndex>();
+            if (target.value() < functions.size()) {
+                auto& function = functions[target.value()];
+                max_call_arg_count = max(max_call_arg_count, function.parameters().size());
+            }
         }
 
-        if (auto output_id = instr_to_output_value.get(i); output_id.has_value())
-            dispatch.destination = value_alloc.get(*output_id).value_or(Dispatch::RegisterOrStack::Stack);
+        auto& addr = result.src_dst_mappings[i];
+        auto input_ids = instr_to_input_values.get(IP(i)).value_or({});
+        if (input_ids.size() <= array_size(addr.sources)) {
+            for (size_t j = 0; j < input_ids.size(); ++j) {
+                auto reg = value_alloc.get(input_ids[j]).value_or(Dispatch::RegisterOrStack::Stack);
+                addr.sources[j] = reg;
+            }
+        }
+
+        if (auto output_id = instr_to_output_value.get(IP(i)); output_id.has_value())
+            addr.destination = value_alloc.get(*output_id).value_or(Dispatch::RegisterOrStack::Stack);
+    }
+
+    result.max_call_arg_count = max_call_arg_count;
+
+    // Swap out local.get (0..7) with local.get_[0..7] to avoid one extra load when possible
+    for (size_t i = 0; i < result.dispatches.size(); ++i) {
+        auto& dispatch = result.dispatches[i];
+        if (dispatch.instruction->opcode() == Instructions::local_get) {
+            auto local_index = dispatch.instruction->local_index().value();
+            if (local_index <= 7) {
+                auto& extra_instruction = append_extra_instruction(
+                    static_cast<OpCode>(Instructions::synthetic_local_get_0.value() + local_index),
+                    dispatch.instruction->local_index());
+                result.dispatches[i].instruction = &extra_instruction;
+                result.dispatches[i].instruction_opcode = result.dispatches[i].instruction->opcode();
+            }
+        }
+    }
+
+    // Swap out local.set (0..7) with local.set_[0..7] to avoid one extra load when possible
+    for (size_t i = 0; i < result.dispatches.size(); ++i) {
+        auto& dispatch = result.dispatches[i];
+        if (dispatch.instruction->opcode() == Instructions::local_set) {
+            auto local_index = dispatch.instruction->local_index().value();
+            if (local_index <= 7) {
+                auto& extra_instruction = append_extra_instruction(
+                    static_cast<OpCode>(Instructions::synthetic_local_set_0.value() + local_index),
+                    dispatch.instruction->local_index());
+                result.dispatches[i].instruction = &extra_instruction;
+                result.dispatches[i].instruction_opcode = result.dispatches[i].instruction->opcode();
+            }
+        }
+    }
+
+    // Swap out br(.if) with the runtime-checked nostack variant if no adjustment is needed.
+    // We still have to check whether that's true in reality as we may have had a polymorphic stack coming in,
+    for (size_t i = 0; i < result.dispatches.size(); ++i) {
+        auto& dispatch = result.dispatches[i];
+        if ((dispatch.instruction->opcode() == Instructions::br || dispatch.instruction->opcode() == Instructions::br_if)
+            && !dispatch.instruction->arguments().get<Instruction::BranchArgs>().has_stack_adjustment) {
+            auto new_opcode = dispatch.instruction->opcode() == Instructions::br
+                ? Instructions::synthetic_br_nostack
+                : Instructions::synthetic_br_if_nostack;
+            auto& extra_instruction = append_extra_instruction(
+                new_opcode,
+                dispatch.instruction->arguments());
+            result.dispatches[i].instruction = &extra_instruction;
+            result.dispatches[i].instruction_opcode = result.dispatches[i].instruction->opcode();
+        }
+    }
+
+    if constexpr (should_try_to_use_direct_threading) {
+        constexpr auto all_sources_are_registers = [](SourcesAndDestination const& addrs, ssize_t expected_source_count, ssize_t expected_dest_count) -> bool {
+            if (expected_source_count < 0 || expected_dest_count > 1)
+                return false;
+            for (ssize_t i = 0; i < expected_source_count; ++i) {
+                if (addrs.sources[i] >= Dispatch::Stack)
+                    return false;
+            }
+
+            if (expected_dest_count == 1 && addrs.destination >= Dispatch::Stack)
+                return false;
+
+            return true;
+        };
+        constexpr auto all_sources_are_callrec = [](SourcesAndDestination const& addrs, ssize_t expected_source_count, ssize_t expected_dest_count) -> bool {
+            if (expected_source_count < 0 || expected_dest_count > 1)
+                return false;
+            for (ssize_t i = 0; i < expected_source_count; ++i) {
+                if (addrs.sources[i] < Dispatch::CallRecord)
+                    return false;
+            }
+            if (expected_dest_count == 1 && addrs.destination < Dispatch::CallRecord)
+                return false;
+            return true;
+        };
+        constexpr auto all_sources_are_stack = [](SourcesAndDestination const& addrs, ssize_t expected_source_count, ssize_t expected_dest_count) -> bool {
+            if (expected_source_count < 0 || expected_dest_count > 1)
+                return false;
+            for (ssize_t i = 0; i < expected_source_count; ++i) {
+                if (addrs.sources[i] != Dispatch::Stack)
+                    return false;
+            }
+
+            if (expected_dest_count == 1 && addrs.destination != Dispatch::Stack)
+                return false;
+
+            return true;
+        };
+
+        for (size_t i = 0; i < result.dispatches.size(); ++i) {
+            auto& dispatch = result.dispatches[i];
+            auto& addrs = result.src_dst_mappings[i];
+
+#define CASE(name, _, inputs, outputs)                                                                                                                                         \
+    case Instructions::name.value():                                                                                                                                           \
+        if (all_sources_are_registers(addrs, inputs, outputs))                                                                                                                 \
+            dispatch.handler_ptr = bit_cast<FlatPtr>(&InstructionHandler<Instructions::name.value()>::template operator()<false, Continue, SourceAddressMix::AllRegisters>);   \
+        else if (all_sources_are_callrec(addrs, inputs, outputs))                                                                                                              \
+            dispatch.handler_ptr = bit_cast<FlatPtr>(&InstructionHandler<Instructions::name.value()>::template operator()<false, Continue, SourceAddressMix::AllCallRecords>); \
+        else if (all_sources_are_stack(addrs, inputs, outputs))                                                                                                                \
+            dispatch.handler_ptr = bit_cast<FlatPtr>(&InstructionHandler<Instructions::name.value()>::template operator()<false, Continue, SourceAddressMix::AllStack>);       \
+        else                                                                                                                                                                   \
+            dispatch.handler_ptr = bit_cast<FlatPtr>(&InstructionHandler<Instructions::name.value()>::template operator()<false, Continue, SourceAddressMix::Any>);            \
+        break;
+
+            switch (dispatch.instruction->opcode().value()) {
+                ENUMERATE_WASM_OPCODES(CASE)
+            default:
+                dbgln("No handler for opcode {}", dispatch.instruction->opcode().value());
+                VERIFY_NOT_REACHED();
+            }
+        }
+        result.direct = true;
+    }
+
+    // Verify instruction stream.
+    struct Mark {
+        size_t ip;
+        StringView label;
+    };
+
+    auto print_instructions_around = [&](size_t start_ish, size_t end_ish, auto... marks) {
+        auto sterr = MUST(Core::File::standard_error());
+        Printer p(*sterr);
+        auto print_range = [&](size_t start_ip, size_t end_ip) {
+            for (size_t k = start_ip; k < end_ip; ++k) {
+                warn("[{:04}] ", k);
+                auto instruction = result.dispatches[k].instruction;
+                auto addresses = result.src_dst_mappings[k];
+
+                p.print(*instruction);
+
+                ([&] { if (k == marks.ip) warnln("       ^-- {}", marks.label); }(), ...);
+
+                auto [in_count, out_count] = instruction_operand_counts(instruction->opcode());
+                for (ssize_t i = 0; i < in_count; ++i) {
+                    warnln("       arg{} [{}]", i, regname(addresses.sources[i]));
+                }
+                if (out_count == 1) {
+                    auto dest = addresses.destination;
+                    warnln("       dest [{}]", regname(dest));
+                } else if (out_count > 1) {
+                    warnln("       dest [multiple outputs]");
+                } else if (first_is_one_of(instruction->opcode(), Instructions::call, Instructions::call_indirect, Instructions::call_ref)) {
+                    if (addresses.destination != Dispatch::Stack)
+                        warnln("       dest [{}]", regname(addresses.destination));
+                }
+            }
+        };
+
+        if (start_ish > end_ish)
+            swap(start_ish, end_ish);
+        auto start_ip = start_ish >= 40 ? start_ish - 40 : 0;
+        auto end_ip = min(result.dispatches.size(), end_ish + 10);
+        auto skip_start = Optional<size_t> {};
+        for (auto ip = start_ip; ip < end_ip; ip += 5) {
+            size_t chunk_end = min(end_ip, ip + 5);
+            print_range(ip, chunk_end);
+            continue;
+            bool has_mark = false;
+            for (auto const& mark : { marks... }) {
+                if (mark.ip >= ip && mark.ip < chunk_end) {
+                    has_mark = true;
+                    break;
+                }
+            }
+            if (has_mark || ip == start_ip || chunk_end == end_ip) {
+                if (skip_start.has_value()) {
+                    warnln("... skipping instructions [{:04}..{:04}] ...", *skip_start, ip);
+                    skip_start = {};
+                }
+                print_range(ip, chunk_end);
+            } else if (!skip_start.has_value()) {
+                skip_start = ip;
+            }
+        }
+    };
+
+    bool used[256] = { false };
+    for (size_t i = 0; i < result.dispatches.size(); ++i) {
+        auto& dispatch = result.dispatches[i];
+        if (dispatch.instruction->opcode() == Instructions::if_) {
+            // if (else) (end), verify (else) - 1 points at a synthetic:else_, and (end)-1+(!has-else) points at a synthetic:end.
+            auto args = dispatch.instruction->arguments().get<Instruction::StructuredInstructionArgs>();
+            if (args.else_ip().has_value()) {
+                size_t else_ip = args.else_ip()->value() - 1;
+                if (result.dispatches[else_ip].instruction->opcode() != Instructions::structured_else) {
+                    dbgln("Invalid else_ip target at instruction {}: else_ip {}", i, else_ip);
+                    dbgln("Instructions around the invalid else_ip:");
+                    print_instructions_around(i, else_ip, Mark { i, "invalid if_"sv }, Mark { else_ip, "this should've been an else"sv }, Mark { else_ip - 1, "previous instruction"sv }, Mark { else_ip + 1, "next instruction"sv });
+                    VERIFY_NOT_REACHED();
+                }
+            }
+            size_t end_ip = args.end_ip.value() - 1 + (args.else_ip().has_value() ? 0 : 1);
+            if (result.dispatches[end_ip].instruction->opcode() != Instructions::structured_end) {
+                dbgln("Invalid end_ip target at instruction {}: end_ip {}", i, end_ip);
+                dbgln("Instructions around the invalid end_ip:");
+                print_instructions_around(i, end_ip, Mark { i, "invalid if_"sv }, Mark { end_ip, "this should've been an end"sv }, Mark { end_ip - 1, "previous instruction"sv }, Mark { end_ip + 1, "next instruction"sv });
+                VERIFY_NOT_REACHED();
+            }
+        }
+        // If the instruction is a call with a callrec, clear used[] for the callrec registers.
+        if (dispatch.instruction->opcode() == Instructions::synthetic_call_with_record_0 || dispatch.instruction->opcode() == Instructions::synthetic_call_with_record_1) {
+            for (size_t j = to_underlying(Dispatch::CallRecord); j <= to_underlying(Dispatch::LastCallRecord); ++j)
+                used[j] = false;
+        }
+
+        auto& addr = result.src_dst_mappings[i];
+
+        // for each input, ensure it's not reading from a register that is not marked as used (unless stack).
+        auto [in_count, out_count] = instruction_operand_counts(dispatch.instruction->opcode());
+        for (ssize_t j = 0; j < in_count; ++j) {
+            auto src = addr.sources[j];
+            if (src == Dispatch::Stack)
+                continue;
+            if (!used[to_underlying(src)]) {
+                dbgln("Instruction {} reads from register {} which is not populated", i, to_underlying(src));
+                dbgln("Instructions around the invalid read:");
+                print_instructions_around(i, i, Mark { i, "invalid read here"sv });
+                VERIFY_NOT_REACHED();
+            }
+            used[to_underlying(src)] = false;
+        }
+        // if the instruction has an output, ensure it's not writing to a register that is marked used.
+        if (out_count == 1 || first_is_one_of(dispatch.instruction->opcode(), Instructions::call, Instructions::call_indirect, Instructions::call_ref)) {
+            auto dest = addr.destination;
+            if (dest != Dispatch::Stack) {
+                if (used[to_underlying(dest)]) {
+                    dbgln("Instruction {} writes to register {} which is already populated", i, to_underlying(dest));
+                    dbgln("Instructions around the invalid write:");
+                    print_instructions_around(i, i, Mark { i, "invalid write here"sv });
+                    VERIFY_NOT_REACHED();
+                }
+                used[to_underlying(dest)] = true;
+            }
+        }
     }
 
     return result;

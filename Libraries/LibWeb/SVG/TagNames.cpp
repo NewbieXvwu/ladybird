@@ -8,8 +8,8 @@
 
 namespace Web::SVG::TagNames {
 
-#define __ENUMERATE_SVG_TAG(name) \
-    FlyString name = #name##_fly_string;
+#define __ENUMERATE_SVG_TAG(name, tag) \
+    Utf16FlyString const& name = *new Utf16FlyString(tag##_utf16_fly_string);
 ENUMERATE_SVG_TAGS
 #undef __ENUMERATE_SVG_TAG
 

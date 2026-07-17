@@ -1,10 +1,8 @@
-#import <CSS/CSSStyleSheet.idl>
-
-// https://www.w3.org/TR/cssom/#the-cssrule-interface
+// https://drafts.csswg.org/cssom/#the-cssrule-interface
 [Exposed=Window]
 interface CSSRule {
 
-    attribute CSSOMString cssText;
+    attribute Utf16CSSOMString cssText;
     readonly attribute CSSRule? parentRule;
     readonly attribute CSSStyleSheet? parentStyleSheet;
 
@@ -20,6 +18,8 @@ interface CSSRule {
     const unsigned short KEYFRAME_RULE = 8;
     const unsigned short MARGIN_RULE = 9;
     const unsigned short NAMESPACE_RULE = 10;
+    const unsigned short COUNTER_STYLE_RULE = 11;
     const unsigned short SUPPORTS_RULE = 12;
+    const unsigned short FONT_FEATURE_VALUES_RULE = 14;
 
 };

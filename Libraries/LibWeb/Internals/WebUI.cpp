@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/WebUIPrototype.h>
+#include <LibWeb/Bindings/WebUI.h>
 #include <LibWeb/Internals/WebUI.h>
 #include <LibWeb/Page/Page.h>
 
@@ -26,7 +26,7 @@ void WebUI::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void WebUI::send_message(String const& name, JS::Value data)
+void WebUI::send_message(Utf16String const& name, JS::Value data)
 {
     page().client().received_message_from_web_ui(name, data);
 }

@@ -6,9 +6,11 @@
 
 #pragma once
 
+#include <AK/NeverDestroyed.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
 #include <AK/RefPtr.h>
+#include <AK/Utf16String.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibWeb/WebIDL/DOMException.h>
 
@@ -29,7 +31,7 @@ enum class SimpleExceptionType {
 
 struct SimpleException {
     SimpleExceptionType type;
-    Variant<String, StringView> message;
+    Utf16String message;
 };
 
 using Exception = Variant<SimpleException, GC::Ref<DOMException>, JS::Completion>;
@@ -91,6 +93,13 @@ public:
     ExceptionOr(ExceptionOr const& other) = default;
     ~ExceptionOr() = default;
 
+    template<typename E>
+    requires(IsBaseOf<DOMException, E>)
+    ExceptionOr(GC::Ref<E> exception)
+        : ExceptionOr(GC::Ref<DOMException> { exception })
+    {
+    }
+
     ValueType& value()
     requires(!IsSame<ValueType, Empty>)
     {
@@ -138,18 +147,10 @@ public:
 namespace AK {
 
 template<>
-struct Formatter<Web::WebIDL::SimpleException> : Formatter<StringView> {
+struct Formatter<Web::WebIDL::SimpleException> : Formatter<Utf16String> {
     ErrorOr<void> format(FormatBuilder& builder, Web::WebIDL::SimpleException const& exception)
     {
-        auto message_view = exception.message.visit(
-            [](String const& message) -> StringView {
-                return message.bytes_as_string_view();
-            },
-            [](StringView message) -> StringView {
-                return message;
-            });
-
-        return Formatter<StringView>::format(builder, message_view);
+        return Formatter<Utf16String>::format(builder, exception.message);
     }
 };
 
@@ -168,17 +169,16 @@ struct Formatter<Web::WebIDL::Exception> : Formatter<FormatString> {
                 VERIFY(completion.is_error());
                 auto value = completion.value();
 
-                if (value.is_object()) {
-                    auto& object = value.as_object();
-                    static JS::PropertyKey const message_property_key { "message"_utf16_fly_string };
-                    auto has_message_or_error = object.has_own_property(message_property_key);
+                if (auto object = value.template as_if<JS::Object>()) {
+                    static NeverDestroyed<JS::PropertyKey> message_property_key { "message"_utf16_fly_string };
+                    auto has_message_or_error = object->has_own_property(*message_property_key);
                     if (!has_message_or_error.is_error() && has_message_or_error.value()) {
-                        auto message_object = object.get_without_side_effects(message_property_key);
-                        return Formatter<StringView>::format(builder, message_object.to_string_without_side_effects());
+                        auto message_object = object->get_without_side_effects(*message_property_key);
+                        return Formatter<Utf16String> {}.format(builder, message_object.to_utf16_string_without_side_effects());
                     }
                 }
 
-                return Formatter<StringView>::format(builder, value.to_string_without_side_effects());
+                return Formatter<Utf16String> {}.format(builder, value.to_utf16_string_without_side_effects());
             });
     }
 };

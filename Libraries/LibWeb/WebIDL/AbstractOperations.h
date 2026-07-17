@@ -8,26 +8,43 @@
 
 #pragma once
 
+#include <AK/FlyString.h>
 #include <AK/Forward.h>
+#include <AK/Utf16String.h>
 #include <LibGC/Ptr.h>
 #include <LibGC/RootVector.h>
 #include <LibJS/Forward.h>
+#include <LibJS/Runtime/AbstractOperations.h>
+#include <LibJS/Runtime/FunctionObject.h>
+#include <LibJS/Runtime/PrimitiveString.h>
+#include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/WebIDL/Buffers.h>
 
 namespace Web::WebIDL {
 
 bool is_buffer_source_type(JS::Value);
 GC::Ptr<JS::ArrayBuffer> underlying_buffer_source(JS::Object& buffer_source);
 WEB_API ErrorOr<ByteBuffer> get_buffer_source_copy(JS::Object const& buffer_source);
+WEB_API ErrorOr<ByteBuffer> get_buffer_source_copy(BufferSource const&);
+WEB_API ErrorOr<ByteBuffer> get_buffer_source_copy(ArrayBufferView const&);
 
 JS::Completion call_user_object_operation(CallbackType& callback, Utf16FlyString const& operation_name, Optional<JS::Value> this_argument, ReadonlySpan<JS::Value> args);
 
-WEB_API JS::ThrowCompletionOr<String> to_string(JS::VM&, JS::Value);
 WEB_API JS::ThrowCompletionOr<Utf16String> to_utf16_string(JS::VM&, JS::Value);
-WEB_API JS::ThrowCompletionOr<String> to_usv_string(JS::VM&, JS::Value);
 JS::ThrowCompletionOr<Utf16String> to_utf16_usv_string(JS::VM&, JS::Value);
 JS::ThrowCompletionOr<String> to_byte_string(JS::VM&, JS::Value);
+
+template<typename T>
+GC::Ref<JS::PrimitiveString> primitive_string_from_string(JS::VM& vm, T&& value)
+{
+    using ValueType = RemoveCVReference<T>;
+    if constexpr (IsSame<ValueType, String> || IsSame<ValueType, StringView> || IsSame<ValueType, FlyString> || IsSame<ValueType, ByteString>)
+        return JS::PrimitiveString::create(vm, Utf16String::from_utf8(value));
+    else
+        return JS::PrimitiveString::create(vm, forward<T>(value));
+}
 
 enum class ExceptionBehavior {
     NotSpecified,
@@ -59,5 +76,29 @@ template<Integral T>
 JS::ThrowCompletionOr<T> convert_to_int(JS::VM& vm, JS::Value, EnforceRange enforce_range = EnforceRange::No, Clamp clamp = Clamp::No);
 
 bool lists_contain_same_elements(GC::Ptr<JS::Array> array, Optional<GC::RootVector<GC::Ref<DOM::Element>>> const& elements);
+
+// https://webidl.spec.whatwg.org/#internally-create-a-new-object-implementing-the-interface
+// Steps from "internally create a new object implementing the interface"
+template<typename PrototypeType>
+JS::ThrowCompletionOr<void> set_prototype_from_new_target(JS::VM& vm, JS::FunctionObject& new_target, Utf16FlyString const& interface_name, JS::Object& object)
+{
+    // 3.2. Let prototype be ? Get(newTarget, "prototype").
+    auto prototype = TRY(new_target.get(vm.names.prototype));
+
+    // 3.3. If Type(prototype) is not Object, then:
+    if (!prototype.is_object()) {
+        // 1. Let targetRealm be ? GetFunctionRealm(newTarget).
+        auto* target_realm = TRY(JS::get_function_realm(vm, new_target));
+
+        // 2. Set prototype to the interface prototype object for interface in targetRealm.
+        VERIFY(target_realm);
+        prototype = &Bindings::ensure_web_prototype<PrototypeType>(*target_realm, interface_name);
+    }
+
+    // 9. Set instance.[[Prototype]] to prototype.
+    VERIFY(prototype.is_object());
+    TRY(object.internal_set_prototype_of(&prototype.as_object()));
+    return {};
+}
 
 }

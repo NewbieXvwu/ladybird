@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/NonnullOwnPtr.h>
 #include <AK/Time.h>
 #include <LibCore/EventLoopImplementation.h>
 
@@ -50,14 +51,13 @@ public:
 
     virtual void wake() override;
 
-    virtual void post_event(EventReceiver& receiver, NonnullOwnPtr<Event>&&) override;
-
 private:
     bool m_exit_requested { false };
     int m_exit_code { 0 };
 
-    // The wake pipe of this event loop needs to be accessible from other threads.
-    Array<int, 2>& m_wake_pipe_fds;
+    // The write end of the wake pipe, copied by value so it remains valid even
+    // if ThreadData is destroyed before this event loop (e.g. during exit()).
+    int m_wake_pipe_write_fd;
 };
 
 using EventLoopManagerPlatform = EventLoopManagerUnix;

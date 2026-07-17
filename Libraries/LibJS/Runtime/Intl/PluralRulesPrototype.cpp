@@ -28,7 +28,7 @@ void PluralRulesPrototype::initialize(Realm& realm)
     auto& vm = this->vm();
 
     // 17.3.5 Intl.PluralRules.prototype [ %Symbol.toStringTag% ], https://tc39.es/ecma402/#sec-intl.pluralrules.prototype-%symbol.tostringtag%
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Intl.PluralRules"_string), Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Intl.PluralRules"_utf16_fly_string), Attribute::Configurable);
 
     u8 attr = Attribute::Writable | Attribute::Configurable;
     define_native_function(realm, vm.names.resolvedOptions, resolved_options, 0, attr);
@@ -56,7 +56,7 @@ JS_DEFINE_NATIVE_FUNCTION(PluralRulesPrototype::resolved_options)
         return PrimitiveString::create(vm, Unicode::plural_category_to_string(category));
     });
 
-    // 5. For each row of Table 30, except the header row, in table order, do
+    // 5. For each row of Table 32, except the header row, in table order, do
     //     a. Let p be the Property value of the current row.
     //     b. If p is "pluralCategories", then
     //         i. Let v be CreateArrayFromList(pluralCategories).
@@ -67,6 +67,8 @@ JS_DEFINE_NATIVE_FUNCTION(PluralRulesPrototype::resolved_options)
     MUST(options->create_data_property_or_throw(vm.names.locale, PrimitiveString::create(vm, plural_rules->locale())));
     MUST(options->create_data_property_or_throw(vm.names.type, PrimitiveString::create(vm, plural_rules->type_string())));
     MUST(options->create_data_property_or_throw(vm.names.notation, PrimitiveString::create(vm, plural_rules->notation_string())));
+    if (plural_rules->has_compact_display())
+        MUST(options->create_data_property_or_throw(vm.names.compactDisplay, PrimitiveString::create(vm, plural_rules->compact_display_string())));
     MUST(options->create_data_property_or_throw(vm.names.minimumIntegerDigits, Value(plural_rules->min_integer_digits())));
     if (plural_rules->has_min_fraction_digits())
         MUST(options->create_data_property_or_throw(vm.names.minimumFractionDigits, Value(plural_rules->min_fraction_digits())));
@@ -89,12 +91,14 @@ JS_DEFINE_NATIVE_FUNCTION(PluralRulesPrototype::resolved_options)
 // 17.3.3 Intl.PluralRules.prototype.select ( value ), https://tc39.es/ecma402/#sec-intl.pluralrules.prototype.select
 JS_DEFINE_NATIVE_FUNCTION(PluralRulesPrototype::select)
 {
+    auto value = vm.argument(0);
+
     // 1. Let pr be the this value.
     // 2. Perform ? RequireInternalSlot(pr, [[InitializedPluralRules]]).
     auto plural_rules = TRY(typed_this_object(vm));
 
-    // 3. Let n be ? ToNumber(value).
-    auto number = TRY(vm.argument(0).to_number(vm));
+    // 3. Let n be ? ToIntlMathematicalValue(value).
+    auto number = TRY(to_intl_mathematical_value(vm, value));
 
     // 4. Return ! ResolvePlural(pr, n).[[PluralCategory]].
     auto plurality = resolve_plural(plural_rules, number);
@@ -117,11 +121,11 @@ JS_DEFINE_NATIVE_FUNCTION(PluralRulesPrototype::select_range)
     if (end.is_undefined())
         return vm.throw_completion<TypeError>(ErrorType::IsUndefined, "end"sv);
 
-    // 4. Let x be ? ToNumber(start).
-    auto x = TRY(start.to_number(vm));
+    // 4. Let x be ? ToIntlMathematicalValue(start).
+    auto x = TRY(to_intl_mathematical_value(vm, start));
 
-    // 5. Let y be ? ToNumber(end).
-    auto y = TRY(end.to_number(vm));
+    // 5. Let y be ? ToIntlMathematicalValue(end).
+    auto y = TRY(to_intl_mathematical_value(vm, end));
 
     // 6. Return ? ResolvePluralRange(pr, x, y).
     auto plurality = TRY(resolve_plural_range(vm, plural_rules, x, y));

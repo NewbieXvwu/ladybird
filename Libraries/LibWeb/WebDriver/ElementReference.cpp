@@ -5,6 +5,7 @@
  */
 
 #include <AK/HashMap.h>
+#include <AK/NeverDestroyed.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
@@ -17,26 +18,34 @@
 #include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/Page/Page.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/WebDriver/ElementReference.h>
 
 namespace Web::WebDriver {
 
 // https://w3c.github.io/webdriver/#dfn-web-element-identifier
-static String const web_element_identifier = "element-6066-11e4-a52e-4f735466cecf"_string;
-static JS::PropertyKey web_element_identifier_key { Utf16FlyString::from_utf8(web_element_identifier) };
+static auto const& web_element_identifier = *new String("element-6066-11e4-a52e-4f735466cecf"_string);
+static auto const& web_element_identifier_key = *new JS::PropertyKey(Utf16FlyString::from_utf8(web_element_identifier));
 
 // https://w3c.github.io/webdriver/#dfn-shadow-root-identifier
-static String const shadow_root_identifier = "shadow-6066-11e4-a52e-4f735466cecf"_string;
-static JS::PropertyKey shadow_root_identifier_key { Utf16FlyString::from_utf8(shadow_root_identifier) };
+static auto const& shadow_root_identifier = *new String("shadow-6066-11e4-a52e-4f735466cecf"_string);
+static auto const& shadow_root_identifier_key = *new JS::PropertyKey(Utf16FlyString::from_utf8(shadow_root_identifier));
 
 // https://w3c.github.io/webdriver/#dfn-browsing-context-group-node-map
-static HashMap<GC::RawPtr<HTML::BrowsingContextGroup const>, HashTable<String>> browsing_context_group_node_map;
+static HashMap<GC::RawPtr<HTML::BrowsingContextGroup const>, HashTable<String>>& browsing_context_group_node_map()
+{
+    static NeverDestroyed<HashMap<GC::RawPtr<HTML::BrowsingContextGroup const>, HashTable<String>>> map;
+    return *map;
+}
 
 // https://w3c.github.io/webdriver/#dfn-navigable-seen-nodes-map
-static HashMap<GC::RawPtr<HTML::Navigable>, HashTable<String>> navigable_seen_nodes_map;
+static HashMap<GC::RawPtr<HTML::LocalNavigable>, HashTable<String>>& navigable_seen_nodes_map()
+{
+    static NeverDestroyed<HashMap<GC::RawPtr<HTML::LocalNavigable>, HashTable<String>>> map;
+    return *map;
+}
 
 // https://w3c.github.io/webdriver/#dfn-get-a-node
 GC::Ptr<Web::DOM::Node> get_node(HTML::BrowsingContext const& browsing_context, StringView reference)
@@ -47,7 +56,7 @@ GC::Ptr<Web::DOM::Node> get_node(HTML::BrowsingContext const& browsing_context, 
 
     // 3. If browsing context group node map does not contain browsing context group, return null.
     // 4. Let node id map be browsing context group node map[browsing context group].
-    auto node_id_map = browsing_context_group_node_map.get(browsing_context_group);
+    auto node_id_map = browsing_context_group_node_map().get(browsing_context_group);
     if (!node_id_map.has_value())
         return nullptr;
 
@@ -73,7 +82,7 @@ String get_or_create_a_node_reference(HTML::BrowsingContext const& browsing_cont
     // 3. If browsing context group node map does not contain browsing context group, set browsing context group node
     //    map[browsing context group] to a new weak map.
     // 4. Let node id map be browsing context group node map[browsing context group].
-    auto& node_id_map = browsing_context_group_node_map.ensure(browsing_context_group);
+    auto& node_id_map = browsing_context_group_node_map().ensure(browsing_context_group);
 
     auto node_id = String::number(node.unique_id().value());
 
@@ -89,7 +98,7 @@ String get_or_create_a_node_reference(HTML::BrowsingContext const& browsing_cont
         // 4. Let navigable seen nodes map be session's navigable seen nodes map.
         // 5. If navigable seen nodes map does not contain navigable, set navigable seen nodes map[navigable] to an empty set.
         // 6. Append node id to navigable seen nodes map[navigable].
-        navigable_seen_nodes_map.ensure(navigable).set(node_id);
+        navigable_seen_nodes_map().ensure(navigable).set(node_id);
     }
 
     // 6. Return node id map[node].
@@ -107,7 +116,7 @@ bool node_reference_is_known(HTML::BrowsingContext const& browsing_context, Stri
     // 2. Let navigable seen nodes map be session's navigable seen nodes map.
     // 3. If navigable seen nodes map contains navigable and navigable seen nodes map[navigable] contains reference,
     //    return true, otherwise return false.
-    if (auto map = navigable_seen_nodes_map.get(navigable); map.has_value())
+    if (auto map = navigable_seen_nodes_map().get(navigable); map.has_value())
         return map->contains(reference);
     return false;
 }
@@ -185,7 +194,7 @@ ErrorOr<GC::Ref<Web::DOM::Element>, WebDriver::Error> deserialize_web_element(We
         return WebDriver::Error::from_code(WebDriver::ErrorCode::InvalidArgument, "Object is not a web element"sv);
 
     // 2. Let reference be the result of getting the web element identifier property from object.
-    auto reference = property.value().as_string().utf8_string();
+    auto reference = property.value().as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
 
     // 3. Let element be the result of trying to get a known element with session and reference.
     auto element = TRY(get_known_element(browsing_context, reference));
@@ -257,14 +266,17 @@ bool is_element_pointer_interactable(Web::HTML::BrowsingContext const& browsing_
     if (!document)
         return false;
 
-    auto const* paint_root = document->paintable_box();
+    auto paint_root = document->paintable_box();
     if (!paint_root)
         return false;
 
     auto viewport = browsing_context.page().top_level_traversable()->viewport_rect();
-    auto center_point = in_view_center_point(element, viewport);
+    auto center_point_or_error = in_view_center_point(element, viewport);
+    if (center_point_or_error.is_error())
+        return false;
+    auto center_point = center_point_or_error.release_value();
 
-    auto result = paint_root->hit_test(center_point, Painting::HitTestType::TextCursor);
+    auto result = const_cast<DOM::Document&>(*document).hit_test(center_point, Painting::HitTestType::Exact);
     if (!result.has_value())
         return false;
 
@@ -387,18 +399,21 @@ GC::RootVector<GC::Ref<Web::DOM::Element>> pointer_interactable_tree(Web::HTML::
 {
     // 1. If element is not in the same tree as session's current browsing context's active document, return an empty sequence.
     if (!browsing_context.active_document()->contains(element))
-        return GC::RootVector<GC::Ref<Web::DOM::Element>>(browsing_context.heap());
+        return GC::RootVector<GC::Ref<Web::DOM::Element>> {};
 
     // 2. Let rectangles be the DOMRect sequence returned by calling getClientRects().
     auto rectangles = element.get_client_rects();
 
     // 3. If rectangles has the length of 0, return an empty sequence.
     if (rectangles.is_empty())
-        return GC::RootVector<GC::Ref<Web::DOM::Element>>(browsing_context.heap());
+        return GC::RootVector<GC::Ref<Web::DOM::Element>> {};
 
     // 4. Let center point be the in-view center point of the first indexed element in rectangles.
     auto viewport = browsing_context.page().top_level_traversable()->viewport_rect();
-    auto center_point = Web::WebDriver::in_view_center_point(element, viewport);
+    auto center_point_or_error = Web::WebDriver::in_view_center_point(element, viewport);
+    if (center_point_or_error.is_error())
+        return GC::RootVector<GC::Ref<Web::DOM::Element>> {};
+    auto center_point = center_point_or_error.release_value();
 
     // 5. Return the elements from point given the coordinates center point.
     return browsing_context.active_document()->elements_from_point(center_point.x().to_double(), center_point.y().to_double());
@@ -475,7 +490,7 @@ ErrorOr<GC::Ref<Web::DOM::ShadowRoot>, WebDriver::Error> deserialize_shadow_root
         return WebDriver::Error::from_code(WebDriver::ErrorCode::InvalidArgument, "Object is not a Shadow Root"sv);
 
     // 2. Let reference be the result of getting the shadow root identifier property from object.
-    auto reference = property.value().as_string().utf8_string();
+    auto reference = property.value().as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
 
     // 3. Let shadow be the result of trying to get a known shadow root with session and reference.
     auto shadow = TRY(get_known_shadow_root(browsing_context, reference));
@@ -527,10 +542,13 @@ String element_rendered_text(DOM::Node& node)
 }
 
 // https://w3c.github.io/webdriver/#dfn-center-point
-CSSPixelPoint in_view_center_point(DOM::Element const& element, CSSPixelRect viewport)
+ErrorOr<CSSPixelPoint, WebDriver::Error> in_view_center_point(DOM::Element const& element, CSSPixelRect viewport)
 {
     // 1. Let rectangle be the first element of the DOMRect sequence returned by calling getClientRects() on element.
-    auto rectangle = element.get_client_rects().first();
+    auto rects = element.get_client_rects();
+    if (rects.is_empty())
+        return WebDriver::Error::from_code(WebDriver::ErrorCode::ElementNotInteractable, "Element has no client rects"_string);
+    auto rectangle = rects.first();
 
     // 2. Let left be max(0, min(x coordinate, x coordinate + width dimension)).
     auto left = max(CSSPixels(0), min(rectangle.x(), rectangle.x() + rectangle.width()));
@@ -551,7 +569,7 @@ CSSPixelPoint in_view_center_point(DOM::Element const& element, CSSPixelRect vie
     auto y = floor((top + bottom) / 2.0);
 
     // 8. Return the pair of (x, y).
-    return { x, y };
+    return CSSPixelPoint { x, y };
 }
 
 }

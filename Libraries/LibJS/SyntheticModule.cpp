@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGC/RootHashTable.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Completion.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/JSONObject.h>
 #include <LibJS/Runtime/ModuleEnvironment.h>
@@ -31,6 +33,11 @@ void SyntheticModule::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_evaluation_steps);
 }
 
+size_t SyntheticModule::external_memory_size() const
+{
+    return saturating_add_external_memory_size(Base::external_memory_size(), vector_external_memory_size(m_export_names));
+}
+
 // 16.2.1.8.1 CreateDefaultExportSyntheticModule ( defaultExport ), https://tc39.es/ecma262/#sec-create-default-export-synthetic-module
 GC::Ref<SyntheticModule> SyntheticModule::create_default_export_synthetic_module(Realm& realm, Value default_export, ByteString filename)
 {
@@ -51,7 +58,7 @@ GC::Ref<SyntheticModule> SyntheticModule::create_default_export_synthetic_module
 }
 
 // 16.2.1.8.2 ParseJSONModule ( source ), https://tc39.es/ecma262/#sec-create-default-export-synthetic-module
-ThrowCompletionOr<GC::Ref<Module>> parse_json_module(Realm& realm, StringView source_text, ByteString filename)
+ThrowCompletionOr<GC::Ref<SyntheticModule>> parse_json_module(Realm& realm, Utf16View source_text, ByteString filename)
 {
     auto& vm = realm.vm();
 
@@ -99,7 +106,7 @@ PromiseCapability& SyntheticModule::load_requested_modules(GC::Ptr<GraphLoadingS
 }
 
 // 16.2.1.8.4.2 GetExportedNames ( ), https://tc39.es/ecma262/#sec-smr-getexportednames
-Vector<Utf16FlyString> SyntheticModule::get_exported_names(VM&, HashTable<Module const*>&)
+Vector<Utf16FlyString> SyntheticModule::get_exported_names(VM&, GC::RootHashTable<GC::Ref<Module const>>&)
 {
     // 1. Return module.[[ExportNames]].
     return m_export_names;
@@ -142,14 +149,18 @@ ThrowCompletionOr<void> SyntheticModule::link(VM& vm)
 }
 
 // 16.2.1.8.4.5 Evaluate ( ), https://tc39.es/ecma262/#sec-smr-Evaluate
-ThrowCompletionOr<GC::Ref<Promise>> SyntheticModule::evaluate(VM& vm)
+ThrowCompletionOr<GC::Ref<PromiseCapability>> SyntheticModule::evaluate(VM& vm)
 {
     auto& realm = this->realm();
 
     // 1. Let moduleContext be a new ECMAScript code execution context.
     // 2. Set the Function of moduleContext to null.
-    ExecutionContext* module_context = nullptr;
-    ALLOCATE_EXECUTION_CONTEXT_ON_NATIVE_STACK(module_context, 0, 0);
+    auto& stack = vm.interpreter_stack();
+    auto* stack_mark = stack.top();
+    auto* module_context = stack.allocate(0, ReadonlySpan<Value> {}, 0);
+    if (!module_context) [[unlikely]]
+        return vm.throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
+    ScopeGuard deallocate_guard = [&stack, stack_mark] { stack.deallocate(stack_mark); };
 
     // 3. Set the Realm of moduleContext to module.[[Realm]].
     module_context->realm = &realm;
@@ -187,7 +198,8 @@ ThrowCompletionOr<GC::Ref<Promise>> SyntheticModule::evaluate(VM& vm)
         MUST(call(vm, *promise_capability->resolve(), js_undefined(), js_undefined()));
 
     // 16. Return pc.[[Promise]].
-    return static_cast<Promise&>(*promise_capability->promise());
+    // AD-HOC: Return the promise capability and let the caller unwrap the promise
+    return promise_capability;
 }
 
 }

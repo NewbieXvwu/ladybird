@@ -8,7 +8,9 @@
 
 #include <AK/OwnPtr.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/Layout/AbsposLayoutInputs.h>
 #include <LibWeb/Layout/AvailableSpace.h>
+#include <LibWeb/Layout/LayoutInput.h>
 #include <LibWeb/Layout/LayoutState.h>
 
 namespace Web::Layout {
@@ -21,7 +23,16 @@ template<typename T>
     return ::max(min, ::min(value, max));
 }
 
+enum class TableWrapperWidthMode {
+    ClampToAvailableWidth,
+    UseTableUsedWidthIfNotAuto,
+};
+
 class FormattingContext {
+#if FORMATTING_CONTEXT_TRACE_DEBUG
+    friend class FormattingContextTracer;
+#endif
+
 public:
     virtual ~FormattingContext();
 
@@ -32,16 +43,49 @@ public:
         Grid,
         Table,
         SVG,
+        ReplacedWithChildren,
+        AbsposReplay,     // Hosts the absolutely positioned element algorithm when it is replayed from saved inputs.
         InternalReplaced, // Internal hack formatting context for replaced elements. FIXME: Get rid of this.
         InternalDummy,    // Internal hack formatting context for unimplemented things. FIXME: Get rid of this.
     };
 
-    virtual void run(AvailableSpace const&) = 0;
+    static constexpr StringView type_name(Type type)
+    {
+        switch (type) {
+        case Type::Block:
+            return "BFC"sv;
+        case Type::Inline:
+            return "IFC"sv;
+        case Type::Flex:
+            return "FFC"sv;
+        case Type::Grid:
+            return "GFC"sv;
+        case Type::Table:
+            return "TFC"sv;
+        case Type::SVG:
+            return "SVG"sv;
+        case Type::ReplacedWithChildren:
+            return "Replaced, with children"sv;
+        case Type::AbsposReplay:
+            return "Abspos replay"sv;
+        case Type::InternalReplaced:
+            return "Replaced"sv;
+        case Type::InternalDummy:
+            return "Dummy"sv;
+        }
+        VERIFY_NOT_REACHED();
+    }
 
-    // This function returns the automatic content height of the context's root box.
+    // https://drafts.csswg.org/css-align-3/#baseline-export
+    enum class BaselineSet : u8 {
+        First,
+        Last,
+    };
+
+    virtual void run(LayoutInput const&) = 0;
+
+    // These functions return the automatic content dimensions of the context's root box.
     virtual CSSPixels automatic_content_width() const = 0;
-
-    // This function returns the automatic content height of the context's root box.
     virtual CSSPixels automatic_content_height() const = 0;
 
     Box const& context_box() const { return m_context_box; }
@@ -55,41 +99,73 @@ public:
 
     [[nodiscard]] static Optional<Type> formatting_context_type_created_by_box(Box const&);
 
+    // The box whose formatting context lays out `child` if `child` is absolutely
+    // positioned: the closest formatting context root at or above its containing block.
+    [[nodiscard]] static Box const& box_establishing_containing_formatting_context(Box const& child);
+
     static bool creates_block_formatting_context(Box const&);
 
-    CSSPixels compute_table_box_width_inside_table_wrapper(Box const&, AvailableSpace const&);
-    CSSPixels compute_table_box_height_inside_table_wrapper(Box const&, AvailableSpace const&);
+    CSSPixels compute_table_box_width_inside_table_wrapper(Box const&, AvailableSpace const&,
+        ContainingBlockConstraints const& table_wrapper_constraints,
+        Optional<CSSPixels> table_wrapper_containing_block_width = {},
+        TableWrapperWidthMode = TableWrapperWidthMode::ClampToAvailableWidth);
+    CSSPixels compute_table_box_height_inside_table_wrapper(Box const&, AvailableSpace const&, ContainingBlockConstraints const& table_wrapper_constraints);
 
-    CSSPixels compute_width_for_replaced_element(Box const&, AvailableSpace const&) const;
-    CSSPixels compute_height_for_replaced_element(Box const&, AvailableSpace const&) const;
+    CSSPixels compute_width_for_replaced_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&) const;
+    CSSPixels compute_height_for_replaced_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&) const;
 
-    OwnPtr<FormattingContext> create_independent_formatting_context_if_needed(LayoutState&, LayoutMode, Box const& child_box);
+    static OwnPtr<FormattingContext> create_independent_formatting_context_if_needed(LayoutState&, LayoutMode, Box const& child_box, FormattingContext* parent);
+    static NonnullOwnPtr<FormattingContext> create_independent_formatting_context(LayoutState&, LayoutMode, Box const& child_box, FormattingContext* parent);
+
+    // Re-runs the absolutely positioned element layout algorithm for a box from the inputs
+    // saved by the last committing layout pass, without running any ancestor formatting
+    // context. Partial relayout uses this to re-resolve a boundary's own size and position.
+    static void layout_absolutely_positioned_element_from_saved_inputs(LayoutState&, Box&);
+
+    // Whether the saved layout inputs are still valid for replaying the box's layout after a
+    // style change on the box itself: parts recorded as derived from the box's own computed
+    // values may be stale, while everything else derives from layout outside the subtree,
+    // which such a change cannot affect.
+    [[nodiscard]] static bool can_replay_saved_abspos_layout_inputs_after_style_change(Box const&);
+
+    // Whether any of the box's inset properties carries anchor() functions, which only
+    // resolve_anchor_insets() can turn into plain values during a full layout pass.
+    [[nodiscard]] static bool box_inset_properties_contain_anchor_functions(Box const&);
+
+    [[nodiscard]] static ContainingBlockConstraints constraints_for_child_context(
+        LayoutState::UsedValues const& containing_block_used_values,
+        ContainingBlockConstraints const& containing_block_constraints);
+
+    [[nodiscard]] static LayoutInput layout_input_for_child_context(
+        LayoutState::UsedValues const& containing_block_used_values,
+        LayoutInput const& containing_block_layout_input,
+        AvailableSpace available_space);
 
     virtual void parent_context_did_dimension_child_root_box() { }
 
-    CSSPixels calculate_min_content_width(Layout::Box const&) const;
-    CSSPixels calculate_max_content_width(Layout::Box const&) const;
-    CSSPixels calculate_min_content_height(Layout::Box const&, CSSPixels width) const;
-    CSSPixels calculate_max_content_height(Layout::Box const&, CSSPixels width) const;
+    void place_child(Box const& child, CSSPixelPoint content_offset);
 
-    CSSPixels calculate_fit_content_height(Layout::Box const&, AvailableSpace const&) const;
-    CSSPixels calculate_fit_content_width(Layout::Box const&, AvailableSpace const&) const;
+    CSSPixels calculate_min_content_width(Layout::Box const&, ContainingBlockConstraints const&) const;
+    CSSPixels calculate_max_content_width(Layout::Box const&, ContainingBlockConstraints const&) const;
+    CSSPixels calculate_min_content_height(Layout::Box const&, CSSPixels width, ContainingBlockConstraints const&) const;
+    CSSPixels calculate_max_content_height(Layout::Box const&, CSSPixels width, ContainingBlockConstraints const&) const;
 
-    CSSPixels calculate_inner_width(Layout::Box const&, AvailableSize const&, CSS::Size const& width) const;
-    [[nodiscard]] CSSPixels calculate_inner_height(Box const&, AvailableSpace const&, CSS::Size const& height) const;
+    CSSPixels calculate_fit_content_height(Layout::Box const&, AvailableSpace const&, ContainingBlockConstraints const&) const;
+    CSSPixels calculate_fit_content_width(Layout::Box const&, AvailableSpace const&, ContainingBlockConstraints const&) const;
+
+    CSSPixels calculate_inner_width(Layout::Box const&, AvailableSize const&, CSS::Size const& width, ContainingBlockConstraints const&) const;
+    [[nodiscard]] CSSPixels calculate_inner_height(Box const&, AvailableSpace const&, CSS::Size const& height, ContainingBlockConstraints const&) const;
 
     virtual CSSPixels greatest_child_width(Box const&) const;
 
-    [[nodiscard]] CSSPixelRect absolute_content_rect(Box const&) const;
+    [[nodiscard]] static CSSPixelRect margin_box_rect(LayoutState::UsedValues const&);
     [[nodiscard]] CSSPixelRect margin_box_rect_in_ancestor_coordinate_space(Box const&, Box const& ancestor_box) const;
     [[nodiscard]] CSSPixelRect margin_box_rect_in_ancestor_coordinate_space(LayoutState::UsedValues const&, Box const& ancestor_box) const;
     [[nodiscard]] CSSPixelRect content_box_rect(Box const&) const;
     [[nodiscard]] CSSPixelRect content_box_rect(LayoutState::UsedValues const&) const;
     [[nodiscard]] CSSPixelRect content_box_rect_in_ancestor_coordinate_space(LayoutState::UsedValues const&, Box const& ancestor_box) const;
-    [[nodiscard]] CSSPixels box_baseline(Box const&) const;
-    [[nodiscard]] CSSPixelRect content_box_rect_in_static_position_ancestor_coordinate_space(Box const&, Box const& ancestor_box) const;
-
-    [[nodiscard]] CSSPixels containing_block_width_for(NodeWithStyleAndBoxModelMetrics const&) const;
+    [[nodiscard]] CSSPixels box_baseline(Box const&, BaselineSet) const;
+    void compute_and_store_baselines(LayoutState::UsedValues&) const;
 
     [[nodiscard]] CSSPixels calculate_stretch_fit_width(Box const&, AvailableSize const&) const;
     [[nodiscard]] CSSPixels calculate_stretch_fit_height(Box const&, AvailableSize const&) const;
@@ -101,31 +177,39 @@ public:
 protected:
     FormattingContext(Type, LayoutMode, LayoutState&, Box const&, FormattingContext* parent = nullptr);
 
+    void dimension_list_item_marker(ListItemMarkerBox const&);
+    [[nodiscard]] static CSSPixels distance_between_marker_and_list_item(ListItemMarkerBox const&);
+
+    [[nodiscard]] static bool computed_height_establishes_definite_containing_block_height(CSS::Size const&);
+    [[nodiscard]] Optional<CSSPixels> calculate_transferred_width_for_replaced_element(Layout::Box const&, ContainingBlockConstraints const&) const;
+
     [[nodiscard]] bool should_treat_width_as_auto(Box const&, AvailableSpace const&) const;
-    [[nodiscard]] bool should_treat_height_as_auto(Box const&, AvailableSpace const&) const;
+    [[nodiscard]] bool should_treat_height_as_auto(Box const&, AvailableSpace const&, ContainingBlockConstraints const&) const;
 
-    [[nodiscard]] bool should_treat_max_width_as_none(Box const&, AvailableSize const&) const;
-    [[nodiscard]] bool should_treat_max_height_as_none(Box const&, AvailableSize const&) const;
+    [[nodiscard]] bool should_treat_max_width_as_none(Box const&, AvailableSize const&, ContainingBlockConstraints const&) const;
+    [[nodiscard]] bool should_treat_max_height_as_none(Box const&, AvailableSize const&, ContainingBlockConstraints const&) const;
 
-    [[nodiscard]] bool box_is_sized_as_replaced_element(Box const&, AvailableSpace const&) const;
+    [[nodiscard]] bool box_is_sized_as_replaced_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&) const;
 
-    OwnPtr<FormattingContext> layout_inside(Box const&, LayoutMode, AvailableSpace const&);
+    enum class CyclicPercentageIntrinsicContribution {
+        NotCyclic,
+        ResolveAsZero,
+        TreatAsInitialValue,
+    };
+    // CSS Sizing resolves cyclic percentages differently for minimum sizes than for preferred/max sizes.
+    // In particular, replaced boxes resolve cyclic preferred/max sizes against zero for min-content
+    // contributions, while cyclic min sizes are treated as their initial value.
+    enum class CyclicPercentageSizeProperty {
+        PreferredOrMaxSize,
+        MinSize,
+    };
+    [[nodiscard]] CyclicPercentageIntrinsicContribution cyclic_percentage_intrinsic_contribution(Box const&, CSS::Size const&, AvailableSize const&, CyclicPercentageSizeProperty) const;
+
+    OwnPtr<FormattingContext> layout_inside(Box const&, LayoutMode, LayoutInput const&);
 
     struct SpaceUsedByFloats {
         CSSPixels left { 0 };
         CSSPixels right { 0 };
-    };
-
-    struct SpaceUsedAndContainingMarginForFloats {
-        // Width for left / right floats, including their own margins.
-        CSSPixels left_used_space;
-        CSSPixels right_used_space;
-        // Left / right total margins from the outermost containing block to the floating element.
-        // Each block in the containing chain adds its own margin and we store the total here.
-        CSSPixels left_total_containing_margin;
-        CSSPixels right_total_containing_margin;
-        GC::Ptr<Box const> matching_left_float_box;
-        GC::Ptr<Box const> matching_right_float_box;
     };
 
     struct ShrinkToFitResult {
@@ -133,38 +217,77 @@ protected:
         CSSPixels preferred_minimum_width { 0 };
     };
 
-    CSSPixels tentative_width_for_replaced_element(Box const&, CSS::Size const& computed_width, AvailableSpace const&) const;
-    CSSPixels tentative_height_for_replaced_element(Box const&, CSS::Size const& computed_height, AvailableSpace const&) const;
+    CSSPixels tentative_width_for_replaced_element(Box const&, CSS::Size const& computed_width, AvailableSpace const&, ContainingBlockConstraints const&) const;
+    CSSPixels tentative_height_for_replaced_element(Box const&, CSS::Size const& computed_height, AvailableSpace const&, ContainingBlockConstraints const&) const;
     CSSPixels compute_auto_height_for_block_formatting_context_root(Box const&) const;
+    static CSSPixels line_box_physical_width(Box const&, LineBox const&);
 
-    [[nodiscard]] CSSPixelSize solve_replaced_size_constraint(CSSPixels input_width, CSSPixels input_height, Box const&, AvailableSpace const&) const;
+    CSSPixels measure_automatic_content_height(Box const&, AvailableSpace const& inner_available_space, ContainingBlockConstraints const&);
+    void make_button_content_box_definite(Box const&, AvailableSpace const&, ContainingBlockConstraints const&, Optional<CSSPixels> measured_content_height = {});
 
-    ShrinkToFitResult calculate_shrink_to_fit_widths(Box const&);
+    [[nodiscard]] CSSPixelSize solve_replaced_size_constraint(CSSPixels input_width, CSSPixels input_height, Box const&, AvailableSpace const&, ContainingBlockConstraints const&) const;
 
-    void layout_absolutely_positioned_element(Box const&, AvailableSpace const&);
-    void compute_width_for_absolutely_positioned_element(Box const&, AvailableSpace const&);
-    void compute_width_for_absolutely_positioned_non_replaced_element(Box const&, AvailableSpace const&);
-    void compute_width_for_absolutely_positioned_replaced_element(Box const&, AvailableSpace const&);
+    ShrinkToFitResult calculate_shrink_to_fit_widths(Box const&, ContainingBlockConstraints const&);
+
+    void layout_absolutely_positioned_element(Box&, AbsposLayoutInputs const&);
+
+    CSSPixels gap_to_px(Variant<CSS::LengthPercentage, CSS::NormalGap> const& gap, CSSPixels reference_value) const;
+
+    void register_contained_abspos_child(Box const& child, StaticPositionRect const&);
+    [[nodiscard]] StaticPositionRect resolve_static_position_relative_to_containing_block(Box const&, StaticPositionRect) const;
+    [[nodiscard]] static CSSPixelPoint aligned_static_position(StaticPositionRect const&, LayoutState::UsedValues const&);
+    void layout_absolutely_positioned_children();
+    void layout_absolutely_positioned_children(Box const&);
+    virtual AbsposContainingBlockInfo resolve_abspos_containing_block_info(Box const&);
+    void resolve_anchor_insets(Box&) const;
+    void compute_width_for_absolutely_positioned_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&, StaticPositionRect const&);
+    void compute_width_for_absolutely_positioned_non_replaced_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&, StaticPositionRect const&);
+    void compute_width_for_absolutely_positioned_replaced_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&, StaticPositionRect const&);
 
     enum class BeforeOrAfterInsideLayout {
         Before,
         After,
     };
-    void compute_height_for_absolutely_positioned_element(Box const&, AvailableSpace const&, BeforeOrAfterInsideLayout);
-    void compute_height_for_absolutely_positioned_non_replaced_element(Box const&, AvailableSpace const&, BeforeOrAfterInsideLayout);
-    void compute_height_for_absolutely_positioned_replaced_element(Box const&, AvailableSpace const&, BeforeOrAfterInsideLayout);
+    void compute_height_for_absolutely_positioned_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&, StaticPositionRect const&, BeforeOrAfterInsideLayout);
+    void compute_height_for_absolutely_positioned_non_replaced_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&, StaticPositionRect const&, BeforeOrAfterInsideLayout);
+    void compute_height_for_absolutely_positioned_replaced_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&, StaticPositionRect const&, BeforeOrAfterInsideLayout);
 
-    [[nodiscard]] Optional<CSSPixels> compute_auto_height_for_absolutely_positioned_element(Box const&, AvailableSpace const&, BeforeOrAfterInsideLayout) const;
-
-    [[nodiscard]] Box const* box_child_to_derive_baseline_from(Box const&) const;
+    [[nodiscard]] Optional<CSSPixels> compute_auto_height_for_absolutely_positioned_element(Box const&, AvailableSpace const&, ContainingBlockConstraints const&, BeforeOrAfterInsideLayout) const;
 
     Type m_type {};
     LayoutMode m_layout_mode;
 
     FormattingContext* m_parent { nullptr };
-    GC::Ref<Box const> m_context_box;
+    Box const& m_context_box;
 
     LayoutState& m_state;
 };
+
+#if FORMATTING_CONTEXT_TRACE_DEBUG
+class FormattingContextTracer {
+public:
+    FormattingContextTracer(FormattingContext const& fc, AvailableSpace const& available_space)
+    {
+        StringBuilder indent_builder;
+        for (int i = 0; i < s_depth; ++i)
+            indent_builder.append("| "sv);
+        auto intrinsic_marker = fc.m_layout_mode == LayoutMode::IntrinsicSizing ? " [intrinsic]"sv : ""sv;
+        dbgln("{}|- {} <{}> run({}){}", indent_builder.string_view(), FormattingContext::type_name(fc.m_type), fc.m_context_box.debug_description(), available_space, intrinsic_marker);
+        ++s_depth;
+    }
+
+    ~FormattingContextTracer()
+    {
+        --s_depth;
+    }
+
+private:
+    inline static int s_depth = 0;
+};
+
+#    define FORMATTING_CONTEXT_TRACE() FormattingContextTracer _formatting_context_tracer(*this, available_space)
+#else
+#    define FORMATTING_CONTEXT_TRACE()
+#endif
 
 }

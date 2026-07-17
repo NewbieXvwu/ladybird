@@ -9,7 +9,6 @@
 #include <AK/Forward.h>
 #include <LibWeb/Layout/FormattingContext.h>
 #include <LibWeb/Layout/TableGrid.h>
-#include <LibWeb/Layout/TableWrapper.h>
 
 namespace Web::Layout {
 
@@ -20,31 +19,41 @@ enum class TableDimension {
 
 class TableFormattingContext final : public FormattingContext {
 public:
+    enum class RowMeasurement {
+        Include,
+        Skip,
+    };
+
     explicit TableFormattingContext(LayoutState&, LayoutMode, Box const&, FormattingContext* parent);
     ~TableFormattingContext();
 
-    void run_until_width_calculation(AvailableSpace const& available_space);
+    void run_until_width_calculation(LayoutInput const&, RowMeasurement = RowMeasurement::Include);
 
-    virtual void run(AvailableSpace const&) override;
+    virtual void run(LayoutInput const&) override;
     virtual CSSPixels automatic_content_width() const override;
     virtual CSSPixels automatic_content_height() const override;
-    StaticPositionRect calculate_static_position_rect(Box const&) const;
 
     Box const& table_box() const { return context_box(); }
-    TableWrapper const& table_wrapper() const
-    {
-        return as<TableWrapper>(*table_box().containing_block());
-    }
+
+    void set_pending_table_box_content_offset_in_wrapper(CSSPixelPoint offset) { m_pending_table_box_content_offset_in_wrapper = offset; }
+    CSSPixelPoint pending_table_box_content_offset_in_wrapper() const { return m_pending_table_box_content_offset_in_wrapper; }
 
     static bool border_is_less_specific(CSS::BorderData const& a, CSS::BorderData const& b);
 
     virtual void parent_context_did_dimension_child_root_box() override;
 
 private:
-    CSSPixels run_caption_layout(CSS::CaptionSide);
+    struct MeasuredCellContent {
+        CSSPixels content_height;
+        CSSPixels first_baseline;
+    };
+    Optional<MeasuredCellContent> measure_cell_content(Box const&, LayoutState::UsedValues const&, AvailableSpace const& inner_available_space);
+
+    CSSPixels run_caption_layout(CSS::CaptionSide, AvailableSpace const&);
     CSSPixels compute_capmin();
     void compute_constrainedness();
-    void compute_cell_measures();
+    void compute_cell_measures(RowMeasurement);
+    void initialize_row_content_sizes();
     void compute_outer_content_sizes();
     template<class RowOrColumn>
     void initialize_table_measures();
@@ -56,6 +65,7 @@ private:
     void distribute_width_to_columns();
     void distribute_excess_width_to_columns(CSSPixels available_width);
     void distribute_excess_width_to_columns_fixed_mode(CSSPixels excess_width);
+    bool can_skip_row_intrinsic_measurement() const;
     void compute_table_height();
     void distribute_height_to_rows();
     void position_row_boxes();
@@ -64,6 +74,7 @@ private:
     CSSPixels border_spacing_horizontal() const;
     CSSPixels border_spacing_vertical() const;
     void finish_grid_initialization(TableGrid const&);
+    void seed_table_participant_used_values(ContainingBlockConstraints const&);
 
     CSSPixels compute_columns_total_used_width() const;
     void commit_candidate_column_widths(Vector<CSSPixels> const& candidate_widths);
@@ -78,10 +89,16 @@ private:
 
     bool use_fixed_mode_layout() const;
 
+    ContainingBlockConstraints m_table_constraints;
+    ContainingBlockConstraints m_participant_constraints;
+
     CSSPixels m_table_height { 0 };
     CSSPixels m_automatic_content_height { 0 };
+    CSSPixelPoint m_pending_table_box_content_offset_in_wrapper {};
+    Optional<CSSPixels> m_min_border_box_height_from_flex_item;
 
     Optional<AvailableSpace> m_available_space;
+    bool m_needs_fixed_mode_row_measurement { false };
 
     struct Column {
         CSSPixels left_offset { 0 };
@@ -141,8 +158,8 @@ private:
     };
 
     struct ConflictingEdge {
-        GC::Ptr<Node const> element;
-        Painting::PaintableBox::ConflictingElementKind element_kind;
+        Node const* element { nullptr };
+        Painting::Paintable::ConflictingElementKind element_kind;
         ConflictingSide side;
         Optional<size_t> row;
         Optional<size_t> column;
@@ -151,7 +168,7 @@ private:
     static TableFormattingContext::ConflictingEdge const& winning_conflicting_edge(TableFormattingContext::ConflictingEdge const& a, TableFormattingContext::ConflictingEdge const& b);
 
     static CSS::BorderData const& border_data_conflicting_edge(ConflictingEdge const& conflicting_edge);
-    static Painting::PaintableBox::BorderDataWithElementKind const border_data_with_element_kind_from_conflicting_edge(ConflictingEdge const& conflicting_edge);
+    static Painting::Paintable::BorderDataWithElementKind const border_data_with_element_kind_from_conflicting_edge(ConflictingEdge const& conflicting_edge);
 
     class BorderConflictFinder {
     public:
@@ -168,20 +185,20 @@ private:
         void collect_column_group_conflicting_edges(Vector<ConflictingEdge>&, Cell const&, ConflictingSide) const;
         void collect_table_box_conflicting_edges(Vector<ConflictingEdge>&, Cell const&, ConflictingSide) const;
 
-        GC::Ptr<Node const> get_col_element(size_t index) const
+        Node const* get_col_element(size_t index) const
         {
             if (index >= m_col_elements_by_index.size())
-                return {};
+                return nullptr;
             return m_col_elements_by_index[index];
         }
 
         struct RowGroupInfo {
-            GC::Ptr<Node const> row_group;
+            Node const* row_group { nullptr };
             size_t start_index;
             size_t row_count;
         };
 
-        Vector<GC::Ptr<Node const>> m_col_elements_by_index;
+        Vector<Node const*> m_col_elements_by_index;
         Vector<Optional<RowGroupInfo>> m_row_group_elements_by_index;
         TableFormattingContext const* m_context;
     };

@@ -1,0 +1,96 @@
+$ee59c992 generator-yield-star.js:6:1
+  Registers: 8
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] GetGlobal dst:reg6, `f`
+  [  10] NewPrimitiveArray dst:reg7, elements:[1, 2]
+  [  30] Call dst:reg5, callee:reg6, this_value:Undefined, f, arguments:[reg7]
+  [  58] End value:reg5
+
+
+f$fd11892c generator-yield-star.js:4:5
+  Registers: 21
+  Blocks:    19
+  Constants:
+    [0] = Undefined
+    [1] = Int32(1)
+    [2] = Int32(5)
+
+block0:
+  [   0] Yield continuation_label:block1, value:Undefined
+
+block1:
+  [  10] GetIterator dst_iterator_object:reg8, dst_iterator_next:reg9, dst_iterator_done:reg10, iterable:arg0
+  [  28] Mov2 dst1:reg6, src1:Int32(1), dst2:reg7, src2:Undefined
+
+block2:
+  [  40] JumpStrictlyEquals lhs:reg6, rhs:Int32(1), true_target:block5, false_target:block6
+
+block3:
+  [  58] Mov dst:reg5, src:reg0
+  [  68] GetCompletionFields type_dst:reg6, value_dst:reg7, completion:reg5
+  [  78] Jump target:block2
+
+block4:
+  [  80] Yield value:Undefined
+
+block5:
+  [  90] Call dst:reg12, callee:reg9, this_value:reg8, arguments:[reg7]
+  [  b8] ThrowIfNotObject src:reg12
+  [  c0] GetById dst:reg13, base:reg12, `done`
+  [  d8] JumpIf condition:reg13, true_target:block7, false_target:block8
+
+block6:
+  [  e8] JumpStrictlyEquals lhs:reg6, rhs:Int32(5), true_target:block9, false_target:block10
+
+block7:
+  [ 100] GetById dst:reg14, base:reg12, `value`
+  [ 118] Jump target:block4
+
+block8:
+  [ 120] YieldIteratorResult continuation_label:block3, value:reg12
+
+block9:
+  [ 130] GetMethod dst:reg16, object:reg8, `throw`
+  [ 140] JumpUndefined condition:reg16, true_target:block12, false_target:block11
+
+block10:
+  [ 150] GetMethod dst:reg18, object:reg8, `return`
+  [ 160] JumpUndefined condition:reg18, true_target:block15, false_target:block16
+
+block11:
+  [ 170] Call dst:reg12, callee:reg16, this_value:reg8, arguments:[reg7]
+  [ 198] ThrowIfNotObject src:reg12
+  [ 1a0] GetById dst:reg13, base:reg12, `done`
+  [ 1b8] JumpIf condition:reg13, true_target:block13, false_target:block14
+
+block12:
+  [ 1c8] IteratorClose iterator_object:reg8, iterator_next:reg9, iterator_done:reg13, completion_value:Undefined
+  [ 1e0] NewTypeError dst:reg17, yield* protocol violation: iterator must have a throw method
+  [ 1f0] Throw src:reg17
+
+block13:
+  [ 1f8] GetById dst:reg14, base:reg12, `value`
+  [ 210] Jump target:block4
+
+block14:
+  [ 218] YieldIteratorResult continuation_label:block3, value:reg12
+
+block15:
+  [ 228] Yield value:reg7
+
+block16:
+  [ 238] Call dst:reg19, callee:reg18, this_value:reg8, arguments:[reg7]
+  [ 260] ThrowIfNotObject src:reg19
+  [ 268] GetById dst:reg13, base:reg19, `done`
+  [ 280] JumpFalse condition:reg13, target:block18
+
+block17:
+  [ 290] GetById dst:reg20, base:reg19, `value`
+  [ 2a8] Yield value:reg20
+
+block18:
+  [ 2b8] YieldIteratorResult continuation_label:block3, value:reg19

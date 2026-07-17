@@ -8,24 +8,23 @@
 
 #include <AK/Error.h>
 #include <AK/NonnullOwnPtr.h>
-
-extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-}
+#include <AK/NonnullRefPtr.h>
+#include <LibMedia/FFmpeg/FFmpegForward.h>
+#include <LibMedia/Forward.h>
 
 namespace Media::FFmpeg {
 
 class FFmpegIOContext {
 public:
-    explicit FFmpegIOContext(AVIOContext*);
+    explicit FFmpegIOContext(NonnullRefPtr<MediaStreamCursor>, AVIOContext*);
     ~FFmpegIOContext();
 
-    static ErrorOr<NonnullOwnPtr<FFmpegIOContext>> create(AK::SeekableStream& stream);
+    static ErrorOr<NonnullOwnPtr<FFmpegIOContext>> create(NonnullRefPtr<MediaStreamCursor>);
 
     AVIOContext* avio_context() const { return m_avio_context; }
 
 private:
+    NonnullRefPtr<MediaStreamCursor> m_stream_cursor;
     AVIOContext* m_avio_context { nullptr };
 };
 

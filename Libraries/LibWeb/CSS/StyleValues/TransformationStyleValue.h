@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <LibGfx/Matrix4x4.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/CSS/TransformFunctions.h>
 
@@ -22,14 +23,25 @@ public:
     }
     virtual ~TransformationStyleValue() override = default;
 
+    static ValueComparingNonnullRefPtr<TransformationStyleValue const> identity_transformation(TransformFunction);
+
     TransformFunction transform_function() const { return m_properties.transform_function; }
     StyleValueVector const& values() const { return m_properties.values; }
 
-    Transformation to_transformation() const;
+    bool can_be_converted_to_matrix_without_reference_box() const;
+    FloatMatrix4x4 to_matrix(Optional<Painting::Paintable const&>) const;
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    GC::Ptr<CSSTransformComponent> reify_a_transform_function(JS::Realm&) const;
+
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(TransformationStyleValue const& other) const { return m_properties == other.m_properties; }
+
+    virtual bool is_computationally_independent() const override
+    {
+        return all_of(m_properties.values, [](auto& value) { return value->is_computationally_independent(); });
+    }
 
 private:
     TransformationStyleValue(PropertyID property, TransformFunction transform_function, StyleValueVector&& values)

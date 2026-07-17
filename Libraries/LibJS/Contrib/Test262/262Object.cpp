@@ -8,7 +8,6 @@
 // NOTE: This file is not named $262Object.cpp because dollar signs in file names cause issues with some build tools.
 
 #include <AK/TypeCasts.h>
-#include <LibJS/Bytecode/Interpreter.h>
 #include <LibJS/Contrib/Test262/262Object.h>
 #include <LibJS/Contrib/Test262/AgentObject.h>
 #include <LibJS/Contrib/Test262/GlobalObject.h>
@@ -17,6 +16,7 @@
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/Object.h>
+#include <LibJS/Runtime/VM.h>
 #include <LibJS/Script.h>
 
 namespace JS::Test262 {
@@ -40,9 +40,9 @@ void $262Object::initialize(Realm& realm)
     define_native_function(realm, "createRealm"_utf16_fly_string, create_realm, 0, attr);
     define_native_function(realm, "detachArrayBuffer"_utf16_fly_string, detach_array_buffer, 1, attr);
     define_native_function(realm, "evalScript"_utf16_fly_string, eval_script, 1, attr);
+    define_native_function(realm, "gc"_utf16_fly_string, collect_garbage, 1, attr);
 
     define_direct_property("agent"_utf16_fly_string, m_agent, attr);
-    define_direct_property("gc"_utf16_fly_string, realm.global_object().get_without_side_effects("gc"_utf16_fly_string), attr);
     define_direct_property("global"_utf16_fly_string, &realm.global_object(), attr);
     define_direct_property("IsHTMLDDA"_utf16_fly_string, m_is_htmldda, attr);
 }
@@ -58,6 +58,12 @@ JS_DEFINE_NATIVE_FUNCTION($262Object::clear_kept_objects)
 {
     vm.finish_execution_generation();
     return js_undefined();
+}
+
+JS_DEFINE_NATIVE_FUNCTION($262Object::collect_garbage)
+{
+    vm.heap().collect_garbage();
+    return JS::js_undefined();
 }
 
 JS_DEFINE_NATIVE_FUNCTION($262Object::create_realm)
@@ -76,18 +82,17 @@ JS_DEFINE_NATIVE_FUNCTION($262Object::create_realm)
 
 JS_DEFINE_NATIVE_FUNCTION($262Object::detach_array_buffer)
 {
-    auto array_buffer = vm.argument(0);
-    if (!array_buffer.is_object() || !is<ArrayBuffer>(array_buffer.as_object()))
+    auto array_buffer = vm.argument(0).as_if<ArrayBuffer>();
+    if (!array_buffer)
         return vm.throw_completion<TypeError>();
 
-    auto& array_buffer_object = static_cast<ArrayBuffer&>(array_buffer.as_object());
-    TRY(JS::detach_array_buffer(vm, array_buffer_object, vm.argument(1)));
+    TRY(JS::detach_array_buffer(vm, *array_buffer, vm.argument(1)));
     return js_null();
 }
 
 JS_DEFINE_NATIVE_FUNCTION($262Object::eval_script)
 {
-    auto source_text = TRY(vm.argument(0).to_string(vm));
+    auto source_text = TRY(vm.argument(0).to_utf16_string(vm));
 
     // 1. Let hostDefined be any host-defined values for the provided sourceText (obtained in an implementation dependent manner)
 
@@ -95,7 +100,7 @@ JS_DEFINE_NATIVE_FUNCTION($262Object::eval_script)
     auto& realm = *vm.current_realm();
 
     // 3. Let s be ParseScript(sourceText, realm, hostDefined).
-    auto script_or_error = Script::parse(source_text, realm);
+    auto script_or_error = Script::parse(source_text.utf16_view(), realm);
 
     // 4. If s is a List of errors, then
     if (script_or_error.is_error()) {
@@ -103,11 +108,11 @@ JS_DEFINE_NATIVE_FUNCTION($262Object::eval_script)
         auto& error = script_or_error.error()[0];
 
         // b. Return Completion { [[Type]]: throw, [[Value]]: error, [[Target]]: empty }.
-        return vm.throw_completion<SyntaxError>(error.to_string());
+        return vm.throw_completion<SyntaxError>(error.to_utf16_string());
     }
 
     // 5. Let status be ScriptEvaluation(s).
-    auto status = vm.bytecode_interpreter().run(script_or_error.value());
+    auto status = vm.run(script_or_error.value());
 
     // 6. Return Completion(status).
     return status;

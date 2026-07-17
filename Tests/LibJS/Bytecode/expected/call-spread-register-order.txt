@@ -1,0 +1,25 @@
+$15d45b76 call-spread-register-order.js:2:1
+  Registers: 10
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+    [1] = Int32(42)
+
+block0:
+  [   0] GetGlobal dst:reg6, `f`
+  [  10] Mov dst:reg8, src:Int32(42)
+  [  20] NewArray dst:reg7, elements:[reg8]
+  [  38] NewPrimitiveArray dst:reg9, elements:[1]
+  [  50] ArrayAppend dst:reg7, src:reg9, is_spread:true
+  [  60] CallWithArgumentArray dst:reg5, callee:reg6, this_value:Undefined, arguments:reg7, f
+  [  78] End value:reg5
+
+
+f$7aaaa003
+  Registers: 5
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] End value:Undefined

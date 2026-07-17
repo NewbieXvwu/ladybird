@@ -1,0 +1,34 @@
+Harness status: OK
+
+Found 29 tests
+
+29 Pass
+Pass	Element becoming scope root
+Pass	Element becoming scope root (selector list)
+Pass	Element becoming scope root, with inner :scope rule
+Pass	Parent element becoming scope limit
+Pass	Parent element becoming scope limit (selector list)
+Pass	Subject element becoming scope limit
+Pass	Parent element affecting scope limit
+Pass	Sibling element affecting scope limit
+Pass	Toggling inner/outer scope roots
+Pass	Element becoming root, with :scope in subject
+Pass	Scope root with :has()
+Pass	Scope root with :has(), :scope subject
+Pass	Scope root with :has(), :scope both subject and non-subject
+Pass	Scope limit with :has()
+Pass	Element becoming root, with :scope selected by ~ combinator
+Pass	Element becoming root via ~ combinator
+Pass	Element becoming root via + combinator
+Pass	:not(scope) in subject
+Pass	:not(scope) in ancestor
+Pass	:not(scope) in limit subject
+Pass	:not(scope) in limit ancestor
+Pass	:nth-child() in scope root
+Pass	:nth-child() in scope limit
+Pass	Modifying selectorText invalidates affected elements
+Pass	Modifying selectorText invalidates affected elements (>)
+Pass	Relative selectors set with selectorText are relative to :scope and &
+Pass	Ancestor element affecting nested scope root (Through latter selector in list)
+Pass	Parent element of subject affecting scope limit
+Pass	Sandwiched deep implicit scope root, :scope in subject

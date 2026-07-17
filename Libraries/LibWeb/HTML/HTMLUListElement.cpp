@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLUListElementPrototype.h>
+#include <LibWeb/Bindings/HTMLUListElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/CSS/StyleValues/CounterStyleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/HTML/HTMLUListElement.h>
 
@@ -26,7 +28,7 @@ void HTMLUListElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-bool HTMLUListElement::is_presentational_hint(FlyString const& name) const
+bool HTMLUListElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -34,19 +36,21 @@ bool HTMLUListElement::is_presentational_hint(FlyString const& name) const
     return name == HTML::AttributeNames::type;
 }
 
-void HTMLUListElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void HTMLUListElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
+    Base::apply_presentational_hints(properties);
+
     // https://html.spec.whatwg.org/multipage/rendering.html#lists
-    for_each_attribute([&](auto& name, auto& value) {
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == HTML::AttributeNames::type) {
-            if (value.equals_ignoring_ascii_case("none"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::None));
-            } else if (value.equals_ignoring_ascii_case("disc"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::Disc));
-            } else if (value.equals_ignoring_ascii_case("circle"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::Circle));
-            } else if (value.equals_ignoring_ascii_case("square"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::Square));
+            if (value.equals_ignoring_ascii_case(u"none"sv)) {
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::KeywordStyleValue::create(CSS::Keyword::None) });
+            } else if (value.equals_ignoring_ascii_case(u"disc"sv)) {
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("disc"_utf16_fly_string) });
+            } else if (value.equals_ignoring_ascii_case(u"circle"sv)) {
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("circle"_utf16_fly_string) });
+            } else if (value.equals_ignoring_ascii_case(u"square"sv)) {
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("square"_utf16_fly_string) });
             }
         }
     });

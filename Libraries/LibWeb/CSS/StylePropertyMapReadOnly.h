@@ -23,9 +23,9 @@ public:
 
     virtual ~StylePropertyMapReadOnly() override;
 
-    WebIDL::ExceptionOr<Variant<GC::Ref<CSSStyleValue>, Empty>> get(String property);
-    WebIDL::ExceptionOr<Vector<GC::Ref<CSSStyleValue>>> get_all(String property);
-    WebIDL::ExceptionOr<bool> has(String property);
+    WebIDL::ExceptionOr<Variant<GC::Ref<CSSStyleValue>, Empty>> get(Utf16FlyString property);
+    WebIDL::ExceptionOr<GC::RootVector<GC::Ref<CSSStyleValue>>> get_all(Utf16FlyString property);
+    WebIDL::ExceptionOr<bool> has(Utf16FlyString property);
     WebIDL::UnsignedLong size() const;
 
 protected:
@@ -35,7 +35,7 @@ protected:
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
-    static RefPtr<StyleValue const> get_style_value(Source&, String property);
+    static RefPtr<StyleValue const> get_style_value(Source&, PropertyNameAndID const& property);
 
     // https://drafts.css-houdini.org/css-typed-om-1/#dom-stylepropertymapreadonly-declarations-slot
     // A StylePropertyMapReadOnly object has a [[declarations]] internal slot, which is a map reflecting the CSS

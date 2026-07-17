@@ -6,11 +6,10 @@
 
 #pragma once
 
-#include <LibTextCodec/Export.h>
-
 namespace TextCodec {
 
 class Decoder;
 class Encoder;
+class StreamingDecoder;
 
 }

@@ -6,7 +6,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLProgressElementPrototype.h>
+#include <LibWeb/Bindings/HTMLProgressElement.h>
+#include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
@@ -51,14 +52,13 @@ double HTMLProgressElement::value() const
     return 0;
 }
 
-WebIDL::ExceptionOr<void> HTMLProgressElement::set_value(double value)
+void HTMLProgressElement::set_value(double value)
 {
     if (value < 0)
         value = 0;
 
-    TRY(set_attribute(HTML::AttributeNames::value, String::number(value)));
+    set_attribute_value(HTML::AttributeNames::value, Utf16String::number(value));
     update_progress_value_element();
-    return {};
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-progress-max
@@ -72,14 +72,13 @@ WebIDL::Double HTMLProgressElement::max() const
     return 1;
 }
 
-WebIDL::ExceptionOr<void> HTMLProgressElement::set_max(double value)
+void HTMLProgressElement::set_max(double value)
 {
     if (value <= 0)
-        return {};
+        return;
 
-    TRY(set_attribute(HTML::AttributeNames::max, String::number(value)));
+    set_attribute_value(HTML::AttributeNames::max, Utf16String::number(value));
     update_progress_value_element();
-    return {};
 }
 
 double HTMLProgressElement::position() const
@@ -96,7 +95,7 @@ void HTMLProgressElement::inserted()
     create_shadow_tree_if_needed();
 }
 
-void HTMLProgressElement::adjust_computed_style(CSS::ComputedProperties& style)
+void HTMLProgressElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
 {
     // https://drafts.csswg.org/css-display-3/#unbox
     if (style.display().is_contents())
@@ -109,22 +108,23 @@ void HTMLProgressElement::create_shadow_tree_if_needed()
         return;
 
     auto shadow_root = realm().create<DOM::ShadowRoot>(document(), *this, Bindings::ShadowRootMode::Closed);
+    shadow_root->set_user_agent_internal(true);
     set_shadow_root(shadow_root);
 
     auto progress_bar_element = MUST(DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML));
-    progress_bar_element->set_use_pseudo_element(CSS::PseudoElement::SliderTrack);
     MUST(shadow_root->append_child(*progress_bar_element));
+    progress_bar_element->set_associated_shadow_host_pseudo_element(CSS::PseudoElement::SliderTrack);
 
     m_progress_value_element = MUST(DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML));
-    m_progress_value_element->set_use_pseudo_element(CSS::PseudoElement::SliderFill);
     MUST(progress_bar_element->append_child(*m_progress_value_element));
+    m_progress_value_element->set_associated_shadow_host_pseudo_element(CSS::PseudoElement::SliderFill);
     update_progress_value_element();
 }
 
 void HTMLProgressElement::update_progress_value_element()
 {
     if (m_progress_value_element)
-        MUST(m_progress_value_element->style_for_bindings()->set_property(CSS::PropertyID::Width, MUST(String::formatted("{}%", position() * 100))));
+        MUST(m_progress_value_element->style_for_bindings()->set_property(CSS::PropertyID::Width, Utf16String::formatted("{}%", position() * 100)));
 }
 
 }

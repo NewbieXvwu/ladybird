@@ -1,7 +1,3 @@
-#import <WebGL/Types.idl>
-#import <WebGL/WebGLRenderingContextOverloads.idl>
-#import <WebGL/WebGLUniformLocation.idl>
-
 // https://registry.khronos.org/webgl/specs/latest/2.0/#3.7
 interface mixin WebGL2RenderingContextOverloads {
     // WebGL1:
@@ -62,6 +58,6 @@ interface mixin WebGL2RenderingContextOverloads {
     // WebGL1:
     undefined readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, [AllowShared] ArrayBufferView? pixels);
     // WebGL2:
-    [FIXME] undefined readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLintptr offset);
+    undefined readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLintptr offset);
     [FIXME] undefined readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, [AllowShared] ArrayBufferView dstData, unsigned long long dstOffset);
 };

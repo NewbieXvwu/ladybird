@@ -2,8 +2,6 @@
 <script src="../include.js"></script>
 <script>
     test(() => {
-        println("FIXME: This test relies on having a GPU backend enabled, which it is not in run-tests mode :(");
-
         let canvas = document.createElement("canvas");
         let context = canvas.getContext("webgl");
         println(`context instanceof WebGLRenderingContext: ${context instanceof WebGLRenderingContext}`);
@@ -11,6 +9,7 @@
 
         let canvas2 = document.createElement("canvas");
         let context2 = canvas2.getContext("webgl2");
+        println(`typeof WebGL2RenderingContext.prototype.texImage2D: ${typeof WebGL2RenderingContext.prototype.texImage2D}`);
         println(`context2 instanceof WebGL2RenderingContext: ${context2 instanceof WebGL2RenderingContext}`);
         println(`context2 is null: ${context2 === null}`);
     });

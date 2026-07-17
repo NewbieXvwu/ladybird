@@ -28,7 +28,7 @@ public:
     virtual ~CharacterData() override;
 
     Utf16String const& data() const { return m_data; }
-    void set_data(Utf16String const&);
+    void set_data(Utf16View const&);
 
     unsigned length_in_utf16_code_units() const { return m_data.length_in_code_units(); }
 
@@ -39,6 +39,7 @@ public:
     WebIDL::ExceptionOr<void> replace_data(size_t offset_in_utf16_code_units, size_t count_in_utf16_code_units, Utf16View const&);
 
     Unicode::Segmenter& grapheme_segmenter() const;
+    Unicode::Segmenter& line_segmenter() const;
     Unicode::Segmenter& word_segmenter() const;
 
 protected:
@@ -47,9 +48,12 @@ protected:
     virtual void initialize(JS::Realm&) override;
 
 private:
+    virtual size_t external_memory_size() const override;
+
     Utf16String m_data;
 
     mutable OwnPtr<Unicode::Segmenter> m_grapheme_segmenter;
+    mutable OwnPtr<Unicode::Segmenter> m_line_segmenter;
     mutable OwnPtr<Unicode::Segmenter> m_word_segmenter;
 };
 

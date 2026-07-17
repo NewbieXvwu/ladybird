@@ -38,11 +38,19 @@ HeadlessWebView::HeadlessWebView(Core::AnonymousBuffer theme, Web::DevicePixelSi
             ? HeadlessWebView::create_child(*this, *page_index)
             : HeadlessWebView::create(m_theme, m_viewport_size);
 
+        // Propagate crashes from child views to parent, so parent tests don't hang
+        // waiting for a child that crashed.
+        web_view->on_web_content_crashed = [this]() {
+            if (on_web_content_crashed)
+                on_web_content_crashed();
+        };
+
         m_child_web_views.append(move(web_view));
         return m_child_web_views.last()->handle();
     };
 
     on_reposition_window = [this](auto position) {
+        m_previous_dimensions.set_location(position.template to_type<Web::DevicePixels>());
         client().async_set_window_position(m_client_state.page_index, position.template to_type<Web::DevicePixels>());
 
         client().async_did_update_window_rect(m_client_state.page_index);
@@ -52,7 +60,7 @@ HeadlessWebView::HeadlessWebView(Core::AnonymousBuffer theme, Web::DevicePixelSi
         m_viewport_size = size.template to_type<Web::DevicePixels>();
 
         client().async_set_window_size(m_client_state.page_index, m_viewport_size);
-        client().async_set_viewport_size(m_client_state.page_index, m_viewport_size);
+        handle_resize();
 
         client().async_did_update_window_rect(m_client_state.page_index);
     };
@@ -67,20 +75,34 @@ HeadlessWebView::HeadlessWebView(Core::AnonymousBuffer theme, Web::DevicePixelSi
 
     on_maximize_window = [this]() {
         m_viewport_size = screen_rect.size();
+        m_previous_dimensions = screen_rect;
 
         client().async_set_window_position(m_client_state.page_index, screen_rect.location());
         client().async_set_window_size(m_client_state.page_index, screen_rect.size());
-        client().async_set_viewport_size(m_client_state.page_index, screen_rect.size());
+        handle_resize();
 
         client().async_did_update_window_rect(m_client_state.page_index);
     };
 
     on_fullscreen_window = [this]() {
+        m_previous_dimensions.set_size(m_viewport_size);
         m_viewport_size = screen_rect.size();
+        m_is_fullscreen = Web::ViewportIsFullscreen::Yes;
 
         client().async_set_window_position(m_client_state.page_index, screen_rect.location());
         client().async_set_window_size(m_client_state.page_index, screen_rect.size());
-        client().async_set_viewport_size(m_client_state.page_index, screen_rect.size());
+        handle_resize();
+
+        client().async_did_update_window_rect(m_client_state.page_index);
+    };
+
+    on_exit_fullscreen_window = [this]() {
+        m_viewport_size = m_previous_dimensions.size();
+        m_is_fullscreen = Web::ViewportIsFullscreen::No;
+
+        client().async_set_window_position(m_client_state.page_index, m_previous_dimensions.location());
+        client().async_set_window_size(m_client_state.page_index, m_previous_dimensions.size());
+        handle_resize();
 
         client().async_did_update_window_rect(m_client_state.page_index);
     };
@@ -141,21 +163,7 @@ HeadlessWebView::HeadlessWebView(Core::AnonymousBuffer theme, Web::DevicePixelSi
         m_pending_prompt_text.clear();
     };
 
-    on_insert_clipboard_entry = [this](Web::Clipboard::SystemClipboardRepresentation entry, auto const&) {
-        Web::Clipboard::SystemClipboardItem item;
-        item.system_clipboard_representations.append(move(entry));
-
-        m_clipboard = move(item);
-    };
-
-    on_request_clipboard_entries = [this](auto request_id) {
-        if (m_clipboard.has_value())
-            retrieved_clipboard_entries(request_id, { { *m_clipboard } });
-        else
-            retrieved_clipboard_entries(request_id, {});
-    };
-
-    m_system_visibility_state = Web::HTML::VisibilityState::Visible;
+    m_top_level_traversable.set_system_visibility_state(Web::HTML::VisibilityState::Visible);
 }
 
 void HeadlessWebView::initialize_client(CreateNewClient create_new_client)
@@ -163,15 +171,24 @@ void HeadlessWebView::initialize_client(CreateNewClient create_new_client)
     ViewImplementation::initialize_client(create_new_client);
 
     client().async_update_system_theme(m_client_state.page_index, m_theme);
-    client().async_set_viewport_size(m_client_state.page_index, viewport_size());
+    handle_resize();
     client().async_set_window_size(m_client_state.page_index, viewport_size());
     client().async_update_screen_rects(m_client_state.page_index, { { screen_rect } }, 0);
+}
+
+void HeadlessWebView::reset_viewport_size(Web::DevicePixelSize size)
+{
+    m_viewport_size = size;
+
+    client().async_set_window_size(m_client_state.page_index, m_viewport_size);
+    handle_resize();
+
+    client().async_did_update_window_rect(m_client_state.page_index);
 }
 
 void HeadlessWebView::update_zoom()
 {
     ViewImplementation::update_zoom();
-    client().async_set_viewport_size(m_client_state.page_index, m_viewport_size);
 }
 
 }

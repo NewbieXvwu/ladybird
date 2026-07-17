@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ReadableStreamDefaultControllerPrototype.h>
+#include <LibWeb/Bindings/ReadableStreamDefaultController.h>
 #include <LibWeb/Streams/AbstractOperations.h>
 #include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/Streams/ReadableStreamDefaultController.h>
@@ -35,7 +35,7 @@ WebIDL::ExceptionOr<void> ReadableStreamDefaultController::close()
 {
     // 1. If ! ReadableStreamDefaultControllerCanCloseOrEnqueue(this) is false, throw a TypeError exception.
     if (!readable_stream_default_controller_can_close_or_enqueue(*this)) {
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Stream is not closable"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Stream is not closable"_utf16 };
     }
 
     // 2. Perform ! ReadableStreamDefaultControllerClose(this).
@@ -45,23 +45,23 @@ WebIDL::ExceptionOr<void> ReadableStreamDefaultController::close()
 }
 
 // https://streams.spec.whatwg.org/#rs-default-controller-enqueue
-WebIDL::ExceptionOr<void> ReadableStreamDefaultController::enqueue(JS::Value chunk)
+WebIDL::ExceptionOr<void> ReadableStreamDefaultController::enqueue(Optional<JS::Value> chunk)
 {
     // 1. If ! ReadableStreamDefaultControllerCanCloseOrEnqueue(this) is false, throw a TypeError exception.
     if (!readable_stream_default_controller_can_close_or_enqueue(*this))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot enqueue chunk to stream"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot enqueue chunk to stream"_utf16 };
 
     // 2. Perform ? ReadableStreamDefaultControllerEnqueue(this, chunk).
-    TRY(readable_stream_default_controller_enqueue(*this, chunk));
+    TRY(readable_stream_default_controller_enqueue(*this, chunk.value_or(JS::js_undefined())));
 
     return {};
 }
 
 // https://streams.spec.whatwg.org/#rs-default-controller-error
-void ReadableStreamDefaultController::error(JS::Value error)
+void ReadableStreamDefaultController::error(Optional<JS::Value> error)
 {
     // 1. Perform ! ReadableStreamDefaultControllerError(this, e).
-    readable_stream_default_controller_error(*this, error);
+    readable_stream_default_controller_error(*this, error.value_or(JS::js_undefined()));
 }
 
 // https://streams.spec.whatwg.org/#rs-default-controller-private-cancel

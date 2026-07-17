@@ -28,6 +28,8 @@ class WEB_API MessagePort final
     GC_DECLARE_ALLOCATOR(MessagePort);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     [[nodiscard]] static GC::Ref<MessagePort> create(JS::Realm&);
 
     static void for_each_message_port(Function<void(MessagePort&)>);
@@ -43,10 +45,10 @@ public:
     GC::Ptr<MessagePort const> entangled_port() const { return m_remote_port; }
 
     // https://html.spec.whatwg.org/multipage/web-messaging.html#dom-messageport-postmessage
-    WebIDL::ExceptionOr<void> post_message(JS::Value message, Vector<GC::Root<JS::Object>> const& transfer);
+    WebIDL::ExceptionOr<void> post_message(JS::Value message, GC::RootVector<GC::Ref<JS::Object>> const& transfer);
 
     // https://html.spec.whatwg.org/multipage/web-messaging.html#dom-messageport-postmessage-options
-    WebIDL::ExceptionOr<void> post_message(JS::Value message, StructuredSerializeOptions const& options);
+    WebIDL::ExceptionOr<void> post_message(JS::Value message, Bindings::StructuredSerializeOptions const& options);
 
     void enable();
     void start();
@@ -66,7 +68,7 @@ public:
 
     void set_worker_event_target(GC::Ref<DOM::EventTarget>);
 
-    WebIDL::ExceptionOr<void> message_port_post_message_steps(GC::Ptr<MessagePort> target_port, JS::Value message, StructuredSerializeOptions const& options);
+    WebIDL::ExceptionOr<void> message_port_post_message_steps(GC::Ptr<MessagePort> target_port, JS::Value message, Bindings::StructuredSerializeOptions const& options);
 
 private:
     explicit MessagePort(JS::Realm&);
@@ -77,6 +79,10 @@ private:
 
     bool is_entangled() const;
 
+    void dispatch_pending_messages();
+    void flush_pending_outgoing_messages();
+    void queue_message_task(SerializedTransferRecord&&);
+    void drain_transport();
     void post_message_task_steps(SerializedTransferRecord&);
     void post_port_message(SerializedTransferRecord const&);
     ErrorOr<void> send_message_on_transport(SerializedTransferRecord const&);
@@ -92,6 +98,9 @@ private:
 
     GC::Ptr<DOM::EventTarget> m_worker_event_target;
 
+    Vector<SerializedTransferRecord> m_pending_incoming_messages;
+    Vector<SerializedTransferRecord> m_pending_outgoing_messages;
+    bool m_should_shutdown_on_enable { false };
     bool m_enabled { false };
 };
 

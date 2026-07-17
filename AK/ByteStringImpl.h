@@ -6,9 +6,8 @@
 
 #pragma once
 
-#include <AK/Badge.h>
+#include <AK/AtomicRefCounted.h>
 #include <AK/NonnullRefPtr.h>
-#include <AK/RefCounted.h>
 #include <AK/Span.h>
 #include <AK/Types.h>
 #include <AK/kmalloc.h>
@@ -22,7 +21,7 @@ enum ShouldChomp {
 
 size_t allocation_size_for_stringimpl(size_t length);
 
-class ByteStringImpl : public RefCounted<ByteStringImpl> {
+class ByteStringImpl : public AtomicRefCounted<ByteStringImpl> {
 public:
     static NonnullRefPtr<ByteStringImpl const> create_uninitialized(size_t length, char*& buffer);
     static NonnullRefPtr<ByteStringImpl const> create(char const* cstring, ShouldChomp = NoChomp);
@@ -31,7 +30,7 @@ public:
 
     void operator delete(void* ptr)
     {
-        kfree_sized(ptr, allocation_size_for_stringimpl(static_cast<ByteStringImpl*>(ptr)->m_length));
+        kfree(ptr);
     }
 
     static ByteStringImpl& the_empty_stringimpl();
@@ -73,12 +72,13 @@ public:
     unsigned case_insensitive_hash() const;
 
 private:
+    friend struct EmptyByteStringImpl;
+
     enum ConstructTheEmptyStringImplTag {
         ConstructTheEmptyStringImpl
     };
-    explicit ByteStringImpl(ConstructTheEmptyStringImplTag)
+    explicit constexpr ByteStringImpl(ConstructTheEmptyStringImplTag)
     {
-        m_inline_buffer[0] = '\0';
     }
 
     enum ConstructWithInlineBufferTag {

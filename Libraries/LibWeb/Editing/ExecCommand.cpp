@@ -5,6 +5,7 @@
  */
 
 #include <AK/TemporaryChange.h>
+#include <LibWeb/Bindings/InputEvent.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/Range.h>
@@ -17,7 +18,12 @@
 namespace Web::DOM {
 
 // https://w3c.github.io/editing/docs/execCommand/#execcommand()
-WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[maybe_unused]] bool show_ui, Utf16String const& value)
+WebIDL::ExceptionOr<bool> Document::exec_command(Utf16FlyString const& command, [[maybe_unused]] bool show_ui, Utf16View value)
+{
+    return exec_command_internal(command, show_ui, value, DispatchInputEvent::Yes);
+}
+
+WebIDL::ExceptionOr<bool> Document::exec_command_internal(Utf16FlyString const& command, [[maybe_unused]] bool show_ui, Utf16View value, DispatchInputEvent dispatch_input_event)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -118,26 +124,32 @@ WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[may
     //    value of command, and its data attribute initialized to null.
     bool tree_was_modified = dom_tree_version() != old_dom_tree_version
         || character_data_version() != old_character_data_version;
-    if (tree_was_modified && affected_editing_host) {
-        UIEvents::InputEventInit event_init {};
+    if (tree_was_modified && affected_editing_host && dispatch_input_event == DispatchInputEvent::Yes) {
+        Bindings::InputEventInit event_init {};
         event_init.bubbles = true;
         event_init.input_type = command_definition.mapped_value;
 
         // AD-HOC: For insertText, we do what other browsers do and set data to value.
         if (command == Editing::CommandNames::insertText)
-            event_init.data = value;
+            event_init.data = Utf16String::from_utf16(value);
 
         auto event = UIEvents::InputEvent::create_from_platform_event(realm(), HTML::EventNames::input, event_init);
         event->set_is_trusted(true);
+
+        TemporaryChange preserve_selection_offsets { m_preserve_selection_offsets_during_identical_character_data_replacement, true };
         affected_editing_host->dispatch_event(event);
     }
+
+    // AD-HOC: Scroll the cursor into view after executing a command.
+    if (auto selection = get_selection())
+        selection->scroll_focus_into_view();
 
     // 8. Return true.
     return true;
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandenabled()
-WebIDL::ExceptionOr<bool> Document::query_command_enabled(FlyString const& command)
+WebIDL::ExceptionOr<bool> Document::query_command_enabled(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -232,7 +244,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_enabled(FlyString const& comma
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandindeterm()
-WebIDL::ExceptionOr<bool> Document::query_command_indeterm(FlyString const& command)
+WebIDL::ExceptionOr<bool> Document::query_command_indeterm(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -244,34 +256,6 @@ WebIDL::ExceptionOr<bool> Document::query_command_indeterm(FlyString const& comm
         return false;
     auto const& command_definition = optional_command.value();
     if (!command_definition.indeterminate) {
-        // https://w3c.github.io/editing/docs/execCommand/#inline-command-activated-values
-        // If a command is a standard inline value command, it is indeterminate if among formattable nodes that are
-        // effectively contained in the active range, there are two that have distinct effective command values.
-        if (command_definition.command.is_one_of(Editing::CommandNames::backColor, Editing::CommandNames::fontName,
-                Editing::CommandNames::foreColor, Editing::CommandNames::hiliteColor)) {
-            Optional<Utf16String> first_node_value;
-            auto range = Editing::active_range(*this);
-            bool has_distinct_values = false;
-            Editing::for_each_node_effectively_contained_in_range(range, [&](GC::Ref<Node> descendant) {
-                if (!Editing::is_formattable_node(descendant))
-                    return TraversalDecision::Continue;
-
-                auto node_value = Editing::effective_command_value(descendant, command_definition.command);
-                if (!node_value.has_value())
-                    return TraversalDecision::Continue;
-
-                if (!first_node_value.has_value()) {
-                    first_node_value = node_value.value();
-                } else if (first_node_value.value() != node_value.value()) {
-                    has_distinct_values = true;
-                    return TraversalDecision::Break;
-                }
-
-                return TraversalDecision::Continue;
-            });
-            return has_distinct_values;
-        }
-
         // If a command has inline command activated values defined but nothing else defines when it is indeterminate,
         // it is indeterminate if among formattable nodes effectively contained in the active range, there is at least
         // one whose effective command value is one of the given values and at least one whose effective command value
@@ -308,7 +292,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_indeterm(FlyString const& comm
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandstate()
-WebIDL::ExceptionOr<bool> Document::query_command_state(FlyString const& command)
+WebIDL::ExceptionOr<bool> Document::query_command_state(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -357,7 +341,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_state(FlyString const& command
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandsupported()
-WebIDL::ExceptionOr<bool> Document::query_command_supported(FlyString const& command)
+WebIDL::ExceptionOr<bool> Document::query_command_supported(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -371,7 +355,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_supported(FlyString const& com
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandvalue()
-WebIDL::ExceptionOr<String> Document::query_command_value(FlyString const& command)
+WebIDL::ExceptionOr<Utf16String> Document::query_command_value(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -380,42 +364,42 @@ WebIDL::ExceptionOr<String> Document::query_command_value(FlyString const& comma
     // 1. If command is not supported or has no value, return the empty string.
     auto optional_command = Editing::find_command_definition(command);
     if (!optional_command.has_value())
-        return String {};
+        return Utf16String {};
     auto const& command_definition = optional_command.release_value();
     auto value_override = command_value_override(command_definition.command);
     if (!command_definition.value && !value_override.has_value())
-        return String {};
+        return Utf16String {};
 
     // 2. If command is "fontSize" and its value override is set, convert the value override to an
     //    integer number of pixels and return the legacy font size for the result.
     if (command_definition.command == Editing::CommandNames::fontSize && value_override.has_value()) {
         auto pixel_size = Editing::font_size_to_pixel_size(value_override.release_value());
-        return Editing::legacy_font_size(pixel_size.to_int()).to_utf8_but_should_be_ported_to_utf16();
+        return Editing::legacy_font_size(pixel_size.to_int());
     }
 
     // 3. If the value override for command is set, return it.
     if (value_override.has_value())
-        return value_override.release_value().to_utf8_but_should_be_ported_to_utf16();
+        return Utf16String::from_utf16(value_override.release_value());
 
     // 4. Return command's value.
-    return command_definition.value(*this).to_utf8_but_should_be_ported_to_utf16();
+    return command_definition.value(*this);
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#value-override
-void Document::set_command_value_override(FlyString const& command, Utf16String const& value)
+void Document::set_command_value_override(Utf16FlyString const& command, Utf16View value)
 {
-    m_command_value_override.set(command, value);
+    m_command_value_override.set(command, Utf16String::from_utf16(value));
 
     // The value override for the backColor command must be the same as the value override for the hiliteColor command,
     // such that setting one sets the other to the same thing and unsetting one unsets the other.
     if (command == Editing::CommandNames::backColor)
-        m_command_value_override.set(Editing::CommandNames::hiliteColor, value);
+        m_command_value_override.set(Editing::CommandNames::hiliteColor, Utf16String::from_utf16(value));
     else if (command == Editing::CommandNames::hiliteColor)
-        m_command_value_override.set(Editing::CommandNames::backColor, value);
+        m_command_value_override.set(Editing::CommandNames::backColor, Utf16String::from_utf16(value));
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#value-override
-void Document::clear_command_value_override(FlyString const& command)
+void Document::clear_command_value_override(Utf16FlyString const& command)
 {
     m_command_value_override.remove(command);
 

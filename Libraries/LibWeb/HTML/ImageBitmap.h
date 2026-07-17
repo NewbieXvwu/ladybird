@@ -7,7 +7,8 @@
 #pragma once
 
 #include <AK/OwnPtr.h>
-#include <LibGfx/Bitmap.h>
+#include <LibGfx/Forward.h>
+#include <LibWeb/Bindings/ImageBitmap.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Bindings/Serializable.h>
 #include <LibWeb/Bindings/Transferable.h>
@@ -16,16 +17,17 @@
 
 namespace Web::HTML {
 
-using ImageBitmapSource = FlattenVariant<CanvasImageSource, Variant<GC::Root<FileAPI::Blob>, GC::Root<ImageData>>>;
+using ImageBitmapSource = FlattenVariant<CanvasImageSource, Variant<GC::Ref<FileAPI::Blob>, GC::Ref<ImageData>>>;
 
 // https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#imagebitmapoptions
 struct ImageBitmapOptions {
     // FIXME: Implement the rest of the fields
     Optional<WebIDL::UnsignedLong> resize_width;
     Optional<WebIDL::UnsignedLong> resize_height;
+    Bindings::ResizeQuality resize_quality = Bindings::ResizeQuality::Low;
 };
 
-class ImageBitmap final : public Bindings::PlatformObject
+class WEB_API ImageBitmap final : public Bindings::PlatformObject
     , public Web::Bindings::Serializable
     , public Web::Bindings::Transferable {
     WEB_PLATFORM_OBJECT(ImageBitmap, Bindings::PlatformObject);
@@ -33,12 +35,11 @@ class ImageBitmap final : public Bindings::PlatformObject
 
 public:
     static GC::Ref<ImageBitmap> create(JS::Realm&);
-    virtual ~ImageBitmap() override = default;
+    virtual ~ImageBitmap() override;
 
     // ^Web::Bindings::Serializable
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::ImageBitmap; }
-    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
-    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::StructuredSerializeWriter&, bool for_storage, HTML::SerializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::StructuredSerializeReader&, HTML::DeserializationMemory&) override;
 
     // ^Web::Bindings::Transferable
     virtual WebIDL::ExceptionOr<void> transfer_steps(HTML::TransferDataEncoder&) override;
@@ -64,11 +65,12 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     WebIDL::UnsignedLong m_width = 0;
     WebIDL::UnsignedLong m_height = 0;
 
-    RefPtr<Gfx::Bitmap> m_bitmap { nullptr };
+    RefPtr<Gfx::Bitmap> m_bitmap;
 };
 
 }

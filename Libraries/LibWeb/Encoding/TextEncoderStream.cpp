@@ -10,8 +10,9 @@
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/TextEncoderStreamPrototype.h>
+#include <LibWeb/Bindings/TextEncoderStream.h>
 #include <LibWeb/Encoding/TextEncoderStream.h>
+#include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/Streams/TransformStream.h>
 #include <LibWeb/Streams/TransformStreamOperations.h>
 #include <LibWeb/WebIDL/Promise.h>
@@ -21,7 +22,7 @@ namespace Web::Encoding {
 GC_DEFINE_ALLOCATOR(TextEncoderStream);
 
 // https://encoding.spec.whatwg.org/#dom-textencoderstream
-WebIDL::ExceptionOr<GC::Ref<TextEncoderStream>> TextEncoderStream::construct_impl(JS::Realm& realm)
+GC::Ref<TextEncoderStream> TextEncoderStream::construct_impl(JS::Realm& realm)
 {
     // 1. Set this’s encoder to an instance of the UTF-8 encoder.
     // NOTE: No-op, as AK::String is already in UTF-8 format.
@@ -38,6 +39,7 @@ WebIDL::ExceptionOr<GC::Ref<TextEncoderStream>> TextEncoderStream::construct_imp
     auto transform_algorithm = GC::create_function(realm.heap(), [stream](JS::Value chunk) -> GC::Ref<WebIDL::Promise> {
         auto& realm = stream->realm();
         auto& vm = realm.vm();
+        HTML::TemporaryExecutionContext execution_context { realm };
 
         if (auto result = stream->encode_and_enqueue_chunk(chunk); result.is_error()) {
             auto throw_completion = Bindings::exception_to_throw_completion(vm, result.exception());
@@ -51,6 +53,7 @@ WebIDL::ExceptionOr<GC::Ref<TextEncoderStream>> TextEncoderStream::construct_imp
     auto flush_algorithm = GC::create_function(realm.heap(), [stream]() -> GC::Ref<WebIDL::Promise> {
         auto& realm = stream->realm();
         auto& vm = realm.vm();
+        HTML::TemporaryExecutionContext execution_context { realm };
 
         if (auto result = stream->encode_and_flush(); result.is_error()) {
             auto throw_completion = Bindings::exception_to_throw_completion(vm, result.exception());
@@ -96,15 +99,14 @@ WebIDL::ExceptionOr<void> TextEncoderStream::encode_and_enqueue_chunk(JS::Value 
     auto& vm = this->vm();
 
     // 1. Let input be the result of converting chunk to a DOMString.
-    auto input = TRY(chunk.to_string(vm));
+    auto input = TRY(chunk.to_utf16_string(vm));
 
     // 2. Convert input to an I/O queue of code units.
     // Spec Note: DOMString, as well as an I/O queue of code units rather than scalar values, are used here so that a
     //            surrogate pair that is split between chunks can be reassembled into the appropriate scalar value.
     //            The behavior is otherwise identical to USVString. In particular, lone surrogates will be replaced
     //            with U+FFFD.
-    auto code_points = input.code_points();
-    auto it = code_points.begin();
+    size_t code_unit_index = 0;
 
     // 3. Let output be the I/O queue of bytes « end-of-queue ».
     ByteBuffer output;
@@ -113,7 +115,7 @@ WebIDL::ExceptionOr<void> TextEncoderStream::encode_and_enqueue_chunk(JS::Value 
     while (true) {
         // 2. If item is end-of-queue, then:
         // NOTE: This is done out-of-order so that we're not dereferencing a code point iterator that points to the end.
-        if (it.done()) {
+        if (code_unit_index >= input.length_in_code_units()) {
             // 1. Convert output into a byte sequence.
             // Note: No-op.
 
@@ -132,10 +134,10 @@ WebIDL::ExceptionOr<void> TextEncoderStream::encode_and_enqueue_chunk(JS::Value 
         }
 
         // 1. Let item be the result of reading from input.
-        auto item = *it;
+        auto item = input.code_unit_at(code_unit_index);
 
         // 3. Let result be the result of executing the convert code unit to scalar value algorithm with encoder, item and input.
-        auto result = convert_code_unit_to_scalar_value(item, it);
+        auto result = convert_code_unit_to_scalar_value(item, code_unit_index);
 
         // 4. If result is not continue, then process an item with result, encoder’s encoder, input, output, and "fatal".
         if (result.has_value()) {
@@ -168,10 +170,10 @@ WebIDL::ExceptionOr<void> TextEncoderStream::encode_and_flush()
 }
 
 // https://encoding.spec.whatwg.org/#convert-code-unit-to-scalar-value
-Optional<u32> TextEncoderStream::convert_code_unit_to_scalar_value(u32 item, Utf8CodePointIterator& code_point_iterator)
+Optional<u32> TextEncoderStream::convert_code_unit_to_scalar_value(u32 item, size_t& code_unit_index)
 {
     ArmedScopeGuard move_to_next_code_point_guard = [&] {
-        ++code_point_iterator;
+        ++code_unit_index;
     };
 
     // 1. If encoder’s leading surrogate is non-null, then:

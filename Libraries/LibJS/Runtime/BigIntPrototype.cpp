@@ -45,10 +45,10 @@ static ThrowCompletionOr<GC::Ref<BigInt>> this_bigint_value(VM& vm, Value value)
         return value.as_bigint();
 
     // 2. If value is an Object and value has a [[BigIntData]] internal slot, then
-    if (value.is_object() && is<BigIntObject>(value.as_object())) {
+    if (auto bigint = value.as_if<BigIntObject>()) {
         // a. Assert: value.[[BigIntData]] is a BigInt.
         // b. Return value.[[BigIntData]].
-        return static_cast<BigIntObject&>(value.as_object()).bigint();
+        return bigint->bigint();
     }
 
     // 3. Throw a TypeError exception.
@@ -74,7 +74,7 @@ JS_DEFINE_NATIVE_FUNCTION(BigIntPrototype::to_string)
     }
 
     // 5. Return BigInt::toString(x, radixMV).
-    return PrimitiveString::create(vm, TRY_OR_THROW_OOM(vm, bigint->big_integer().to_base(radix)));
+    return PrimitiveString::create(vm, TRY_OR_THROW_OOM(vm, bigint->big_integer().to_base_utf16(radix)));
 }
 
 // 21.2.3.2 BigInt.prototype.toLocaleString ( [ reserved1 [ , reserved2 ] ] ), https://tc39.es/ecma262/#sec-bigint.prototype.tolocalestring

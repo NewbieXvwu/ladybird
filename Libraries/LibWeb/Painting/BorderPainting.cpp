@@ -10,6 +10,7 @@
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Layout/Node.h>
+#include <LibWeb/Painting/BorderPainting.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 
 namespace Web::Painting {
@@ -54,7 +55,7 @@ Gfx::Color border_color(BorderEdge edge, BordersDataDevicePixels const& borders_
     return border_data.color;
 }
 
-void paint_border(DisplayListRecorder& painter, BorderEdge edge, DevicePixelRect const& rect, CornerRadius const& radius, CornerRadius const& opposite_radius, BordersDataDevicePixels const& borders_data, Gfx::Path& path, bool last)
+void paint_border(DisplayListRecorder& painter, BorderEdge edge, DevicePixelRect const& rect, Gfx::CornerRadius const& radius, Gfx::CornerRadius const& opposite_radius, BordersDataDevicePixels const& borders_data, Gfx::Path& path, bool last)
 {
     auto const& border_data = borders_data.for_edge(edge);
 
@@ -65,38 +66,41 @@ void paint_border(DisplayListRecorder& painter, BorderEdge edge, DevicePixelRect
     auto border_style = border_data.line_style;
 
     auto paint_double_border = [&](float proportional_line_thickness, CSS::LineStyle outer_style, CSS::LineStyle inner_style) {
+        // AD-HOC: We clamp the individual borders to 1px thick if they're less so that they don't disappear entirely.
+        //         This matches other browsers and is allowable per the spec, where the thickness is implementation-defined.
+
         // FIXME: Converting to floats and back is awkward, can we somehow do all this processing using CSSPixels?
         auto modified_borders_data = borders_data;
-        modified_borders_data.top.width = static_cast<float>(modified_borders_data.top.width.value()) * proportional_line_thickness;
-        modified_borders_data.right.width = static_cast<float>(modified_borders_data.right.width.value()) * proportional_line_thickness;
-        modified_borders_data.bottom.width = static_cast<float>(modified_borders_data.bottom.width.value()) * proportional_line_thickness;
-        modified_borders_data.left.width = static_cast<float>(modified_borders_data.left.width.value()) * proportional_line_thickness;
+        modified_borders_data.top.width = max(1, static_cast<float>(modified_borders_data.top.width.value()) * proportional_line_thickness);
+        modified_borders_data.right.width = max(1, static_cast<float>(modified_borders_data.right.width.value()) * proportional_line_thickness);
+        modified_borders_data.bottom.width = max(1, static_cast<float>(modified_borders_data.bottom.width.value()) * proportional_line_thickness);
+        modified_borders_data.left.width = max(1, static_cast<float>(modified_borders_data.left.width.value()) * proportional_line_thickness);
 
         auto modified_rect = rect;
 
         // Outer border
         switch (edge) {
         case BorderEdge::Top:
-            modified_rect.set_height(static_cast<float>(rect.height().value()) * proportional_line_thickness);
+            modified_rect.set_height(max(1, static_cast<float>(rect.height().value()) * proportional_line_thickness));
             break;
         case BorderEdge::Right:
-            modified_rect.set_width(static_cast<float>(rect.width().value()) * proportional_line_thickness);
+            modified_rect.set_width(max(1, static_cast<float>(rect.width().value()) * proportional_line_thickness));
             modified_rect.set_right_without_resize(rect.right());
             break;
         case BorderEdge::Bottom:
-            modified_rect.set_height(static_cast<float>(rect.height().value()) * proportional_line_thickness);
+            modified_rect.set_height(max(1, static_cast<float>(rect.height().value()) * proportional_line_thickness));
             modified_rect.set_bottom_without_resize(rect.bottom());
             break;
         case BorderEdge::Left:
-            modified_rect.set_width(static_cast<float>(rect.width().value()) * proportional_line_thickness);
+            modified_rect.set_width(max(1, static_cast<float>(rect.width().value()) * proportional_line_thickness));
             break;
         }
         modified_borders_data.for_edge(edge).line_style = outer_style;
-        paint_border(painter, edge, modified_rect, radius, opposite_radius, modified_borders_data, path, last);
+        paint_border(painter, edge, modified_rect, radius, opposite_radius, modified_borders_data, path, true);
 
         // Inner border, with smaller rect and radii
-        CornerRadius modified_radius = radius;
-        CornerRadius modified_opposite_radius = opposite_radius;
+        Gfx::CornerRadius modified_radius = radius;
+        Gfx::CornerRadius modified_opposite_radius = opposite_radius;
         switch (edge) {
         case BorderEdge::Top: {
             auto top_inset = borders_data.top.width - modified_borders_data.top.width;
@@ -165,7 +169,7 @@ void paint_border(DisplayListRecorder& painter, BorderEdge edge, DevicePixelRect
         }
 
         modified_borders_data.for_edge(edge).line_style = inner_style;
-        paint_border(painter, edge, modified_rect, modified_radius, modified_opposite_radius, modified_borders_data, path, last);
+        paint_border(painter, edge, modified_rect, modified_radius, modified_opposite_radius, modified_borders_data, path, true);
     };
 
     auto gfx_line_style = Gfx::LineStyle::Solid;
@@ -282,7 +286,6 @@ void paint_border(DisplayListRecorder& painter, BorderEdge edge, DevicePixelRect
 
         // If joined borders have the same color, combine them to draw together.
         if (ready_to_draw) {
-            path.close_all_subpaths();
             painter.fill_path({ .path = path, .paint_style_or_color = color, .winding_rule = Gfx::WindingRule::EvenOdd });
             path.clear();
         }
@@ -583,7 +586,7 @@ void paint_border(DisplayListRecorder& painter, BorderEdge edge, DevicePixelRect
     }
 }
 
-void paint_all_borders(DisplayListRecorder& painter, DevicePixelRect const& border_rect, CornerRadii const& corner_radii, BordersDataDevicePixels const& borders_data)
+void paint_all_borders(DisplayListRecorder& painter, DevicePixelRect const& border_rect, Gfx::CornerRadii const& corner_radii, BordersDataDevicePixels const& borders_data)
 {
     if (borders_data.top.width <= 0 && borders_data.right.width <= 0 && borders_data.left.width <= 0 && borders_data.bottom.width <= 0)
         return;

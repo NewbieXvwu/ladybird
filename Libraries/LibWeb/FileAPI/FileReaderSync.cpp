@@ -7,7 +7,7 @@
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibJS/Runtime/TypedArray.h>
-#include <LibWeb/Bindings/FileReaderSyncPrototype.h>
+#include <LibWeb/Bindings/FileReaderSync.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/FileAPI/FileReaderSync.h>
@@ -44,31 +44,31 @@ GC::Ref<FileReaderSync> FileReaderSync::construct_impl(JS::Realm& realm)
 }
 
 // https://w3c.github.io/FileAPI/#dfn-readAsArrayBufferSync
-WebIDL::ExceptionOr<GC::Root<JS::ArrayBuffer>> FileReaderSync::read_as_array_buffer(Blob& blob)
+WebIDL::ExceptionOr<GC::Ref<JS::ArrayBuffer>> FileReaderSync::read_as_array_buffer(Blob& blob)
 {
-    return read_as<GC::Root<JS::ArrayBuffer>>(blob, FileReader::Type::ArrayBuffer);
+    return read_as<GC::Ref<JS::ArrayBuffer>>(blob, FileReader::Type::ArrayBuffer);
 }
 
 // https://w3c.github.io/FileAPI/#dfn-readAsBinaryStringSync
-WebIDL::ExceptionOr<String> FileReaderSync::read_as_binary_string(Blob& blob)
+WebIDL::ExceptionOr<Utf16String> FileReaderSync::read_as_binary_string(Blob& blob)
 {
-    return read_as<String>(blob, FileReader::Type::BinaryString);
+    return read_as<Utf16String>(blob, FileReader::Type::BinaryString);
 }
 
 // https://w3c.github.io/FileAPI/#dfn-readAsTextSync
-WebIDL::ExceptionOr<String> FileReaderSync::read_as_text(Blob& blob, Optional<String> const& encoding)
+WebIDL::ExceptionOr<Utf16String> FileReaderSync::read_as_text(Blob& blob, Optional<Utf16String> const& encoding)
 {
-    return read_as<String>(blob, FileReader::Type::Text, encoding);
+    return read_as<Utf16String>(blob, FileReader::Type::Text, encoding);
 }
 
 // https://w3c.github.io/FileAPI/#dfn-readAsDataURLSync
-WebIDL::ExceptionOr<String> FileReaderSync::read_as_data_url(Blob& blob)
+WebIDL::ExceptionOr<Utf16String> FileReaderSync::read_as_data_url(Blob& blob)
 {
-    return read_as<String>(blob, FileReader::Type::DataURL);
+    return read_as<Utf16String>(blob, FileReader::Type::DataURL);
 }
 
 template<typename Result>
-WebIDL::ExceptionOr<Result> FileReaderSync::read_as(Blob& blob, FileReader::Type type, Optional<String> const& encoding)
+WebIDL::ExceptionOr<Result> FileReaderSync::read_as(Blob& blob, FileReader::Type type, Optional<Utf16String> const& encoding)
 {
     // 1. Let stream be the result of calling get stream on blob.
     auto stream = blob.get_stream();
@@ -94,7 +94,7 @@ WebIDL::ExceptionOr<Result> FileReaderSync::read_as(Blob& blob, FileReader::Type
     if (promise->state() == JS::Promise::State::Fulfilled && array_buffer) {
         // AD-HOC: This diverges from the spec as wrritten, where the type argument is specified explicitly for each caller.
         // 1. Return the result of package data given bytes, type, blob’s type, and encoding.
-        auto result = TRY(FileReader::blob_package_data(realm(), array_buffer->buffer(), type, blob.type(), encoding));
+        auto result = TRY(FileReader::blob_package_data(realm(), MUST(array_buffer->copy_to_byte_buffer()), type, blob.type(), encoding));
         return result.get<Result>();
     }
 

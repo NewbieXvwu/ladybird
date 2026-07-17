@@ -8,9 +8,9 @@
 #pragma once
 
 #include <AK/Variant.h>
-#include <LibJS/Bytecode/Interpreter.h>
 #include <LibJS/Runtime/ExecutionContext.h>
 #include <LibJS/Runtime/Object.h>
+#include <LibJS/Runtime/VM.h>
 
 namespace JS {
 
@@ -28,7 +28,7 @@ public:
         Completed,
     };
 
-    static ThrowCompletionOr<GC::Ref<AsyncGenerator>> create(Realm&, Value, ECMAScriptFunctionObject*, NonnullOwnPtr<ExecutionContext>);
+    static GC::Ref<AsyncGenerator> create(Realm&, Variant<GC::Ref<ECMAScriptFunctionObject>, GC::Ref<NativeJavaScriptBackedFunction>>, NonnullOwnPtr<ExecutionContext>);
 
     virtual ~AsyncGenerator() override;
 
@@ -43,8 +43,22 @@ public:
 
     Optional<String> const& generator_brand() const { return m_generator_brand; }
 
+    void set_pending_completion(Completion const& completion)
+    {
+        m_pending_completion_value = completion.value();
+        m_pending_completion_type = completion.type();
+    }
+    Value pending_completion_value() const { return m_pending_completion_value; }
+    Completion::Type pending_completion_type() const { return m_pending_completion_type; }
+    void set_pending_completion_type(Completion::Type completion_type) { m_pending_completion_type = completion_type; }
+    void clear_pending_completion()
+    {
+        m_pending_completion_value = js_undefined();
+        m_pending_completion_type = Completion::Type::Normal;
+    }
+
 private:
-    AsyncGenerator(Realm&, Object& prototype, NonnullOwnPtr<ExecutionContext>);
+    AsyncGenerator(Realm&, Object* prototype, NonnullOwnPtr<ExecutionContext>, GC::Ref<Bytecode::Executable>);
 
     virtual void visit_edges(Cell::Visitor&) override;
 
@@ -58,9 +72,11 @@ private:
     Vector<AsyncGeneratorRequest> m_async_generator_queue;     // [[AsyncGeneratorQueue]]
     Optional<String> m_generator_brand;                        // [[GeneratorBrand]]
 
-    GC::Ptr<ECMAScriptFunctionObject> m_generating_function;
-    Value m_previous_value;
+    GC::Ref<Bytecode::Executable> m_generating_executable;
+    u32 m_yield_continuation { ExecutionContext::no_yield_continuation };
     GC::Ptr<Promise> m_current_promise;
+    Value m_pending_completion_value { js_undefined() };
+    Completion::Type m_pending_completion_type { Completion::Type::Normal };
 };
 
 }

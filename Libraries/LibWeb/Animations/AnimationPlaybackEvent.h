@@ -1,21 +1,18 @@
 /*
- * Copyright (c) 2023, Matthew Olsson <mattco@serenityos.org>.
+ * Copyright (c) 2023, Matthew Olsson <mattco@serenityos.org>
+ * Copyright (c) 2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <LibWeb/Animations/TimeValue.h>
+#include <LibWeb/Bindings/AnimationPlaybackEvent.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/DOM/Event.h>
 
 namespace Web::Animations {
-
-// https://www.w3.org/TR/web-animations-1/#dictdef-animationplaybackeventinit
-struct AnimationPlaybackEventInit : public DOM::EventInit {
-    Optional<double> current_time {};
-    Optional<double> timeline_time {};
-};
 
 // https://www.w3.org/TR/web-animations-1/#animationplaybackevent
 class AnimationPlaybackEvent : public DOM::Event {
@@ -23,27 +20,25 @@ class AnimationPlaybackEvent : public DOM::Event {
     GC_DECLARE_ALLOCATOR(AnimationPlaybackEvent);
 
 public:
-    [[nodiscard]] static GC::Ref<AnimationPlaybackEvent> create(JS::Realm&, FlyString const& type, AnimationPlaybackEventInit const& event_init = {});
-    static WebIDL::ExceptionOr<GC::Ref<AnimationPlaybackEvent>> construct_impl(JS::Realm&, FlyString const& type, AnimationPlaybackEventInit const& event_init);
+    [[nodiscard]] static GC::Ref<AnimationPlaybackEvent> create(JS::Realm&, Utf16FlyString const& type, Bindings::AnimationPlaybackEventInit const& event_init = {});
+    static WebIDL::ExceptionOr<GC::Ref<AnimationPlaybackEvent>> construct_impl(JS::Realm&, Utf16FlyString const& type, Bindings::AnimationPlaybackEventInit const& event_init);
 
     virtual ~AnimationPlaybackEvent() override = default;
 
-    Optional<double> current_time() const { return m_current_time; }
-    void set_current_time(Optional<double> current_time) { m_current_time = current_time; }
-
-    Optional<double> timeline_time() const { return m_timeline_time; }
-    void set_timeline_time(Optional<double> timeline_time) { m_timeline_time = timeline_time; }
+    NullableCSSNumberish current_time() const;
+    NullableCSSNumberish timeline_time() const;
 
 private:
-    AnimationPlaybackEvent(JS::Realm&, FlyString const& type, AnimationPlaybackEventInit const& event_init);
+    AnimationPlaybackEvent(JS::Realm&, Utf16FlyString const& type, Bindings::AnimationPlaybackEventInit const& event_init);
 
     virtual void initialize(JS::Realm&) override;
+    virtual void visit_edges(Visitor&) override;
 
-    // https://www.w3.org/TR/web-animations-1/#dom-animationplaybackeventinit-currenttime
-    Optional<double> m_current_time {};
+    // https://drafts.csswg.org/web-animations-2/#dom-animationplaybackevent-currenttime
+    NullableCSSNumberish m_current_time;
 
-    // https://www.w3.org/TR/web-animations-1/#dom-animationplaybackeventinit-timelinetime
-    Optional<double> m_timeline_time {};
+    // https://drafts.csswg.org/web-animations-2/#dom-animationplaybackevent-timelinetime
+    NullableCSSNumberish m_timeline_time;
 };
 
 }

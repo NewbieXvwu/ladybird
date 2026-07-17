@@ -26,9 +26,17 @@ public:
 
     bool fill() const { return m_properties.fill; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(BorderImageSliceStyleValue const& other) const { return m_properties == other.m_properties; }
+
+    virtual bool is_computationally_independent() const override
+    {
+        return m_properties.top->is_computationally_independent()
+            && m_properties.right->is_computationally_independent()
+            && m_properties.bottom->is_computationally_independent()
+            && m_properties.left->is_computationally_independent();
+    }
 
 private:
     BorderImageSliceStyleValue(ValueComparingNonnullRefPtr<StyleValue const> top, ValueComparingNonnullRefPtr<StyleValue const> right, ValueComparingNonnullRefPtr<StyleValue const> bottom, ValueComparingNonnullRefPtr<StyleValue const> left, bool fill)

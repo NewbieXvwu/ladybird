@@ -7,14 +7,14 @@
 #pragma once
 
 #include <AK/HashMap.h>
-#include <AK/Tuple.h>
-#include <LibGfx/Bitmap.h>
+#include <AK/Optional.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibGfx/Forward.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/Bindings/ViewTransitionPrototype.h>
-#include <LibWeb/CSS/Enums.h>
+#include <LibWeb/Bindings/ViewTransition.h>
 #include <LibWeb/CSS/Filter.h>
 #include <LibWeb/CSS/PreferredColorScheme.h>
-#include <LibWeb/CSS/Transformation.h>
+#include <LibWeb/CSS/StyleValues/TransformationStyleValue.h>
 #include <LibWeb/DOM/PseudoElement.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/PixelUnits.h>
@@ -23,17 +23,17 @@ namespace Web::ViewTransition {
 
 // https://drafts.csswg.org/css-view-transitions-1/#named-view-transition-pseudo
 class NamedViewTransitionPseudoElement
-    : public DOM::PseudoElementTreeNode {
-    GC_CELL(NamedViewTransitionPseudoElement, DOM::PseudoElementTreeNode);
+    : public DOM::SyntheticPseudoElementTreeNode {
+    GC_CELL(NamedViewTransitionPseudoElement, DOM::SyntheticPseudoElementTreeNode);
     GC_DECLARE_ALLOCATOR(NamedViewTransitionPseudoElement);
 
-    NamedViewTransitionPseudoElement(CSS::PseudoElement, FlyString);
+    NamedViewTransitionPseudoElement(CSS::PseudoElement, Utf16FlyString);
 
     CSS::PseudoElement m_type;
 
     // Several of the view transition pseudo-elements are named view transition pseudo-elements, which are
     // functional tree-abiding view transition pseudo-elements associated with a view transition name.
-    FlyString m_view_transition_name;
+    Utf16FlyString m_view_transition_name;
 };
 
 // https://drafts.csswg.org/css-view-transitions-1/#::view-transition-old
@@ -43,9 +43,9 @@ class ReplacedNamedViewTransitionPseudoElement
     GC_CELL(ReplacedNamedViewTransitionPseudoElement, NamedViewTransitionPseudoElement);
     GC_DECLARE_ALLOCATOR(ReplacedNamedViewTransitionPseudoElement);
 
-    ReplacedNamedViewTransitionPseudoElement(CSS::PseudoElement, FlyString, RefPtr<Gfx::ImmutableBitmap>);
+    ReplacedNamedViewTransitionPseudoElement(CSS::PseudoElement, Utf16FlyString, Optional<Gfx::DecodedImageFrame>);
 
-    RefPtr<Gfx::ImmutableBitmap> m_content;
+    Optional<Gfx::DecodedImageFrame> m_content;
 };
 
 // https://drafts.csswg.org/css-view-transitions-1/#captured-element
@@ -53,11 +53,11 @@ struct CapturedElement : public JS::Cell {
     GC_CELL(CapturedElement, JS::Cell)
     GC_DECLARE_ALLOCATOR(CapturedElement);
 
-    RefPtr<Gfx::ImmutableBitmap> old_image {};
+    Optional<Gfx::DecodedImageFrame> old_image {};
     CSSPixels old_width = 0;
     CSSPixels old_height = 0;
     // FIXME: Make this an identity transform function by default.
-    CSS::Transformation old_transform = CSS::Transformation(CSS::TransformFunction::Translate, Vector<CSS::TransformValue>());
+    NonnullRefPtr<CSS::TransformationStyleValue const> old_transform = CSS::TransformationStyleValue::identity_transformation(CSS::TransformFunction::Translate);
     Optional<CSS::WritingMode> old_writing_mode {};
     Optional<CSS::Direction> old_direction {};
     // FIXME: old_text_orientation
@@ -146,7 +146,7 @@ private:
     virtual void visit_edges(JS::Cell::Visitor&) override;
 
     // https://drafts.csswg.org/css-view-transitions-1/#viewtransition-named-elements
-    HashMap<FlyString, GC::Ptr<CapturedElement>> m_named_elements = {};
+    HashMap<Utf16FlyString, GC::Ptr<CapturedElement>> m_named_elements = {};
 
     // https://drafts.csswg.org/css-view-transitions-1/#viewtransition-phase
     Phase m_phase = Phase::PendingCapture;
@@ -164,7 +164,7 @@ private:
     GC::Ref<WebIDL::Promise> m_finished_promise;
 
     // https://drafts.csswg.org/css-view-transitions-1/#viewtransition-transition-root-pseudo-element
-    GC::Ref<DOM::PseudoElementTreeNode> m_transition_root_pseudo_element;
+    GC::Ref<DOM::SyntheticPseudoElementTreeNode> m_transition_root_pseudo_element;
 
     // https://drafts.csswg.org/css-view-transitions-1/#viewtransition-initial-snapshot-containing-block-size
     Optional<CSSPixelSize> m_initial_snapshot_containing_block_size;

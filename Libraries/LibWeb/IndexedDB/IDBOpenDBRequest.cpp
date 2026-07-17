@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/IDBOpenDBRequestPrototype.h>
+#include <LibWeb/Bindings/IDBOpenDBRequest.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/IndexedDB/IDBOpenDBRequest.h>
@@ -32,6 +32,13 @@ void IDBOpenDBRequest::initialize(JS::Realm& realm)
 GC::Ref<IDBOpenDBRequest> IDBOpenDBRequest::create(JS::Realm& realm)
 {
     return realm.create<IDBOpenDBRequest>(realm);
+}
+
+DOM::EventTarget* IDBOpenDBRequest::get_parent(DOM::Event const&)
+{
+    // https://w3c.github.io/IndexedDB/#open-requests
+    // An open request’s get the parent algorithm returns null.
+    return nullptr;
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbopendbrequest-onblocked

@@ -1,0 +1,97 @@
+/*
+ * Copyright (c) 2018-2024, Andreas Kling <andreas@ladybird.org>
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#pragma once
+
+#include <AK/Array.h>
+#include <AK/HashMap.h>
+#include <LibWeb/CSS/Selector.h>
+#include <LibWeb/DOM/Element.h>
+
+namespace Web::SelectorMatching {
+
+enum class HasMatchResult : u8 {
+    Matched,
+    NotMatched,
+};
+
+struct HasResultCacheKey {
+    u64 selector_id;
+    GC::Ptr<DOM::Element const> element;
+
+    void visit_edges(GC::Cell::Visitor& visitor)
+    {
+        visitor.visit(element);
+    }
+
+    bool operator==(HasResultCacheKey const&) const = default;
+};
+
+struct HasResultCacheKeyTraits : Traits<HasResultCacheKey> {
+    static unsigned hash(HasResultCacheKey const& key)
+    {
+        return pair_int_hash(u64_hash(key.selector_id), ptr_hash(key.element.ptr()));
+    }
+};
+
+using HasResultCache = HashMap<HasResultCacheKey, HasMatchResult, HasResultCacheKeyTraits>;
+
+enum class HasFastRejectFilterTraversalType : u8 {
+    Children,
+    Descendants,
+};
+
+struct HasFastRejectFilterKey {
+    GC::Ptr<DOM::Element const> element;
+    HasFastRejectFilterTraversalType traversal_type;
+
+    void visit_edges(GC::Cell::Visitor& visitor)
+    {
+        visitor.visit(element);
+    }
+
+    bool operator==(HasFastRejectFilterKey const&) const = default;
+};
+
+struct HasFastRejectFilterKeyTraits : Traits<HasFastRejectFilterKey> {
+    static unsigned hash(HasFastRejectFilterKey const& key)
+    {
+        return pair_int_hash(ptr_hash(key.element.ptr()), to_underlying(key.traversal_type));
+    }
+};
+
+struct HasFastRejectFilter {
+    static constexpr size_t bucket_count = 64;
+
+    bool seen_once { false };
+    bool populated { false };
+    Array<u64, bucket_count> buckets {};
+
+    void add(u32 hash);
+    [[nodiscard]] bool may_contain(u32 hash) const;
+};
+
+using HasFastRejectFilterCache = HashMap<HasFastRejectFilterKey, HasFastRejectFilter, HasFastRejectFilterKeyTraits>;
+
+struct MatchContext {
+    GC::Ptr<CSS::CSSStyleSheet const> style_sheet_for_rule {};
+    GC::Ptr<DOM::Element const> subject {};
+    GC::Ptr<DOM::ShadowRoot const> rule_shadow_root {}; // Shadow root the matched rule belongs to
+    bool collect_per_element_selector_involvement_metadata { false };
+    // True while we are evaluating the argument of a :has() pseudo-class.
+    // Elements visited by selector walks (descendants, siblings, etc.) while
+    // this is set get marked as in_has_scope so the invalidation walker can
+    // later terminate once it leaves the scope. Transparent to callers;
+    // toggled from the Rust engine via selector_ffi_set_inside_has_argument.
+    bool inside_has_argument_match { false };
+    HasResultCache* has_result_cache { nullptr };
+    HasFastRejectFilterCache* has_fast_reject_filter_cache { nullptr };
+};
+
+bool matches(CSS::Selector const&, DOM::AbstractElement const&, GC::Ptr<DOM::Element const> shadow_host, MatchContext& context, GC::Ptr<DOM::ParentNode const> scope = {});
+bool matches_originating_element_for_pseudo_element(CSS::Selector const&, CSS::PseudoElement, DOM::AbstractElement const&, GC::Ptr<DOM::Element const> shadow_host, MatchContext&, GC::Ptr<DOM::ParentNode const> scope = {});
+
+}

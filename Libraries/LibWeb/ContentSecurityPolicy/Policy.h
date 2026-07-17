@@ -38,7 +38,8 @@ public:
 
     ~Policy() = default;
 
-    [[nodiscard]] static GC::Ref<Policy> parse_a_serialized_csp(GC::Heap&, Variant<ByteBuffer, String> serialized, Source source, Disposition disposition);
+    [[nodiscard]] static GC::Ref<Policy> parse_a_serialized_csp(GC::Heap&, Variant<ByteString, String> serialized, Source source, Disposition disposition);
+    [[nodiscard]] static GC::Ref<Policy> parse_a_serialized_csp(GC::Heap&, Utf16View serialized, Source source, Disposition disposition);
     [[nodiscard]] static GC::Ref<PolicyList> parse_a_responses_content_security_policies(GC::Heap&, GC::Ref<Fetch::Infrastructure::Response const> response);
     [[nodiscard]] static GC::Ref<Policy> create_from_serialized_policy(GC::Heap&, SerializedPolicy const&);
 
@@ -48,13 +49,13 @@ public:
     [[nodiscard]] URL::Origin const& self_origin() const { return m_self_origin.value(); }
     [[nodiscard]] String const& pre_parsed_policy_string(Badge<Violation>) const { return m_pre_parsed_policy_string; }
 
-    [[nodiscard]] bool contains_directive_with_name(StringView name) const;
-    [[nodiscard]] GC::Ptr<Directives::Directive> get_directive_by_name(StringView) const;
+    [[nodiscard]] bool contains_directive_with_name(Utf16View name) const;
+    [[nodiscard]] GC::Ptr<Directives::Directive> get_directive_by_name(Utf16View) const;
 
     [[nodiscard]] GC::Ref<Policy> clone(GC::Heap&) const;
     [[nodiscard]] SerializedPolicy serialize() const;
 
-    void remove_directive(Badge<HTML::HTMLMetaElement>, FlyString const& name);
+    void remove_directive(Badge<HTML::HTMLMetaElement>, Utf16FlyString const& name);
     void set_self_origin(Badge<HTML::HTMLMetaElement>, URL::Origin const& origin);
 
 protected:

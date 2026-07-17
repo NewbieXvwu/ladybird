@@ -3,41 +3,24 @@ description: 'Restores caches of downloaded files and build artifacts.'
 author: 'Andrew Kaster <akaster@serenityos.org>'
 
 inputs:
-  runner_labels:
-    description: 'Runner selection labels'
-    required: true
   os:
     description: 'Operating System to restore caches for'
     required: true
-    default: 'Linux'
   arch:
     description: 'Target Architecture to restore caches for'
-    required: false
-    default: 'x86_64'
+    required: true
   toolchain:
     description: 'Toolchain to restore caches for (GNU or Clang)'
-    required: false
-    default: 'GNU'
+    required: true
   cache_key_extra:
     description: 'Code coverage setting, ON or OFF, or debug setting, ALL or NORMAL'
-    required: false
-    default: 'OFF'
-  ccache_version:
-    description: 'Increment this number if CI has trouble with ccache.'
-    required: false
-    default: '0'
+    required: true
   ccache_path:
     description: 'Path to the ccache directory'
-    required: false
-    default: ''
-  download_cache_path:
-    description: 'Path to the download cache directory'
-    required: false
-    default: 'caches'
+    required: true
   vcpkg_cache_path:
     description: 'Path to vcpkg binary cache'
-    required: false
-    default: ''
+    required: true
 
 outputs:
   ccache_primary_key:
@@ -57,17 +40,16 @@ runs:
         echo "timestamp=$(date -u "+%Y%m%d%H%M_%S")" >> "$GITHUB_OUTPUT"
 
     - name: 'Compiler Cache'
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       id: 'ccache'
-      if: ${{ inputs.ccache_path != '' }}
       with:
         path: ${{ inputs.ccache_path }}
-        key: '"ccache" | "${{ inputs.os }}" | "${{ inputs.arch }}" | "${{ inputs.toolchain }}" | "${{ inputs.cache_key_extra }}" | "${{ inputs.ccache_version }}" | ${{ steps.date-stamp.outputs.timestamp }}'
+        key: ccache | ${{ inputs.os }} | ${{ inputs.arch }} | ${{ inputs.toolchain }} | ${{ inputs.cache_key_extra }} | ${{ steps.date-stamp.outputs.timestamp }}
         restore-keys: |
-          "ccache" | "${{ inputs.os }}" | "${{ inputs.arch }}" | "${{ inputs.toolchain }}" | "${{ inputs.cache_key_extra }}" | "${{ inputs.ccache_version }}"
+          ccache | ${{ inputs.os }} | ${{ inputs.arch }} | ${{ inputs.toolchain }} | ${{ inputs.cache_key_extra }}
 
     - name: 'Configure Compiler Cache'
-      if: ${{ inputs.os != 'Windows' && inputs.ccache_path != '' }}
+      if: ${{ inputs.os != 'Windows' }}
       shell: bash
       env:
         CCACHE_DIR: ${{ inputs.ccache_path }}
@@ -75,34 +57,33 @@ runs:
           ccache -M 0
 
           # Reset all ccache modification dates to a known epoch. This provides a baseline that we can prune against.
-          find ${{ inputs.ccache_path }} | tac | xargs touch -a -m -d "2018-10-10T09:53:07Z"
+          find "${{ inputs.ccache_path }}" | tac | xargs touch -a -m -d "2018-10-10T09:53:07Z"
 
           ccache -s
           ccache -z
 
     - name: 'Configure Compiler Cache (Windows)'
-      if: ${{ inputs.os == 'Windows' && inputs.ccache_path != '' }}
+      if: ${{ inputs.os == 'Windows' }}
       shell: pwsh
       env:
         CCACHE_DIR: ${{ inputs.ccache_path }}
       run: |
         ccache -M 0
-        
+
         # Reset all ccache modification dates to a known epoch. This provides a baseline that we can prune against.
-        Get-ChildItem -Path "${{ inputs.ccache_path }}" -Recurse | Sort-Object FullName -Descending | ForEach-Object { 
+        Get-ChildItem -Path "${{ inputs.ccache_path }}" -Recurse | Sort-Object FullName -Descending | ForEach-Object {
             $_.LastWriteTime = [DateTime]::Parse("2018-10-10T09:53:07Z")
             $_.LastAccessTime = [DateTime]::Parse("2018-10-10T09:53:07Z")
         }
-        
+
         ccache -s
         ccache -z
 
     - name: 'Restore vcpkg cache'
-      uses: actions/cache/restore@v4
-      if: ${{ inputs.vcpkg_cache_path != '' }}
+      uses: actions/cache/restore@v6
       id: 'vcpkg'
       with:
         path: ${{ inputs.vcpkg_cache_path }}
-        key: '"vcpkg" | "${{ inputs.os }}" | "${{ inputs.arch }}" | "${{ inputs.toolchain }}" | "${{ inputs.cache_key_extra }}" | "${{ inputs.ccache_version }}" | ${{ steps.date-stamp.outputs.timestamp }}'
+        key: vcpkg | ${{ inputs.os }} | ${{ inputs.arch }} | ${{ inputs.toolchain }} | ${{ inputs.cache_key_extra }} | ${{ hashFiles('vcpkg.json') }}
         restore-keys: |
-          "vcpkg" | "${{ inputs.os }}" | "${{ inputs.arch }}" | "${{ inputs.toolchain }}" | "${{ inputs.cache_key_extra }}" | "${{ inputs.ccache_version }}"
+          vcpkg | ${{ inputs.os }} | ${{ inputs.arch }} | ${{ inputs.toolchain }} | ${{ inputs.cache_key_extra }}

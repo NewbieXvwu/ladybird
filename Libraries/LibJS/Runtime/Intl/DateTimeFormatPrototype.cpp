@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2021-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -29,7 +29,7 @@ void DateTimeFormatPrototype::initialize(Realm& realm)
     auto& vm = this->vm();
 
     // 11.3.7 Intl.DateTimeFormat.prototype [ %Symbol.toStringTag% ], https://tc39.es/ecma402/#sec-intl.datetimeformat.prototype-%symbol.tostringtag%
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Intl.DateTimeFormat"_string), Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Intl.DateTimeFormat"_utf16_fly_string), Attribute::Configurable);
 
     define_native_accessor(realm, vm.names.format, format, nullptr, Attribute::Configurable);
 
@@ -94,7 +94,7 @@ JS_DEFINE_NATIVE_FUNCTION(DateTimeFormatPrototype::resolved_options)
     }
 
     if (!date_time_format->has_date_style() && !date_time_format->has_time_style()) {
-        MUST(for_each_calendar_field(vm, date_time_format->date_time_format(), [&](auto& option, auto const& property, auto const&) -> ThrowCompletionOr<void> {
+        MUST(for_each_calendar_field(vm, date_time_format->date_time_format(), [&](auto, auto& option, auto const& property, auto const&) -> ThrowCompletionOr<void> {
             using ValueType = typename RemoveReference<decltype(option)>::ValueType;
 
             if (!option.has_value())
@@ -104,7 +104,7 @@ JS_DEFINE_NATIVE_FUNCTION(DateTimeFormatPrototype::resolved_options)
                 MUST(options->create_data_property_or_throw(property, Value(*option)));
             } else {
                 auto name = Unicode::calendar_pattern_style_to_string(*option);
-                MUST(options->create_data_property_or_throw(property, PrimitiveString::create(vm, name)));
+                MUST(options->create_data_property_or_throw(property, PrimitiveString::create(vm, move(name))));
             }
 
             return {};
@@ -146,7 +146,7 @@ JS_DEFINE_NATIVE_FUNCTION(DateTimeFormatPrototype::format)
 }
 
 // 11.3.4 Intl.DateTimeFormat.prototype.formatRange ( startDate, endDate ), https://tc39.es/ecma402/#sec-intl.datetimeformat.prototype.formatRange
-// 15.10.2 Intl.DateTimeFormat.prototype.formatRange ( startDate, endDate ), https://tc39.es/proposal-temporal/#sec-intl.datetimeformat.prototype.formatRange
+// 15.7.2 Intl.DateTimeFormat.prototype.formatRange ( startDate, endDate ), https://tc39.es/proposal-temporal/#sec-intl.datetimeformat.prototype.formatRange
 JS_DEFINE_NATIVE_FUNCTION(DateTimeFormatPrototype::format_range)
 {
     auto start_date_value = vm.argument(0);
@@ -174,7 +174,7 @@ JS_DEFINE_NATIVE_FUNCTION(DateTimeFormatPrototype::format_range)
 }
 
 // 11.3.5 Intl.DateTimeFormat.prototype.formatRangeToParts ( startDate, endDate ), https://tc39.es/ecma402/#sec-Intl.DateTimeFormat.prototype.formatRangeToParts
-// 15.10.3 Intl.DateTimeFormat.prototype.formatRangeToParts ( startDate, endDate ), https://tc39.es/proposal-temporal/#sec-Intl.DateTimeFormat.prototype.formatRangeToParts
+// 15.7.3 Intl.DateTimeFormat.prototype.formatRangeToParts ( startDate, endDate ), https://tc39.es/proposal-temporal/#sec-Intl.DateTimeFormat.prototype.formatRangeToParts
 JS_DEFINE_NATIVE_FUNCTION(DateTimeFormatPrototype::format_range_to_parts)
 {
     auto start_date_value = vm.argument(0);
@@ -201,7 +201,7 @@ JS_DEFINE_NATIVE_FUNCTION(DateTimeFormatPrototype::format_range_to_parts)
 }
 
 // 11.3.6 Intl.DateTimeFormat.prototype.formatToParts ( date ), https://tc39.es/ecma402/#sec-Intl.DateTimeFormat.prototype.formatToParts
-// 15.10.1 Intl.DateTimeFormat.prototype.formatToParts ( date ), https://tc39.es/proposal-temporal/#sec-Intl.DateTimeFormat.prototype.formatToParts
+// 15.7.1 Intl.DateTimeFormat.prototype.formatToParts ( date ), https://tc39.es/proposal-temporal/#sec-Intl.DateTimeFormat.prototype.formatToParts
 JS_DEFINE_NATIVE_FUNCTION(DateTimeFormatPrototype::format_to_parts)
 {
     auto& realm = *vm.current_realm();

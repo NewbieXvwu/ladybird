@@ -14,19 +14,7 @@ interface HTMLDetailsElement : HTMLElement {
 };
 ```
 
-2. If the IDL refers to other IDL types, you need to import those. For example, `CSSRule` has an attribute that returns a `CSSStyleSheet`, so that needs to be imported:
-```webidl
-#import <CSS/CSSStyleSheet.idl>
+2. Add the IDL file to [`LibWeb/idl_files.cmake`](../Libraries/LibWeb/idl_files.cmake).
 
-interface CSSRule {
-    readonly attribute CSSStyleSheet? parentStyleSheet;
-};
-```
-
-3. Add a `libweb_js_bindings(HTML/HTMLDetailsElement)` call to [`LibWeb/idl_files.cmake`](../Libraries/LibWeb/idl_files.cmake) (only for top-level interfaces)
-
-4. Forward declare the generated class in [`LibWeb/Forward.h`](../Libraries/LibWeb/Forward.h):
+3. Forward declare the generated class in [`LibWeb/Forward.h`](../Libraries/LibWeb/Forward.h):
     - `HTMLDetailsElement` in its namespace.
-
-5. If your type isn't an Event or Element, you will need to add it to [`is_platform_object()`](../Meta/Lagom/Tools/CodeGenerators/LibWeb/BindingsGenerator/IDLGenerators.cpp)
-   so that it can be accepted as an IDL parameter, attribute or return type.

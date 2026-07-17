@@ -6,8 +6,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Assertions.h>
 #include <AK/Badge.h>
-#include <LibCore/Event.h>
+#include <AK/Platform.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/EventLoopImplementation.h>
 #include <LibCore/EventReceiver.h>
@@ -18,17 +19,10 @@ namespace Core {
 
 namespace {
 
-OwnPtr<Vector<EventLoop&>>& event_loop_stack_uninitialized()
+EventLoop*& current_event_loop()
 {
-    thread_local OwnPtr<Vector<EventLoop&>> s_event_loop_stack = nullptr;
-    return s_event_loop_stack;
-}
-Vector<EventLoop&>& event_loop_stack()
-{
-    auto& the_stack = event_loop_stack_uninitialized();
-    if (the_stack == nullptr)
-        the_stack = make<Vector<EventLoop&>>();
-    return *the_stack;
+    thread_local EventLoop* s_current_event_loop = nullptr;
+    return s_current_event_loop;
 }
 
 }
@@ -36,34 +30,44 @@ Vector<EventLoop&>& event_loop_stack()
 EventLoop::EventLoop()
     : m_impl(EventLoopManager::the().make_implementation())
 {
-    if (event_loop_stack().is_empty()) {
-        event_loop_stack().append(*this);
-    }
+    VERIFY(!current_event_loop());
+    current_event_loop() = this;
 }
 
 EventLoop::~EventLoop()
 {
-    if (!event_loop_stack().is_empty() && &event_loop_stack().last() == this) {
-        event_loop_stack().take_last();
-    }
+    if (m_weak)
+        m_weak->revoke();
+    if (current_event_loop() == this)
+        current_event_loop() = nullptr;
+}
+
+EventLoop& EventLoop::initialize_for_current_thread()
+{
+    return *new EventLoop;
 }
 
 bool EventLoop::is_running()
 {
-    auto& stack = event_loop_stack_uninitialized();
-    return stack != nullptr && !stack->is_empty();
+    return current_event_loop() != nullptr;
 }
 
 EventLoop& EventLoop::current()
 {
-    if (event_loop_stack().is_empty())
-        dbgln("No EventLoop is present, unable to return current one!");
-    return event_loop_stack().last();
+    VERIFY(current_event_loop());
+    return *current_event_loop();
+}
+
+NonnullRefPtr<WeakEventLoopReference> EventLoop::current_weak()
+{
+    auto& event_loop = current();
+    if (!event_loop.m_weak)
+        event_loop.m_weak = adopt_ref(*new (nothrow) WeakEventLoopReference(event_loop));
+    return *event_loop.m_weak;
 }
 
 void EventLoop::quit(int code)
 {
-    ThreadEventQueue::current().cancel_all_pending_jobs();
     m_impl->quit(code);
 }
 
@@ -72,44 +76,23 @@ bool EventLoop::was_exit_requested()
     return m_impl->was_exit_requested();
 }
 
-struct EventLoopPusher {
-public:
-    EventLoopPusher(EventLoop& event_loop)
-    {
-        event_loop_stack().append(event_loop);
-    }
-    ~EventLoopPusher()
-    {
-        event_loop_stack().take_last();
-    }
-};
-
 int EventLoop::exec()
 {
-    EventLoopPusher pusher(*this);
+    VERIFY(current_event_loop() == this);
     return m_impl->exec();
 }
 
 void EventLoop::spin_until(Function<bool()> goal_condition)
 {
-    EventLoopPusher pusher(*this);
+    VERIFY(current_event_loop() == this);
     while (!goal_condition())
         pump();
 }
 
 size_t EventLoop::pump(WaitMode mode)
 {
+    VERIFY(current_event_loop() == this);
     return m_impl->pump(mode == WaitMode::WaitForEvents ? EventLoopImplementation::PumpMode::WaitForEvents : EventLoopImplementation::PumpMode::DontWaitForEvents);
-}
-
-void EventLoop::post_event(EventReceiver& receiver, NonnullOwnPtr<Event>&& event)
-{
-    m_impl->post_event(receiver, move(event));
-}
-
-void EventLoop::add_job(NonnullRefPtr<Promise<NonnullRefPtr<EventReceiver>>> job_promise)
-{
-    ThreadEventQueue::current().add_job(move(job_promise));
 }
 
 int EventLoop::register_signal(int signal_number, Function<void(int)> handler)
@@ -142,6 +125,16 @@ void EventLoop::unregister_notifier(Badge<Notifier>, Notifier& notifier)
     EventLoopManager::the().unregister_notifier(notifier);
 }
 
+void EventLoop::register_process(pid_t pid, ESCAPING Function<void(pid_t)> exit_handler)
+{
+    EventLoopManager::the().register_process(pid, move(exit_handler));
+}
+
+void EventLoop::unregister_process(pid_t pid)
+{
+    EventLoopManager::the().unregister_process(pid);
+}
+
 void EventLoop::wake()
 {
     m_impl->wake();
@@ -149,13 +142,61 @@ void EventLoop::wake()
 
 void EventLoop::deferred_invoke(Function<void()> invokee)
 {
-    auto context = DeferredInvocationContext::construct();
-    post_event(context, make<Core::DeferredInvocationEvent>(context, move(invokee)));
+    m_impl->deferred_invoke(move(invokee));
 }
 
 void deferred_invoke(Function<void()> invokee)
 {
     EventLoop::current().deferred_invoke(move(invokee));
+}
+
+WeakEventLoopReference::WeakEventLoopReference(EventLoop& event_loop)
+    : m_event_loop(&event_loop)
+{
+}
+
+void WeakEventLoopReference::revoke()
+{
+    Sync::RWLockLocker<Sync::LockMode::Write> locker { m_lock };
+    m_event_loop = nullptr;
+}
+
+StrongEventLoopReference WeakEventLoopReference::take()
+{
+    return StrongEventLoopReference(*this);
+}
+
+StrongEventLoopReference::StrongEventLoopReference(WeakEventLoopReference& event_loop_weak)
+{
+    event_loop_weak.m_lock.lock_read();
+    m_event_loop_weak = &event_loop_weak;
+}
+
+StrongEventLoopReference::~StrongEventLoopReference()
+{
+    m_event_loop_weak->m_lock.unlock_read();
+}
+
+bool StrongEventLoopReference::is_alive() const
+{
+    return m_event_loop_weak->m_event_loop != nullptr;
+}
+
+StrongEventLoopReference::operator bool() const
+{
+    return is_alive();
+}
+
+EventLoop* StrongEventLoopReference::operator*() const
+{
+    VERIFY(is_alive());
+    return m_event_loop_weak->m_event_loop;
+}
+
+EventLoop* StrongEventLoopReference::operator->() const
+{
+    VERIFY(is_alive());
+    return m_event_loop_weak->m_event_loop;
 }
 
 }

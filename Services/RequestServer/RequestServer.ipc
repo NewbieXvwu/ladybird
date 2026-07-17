@@ -1,13 +1,23 @@
+#include <LibCore/AnonymousBuffer.h>
 #include <LibCore/Proxy.h>
-#include <LibHTTP/HeaderMap.h>
+#include <LibHTTP/Cache/CacheMode.h>
+#include <LibHTTP/Cache/DiskCacheSettings.h>
+#include <LibHTTP/Cache/Utilities.h>
+#include <LibHTTP/Cookie/IncludeCredentials.h>
+#include <LibHTTP/Header.h>
+#include <LibIPC/TransportHandle.h>
 #include <LibURL/URL.h>
 #include <RequestServer/CacheLevel.h>
+#include <RequestServer/IsPrivate.h>
+#include <RequestServer/RequestType.h>
 
 endpoint RequestServer
 {
     init_transport(int peer_pid) => (int peer_pid)
-    connect_new_client() => (IPC::File client_socket)
-    connect_new_clients(size_t count) => (Vector<IPC::File> sockets)
+    connect_new_client(::RequestServer::IsPrivate is_private) => (IPC::TransportHandle handle)
+    connect_new_clients(size_t count, ::RequestServer::IsPrivate is_private) => (Vector<IPC::TransportHandle> handles)
+
+    set_disk_cache_settings(HTTP::DiskCacheSettings disk_cache_settings) =|
 
     // use_tls: enable DNS over TLS
     set_dns_server(ByteString host_or_address, u16 port, bool use_tls, bool validate_dnssec_locally) =|
@@ -15,17 +25,29 @@ endpoint RequestServer
 
     // Test if a specific protocol is supported, e.g "http"
     is_supported_protocol(ByteString protocol) => (bool supported)
+    get_client_id() => (int client_id)
 
-    start_request(i32 request_id, ByteString method, URL::URL url, HTTP::HeaderMap request_headers, ByteBuffer request_body, Core::ProxyData proxy_data) =|
-    stop_request(i32 request_id) => (bool success)
-    set_certificate(i32 request_id, ByteString certificate, ByteString key) => (bool success)
+    start_request(u64 request_id, ByteString method, URL::URL url, Vector<HTTP::Header> request_headers, ByteBuffer request_body, HTTP::CacheMode cache_mode, HTTP::Cookie::IncludeCredentials include_credentials, Core::ProxyData proxy_data, bool keep_alive_for_transfer) =|
+    adopt_request(int source_client_id, u64 source_request_id, u64 target_request_id) =|
+    release_request_for_transfer(u64 request_id) =|
+    stop_request(u64 request_id) => (bool success)
+    set_certificate(u64 request_id, ByteString certificate, ByteString key) => (bool success)
 
-    ensure_connection(URL::URL url, ::RequestServer::CacheLevel cache_level) =|
+    ensure_connection(u64 request_id, URL::URL url, ::RequestServer::CacheLevel cache_level) =|
+
+    retrieved_http_cookie(int client_id, u64 request_id, ::RequestServer::RequestType request_type, String cookie) =|
+
+    estimate_cache_size_accessed_since(u64 cache_size_estimation_id, UnixDateTime since) =|
+    remove_cache_entries_accessed_since(UnixDateTime since) =|
+    store_cache_associated_data(URL::URL url, ByteString method, Vector<HTTP::Header> request_headers, Optional<u64> vary_key, HTTP::CacheEntryAssociatedData associated_data, Core::AnonymousBuffer data) => (bool stored)
+    retrieve_cache_associated_data(URL::URL url, ByteString method, Vector<HTTP::Header> request_headers, Optional<u64> vary_key, HTTP::CacheEntryAssociatedData associated_data) => (Optional<Core::AnonymousBuffer> data)
+    create_synthetic_cache_entry(URL::URL url, ByteString method) => (bool created)
 
     // Websocket Connection API
-    websocket_connect(i64 websocket_id, URL::URL url, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, HTTP::HeaderMap additional_request_headers) =|
-    websocket_send(i64 websocket_id, bool is_text, ByteBuffer data) =|
-    websocket_close(i64 websocket_id, u16 code, ByteString reason) =|
-    websocket_set_certificate(i64 request_id, ByteString certificate, ByteString key) => (bool success)
+    websocket_connect(u64 websocket_id, URL::URL url, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers) =|
+    websocket_send(u64 websocket_id, bool is_text, ByteBuffer data) =|
+    websocket_send_shared(u64 websocket_id, bool is_text, Core::AnonymousBuffer data) =|
+    websocket_close(u64 websocket_id, u16 code, ByteString reason) =|
+    websocket_set_certificate(u64 request_id, ByteString certificate, ByteString key) => (bool success)
 
 }

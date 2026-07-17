@@ -7,6 +7,8 @@
 #pragma once
 
 #include <AK/String.h>
+#include <AK/StringBuilder.h>
+#include <AK/Utf16String.h>
 #include <LibWeb/CSS/SerializationMode.h>
 #include <LibWeb/CSS/Serialize.h>
 
@@ -19,18 +21,41 @@ public:
     {
     }
 
+    static Percentage from_style_value(NonnullRefPtr<StyleValue const> const& value);
+
     double value() const { return m_value; }
     double as_fraction() const { return m_value * 0.01; }
 
-    String to_string(SerializationMode = SerializationMode::Normal) const
+    void serialize(StringBuilder& builder, SerializationMode = SerializationMode::Normal) const
     {
         // https://drafts.csswg.org/cssom/#serialize-a-css-value
         // -> <percentage>
         // The <number> component serialized as per <number> followed by the literal string "%" (U+0025).
-        StringBuilder builder;
         serialize_a_number(builder, m_value);
-        builder.append("%"sv);
+        builder.append('%');
+    }
+
+    void serialize(Utf16StringBuilder& builder, SerializationMode = SerializationMode::Normal) const
+    {
+        // https://drafts.csswg.org/cssom/#serialize-a-css-value
+        // -> <percentage>
+        // The <number> component serialized as per <number> followed by the literal string "%" (U+0025).
+        serialize_a_number(builder, m_value);
+        builder.append_ascii('%');
+    }
+
+    String to_string(SerializationMode mode = SerializationMode::Normal) const
+    {
+        StringBuilder builder;
+        serialize(builder, mode);
         return builder.to_string_without_validation();
+    }
+
+    Utf16String to_utf16_string(SerializationMode mode = SerializationMode::Normal) const
+    {
+        Utf16StringBuilder builder;
+        serialize(builder, mode);
+        return builder.to_string();
     }
 
     bool operator==(Percentage const& other) const { return m_value == other.m_value; }

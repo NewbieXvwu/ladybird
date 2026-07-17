@@ -8,9 +8,11 @@
 
 #include <AK/JsonValue.h>
 #include <AK/NonnullRefPtr.h>
+#include <AK/Utf16String.h>
 #include <LibGC/Ptr.h>
 #include <LibIPC/ConnectionFromClient.h>
 #include <LibIPC/Transport.h>
+#include <LibIPC/TransportHandle.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibWeb/Forward.h>
 #include <WebContent/WebUIClientEndpoint.h>
@@ -20,12 +22,14 @@ namespace WebContent {
 
 class WebUIConnection final : public IPC::ConnectionFromClient<WebUIClientEndpoint, WebUIServerEndpoint> {
 public:
-    static ErrorOr<NonnullRefPtr<WebUIConnection>> connect(IPC::File, Web::DOM::Document&);
+    static ErrorOr<NonnullRefPtr<WebUIConnection>> connect(IPC::TransportHandle, Web::DOM::Document&);
     virtual ~WebUIConnection() override;
 
     void visit_edges(JS::Cell::Visitor&);
 
-    void received_message_from_web_ui(String const& name, JS::Value data);
+    void received_message_from_web_ui(Utf16String const& name, JS::Value data);
+
+    Web::DOM::Document const& document() const { return m_document; }
 
 private:
     WebUIConnection(NonnullOwnPtr<IPC::Transport>, Web::DOM::Document&);

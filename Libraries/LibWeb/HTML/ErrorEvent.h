@@ -6,19 +6,12 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16String.h>
+#include <LibWeb/Bindings/ErrorEvent.h>
 #include <LibWeb/DOM/Event.h>
 
 namespace Web::HTML {
-
-// https://html.spec.whatwg.org/multipage/webappapis.html#erroreventinit
-struct ErrorEventInit : public DOM::EventInit {
-    String message;
-    String filename;
-    u32 lineno { 0 };
-    u32 colno { 0 };
-    JS::Value error { JS::js_undefined() };
-};
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#errorevent
 class ErrorEvent final : public DOM::Event {
@@ -26,16 +19,16 @@ class ErrorEvent final : public DOM::Event {
     GC_DECLARE_ALLOCATOR(ErrorEvent);
 
 public:
-    [[nodiscard]] static GC::Ref<ErrorEvent> create(JS::Realm&, FlyString const& event_name, ErrorEventInit const& = {});
-    static WebIDL::ExceptionOr<GC::Ref<ErrorEvent>> construct_impl(JS::Realm&, FlyString const& event_name, ErrorEventInit const& event_init);
+    [[nodiscard]] static GC::Ref<ErrorEvent> create(JS::Realm&, Utf16FlyString const& event_name, Bindings::ErrorEventInit const& = {});
+    static WebIDL::ExceptionOr<GC::Ref<ErrorEvent>> construct_impl(JS::Realm&, Utf16FlyString const& event_name, Bindings::ErrorEventInit const& event_init);
 
     virtual ~ErrorEvent() override;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#dom-errorevent-message
-    String const& message() const { return m_message; }
+    Utf16String const& message() const { return m_message; }
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#dom-errorevent-filename
-    String const& filename() const { return m_filename; }
+    Utf16String const& filename() const { return m_filename; }
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#dom-errorevent-lineno
     u32 lineno() const { return m_lineno; }
@@ -47,13 +40,13 @@ public:
     JS::Value error() const { return m_error; }
 
 private:
-    ErrorEvent(JS::Realm&, FlyString const& event_name, ErrorEventInit const& event_init);
+    ErrorEvent(JS::Realm&, Utf16FlyString const& event_name, Bindings::ErrorEventInit const& event_init);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
-    String m_message;
-    String m_filename; // FIXME: This should be a USVString.
+    Utf16String m_message;
+    Utf16String m_filename;
     u32 m_lineno { 0 };
     u32 m_colno { 0 };
     JS::Value m_error;

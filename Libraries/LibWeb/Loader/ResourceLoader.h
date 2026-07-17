@@ -11,44 +11,48 @@
 #include <AK/Function.h>
 #include <AK/HashTable.h>
 #include <LibCore/EventReceiver.h>
+#include <LibCore/ImmutableBytes.h>
+#include <LibGC/Function.h>
+#include <LibHTTP/HeaderList.h>
+#include <LibRequests/CameFromCache.h>
 #include <LibRequests/Forward.h>
+#include <LibRequests/Request.h>
+#include <LibRequests/RequestClient.h>
+#include <LibRequests/RequestTimingInfo.h>
 #include <LibURL/URL.h>
-#include <LibWeb/Export.h>
-#include <LibWeb/Loader/Resource.h>
-#include <LibWeb/Loader/UserAgent.h>
+#include <LibWeb/Forward.h>
+#include <LibWeb/Loader/NavigatorCompatibilityMode.h>
 
 namespace Web {
 
 class WEB_API ResourceLoader : public Core::EventReceiver {
     C_OBJECT_ABSTRACT(ResourceLoader)
+
 public:
     static void initialize(GC::Heap&, NonnullRefPtr<Requests::RequestClient>);
+    static bool is_initialized();
     static ResourceLoader& the();
 
     void set_client(NonnullRefPtr<Requests::RequestClient>);
 
-    RefPtr<Resource> load_resource(Resource::Type, LoadRequest&);
-
-    using SuccessCallback = GC::Function<void(ReadonlyBytes, Requests::RequestTimingInfo const&, HTTP::HeaderMap const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase)>;
-    using ErrorCallback = GC::Function<void(ByteString const&, Requests::RequestTimingInfo const&, Optional<u32> status_code, Optional<String> const& reason_phrase, ReadonlyBytes payload, HTTP::HeaderMap const& response_headers)>;
-    using TimeoutCallback = GC::Function<void()>;
-
-    void load(LoadRequest&, GC::Root<SuccessCallback> success_callback, GC::Root<ErrorCallback> error_callback = nullptr, Optional<u32> timeout = {}, GC::Root<TimeoutCallback> timeout_callback = nullptr);
-
-    using OnHeadersReceived = GC::Function<void(HTTP::HeaderMap const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase)>;
-    using OnDataReceived = GC::Function<void(ReadonlyBytes data)>;
+    using OnHeadersReceived = GC::Function<void(Requests::Request*, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key, Requests::CameFromCache came_from_cache)>;
+    using OnDataReceived = GC::Function<void(Requests::ResponseData data)>;
+    using OnCachedBodyAvailable = GC::Function<void(Core::ImmutableBytes data)>;
     using OnComplete = GC::Function<void(bool success, Requests::RequestTimingInfo const& timing_info, Optional<StringView> error_message)>;
 
-    void load_unbuffered(LoadRequest&, GC::Root<OnHeadersReceived>, GC::Root<OnDataReceived>, GC::Root<OnComplete>);
+    RefPtr<Requests::Request> load(LoadRequest&, GC::Root<OnHeadersReceived>, GC::Root<OnDataReceived>, GC::Root<OnCachedBodyAvailable>, GC::Root<OnComplete>, Requests::RequestClient::KeepAliveForTransfer = Requests::RequestClient::KeepAliveForTransfer::No);
 
     RefPtr<Requests::RequestClient>& request_client() { return m_request_client; }
 
-    void prefetch_dns(URL::URL const&);
-    void preconnect(URL::URL const&);
+    void prefetch_dns(URL::URL const&, URL::URL const& source_url);
+    void preconnect(URL::URL const&, URL::URL const& source_url);
 
     Function<void()> on_load_counter_change;
 
     int pending_loads() const { return m_pending_loads; }
+
+    static void try_store_hsts_policy_for_url(Page&, URL::URL const&, StringView header_value);
+    static bool is_known_hsts_host(Page&, String const& host);
 
     String const& user_agent() const { return m_user_agent; }
     void set_user_agent(String user_agent) { m_user_agent = move(user_agent); }
@@ -66,19 +70,26 @@ public:
     NavigatorCompatibilityMode navigator_compatibility_mode() { return m_navigator_compatibility_mode; }
     void set_navigator_compatibility_mode(NavigatorCompatibilityMode mode) { m_navigator_compatibility_mode = mode; }
 
-    bool enable_do_not_track() const { return m_enable_do_not_track; }
-    void set_enable_do_not_track(bool enable) { m_enable_do_not_track = enable; }
-
-    void clear_cache();
-    void evict_from_cache(LoadRequest const&);
-
-    GC::Heap& heap() { return m_heap; }
+    bool enable_global_privacy_control() const { return m_enable_global_privacy_control; }
+    void set_enable_global_privacy_control(bool enable) { m_enable_global_privacy_control = enable; }
 
 private:
     explicit ResourceLoader(GC::Heap&, NonnullRefPtr<Requests::RequestClient>);
 
-    RefPtr<Requests::Request> start_network_request(LoadRequest const&);
-    void handle_network_response_headers(LoadRequest const&, HTTP::HeaderMap const&);
+    struct FileLoadResult {
+        ReadonlyBytes data;
+        NonnullRefPtr<HTTP::HeaderList> response_headers;
+        Requests::RequestTimingInfo timing_info {};
+    };
+    template<typename FileHandler, typename ErrorHandler>
+    void handle_file_load_request(LoadRequest& request, FileHandler on_file, ErrorHandler on_error);
+    template<typename ResourceHandler, typename ErrorHandler>
+    void handle_about_load_request(LoadRequest const& request, ResourceHandler on_resource, ErrorHandler on_error);
+    template<typename ResourceHandler, typename ErrorHandler>
+    void handle_resource_load_request(LoadRequest const& request, ResourceHandler on_resource, ErrorHandler on_error);
+
+    RefPtr<Requests::Request> start_network_request(LoadRequest const&, Requests::RequestClient::KeepAliveForTransfer);
+    void handle_network_response_headers(LoadRequest const&, HTTP::HeaderList const&);
     void finish_network_request(NonnullRefPtr<Requests::Request>);
 
     int m_pending_loads { 0 };
@@ -91,7 +102,7 @@ private:
     String m_platform;
     Vector<String> m_preferred_languages = { "en"_string };
     NavigatorCompatibilityMode m_navigator_compatibility_mode;
-    bool m_enable_do_not_track { false };
+    bool m_enable_global_privacy_control { false };
 };
 
 }

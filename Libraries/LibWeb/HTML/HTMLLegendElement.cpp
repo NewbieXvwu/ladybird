@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLLegendElementPrototype.h>
+#include <LibWeb/Bindings/HTMLLegendElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/HTMLFieldSetElement.h>
 #include <LibWeb/HTML/HTMLLegendElement.h>
@@ -40,9 +40,9 @@ HTMLFormElement* HTMLLegendElement::form()
     return nullptr;
 }
 
-GC::Ptr<Layout::Node> HTMLLegendElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> HTMLLegendElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
-    return heap().allocate<Layout::LegendBox>(document(), *this, move(style));
+    return make_ref_counted<Layout::LegendBox>(document(), *this, style);
 }
 
 Layout::LegendBox* HTMLLegendElement::layout_node()

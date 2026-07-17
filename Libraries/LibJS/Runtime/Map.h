@@ -25,6 +25,8 @@ public:
 
     virtual ~Map() override = default;
 
+    virtual bool is_map_object() const final { return true; }
+
     void map_clear();
     bool map_remove(Value const&);
     Optional<Value> map_get(Value const&) const;
@@ -32,7 +34,14 @@ public:
     void map_set(Value const&, Value);
     size_t map_size() const;
 
+    virtual size_t external_memory_size() const override;
+
     struct EndIterator {
+    };
+
+    struct Entry {
+        Value key;
+        Value value;
     };
 
     template<bool IsConst>
@@ -49,20 +58,20 @@ public:
             return *this;
         }
 
-        decltype(auto) operator*()
+        Entry operator*() const
         {
             ensure_next_element();
-            return *m_map->m_entries.find(*m_map->m_keys.begin_from(m_index));
-        }
-
-        decltype(auto) operator*() const
-        {
-            ensure_next_element();
-            return *m_map->m_entries.find(*m_map->m_keys.begin_from(m_index));
+            auto const& entry = *m_map->m_entries.find(*m_map->m_keys.begin_from(m_index));
+            return { entry.key, entry.value };
         }
 
         bool operator==(IteratorImpl const& other) const { return m_index == other.m_index && &m_map == &other.m_map; }
         bool operator==(EndIterator const&) const { return is_end(); }
+
+        void visit_edges(Cell::Visitor& visitor)
+        {
+            visitor.visit(m_map);
+        }
 
     private:
         friend class Map;
@@ -111,9 +120,14 @@ private:
     explicit Map(Object& prototype);
     virtual void visit_edges(Visitor& visitor) override;
 
+    void account_external_memory_change(size_t old_external_memory_size);
+
     size_t m_next_insertion_id { 0 };
     RedBlackTree<size_t, Value> m_keys;
     HashMap<Value, Value, ValueTraits> m_entries;
 };
+
+template<>
+inline bool Object::fast_is<Map>() const { return is_map_object(); }
 
 }

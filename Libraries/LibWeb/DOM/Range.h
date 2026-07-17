@@ -13,6 +13,7 @@
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Selection/Selection.h>
+#include <LibWeb/TrustedTypes/TrustedHTML.h>
 #include <LibWeb/WebIDL/Types.h>
 
 namespace Web::DOM {
@@ -31,6 +32,8 @@ class WEB_API Range final : public AbstractRange {
     GC_DECLARE_ALLOCATOR(Range);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     [[nodiscard]] static GC::Ref<Range> create(Document&);
     [[nodiscard]] static GC::Ref<Range> create(HTML::Window&);
     [[nodiscard]] static GC::Ref<Range> create(GC::Ref<Node> start_container, WebIDL::UnsignedLong start_offset, GC::Ref<Node> end_container, WebIDL::UnsignedLong end_offset);
@@ -91,7 +94,7 @@ public:
 
     void set_associated_selection(Badge<Selection::Selection>, GC::Ptr<Selection::Selection>);
 
-    WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> create_contextual_fragment(String const& fragment);
+    WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> create_contextual_fragment(TrustedTypes::TrustedHTMLOrString const& fragment);
 
     template<typename Callback>
     void for_each_contained(Callback callback) const
@@ -126,6 +129,7 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual void finalize() override;
 
     GC::Ref<Node> root() const;
 

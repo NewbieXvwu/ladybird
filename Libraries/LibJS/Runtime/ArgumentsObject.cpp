@@ -6,14 +6,15 @@
 
 #include <LibJS/Runtime/ArgumentsObject.h>
 #include <LibJS/Runtime/Completion.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/GlobalObject.h>
 
 namespace JS {
 
 GC_DEFINE_ALLOCATOR(ArgumentsObject);
 
-ArgumentsObject::ArgumentsObject(Realm& realm, Environment& environment)
-    : Object(realm.intrinsics().mapped_arguments_object_shape(), MayInterfereWithIndexedPropertyAccess::Yes)
+ArgumentsObject::ArgumentsObject(Realm& realm, Environment& environment, bool parameter_list_is_empty)
+    : Object(realm.intrinsics().mapped_arguments_object_shape(), parameter_list_is_empty ? MayInterfereWithIndexedPropertyAccess::No : MayInterfereWithIndexedPropertyAccess::Yes)
     , m_environment(environment)
 {
 }
@@ -21,13 +22,17 @@ ArgumentsObject::ArgumentsObject(Realm& realm, Environment& environment)
 void ArgumentsObject::initialize(Realm& realm)
 {
     Base::initialize(realm);
-    set_has_parameter_map();
 }
 
 void ArgumentsObject::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_environment);
+}
+
+size_t ArgumentsObject::external_memory_size() const
+{
+    return Object::external_memory_size() + vector_external_memory_size(m_mapped_names);
 }
 
 bool ArgumentsObject::parameter_map_has(PropertyKey const& key) const
@@ -38,7 +43,7 @@ bool ArgumentsObject::parameter_map_has(PropertyKey const& key) const
 }
 
 // 10.4.4.3 [[Get]] ( P, Receiver ), https://tc39.es/ecma262/#sec-arguments-exotic-objects-get-p-receiver
-ThrowCompletionOr<Value> ArgumentsObject::internal_get(PropertyKey const& property_key, Value receiver, CacheablePropertyMetadata* cacheable_metadata, PropertyLookupPhase phase) const
+ThrowCompletionOr<Value> ArgumentsObject::internal_get(PropertyKey const& property_key, Value receiver, CacheableGetPropertyMetadata* cacheable_metadata, PropertyLookupPhase phase) const
 {
     // 1. Let map be args.[[ParameterMap]].
     // 2. Let isMapped be ! HasOwnProperty(map, P).
@@ -56,7 +61,7 @@ ThrowCompletionOr<Value> ArgumentsObject::internal_get(PropertyKey const& proper
 }
 
 // 10.4.4.4 [[Set]] ( P, V, Receiver ), https://tc39.es/ecma262/#sec-arguments-exotic-objects-set-p-v-receiver
-ThrowCompletionOr<bool> ArgumentsObject::internal_set(PropertyKey const& property_key, Value value, Value receiver, CacheablePropertyMetadata*, PropertyLookupPhase)
+ThrowCompletionOr<bool> ArgumentsObject::internal_set(PropertyKey const& property_key, Value value, Value receiver, CacheableSetPropertyMetadata*, PropertyLookupPhase)
 {
     bool is_mapped = false;
 
@@ -126,7 +131,7 @@ ThrowCompletionOr<Optional<PropertyDescriptor>> ArgumentsObject::internal_get_ow
 }
 
 // 10.4.4.2 [[DefineOwnProperty]] ( P, Desc ), https://tc39.es/ecma262/#sec-arguments-exotic-objects-defineownproperty-p-desc
-ThrowCompletionOr<bool> ArgumentsObject::internal_define_own_property(PropertyKey const& property_key, PropertyDescriptor const& descriptor, Optional<PropertyDescriptor>* precomputed_get_own_property)
+ThrowCompletionOr<bool> ArgumentsObject::internal_define_own_property(PropertyKey const& property_key, PropertyDescriptor& descriptor, Optional<PropertyDescriptor>* precomputed_get_own_property)
 {
     // 1. Let map be args.[[ParameterMap]].
     // 2. Let isMapped be ! HasOwnProperty(map, P).

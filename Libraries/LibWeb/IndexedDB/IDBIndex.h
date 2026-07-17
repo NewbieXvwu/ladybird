@@ -7,6 +7,7 @@
 #pragma once
 
 #include <LibGC/Heap.h>
+#include <LibWeb/Bindings/IDBObjectStore.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/IndexedDB/IDBObjectStore.h>
 #include <LibWeb/IndexedDB/Internal/Index.h>
@@ -22,8 +23,8 @@ public:
     virtual ~IDBIndex() override;
     [[nodiscard]] static GC::Ref<IDBIndex> create(JS::Realm&, GC::Ref<Index>, GC::Ref<IDBObjectStore>);
 
-    WebIDL::ExceptionOr<void> set_name(String const& value);
-    String name() const { return m_name; }
+    WebIDL::ExceptionOr<void> set_name(Utf16String const& value);
+    Utf16String name() const { return m_name; }
     GC::Ref<IDBObjectStore> object_store() { return m_object_store_handle; }
     JS::Value key_path() const;
     bool multi_entry() const { return m_index->multi_entry(); }
@@ -33,14 +34,16 @@ public:
     [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> get_key(JS::Value);
     [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> get_all(Optional<JS::Value>, Optional<WebIDL::UnsignedLong>);
     [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> get_all_keys(Optional<JS::Value>, Optional<WebIDL::UnsignedLong>);
-    [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> get_all_records(IDBGetAllOptions const&);
-    [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> count(JS::Value);
-    [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> open_cursor(JS::Value, Bindings::IDBCursorDirection = Bindings::IDBCursorDirection::Next);
-    [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> open_key_cursor(JS::Value, Bindings::IDBCursorDirection = Bindings::IDBCursorDirection::Next);
+    [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> get_all_records(Bindings::IDBGetAllOptions const&);
+    [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> count(Optional<JS::Value>);
+    [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> open_cursor(Optional<JS::Value>, Bindings::IDBCursorDirection = Bindings::IDBCursorDirection::Next);
+    [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<IDBRequest>> open_key_cursor(Optional<JS::Value>, Bindings::IDBCursorDirection = Bindings::IDBCursorDirection::Next);
 
     // The transaction of an index handle is the transaction of its associated object store handle.
     GC::Ref<IDBTransaction> transaction() { return m_object_store_handle->transaction(); }
     GC::Ref<Index> index() { return m_index; }
+
+    void update_name() { m_name = m_index->name(); }
 
 protected:
     explicit IDBIndex(JS::Realm&, GC::Ref<Index>, GC::Ref<IDBObjectStore>);
@@ -53,7 +56,7 @@ private:
     GC::Ref<IDBObjectStore> m_object_store_handle;
 
     // An index handle has a name, which is initialized to the name of the associated index when the index handle is created.
-    String m_name;
+    Utf16String m_name;
 };
 
 }

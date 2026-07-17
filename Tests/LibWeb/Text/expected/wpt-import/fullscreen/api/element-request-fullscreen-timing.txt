@@ -1,0 +1,8 @@
+Harness status: OK
+
+Found 2 tests
+
+1 Pass
+1 Fail
+Fail	Timing of fullscreenchange and resize events
+Pass	Timing of fullscreenerror event

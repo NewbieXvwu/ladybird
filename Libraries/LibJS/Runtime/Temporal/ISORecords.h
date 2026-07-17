@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2024-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,17 +9,15 @@
 #include <AK/Optional.h>
 #include <AK/String.h>
 #include <AK/Types.h>
+#include <AK/Utf16String.h>
 #include <AK/Variant.h>
 #include <LibCrypto/BigInt/SignedBigInteger.h>
+#include <LibUnicode/Calendar.h>
 
 namespace JS::Temporal {
 
 // 3.5.1 ISO Date Records, https://tc39.es/proposal-temporal/#sec-temporal-iso-date-records
-struct ISODate {
-    i32 year { 0 };
-    u8 month { 0 };
-    u8 day { 0 };
-};
+using ISODate = Unicode::ISODate;
 
 // 4.5.1 Time Records, https://tc39.es/proposal-temporal/#sec-temporal-time-records
 struct Time {
@@ -53,11 +51,17 @@ struct ISOYearMonth {
 // 13.32 ISO String Time Zone Parse Records, https://tc39.es/proposal-temporal/#sec-temporal-iso-string-time-zone-parse-records
 struct ParsedISOTimeZone {
     bool z_designator { false };
-    Optional<String> offset_string;
-    Optional<String> time_zone_annotation;
+    Optional<Utf16String> offset_string;
+    Optional<Utf16String> time_zone_annotation;
 };
 
-// 13.33 ISO Date-Time Parse Records, https://tc39.es/proposal-temporal/#sec-temporal-iso-date-time-parse-records
+// 13.33 Time Zone Identifier Parse Records, https://tc39.es/proposal-temporal/#sec-temporal-time-zone-identifier-parse-records
+struct ParsedTimeZoneIdentifier {
+    Optional<Utf16String> name;
+    Optional<i64> offset_minutes;
+};
+
+// 13.34 ISO Date-Time Parse Records, https://tc39.es/proposal-temporal/#sec-temporal-iso-date-time-parse-records
 struct ParsedISODateTime {
     struct StartOfDay { };
 
@@ -66,7 +70,7 @@ struct ParsedISODateTime {
     u8 day { 0 };
     Variant<StartOfDay, Time> time;
     ParsedISOTimeZone time_zone;
-    Optional<String> calendar;
+    Optional<Utf16String> calendar;
 };
 
 }

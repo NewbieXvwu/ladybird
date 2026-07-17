@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/Export.h>
 
 namespace Web::HTML::EventNames {
@@ -19,7 +19,10 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(animationend)             \
     __ENUMERATE_HTML_EVENT(animationiteration)       \
     __ENUMERATE_HTML_EVENT(animationstart)           \
+    __ENUMERATE_HTML_EVENT(audioend)                 \
     __ENUMERATE_HTML_EVENT(audioprocess)             \
+    __ENUMERATE_HTML_EVENT(audiostart)               \
+    __ENUMERATE_HTML_EVENT(begin)                    \
     __ENUMERATE_HTML_EVENT(beforeinput)              \
     __ENUMERATE_HTML_EVENT(beforematch)              \
     __ENUMERATE_HTML_EVENT(beforeprint)              \
@@ -27,6 +30,7 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(beforeunload)             \
     __ENUMERATE_HTML_EVENT(blocked)                  \
     __ENUMERATE_HTML_EVENT(blur)                     \
+    __ENUMERATE_HTML_EVENT(boundary)                 \
     __ENUMERATE_HTML_EVENT(cancel)                   \
     __ENUMERATE_HTML_EVENT(canplay)                  \
     __ENUMERATE_HTML_EVENT(canplaythrough)           \
@@ -44,6 +48,7 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(cuechange)                \
     __ENUMERATE_HTML_EVENT(currententrychange)       \
     __ENUMERATE_HTML_EVENT(cut)                      \
+    __ENUMERATE_HTML_EVENT(devicechange)             \
     __ENUMERATE_HTML_EVENT(disconnect)               \
     __ENUMERATE_HTML_EVENT(dispose)                  \
     __ENUMERATE_HTML_EVENT(DOMContentLoaded)         \
@@ -56,6 +61,7 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(drop)                     \
     __ENUMERATE_HTML_EVENT(durationchange)           \
     __ENUMERATE_HTML_EVENT(emptied)                  \
+    __ENUMERATE_HTML_EVENT(end)                      \
     __ENUMERATE_HTML_EVENT(ended)                    \
     __ENUMERATE_HTML_EVENT(enter)                    \
     __ENUMERATE_HTML_EVENT(error)                    \
@@ -65,6 +71,8 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(focusin)                  \
     __ENUMERATE_HTML_EVENT(focusout)                 \
     __ENUMERATE_HTML_EVENT(formdata)                 \
+    __ENUMERATE_HTML_EVENT(fullscreenchange)         \
+    __ENUMERATE_HTML_EVENT(fullscreenerror)          \
     __ENUMERATE_HTML_EVENT(hashchange)               \
     __ENUMERATE_HTML_EVENT(input)                    \
     __ENUMERATE_HTML_EVENT(invalid)                  \
@@ -78,11 +86,13 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(loadingdone)              \
     __ENUMERATE_HTML_EVENT(loadingerror)             \
     __ENUMERATE_HTML_EVENT(loadstart)                \
+    __ENUMERATE_HTML_EVENT(mark)                     \
     __ENUMERATE_HTML_EVENT(message)                  \
     __ENUMERATE_HTML_EVENT(messageerror)             \
     __ENUMERATE_HTML_EVENT(navigate)                 \
     __ENUMERATE_HTML_EVENT(navigateerror)            \
     __ENUMERATE_HTML_EVENT(navigatesuccess)          \
+    __ENUMERATE_HTML_EVENT(nomatch)                  \
     __ENUMERATE_HTML_EVENT(offline)                  \
     __ENUMERATE_HTML_EVENT(online)                   \
     __ENUMERATE_HTML_EVENT(open)                     \
@@ -101,8 +111,11 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(rejectionhandled)         \
     __ENUMERATE_HTML_EVENT(remove)                   \
     __ENUMERATE_HTML_EVENT(removetrack)              \
+    __ENUMERATE_HTML_EVENT(repeat)                   \
     __ENUMERATE_HTML_EVENT(reset)                    \
     __ENUMERATE_HTML_EVENT(resize)                   \
+    __ENUMERATE_HTML_EVENT(result)                   \
+    __ENUMERATE_HTML_EVENT(resume)                   \
     __ENUMERATE_HTML_EVENT(scroll)                   \
     __ENUMERATE_HTML_EVENT(scrollend)                \
     __ENUMERATE_HTML_EVENT(securitypolicyviolation)  \
@@ -111,7 +124,12 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(select)                   \
     __ENUMERATE_HTML_EVENT(selectionchange)          \
     __ENUMERATE_HTML_EVENT(slotchange)               \
+    __ENUMERATE_HTML_EVENT(soundend)                 \
+    __ENUMERATE_HTML_EVENT(soundstart)               \
+    __ENUMERATE_HTML_EVENT(speechend)                \
+    __ENUMERATE_HTML_EVENT(speechstart)              \
     __ENUMERATE_HTML_EVENT(stalled)                  \
+    __ENUMERATE_HTML_EVENT(start)                    \
     __ENUMERATE_HTML_EVENT(statechange)              \
     __ENUMERATE_HTML_EVENT(storage)                  \
     __ENUMERATE_HTML_EVENT(submit)                   \
@@ -128,6 +146,7 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(upgradeneeded)            \
     __ENUMERATE_HTML_EVENT(versionchange)            \
     __ENUMERATE_HTML_EVENT(visibilitychange)         \
+    __ENUMERATE_HTML_EVENT(voiceschanged)            \
     __ENUMERATE_HTML_EVENT(volumechange)             \
     __ENUMERATE_HTML_EVENT(waiting)                  \
     __ENUMERATE_HTML_EVENT(webkitAnimationEnd)       \
@@ -135,7 +154,7 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(webkitAnimationStart)     \
     __ENUMERATE_HTML_EVENT(webkitTransitionEnd)
 
-#define __ENUMERATE_HTML_EVENT(name) extern WEB_API FlyString name;
+#define __ENUMERATE_HTML_EVENT(name) extern WEB_API Utf16FlyString const& name;
 ENUMERATE_HTML_EVENTS
 #undef __ENUMERATE_HTML_EVENT
 

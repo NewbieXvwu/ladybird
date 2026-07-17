@@ -8,16 +8,22 @@
 
 #include <AK/Concepts.h>
 #include <AK/Forward.h>
+#include <AK/HashTable.h>
+#include <AK/NonnullRefPtr.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16View.h>
 #include <LibCrypto/Forward.h>
 #include <LibGC/RootVector.h>
 #include <LibJS/Export.h>
 #include <LibJS/Forward.h>
 #include <LibJS/Runtime/CanonicalIndex.h>
 #include <LibJS/Runtime/Environment.h>
+#include <LibJS/Runtime/ErrorTypes.h>
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/Iterator.h>
 #include <LibJS/Runtime/KeyedCollections.h>
+#include <LibJS/Runtime/ModuleRequest.h>
 #include <LibJS/Runtime/PrivateEnvironment.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibJS/Runtime/Value.h>
@@ -27,6 +33,7 @@ namespace JS {
 GC::Ref<DeclarativeEnvironment> new_declarative_environment(Environment&);
 JS_API GC::Ref<ObjectEnvironment> new_object_environment(Object&, bool is_with_environment, Environment*);
 GC::Ref<FunctionEnvironment> new_function_environment(ECMAScriptFunctionObject&, Object* new_target);
+GC::Ref<FunctionEnvironment> new_function_environment(NativeJavaScriptBackedFunction&, Object* new_target);
 GC::Ref<PrivateEnvironment> new_private_environment(VM& vm, PrivateEnvironment* outer);
 GC::Ref<Environment> get_this_environment(VM&);
 JS_API bool can_be_held_weakly(Value);
@@ -39,18 +46,17 @@ JS_API ThrowCompletionOr<size_t> length_of_array_like(VM&, Object const&);
 ThrowCompletionOr<GC::RootVector<Value>> create_list_from_array_like(VM&, Value, Function<ThrowCompletionOr<void>(Value)> = {});
 ThrowCompletionOr<FunctionObject*> species_constructor(VM&, Object const&, FunctionObject& default_constructor);
 JS_API ThrowCompletionOr<Realm*> get_function_realm(VM&, FunctionObject const&);
-ThrowCompletionOr<void> initialize_bound_name(VM&, Utf16FlyString const&, Value, Environment*);
-bool is_compatible_property_descriptor(bool extensible, PropertyDescriptor const&, Optional<PropertyDescriptor> const& current);
-bool validate_and_apply_property_descriptor(Object*, PropertyKey const&, bool extensible, PropertyDescriptor const&, Optional<PropertyDescriptor> const& current);
+bool is_compatible_property_descriptor(bool extensible, PropertyDescriptor&, Optional<PropertyDescriptor> const& current);
+bool validate_and_apply_property_descriptor(Object*, PropertyKey const&, bool extensible, PropertyDescriptor&, Optional<PropertyDescriptor> const& current);
 JS_API ThrowCompletionOr<Object*> get_prototype_from_constructor(VM&, FunctionObject const& constructor, GC::Ref<Object> (Intrinsics::*intrinsic_default_prototype)());
 Object* create_unmapped_arguments_object(VM&, ReadonlySpan<Value> arguments);
-Object* create_mapped_arguments_object(VM&, FunctionObject&, NonnullRefPtr<FunctionParameters const> const&, ReadonlySpan<Value> arguments, Environment&);
+Object* create_mapped_arguments_object(VM&, FunctionObject&, ReadonlySpan<Utf16FlyString> parameter_names, ReadonlySpan<Value> arguments, Environment&);
 
 // 2.1.1 DisposeCapability Records, https://tc39.es/proposal-explicit-resource-management/#sec-disposecapability-records
 struct JS_API DisposeCapability {
     void visit_edges(GC::Cell::Visitor&) const;
 
-    Vector<DisposableResource> disposable_resource_stack; // [[DisposableResourceStack]]
+    OwnPtr<Vector<DisposableResource>> disposable_resource_stack; // [[DisposableResourceStack]]
 };
 
 // 2.1.2 DisposableResource Records, https://tc39.es/proposal-explicit-resource-management/#sec-disposableresource-records
@@ -69,14 +75,20 @@ ThrowCompletionOr<GC::Ptr<FunctionObject>> get_dispose_method(VM&, Value, Enviro
 Completion dispose(VM&, Value, Environment::InitializeBindingHint, GC::Ptr<FunctionObject> method);
 Completion dispose_resources(VM&, DisposeCapability&, Completion);
 
+bool all_import_attributes_supported(VM& vm, Vector<ImportAttribute> const& attributes);
+
 ThrowCompletionOr<Value> perform_import_call(VM&, Value specifier, Value options_value);
+
+size_t max_js_string_length();
+ThrowCompletionOr<size_t> checked_js_string_length_sum(VM&, size_t, size_t, ErrorType const&);
+ThrowCompletionOr<size_t> checked_js_string_length_product(VM&, size_t, size_t, ErrorType const&);
 
 enum class CanonicalIndexMode {
     DetectNumericRoundtrip,
     IgnoreNumericRoundtrip,
 };
 [[nodiscard]] CanonicalIndex canonical_numeric_index_string(PropertyKey const&, CanonicalIndexMode needs_numeric);
-ThrowCompletionOr<String> get_substitution(VM&, Utf16View const& matched, Utf16View const& str, size_t position, Span<Value> captures, Value named_captures, Value replacement);
+ThrowCompletionOr<Utf16String> get_substitution(VM&, Utf16View const& matched, Utf16View const& str, size_t position, Span<Value> captures, Value named_captures, Utf16View const& replacement);
 
 enum class CallerMode {
     Strict,
@@ -85,7 +97,30 @@ enum class CallerMode {
 
 ThrowCompletionOr<Value> perform_eval(VM&, Value, CallerMode, EvalMode);
 
-ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& program, Environment* variable_environment, Environment* lexical_environment, PrivateEnvironment* private_environment, bool strict);
+struct EvalDeclarationData {
+    Vector<Utf16FlyString> var_names;
+
+    struct FunctionToInitialize {
+        GC::Root<SharedFunctionInstanceData> shared_data;
+        Utf16FlyString name;
+    };
+    Vector<FunctionToInitialize> functions_to_initialize;
+    HashTable<Utf16FlyString> declared_function_names;
+
+    Vector<Utf16FlyString> var_scoped_names;
+
+    Vector<Utf16FlyString> annex_b_candidate_names;
+
+    struct LexicalBinding {
+        Utf16FlyString name;
+        bool is_constant { false };
+    };
+    Vector<LexicalBinding> lexical_bindings;
+
+    Vector<Utf16FlyString> referenced_private_names;
+};
+
+ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, EvalDeclarationData&, Environment* variable_environment, Environment* lexical_environment, PrivateEnvironment* private_environment, bool strict);
 
 // 7.3.14 Call ( F, V [ , argumentsList ] ), https://tc39.es/ecma262/#sec-call
 ALWAYS_INLINE ThrowCompletionOr<Value> call(VM& vm, Value function, Value this_value, ReadonlySpan<Value> arguments_list)
@@ -157,16 +192,22 @@ ALWAYS_INLINE ThrowCompletionOr<GC::Ref<Object>> construct(VM& vm, FunctionObjec
 
 // 10.1.13 OrdinaryCreateFromConstructor ( constructor, intrinsicDefaultProto [ , internalSlotsList ] ), https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor
 template<typename T, typename... Args>
-ThrowCompletionOr<GC::Ref<T>> ordinary_create_from_constructor(VM& vm, FunctionObject const& constructor, GC::Ref<Object> (Intrinsics::*intrinsic_default_prototype)(), Args&&... args)
+ALWAYS_INLINE ThrowCompletionOr<GC::Ref<T>> ordinary_create_from_constructor(VM& vm, Realm& realm, FunctionObject const& constructor, GC::Ref<Object> (Intrinsics::*intrinsic_default_prototype)(), Args&&... args)
 {
-    auto& realm = *vm.current_realm();
     auto* prototype = TRY(get_prototype_from_constructor(vm, constructor, intrinsic_default_prototype));
     return realm.create<T>(forward<Args>(args)..., *prototype);
 }
 
+// 10.1.13 OrdinaryCreateFromConstructor ( constructor, intrinsicDefaultProto [ , internalSlotsList ] ), https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor
+template<typename T, typename... Args>
+ALWAYS_INLINE ThrowCompletionOr<GC::Ref<T>> ordinary_create_from_constructor(VM& vm, FunctionObject const& constructor, GC::Ref<Object> (Intrinsics::*intrinsic_default_prototype)(), Args&&... args)
+{
+    return ordinary_create_from_constructor<T>(vm, *vm.current_realm(), constructor, intrinsic_default_prototype, forward<Args>(args)...);
+}
+
 // 7.3.35 AddValueToKeyedGroup ( groups, key, value ), https://tc39.es/ecma262/#sec-add-value-to-keyed-group
 template<typename GroupsType, typename KeyType>
-void add_value_to_keyed_group(VM& vm, GroupsType& groups, KeyType key, Value value)
+void add_value_to_keyed_group(GroupsType& groups, KeyType key, Value value)
 {
     // 1. For each Record { [[Key]], [[Elements]] } g of groups, do
     //      a. If SameValue(g.[[Key]], key) is true, then
@@ -184,7 +225,7 @@ void add_value_to_keyed_group(VM& vm, GroupsType& groups, KeyType key, Value val
     }
 
     // 2. Let group be the Record { [[Key]]: key, [[Elements]]: « value » }.
-    GC::RootVector<Value> new_elements { vm.heap() };
+    GC::RootVector<Value> new_elements;
     new_elements.append(value);
 
     // 3. Append group as the last element of groups.
@@ -203,7 +244,7 @@ ThrowCompletionOr<GroupsType> group_by(VM& vm, Value items, Value callback_funct
 
     // 2. If IsCallable(callbackfn) is false, throw a TypeError exception.
     if (!callback_function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function);
 
     // 3. Let groups be a new empty List.
     GroupsType groups;
@@ -247,7 +288,7 @@ ThrowCompletionOr<GroupsType> group_by(VM& vm, Value items, Value callback_funct
             // ii. IfAbruptCloseIterator(key, iteratorRecord).
             auto property_key = TRY_OR_CLOSE_ITERATOR(vm, iterator_record, key.to_property_key(vm));
 
-            add_value_to_keyed_group(vm, groups, move(property_key), value);
+            add_value_to_keyed_group(groups, move(property_key), value);
         }
         // h. Else,
         else {
@@ -257,7 +298,7 @@ ThrowCompletionOr<GroupsType> group_by(VM& vm, Value items, Value callback_funct
             // ii. Set key to CanonicalizeKeyedCollectionKey(key).
             key = canonicalize_keyed_collection_key(key);
 
-            add_value_to_keyed_group(vm, groups, make_root(key), value);
+            add_value_to_keyed_group(groups, make_root(key), value);
         }
 
         // i. Perform AddValueToKeyedGroup(groups, key, value).
@@ -314,12 +355,6 @@ auto remainder(Crypto::BigInteger auto const& x, Crypto::BigInteger auto const& 
     return x.divided_by(y).remainder;
 }
 
-// 14.3 The Year-Week Record Specification Type, https://tc39.es/proposal-temporal/#sec-year-week-record-specification-type
-struct YearWeek {
-    Optional<u8> week;
-    Optional<i32> year;
-};
-
 // 14.5.1.1 ToIntegerIfIntegral ( argument ), https://tc39.es/proposal-temporal/#sec-tointegerifintegral
 template<typename... Args>
 ThrowCompletionOr<double> to_integer_if_integral(VM& vm, Value argument, ErrorType const& error_type, Args&&... args)
@@ -341,7 +376,7 @@ enum class OptionType {
 };
 
 struct Required { };
-using OptionDefault = Variant<Required, Empty, bool, StringView, double>;
+using OptionDefault = Variant<Required, Empty, bool, Utf16View, double>;
 
 ThrowCompletionOr<GC::Ref<Object>> get_options_object(VM&, Value options);
 ThrowCompletionOr<Value> get_option(VM&, Object const& options, PropertyKey const& property, OptionType type, ReadonlySpan<StringView> values, OptionDefault const&);

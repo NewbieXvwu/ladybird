@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/Utf16String.h>
 #include <LibIPC/Forward.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
@@ -15,29 +15,56 @@
 
 namespace Web::HTML {
 
-enum class CanUseCrossOriginIsolatedAPIs {
+enum class CanUseCrossOriginIsolatedAPIs : u8 {
     No,
     Yes,
 };
 
+struct SerializedDocument {
+    URL::URL url;
+    bool relevant_settings_object_is_secure_context { false };
+};
+
+struct SerializedWindow {
+    SerializedDocument associated_document;
+};
+
+struct SerializedWorkerGlobalScope {
+    bool relevant_settings_object_is_secure_context { false };
+};
+
+using SerializedGlobal = Variant<SerializedWindow, SerializedWorkerGlobalScope>;
+
 struct SerializedEnvironmentSettingsObject {
-    String id;
+    Utf16String id;
     URL::URL creation_url;
     Optional<URL::URL> top_level_creation_url;
     Optional<URL::Origin> top_level_origin;
 
-    String api_url_character_encoding;
     URL::URL api_base_url;
     URL::Origin origin;
     bool has_cross_site_ancestor;
     SerializedPolicyContainer policy_container;
     CanUseCrossOriginIsolatedAPIs cross_origin_isolated_capability;
     double time_origin;
+    SerializedGlobal global;
 };
 
 }
 
 namespace IPC {
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::HTML::SerializedWindow const&);
+
+template<>
+WEB_API ErrorOr<Web::HTML::SerializedWindow> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::HTML::SerializedWorkerGlobalScope const&);
+
+template<>
+WEB_API ErrorOr<Web::HTML::SerializedWorkerGlobalScope> decode(Decoder&);
 
 template<>
 WEB_API ErrorOr<void> encode(Encoder&, Web::HTML::SerializedEnvironmentSettingsObject const&);

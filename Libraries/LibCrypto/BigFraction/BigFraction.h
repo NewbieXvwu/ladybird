@@ -6,13 +6,13 @@
 
 #pragma once
 
-#include <AK/ByteString.h>
+#include <AK/Utf16String.h>
 #include <LibCrypto/BigInt/SignedBigInteger.h>
 
 namespace Crypto {
 
 class BigFraction {
-    // FIXME Make the whole API more error-friendly. This includes:
+    // FIXME: Make the whole API more error-friendly. This includes:
     //   - Propagating errors from BigIntegers
     //   - Returns errors from BigFraction(numerator, denominator);
     //   - Duplicate fallible operators with a error-friendly version
@@ -56,7 +56,7 @@ public:
     //      - m_denominator = 10000
     BigFraction rounded(unsigned rounding_threshold) const;
 
-    String to_string(unsigned rounding_threshold) const;
+    Utf16String to_utf16_string(unsigned rounding_threshold) const;
     double to_double() const;
 
     Crypto::SignedBigInteger const& numerator() const& { return m_numerator; }

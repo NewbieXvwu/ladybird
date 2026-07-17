@@ -7,18 +7,23 @@
  */
 
 #include <AK/GenericShorthands.h>
+#include <LibGC/RootHashTable.h>
+#include <LibGC/RootVector.h>
 #include <LibJS/CyclicModule.h>
 #include <LibJS/Module.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/ModuleEnvironment.h>
 #include <LibJS/Runtime/ModuleNamespaceObject.h>
 #include <LibJS/Runtime/ModuleRequest.h>
 #include <LibJS/Runtime/Promise.h>
+#include <LibJS/Runtime/PromiseCapability.h>
 #include <LibJS/Runtime/VM.h>
 
 namespace JS {
 
 GC_DEFINE_ALLOCATOR(Module);
 GC_DEFINE_ALLOCATOR(GraphLoadingState);
+GC_DEFINE_ALLOCATOR(GraphLoadingState::HostDefined);
 
 Module::Module(Realm& realm, ByteString filename, Script::HostDefined* host_defined)
     : m_realm(realm)
@@ -39,27 +44,32 @@ void Module::visit_edges(Cell::Visitor& visitor)
         m_host_defined->visit_host_defined_self(visitor);
 }
 
+size_t Module::external_memory_size() const
+{
+    return byte_string_external_memory_size(m_filename);
+}
+
 // 16.2.1.5.1 EvaluateModuleSync ( module ), https://tc39.es/ecma262/#sec-EvaluateModuleSync
 ThrowCompletionOr<void> Module::evaluate_module_sync(VM& vm)
 {
     // 1. Assert: module is not a Cyclic Module Record.
     // 2. Let promise be module.Evaluate().
-    auto promise = TRY(evaluate(vm));
+    auto& promise = static_cast<JS::Promise&>(*TRY(evaluate(vm))->promise());
 
     // 3. Assert: promise.[[PromiseState]] is either FULFILLED or REJECTED.
-    VERIFY(first_is_one_of(promise->state(), Promise::State::Fulfilled, Promise::State::Rejected));
+    VERIFY(first_is_one_of(promise.state(), Promise::State::Fulfilled, Promise::State::Rejected));
 
     // 4. If promise.[[PromiseState]] is REJECTED, then
-    if (promise->state() == Promise::State::Rejected) {
+    if (promise.state() == Promise::State::Rejected) {
         // a. If promise.[[PromiseIsHandled]] is false, perform HostPromiseRejectionTracker(promise, "handle").
-        if (!promise->is_handled())
+        if (!promise.is_handled())
             vm.host_promise_rejection_tracker(promise, Promise::RejectionOperation::Handle);
 
         // b. Set promise.[[PromiseIsHandled]] to true.
-        promise->set_is_handled();
+        promise.set_is_handled();
 
         // c. Return ThrowCompletion(promise.[[PromiseResult]]).
-        return throw_completion(promise->result());
+        return throw_completion(promise.result());
     }
 
     // 5. Return UNUSED.
@@ -67,7 +77,7 @@ ThrowCompletionOr<void> Module::evaluate_module_sync(VM& vm)
 }
 
 // 16.2.1.5.1.1 InnerModuleLinking ( module, stack, index ), https://tc39.es/ecma262/#sec-InnerModuleLinking
-ThrowCompletionOr<u32> Module::inner_module_linking(VM& vm, Vector<Module*>&, u32 index)
+ThrowCompletionOr<u32> Module::inner_module_linking(VM& vm, GC::RootVector<GC::Ref<Module>>&, u32 index)
 {
     // 1. If module is not a Cyclic Module Record, then
     // a. Perform ? module.Link().
@@ -77,7 +87,7 @@ ThrowCompletionOr<u32> Module::inner_module_linking(VM& vm, Vector<Module*>&, u3
 }
 
 // 16.2.1.5.2.1 InnerModuleEvaluation ( module, stack, index ), https://tc39.es/ecma262/#sec-innermoduleevaluation
-ThrowCompletionOr<u32> Module::inner_module_evaluation(VM& vm, Vector<Module*>&, u32 index)
+ThrowCompletionOr<u32> Module::inner_module_evaluation(VM& vm, GC::RootVector<GC::Ref<Module>>&, u32 index)
 {
     // 1. If module is not a Cyclic Module Record, then
     // a. Perform ? EvaluateModuleSync(module).
@@ -95,20 +105,20 @@ void finish_loading_imported_module(ImportedModuleReferrer referrer, ModuleReque
         // NOTE: Only Script and CyclicModule referrers have the [[LoadedModules]] internal slot.
         if (referrer.has<GC::Ref<Script>>() || referrer.has<GC::Ref<CyclicModule>>()) {
             auto& loaded_modules = referrer.visit(
-                [](GC::Ref<JS::Realm>&) -> Vector<ModuleWithSpecifier>& {
+                [](GC::Ref<JS::Realm>&) -> Vector<LoadedModuleRequest>& {
                     VERIFY_NOT_REACHED();
                     __builtin_unreachable();
                 },
-                [](auto& script_or_module) -> Vector<ModuleWithSpecifier>& {
+                [](auto& script_or_module) -> Vector<LoadedModuleRequest>& {
                     return script_or_module->loaded_modules();
                 });
 
             bool found_record = false;
 
-            // a. If referrer.[[LoadedModules]] contains a Record whose [[Specifier]] is specifier, then
+            // a. If referrer.[[LoadedModules]] contains a LoadedModuleRequest Record record such that ModuleRequestsEqual(record, moduleRequest) is true, then
             for (auto const& record : loaded_modules) {
-                if (record.specifier == module_request.module_specifier) {
-                    // i. Assert: That Record's [[Module]] is result.[[Value]].
+                if (module_requests_equal(record, module_request)) {
+                    // i. Assert: record.[[Module]] and result.[[Value]] are the same Module Record.
                     VERIFY(record.module == result.value());
                     found_record = true;
                 }
@@ -118,9 +128,10 @@ void finish_loading_imported_module(ImportedModuleReferrer referrer, ModuleReque
             if (!found_record) {
                 auto module = result.value();
 
-                // i. Append the Record { [[Specifier]]: specifier, [[Module]]: result.[[Value]] } to referrer.[[LoadedModules]].
-                loaded_modules.append(ModuleWithSpecifier {
+                // i. Append the LoadedModuleRequest Record { [[Specifier]]: moduleRequest.[[Specifier]], [[Attributes]]: moduleRequest.[[Attributes]], [[Module]]: result.[[Value]] } to referrer.[[LoadedModules]].
+                loaded_modules.append(LoadedModuleRequest {
                     .specifier = module_request.module_specifier.to_utf16_string(),
+                    .attributes = module_request.attributes,
                     .module = GC::Ref<Module>(*module) });
             }
         }
@@ -177,7 +188,7 @@ GC::Ref<Object> Module::get_module_namespace(VM& vm)
 
 Vector<Utf16FlyString> Module::get_exported_names(VM& vm)
 {
-    HashTable<Module const*> export_star_set;
+    GC::RootHashTable<GC::Ref<Module const>> export_star_set;
     return get_exported_names(vm, export_star_set);
 }
 

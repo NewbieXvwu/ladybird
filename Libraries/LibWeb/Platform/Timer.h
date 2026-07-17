@@ -6,40 +6,52 @@
 
 #pragma once
 
-#include <AK/RefCounted.h>
+#include <AK/NonnullRefPtr.h>
+#include <LibCore/Forward.h>
+#include <LibGC/CellAllocator.h>
 #include <LibJS/Heap/Cell.h>
 
 namespace Web::Platform {
 
 class Timer : public JS::Cell {
     GC_CELL(Timer, JS::Cell);
+    GC_DECLARE_ALLOCATOR(Timer);
 
 public:
     static GC::Ref<Timer> create(GC::Heap&);
     static GC::Ref<Timer> create_repeating(GC::Heap&, int interval_ms, GC::Ptr<GC::Function<void()>> timeout_handler);
     static GC::Ref<Timer> create_single_shot(GC::Heap&, int interval_ms, GC::Ptr<GC::Function<void()>> timeout_handler);
 
+    static constexpr bool OVERRIDES_MUST_SURVIVE_GARBAGE_COLLECTION = true;
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~Timer();
+    virtual void finalize() override;
+    virtual bool must_survive_garbage_collection() const override;
 
-    virtual void start() = 0;
-    virtual void start(int interval_ms) = 0;
-    virtual void restart() = 0;
-    virtual void restart(int interval_ms) = 0;
-    virtual void stop() = 0;
+    void start();
+    void start(int interval_ms);
+    void restart();
+    void restart(int interval_ms);
+    void stop();
 
-    virtual void set_active(bool) = 0;
+    void set_active(bool);
 
-    virtual bool is_active() const = 0;
-    virtual int interval() const = 0;
-    virtual void set_interval(int interval_ms) = 0;
+    bool is_active() const;
+    int interval() const;
+    void set_interval(int interval_ms);
 
-    virtual bool is_single_shot() const = 0;
-    virtual void set_single_shot(bool) = 0;
+    bool is_single_shot() const;
+    void set_single_shot(bool);
 
     GC::Ptr<GC::Function<void()>> on_timeout;
 
-protected:
+private:
+    Timer();
+
     virtual void visit_edges(JS::Cell::Visitor&) override;
+
+    NonnullRefPtr<Core::Timer> m_timer;
 };
 
 }

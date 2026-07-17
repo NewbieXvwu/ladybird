@@ -11,6 +11,7 @@
 #include <LibGfx/Matrix.h>
 #include <LibGfx/Vector3.h>
 #include <LibGfx/Vector4.h>
+#include <LibIPC/Forward.h>
 
 namespace Gfx {
 
@@ -59,6 +60,16 @@ constexpr static Matrix4x4<T> scale_matrix(Vector3<T> const& s)
 }
 
 template<typename T>
+constexpr static Matrix4x4<T> perspective_matrix(T distance)
+{
+    return Matrix4x4<T>(
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, -1 / distance, 1);
+}
+
+template<typename T>
 constexpr static Matrix4x4<T> rotation_matrix(Vector3<T> const& axis, T angle)
 {
     T c, s;
@@ -96,3 +107,13 @@ typedef Matrix4x4<double> DoubleMatrix4x4;
 using Gfx::DoubleMatrix4x4;
 using Gfx::FloatMatrix4x4;
 using Gfx::Matrix4x4;
+
+namespace IPC {
+
+template<>
+ErrorOr<void> encode(Encoder&, Gfx::FloatMatrix4x4 const&);
+
+template<>
+ErrorOr<Gfx::FloatMatrix4x4> decode(Decoder&);
+
+}

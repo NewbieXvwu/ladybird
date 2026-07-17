@@ -6,10 +6,10 @@
 
 #pragma once
 
+#include <AK/Utf16View.h>
 #include <LibWeb/ARIA/Roles.h>
-#include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
-#include <LibWeb/HTML/PopoverInvokerElement.h>
+#include <LibWeb/HTML/PopoverTargetAttributes.h>
 
 namespace Web::HTML {
 
@@ -21,16 +21,15 @@ namespace Web::HTML {
 
 class HTMLButtonElement final
     : public HTMLElement
-    , public FormAssociatedElement
-    , public PopoverInvokerElement {
+    , public PopoverTargetAttributes {
     WEB_PLATFORM_OBJECT(HTMLButtonElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLButtonElement);
-    FORM_ASSOCIATED_ELEMENT(HTMLElement, HTMLButtonElement)
 
 public:
     virtual ~HTMLButtonElement() override;
 
     virtual void initialize(JS::Realm&) override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
     enum class TypeAttributeState {
 #define __ENUMERATE_HTML_BUTTON_TYPE_ATTRIBUTE(_, state) state,
@@ -39,16 +38,19 @@ public:
     };
 
     TypeAttributeState type_state() const;
-    String type_for_bindings() const;
-    WebIDL::ExceptionOr<void> set_type_for_bindings(String const&);
+    Utf16FlyString type_for_bindings() const;
+    void set_type_for_bindings(Utf16View);
 
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     // ^EventTarget
     // https://html.spec.whatwg.org/multipage/interaction.html#the-tabindex-attribute:the-button-element
     // https://html.spec.whatwg.org/multipage/interaction.html#focusable-area
     // https://html.spec.whatwg.org/multipage/semantics-other.html#concept-element-disabled
     virtual bool is_focusable() const override;
+
+    // ^FormAssociatedElement
+    virtual bool is_form_associated_element() const override { return true; }
 
     // ^FormAssociatedElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-listed
@@ -73,14 +75,15 @@ public:
     // https://www.w3.org/TR/html-aria/#el-button
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::button; }
 
-    virtual Utf16String value() const override;
-    virtual Optional<String> optional_value() const override;
+    Utf16String value() const;
+    virtual Utf16String form_value() const override { return value(); }
+    virtual Optional<Utf16String> optional_value() const override;
 
     virtual bool has_activation_behavior() const override;
     virtual void activation_behavior(DOM::Event const&) override;
 
-    String command() const;
-    WebIDL::ExceptionOr<void> set_command(String const&);
+    Utf16String command() const;
+    void set_command(Utf16View);
 
     GC::Ptr<DOM::Element> command_for_element() { return m_command_for_element; }
     void set_command_for_element(GC::Ptr<DOM::Element> value) { m_command_for_element = value; }

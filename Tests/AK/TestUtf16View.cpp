@@ -99,6 +99,15 @@ TEST_CASE(null_view)
         FAIL("Iterating a null UTF-16 string should not produce any values");
 }
 
+TEST_CASE(default_empty_view_is_empty_ascii_string)
+{
+    Utf16View view;
+    EXPECT(view.has_ascii_storage());
+    EXPECT_EQ(view.ascii_span().data(), "");
+    EXPECT_EQ(view.length_in_code_units(), 0zu);
+    EXPECT_EQ(view, ""sv);
+}
+
 TEST_CASE(utf16_literal)
 {
     {
@@ -473,6 +482,16 @@ TEST_CASE(comparison)
     EXPECT(u"😂"sv > u"😀"sv);
     EXPECT(!(u"😂"sv <= u"😀"sv));
     EXPECT(u"😂"sv >= u"😀"sv);
+
+    EXPECT(u"ÿ"sv < u"Ā"sv);
+    EXPECT(!(u"ÿ"sv > u"Ā"sv));
+    EXPECT(u"Ā"sv > u"ÿ"sv);
+    EXPECT(!(u"Ā"sv < u"ÿ"sv));
+
+    EXPECT(u"❤"sv < u"😀"sv);
+    EXPECT(!(u"❤"sv > u"😀"sv));
+    EXPECT(u"😀"sv > u"❤"sv);
+    EXPECT(!(u"😀"sv < u"❤"sv));
 }
 
 TEST_CASE(equals_ignoring_case)
@@ -849,4 +868,65 @@ TEST_CASE(find_code_unit_offset_ignoring_case)
     EXPECT_EQ(2u, view.find_code_unit_offset_ignoring_case(u"foO"sv).value());
     EXPECT_EQ(7u, view.find_code_unit_offset_ignoring_case(u"baR"sv).value());
     EXPECT(!view.find_code_unit_offset_ignoring_case(u"baz"sv).has_value());
+}
+
+TEST_CASE(previous_code_point_at)
+{
+    // ASCII text.
+    {
+        Utf16View view { u"abc"sv };
+        size_t index = 3;
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)'c');
+        EXPECT_EQ(index, 2u);
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)'b');
+        EXPECT_EQ(index, 1u);
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)'a');
+        EXPECT_EQ(index, 0u);
+    }
+
+    // Surrogate pair (emoji).
+    {
+        Utf16View view { u"a😀b"sv };
+        size_t index = 4;
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)'b');
+        EXPECT_EQ(index, 3u);
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)0x1f600);
+        EXPECT_EQ(index, 1u);
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)'a');
+        EXPECT_EQ(index, 0u);
+    }
+
+    // Unpaired low surrogate.
+    {
+        Utf16View view { u"a\xdc00g"sv };
+        size_t index = 3;
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)'g');
+        EXPECT_EQ(index, 2u);
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)0xdc00);
+        EXPECT_EQ(index, 1u);
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)'a');
+        EXPECT_EQ(index, 0u);
+    }
+
+    // Unpaired high surrogate.
+    {
+        Utf16View view { u"a\xd800g"sv };
+        size_t index = 3;
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)'g');
+        EXPECT_EQ(index, 2u);
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)0xd800);
+        EXPECT_EQ(index, 1u);
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)'a');
+        EXPECT_EQ(index, 0u);
+    }
+
+    // Two consecutive unpaired low surrogates.
+    {
+        Utf16View view { u"\xdc00\xdc00"sv };
+        size_t index = 2;
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)0xdc00);
+        EXPECT_EQ(index, 1u);
+        EXPECT_EQ(view.previous_code_point_at(index), (u32)0xdc00);
+        EXPECT_EQ(index, 0u);
+    }
 }

@@ -21,7 +21,6 @@ class JS_API GlobalObject : public Object {
     friend class Intrinsics;
 
 public:
-    virtual void initialize(Realm&) override;
     virtual ~GlobalObject() override;
 
 protected:
@@ -30,7 +29,6 @@ protected:
 private:
     virtual bool is_global_object() const final { return true; }
 
-    JS_DECLARE_NATIVE_FUNCTION(gc);
     JS_DECLARE_NATIVE_FUNCTION(is_nan);
     JS_DECLARE_NATIVE_FUNCTION(is_finite);
     JS_DECLARE_NATIVE_FUNCTION(parse_float);
@@ -53,7 +51,7 @@ template<typename... Args>
 [[nodiscard]] ALWAYS_INLINE ThrowCompletionOr<Value> Value::invoke(VM& vm, PropertyKey const& property_key, Args... args)
 {
     if constexpr (sizeof...(Args) > 0) {
-        GC::RootVector<Value> arglist { vm.heap() };
+        GC::RootVector<Value> arglist;
         (..., arglist.append(move(args)));
         return invoke_internal(vm, property_key, move(arglist));
     }

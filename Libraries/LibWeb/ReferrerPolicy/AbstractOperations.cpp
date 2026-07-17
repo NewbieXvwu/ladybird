@@ -9,6 +9,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/Fetch/Infrastructure/URL.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/ReferrerPolicy/AbstractOperations.h>
@@ -21,17 +22,18 @@ namespace Web::ReferrerPolicy {
 ReferrerPolicy parse_a_referrer_policy_from_a_referrer_policy_header(Fetch::Infrastructure::Response const& response)
 {
     // 1. Let policy-tokens be the result of extracting header list values given `Referrer-Policy` and response’s header list.
-    auto policy_tokens_or_failure = Fetch::Infrastructure::extract_header_list_values("Referrer-Policy"sv.bytes(), response.header_list());
-    auto policy_tokens = policy_tokens_or_failure.has<Vector<ByteBuffer>>() ? policy_tokens_or_failure.get<Vector<ByteBuffer>>() : Vector<ByteBuffer> {};
+    auto policy_tokens_or_failure = response.header_list()->extract_header_list_values("Referrer-Policy"sv);
 
     // 2. Let policy be the empty string.
     auto policy = ReferrerPolicy::EmptyString;
 
     // 3. For each token in policy-tokens, if token is a referrer policy and token is not the empty string, then set policy to token.
-    for (auto token : policy_tokens) {
-        auto referrer_policy = from_string(token);
-        if (referrer_policy.has_value() && referrer_policy.value() != ReferrerPolicy::EmptyString)
-            policy = referrer_policy.release_value();
+    if (auto const* policy_tokens = policy_tokens_or_failure.get_pointer<Vector<ByteString>>()) {
+        for (auto const& token : *policy_tokens) {
+            auto referrer_policy = from_string(token);
+            if (referrer_policy.has_value() && referrer_policy.value() != ReferrerPolicy::EmptyString)
+                policy = referrer_policy.release_value();
+        }
     }
 
     // 4. Return policy.
@@ -107,8 +109,11 @@ Optional<URL::URL> determine_requests_referrer(Fetch::Infrastructure::Request co
 
     // 6. If the result of serializing referrerURL is a string whose length is greater than 4096, set referrerURL to
     //    referrerOrigin.
-    if (referrer_url.has_value() && referrer_url.value().serialize().bytes().size() > 4096)
-        referrer_url = referrer_origin;
+    if (referrer_url.has_value()) {
+        auto serialized_referrer_url = referrer_url.value().serialize();
+        if (serialized_referrer_url.bytes().size() > 4096)
+            referrer_url = referrer_origin;
+    }
 
     // 7. The user agent MAY alter referrerURL or referrerOrigin at this point to enforce arbitrary policy
     //    considerations in the interests of minimizing data leakage. For example, the user agent could strip the URL

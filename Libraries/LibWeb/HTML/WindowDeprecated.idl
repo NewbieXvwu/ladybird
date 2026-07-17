@@ -1,0 +1,7 @@
+// https://html.spec.whatwg.org/multipage/obsolete.html#external
+partial interface Window {
+    undefined captureEvents();
+    undefined releaseEvents();
+
+    [Replaceable, SameObject] readonly attribute External external;
+};

@@ -5,13 +5,15 @@
  */
 
 #include <AK/QuickSort.h>
-#include <LibWeb/Bindings/IntersectionObserverPrototype.h>
+#include <AK/Utf16StringBuilder.h>
+#include <LibWeb/Bindings/IntersectionObserver.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/HTML/BrowsingContext.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/IntersectionObserver/IntersectionObserver.h>
 #include <LibWeb/Layout/Viewport.h>
@@ -22,7 +24,7 @@ namespace Web::IntersectionObserver {
 GC_DEFINE_ALLOCATOR(IntersectionObserver);
 
 // https://w3c.github.io/IntersectionObserver/#dom-intersectionobserver-intersectionobserver
-WebIDL::ExceptionOr<GC::Ref<IntersectionObserver>> IntersectionObserver::construct_impl(JS::Realm& realm, GC::Ptr<WebIDL::CallbackType> callback, IntersectionObserverInit const& options)
+WebIDL::ExceptionOr<GC::Ref<IntersectionObserver>> IntersectionObserver::construct_impl(JS::Realm& realm, GC::Ptr<WebIDL::CallbackType> callback, Bindings::IntersectionObserverInit const& options)
 {
     // https://w3c.github.io/IntersectionObserver/#initialize-a-new-intersectionobserver
     // 1. Let this be a new IntersectionObserver object
@@ -53,7 +55,7 @@ WebIDL::ExceptionOr<GC::Ref<IntersectionObserver>> IntersectionObserver::constru
     // 6. If any value in thresholds is less than 0.0 or greater than 1.0, throw a RangeError exception.
     for (auto value : thresholds) {
         if (value < 0.0 || value > 1.0)
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "Threshold values must be between 0.0 and 1.0 inclusive"sv };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "Threshold values must be between 0.0 and 1.0 inclusive"_utf16 };
     }
 
     // 7. Sort thresholds in ascending order.
@@ -83,7 +85,7 @@ WebIDL::ExceptionOr<GC::Ref<IntersectionObserver>> IntersectionObserver::constru
     return realm.create<IntersectionObserver>(realm, callback, options.root, move(root_margin.value()), move(scroll_margin.value()), move(thresholds), move(delay), move(options.track_visibility));
 }
 
-IntersectionObserver::IntersectionObserver(JS::Realm& realm, GC::Ptr<WebIDL::CallbackType> callback, Optional<Variant<GC::Root<DOM::Element>, GC::Root<DOM::Document>>> const& root, Vector<CSS::LengthPercentage> root_margin, Vector<CSS::LengthPercentage> scroll_margin, Vector<double>&& thresholds, double delay, bool track_visibility)
+IntersectionObserver::IntersectionObserver(JS::Realm& realm, GC::Ptr<WebIDL::CallbackType> callback, IntersectionObserverRoot const& root, Vector<CSS::LengthPercentage> root_margin, Vector<CSS::LengthPercentage> scroll_margin, Vector<double>&& thresholds, double delay, bool track_visibility)
     : PlatformObject(realm)
     , m_callback(callback)
     , m_root_margin(root_margin)
@@ -92,7 +94,7 @@ IntersectionObserver::IntersectionObserver(JS::Realm& realm, GC::Ptr<WebIDL::Cal
     , m_delay(delay)
     , m_track_visibility(track_visibility)
 {
-    m_root = root.has_value() ? root->visit([](auto& value) -> GC::Ptr<DOM::Node> { return *value; }) : nullptr;
+    m_root = root.has<Empty>() ? nullptr : root.visit([](GC::Ref<DOM::Element> const& value) -> GC::Ptr<DOM::Node> { return value; }, [](GC::Ref<DOM::Document> const& value) -> GC::Ptr<DOM::Node> { return value; }, [](Empty) -> GC::Ptr<DOM::Node> { return nullptr; });
     intersection_root().visit([this](auto& node) {
         m_document = node->document();
     });
@@ -103,6 +105,7 @@ IntersectionObserver::~IntersectionObserver() = default;
 
 void IntersectionObserver::finalize()
 {
+    Base::finalize();
     if (m_document)
         m_document->unregister_intersection_observer({}, *this);
 }
@@ -119,7 +122,8 @@ void IntersectionObserver::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_root);
     visitor.visit(m_callback);
     visitor.visit(m_queued_entries);
-    visitor.visit(m_observation_targets);
+    for (auto& observed_target : m_observation_targets)
+        visitor.visit(observed_target.target);
 }
 
 // https://w3c.github.io/IntersectionObserver/#dom-intersectionobserver-observe
@@ -128,23 +132,32 @@ void IntersectionObserver::observe(DOM::Element& target)
     // Run the observe a target Element algorithm, providing this and target.
     // https://www.w3.org/TR/intersection-observer/#observe-a-target-element
     // 1. If target is in observer’s internal [[ObservationTargets]] slot, return.
-    if (m_observation_targets.contains_slow(GC::Ref { target }))
+    auto observed_target = m_observation_targets.find_if([&target](auto const& entry) {
+        return entry.target.ptr() == &target;
+    });
+    if (!observed_target.is_end())
         return;
 
     // 2. Let intersectionObserverRegistration be an IntersectionObserverRegistration record with an observer
     //    property set to observer, a previousThresholdIndex property set to -1, and a previousIsIntersecting
     //    property set to false.
-    auto intersection_observer_registration = IntersectionObserverRegistration {
-        .observer = *this,
-        .previous_threshold_index = OptionalNone {},
-        .previous_is_intersecting = false,
-    };
+    // NB: This implementation deviates from the spec's storage model. target's
+    //     [[RegisteredIntersectionObservers]] only keeps a strong reference to the observer for lifetime
+    //     management, while the mutable registration fields live in the observer-side observation target below.
+    target.register_intersection_observer({}, *this);
 
     // 3. Append intersectionObserverRegistration to target’s internal [[RegisteredIntersectionObservers]] slot.
-    target.register_intersection_observer({}, move(intersection_observer_registration));
-
+    // NB: Keeping previousThresholdIndex and previousIsIntersecting on the observer-side observation target lets
+    //     the update loop read and write them without a second lookup through target’s registered observers.
+    //
     // 4. Add target to observer’s internal [[ObservationTargets]] slot.
-    m_observation_targets.append(target);
+    m_observation_targets.append(ObservationTarget {
+        .target = target,
+        .previous_threshold_index = OptionalNone {},
+        .previous_is_intersecting = false,
+    });
+
+    m_document->page().client().request_frame();
 }
 
 // https://w3c.github.io/IntersectionObserver/#dom-intersectionobserver-unobserve
@@ -156,8 +169,8 @@ void IntersectionObserver::unobserve(DOM::Element& target)
     target.unregister_intersection_observer({}, *this);
 
     // 2. Remove target from this’s internal [[ObservationTargets]] slot, if present
-    m_observation_targets.remove_first_matching([&target](GC::Ref<DOM::Element> const& entry) {
-        return entry.ptr() == &target;
+    m_observation_targets.remove_first_matching([&target](ObservationTarget const& entry) {
+        return entry.target.ptr() == &target;
     });
 }
 
@@ -168,8 +181,8 @@ void IntersectionObserver::disconnect()
     // 1. Remove the IntersectionObserverRegistration record whose observer property is equal to this from target’s internal
     //    [[RegisteredIntersectionObservers]] slot.
     // 2. Remove target from this’s internal [[ObservationTargets]] slot.
-    for (auto& target : m_observation_targets) {
-        target->unregister_intersection_observer({}, *this);
+    for (auto& observed_target : m_observation_targets) {
+        observed_target.target->unregister_intersection_observer({}, *this);
     }
     m_observation_targets.clear();
 }
@@ -189,70 +202,77 @@ Vector<GC::Root<IntersectionObserverEntry>> IntersectionObserver::take_records()
     return queue;
 }
 
-Variant<GC::Root<DOM::Element>, GC::Root<DOM::Document>, Empty> IntersectionObserver::root() const
+NullableIntersectionObserverRoot IntersectionObserver::root() const
 {
     if (!m_root)
         return Empty {};
     if (m_root->is_element())
-        return GC::make_root(static_cast<DOM::Element&>(*m_root));
+        return GC::Ref { static_cast<DOM::Element&>(*m_root) };
     if (m_root->is_document())
-        return GC::make_root(static_cast<DOM::Document&>(*m_root));
+        return GC::Ref { static_cast<DOM::Document&>(*m_root) };
     VERIFY_NOT_REACHED();
 }
 
+static void append_margin_value(Utf16StringBuilder& builder, CSS::LengthPercentage const& value)
+{
+    auto serialized = value.to_string(CSS::SerializationMode::ResolvedValue);
+    builder.append_ascii(serialized.bytes_as_string_view());
+}
+
 // https://w3c.github.io/IntersectionObserver/#dom-intersectionobserver-rootmargin
-String IntersectionObserver::root_margin() const
+Utf16String IntersectionObserver::root_margin() const
 {
     // On getting, return the result of serializing the elements of [[rootMargin]] space-separated, where pixel
     // lengths serialize as the numeric value followed by "px", and percentages serialize as the numeric value
     // followed by "%". Note that this is not guaranteed to be identical to the options.rootMargin passed to the
     // IntersectionObserver constructor. If no rootMargin was passed to the IntersectionObserver
     // constructor, the value of this attribute is "0px 0px 0px 0px".
-    StringBuilder builder;
-    builder.append(m_root_margin[0].to_string(CSS::SerializationMode::ResolvedValue));
-    builder.append(' ');
-    builder.append(m_root_margin[1].to_string(CSS::SerializationMode::ResolvedValue));
-    builder.append(' ');
-    builder.append(m_root_margin[2].to_string(CSS::SerializationMode::ResolvedValue));
-    builder.append(' ');
-    builder.append(m_root_margin[3].to_string(CSS::SerializationMode::ResolvedValue));
-    return builder.to_string().value();
+    Utf16StringBuilder builder;
+    append_margin_value(builder, m_root_margin[0]);
+    builder.append_ascii(' ');
+    append_margin_value(builder, m_root_margin[1]);
+    builder.append_ascii(' ');
+    append_margin_value(builder, m_root_margin[2]);
+    builder.append_ascii(' ');
+    append_margin_value(builder, m_root_margin[3]);
+    return builder.to_string();
 }
 
 // https://w3c.github.io/IntersectionObserver/#dom-intersectionobserver-scrollmargin
-String IntersectionObserver::scroll_margin() const
+Utf16String IntersectionObserver::scroll_margin() const
 {
     // On getting, return the result of serializing the elements of [[scrollMargin]] space-separated, where pixel
     // lengths serialize as the numeric value followed by "px", and percentages serialize as the numeric value
     // followed by "%". Note that this is not guaranteed to be identical to the options.scrollMargin passed to the
     // IntersectionObserver constructor. If no scrollMargin was passed to the IntersectionObserver
     // constructor, the value of this attribute is "0px 0px 0px 0px".
-    StringBuilder builder;
-    builder.append(m_scroll_margin[0].to_string(CSS::SerializationMode::ResolvedValue));
-    builder.append(' ');
-    builder.append(m_scroll_margin[1].to_string(CSS::SerializationMode::ResolvedValue));
-    builder.append(' ');
-    builder.append(m_scroll_margin[2].to_string(CSS::SerializationMode::ResolvedValue));
-    builder.append(' ');
-    builder.append(m_scroll_margin[3].to_string(CSS::SerializationMode::ResolvedValue));
-    return builder.to_string().value();
+    Utf16StringBuilder builder;
+    append_margin_value(builder, m_scroll_margin[0]);
+    builder.append_ascii(' ');
+    append_margin_value(builder, m_scroll_margin[1]);
+    builder.append_ascii(' ');
+    append_margin_value(builder, m_scroll_margin[2]);
+    builder.append_ascii(' ');
+    append_margin_value(builder, m_scroll_margin[3]);
+    return builder.to_string();
 }
 
 // https://www.w3.org/TR/intersection-observer/#intersectionobserver-intersection-root
-Variant<GC::Root<DOM::Element>, GC::Root<DOM::Document>> IntersectionObserver::intersection_root() const
+Variant<GC::Ref<DOM::Element>, GC::Ref<DOM::Document>> IntersectionObserver::intersection_root() const
 {
-    // The intersection root for an IntersectionObserver is the value of its root attribute
-    // if the attribute is non-null;
-    if (m_root) {
-        if (m_root->is_element())
-            return GC::make_root(static_cast<DOM::Element&>(*m_root));
-        if (m_root->is_document())
-            return GC::make_root(static_cast<DOM::Document&>(*m_root));
-        VERIFY_NOT_REACHED();
-    }
+    auto root_node = intersection_root_node();
+    if (root_node->is_element())
+        return GC::Ref { static_cast<DOM::Element&>(*root_node) };
+    return GC::Ref { static_cast<DOM::Document&>(*root_node) };
+}
 
-    // otherwise, it is the top-level browsing context’s document node, referred to as the implicit root.
-    return GC::make_root(as<HTML::Window>(HTML::relevant_global_object(*this)).page().top_level_browsing_context().active_document());
+GC::Ref<DOM::Node> IntersectionObserver::intersection_root_node() const
+{
+    if (m_root)
+        return *m_root;
+
+    // The implicit root is the top-level browsing context’s document node.
+    return *as<HTML::Window>(HTML::relevant_global_object(*this)).page().top_level_browsing_context().active_document();
 }
 
 // https://www.w3.org/TR/intersection-observer/#intersectionobserver-root-intersection-rectangle
@@ -263,28 +283,35 @@ CSSPixelRect IntersectionObserver::root_intersection_rectangle() const
     auto intersection_root = this->intersection_root();
 
     CSSPixelRect rect;
+    bool intersection_root_is_scrollable = false;
 
     // If the intersection root is a document,
     //    it’s the size of the document's viewport (note that this processing step can only be reached if the document is fully active).
-    if (intersection_root.has<GC::Root<DOM::Document>>()) {
-        auto document = intersection_root.get<GC::Root<DOM::Document>>();
+    if (intersection_root.has<GC::Ref<DOM::Document>>()) {
+        auto document = intersection_root.get<GC::Ref<DOM::Document>>();
 
         // Since the spec says that this is only reach if the document is fully active, that means it must have a navigable.
         VERIFY(document->navigable());
 
-        // NOTE: This rect is the *size* of the viewport. The viewport *offset* is not relevant,
-        //       as intersections are computed using viewport-relative element rects.
-        rect = CSSPixelRect { CSSPixelPoint { 0, 0 }, document->viewport_rect().size() };
+        // NOTE: This rect is in the same layout viewport coordinate space as
+        //       Element::getBoundingClientRect().
+        rect = CSSPixelRect {
+            CSSPixelPoint { 0, 0 },
+            document->viewport_rect().size(),
+        };
+        intersection_root_is_scrollable = true;
     } else {
-        VERIFY(intersection_root.has<GC::Root<DOM::Element>>());
-        auto element = intersection_root.get<GC::Root<DOM::Element>>();
+        VERIFY(intersection_root.has<GC::Ref<DOM::Element>>());
+        auto element = intersection_root.get<GC::Ref<DOM::Element>>();
 
         // FIXME: Otherwise, if the intersection root has a content clip,
         //          it’s the element’s content area.
 
         // Otherwise,
         //    it’s the result of getting the bounding box for the intersection root.
-        rect = element->get_bounding_client_rect();
+        rect = element->bounding_client_rect_assuming_layout_clean();
+        if (auto paintable_box = element->paintable_box())
+            intersection_root_is_scrollable = paintable_box->layout_node().is_scroll_container();
     }
 
     // When calculating the root intersection rectangle for a same-origin-domain target, the rectangle is then
@@ -293,19 +320,30 @@ CSSPixelRect IntersectionObserver::root_intersection_rectangle() const
     // edges, respectively, are offset by, with positive lengths indicating an outward offset. Percentages
     // are resolved relative to the width of the undilated rectangle.
     DOM::Document* document = { nullptr };
-    if (intersection_root.has<GC::Root<DOM::Document>>()) {
-        document = intersection_root.get<GC::Root<DOM::Document>>().cell();
+    if (intersection_root.has<GC::Ref<DOM::Document>>()) {
+        document = intersection_root.get<GC::Ref<DOM::Document>>().ptr();
     } else {
-        document = &intersection_root.get<GC::Root<DOM::Element>>().cell()->document();
+        document = &intersection_root.get<GC::Ref<DOM::Element>>()->document();
     }
-    if (m_document.has_value() && document->origin().is_same_origin(m_document->origin())) {
-        if (auto layout_node = intersection_root.visit([&](auto& node) -> GC::Ptr<Layout::Node> { return node->layout_node(); })) {
-            rect.inflate(
-                m_root_margin[0].to_px(*layout_node, rect.height()),
-                m_root_margin[1].to_px(*layout_node, rect.width()),
-                m_root_margin[2].to_px(*layout_node, rect.height()),
-                m_root_margin[3].to_px(*layout_node, rect.width()));
+    if (m_document && document->origin().is_same_origin(m_document->origin())) {
+        auto const undilated_width = rect.width();
+        CSSPixels top = m_root_margin[0].to_px(rect.height());
+        CSSPixels right = m_root_margin[1].to_px(undilated_width);
+        CSSPixels bottom = m_root_margin[2].to_px(rect.height());
+        CSSPixels left = m_root_margin[3].to_px(undilated_width);
+
+        // https://w3c.github.io/IntersectionObserver/#scrollmargin
+        // NOTE: scrollMargin affects the clipping of target by all scrollable ancestors up to and including the
+        //       intersection root. Both the scrollMargin and the rootMargin are applied to a scrollable intersection
+        //       root's rectangle.
+        if (intersection_root_is_scrollable) {
+            top += m_scroll_margin[0].to_px(undilated_width);
+            right += m_scroll_margin[1].to_px(undilated_width);
+            bottom += m_scroll_margin[2].to_px(undilated_width);
+            left += m_scroll_margin[3].to_px(undilated_width);
         }
+
+        rect.inflate(top, right, bottom, left);
     }
 
     return rect;
@@ -317,7 +355,7 @@ void IntersectionObserver::queue_entry(Badge<DOM::Document>, GC::Ref<Intersectio
 }
 
 // https://w3c.github.io/IntersectionObserver/#parse-a-margin
-Optional<Vector<CSS::LengthPercentage>> IntersectionObserver::parse_a_margin(JS::Realm& realm, String margin_string)
+Optional<Vector<CSS::LengthPercentage>> IntersectionObserver::parse_a_margin(JS::Realm& realm, Utf16View margin_string)
 {
     // 1. Parse a list of component values marginString, storing the result as tokens.
     auto tokens = CSS::Parser::Parser::create(CSS::Parser::ParsingParams { realm }, margin_string).parse_as_list_of_component_values();
@@ -332,7 +370,7 @@ Optional<Vector<CSS::LengthPercentage>> IntersectionObserver::parse_a_margin(JS:
 
     // 4. If there are zero elements in tokens, set tokens to ["0px"].
     if (tokens.size() == 0) {
-        tokens.append(CSS::Parser::Token::create_dimension(0, "px"_fly_string));
+        tokens.append(CSS::Parser::Token::create_dimension(0, "px"_utf16_fly_string));
     }
 
     // 5. Replace each token in tokens:
@@ -342,15 +380,15 @@ Optional<Vector<CSS::LengthPercentage>> IntersectionObserver::parse_a_margin(JS:
     for (auto const& token : tokens) {
         // If token is an absolute length dimension token, replace it with a an equivalent pixel length.
         if (token.is(CSS::Parser::Token::Type::Dimension)) {
-            auto length = CSS::Length(token.token().dimension_value(), CSS::string_to_length_unit(token.token().dimension_unit()).value());
-            if (length.is_absolute()) {
-                length.absolute_length_to_px();
-                tokens_length_percentage.append(length);
-                continue;
+            if (auto length_unit = CSS::string_to_length_unit(token.token().dimension_unit()); length_unit.has_value()) {
+                if (auto length = CSS::Length(token.token().dimension_value(), length_unit.release_value()); length.is_absolute()) {
+                    tokens_length_percentage.append(length);
+                    continue;
+                }
             }
         }
         // If token is a <percentage> token, replace it with an equivalent percentage.
-        if (token.is(CSS::Parser::Token::Type::Percentage)) {
+        else if (token.is(CSS::Parser::Token::Type::Percentage)) {
             tokens_length_percentage.append(CSS::Percentage(token.token().percentage()));
             continue;
         }

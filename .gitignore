@@ -11,6 +11,7 @@
 *.autosave
 build*/
 Build*/
+target/
 Toolchain/Tarballs
 Toolchain/Build
 Toolchain/Local
@@ -20,7 +21,6 @@ Toolchain/Local
 compile_commands.json
 .cache
 .clang_complete
-.clangd
 .idea/
 cmake-build-debug/
 output/
@@ -47,6 +47,9 @@ Libraries/LibWasm/Tests/Spec
 Tests/LibWeb/WPT/wpt
 Tests/LibWeb/WPT/metadata
 Tests/LibWeb/WPT/MANIFEST.json
+
+test-dumps
+*.log
 
 # HTTP Test server artifacts from ./Tests/LibWeb/Fixtures/http-test-server.py
 http-test-server.pid.txt

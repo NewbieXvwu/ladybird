@@ -16,10 +16,6 @@ class SVGViewElement final : public SVGGraphicsElement
     WEB_PLATFORM_OBJECT(SVGViewElement, SVGGraphicsElement);
     GC_DECLARE_ALLOCATOR(SVGViewElement);
 
-public:
-    virtual bool is_presentational_hint(FlyString const&) const override;
-    virtual void apply_presentational_hints(GC::Ref<CSS::CascadedProperties>) const override;
-
 private:
     SVGViewElement(DOM::Document&, DOM::QualifiedName);
 
@@ -28,7 +24,7 @@ private:
 
     virtual bool is_svg_view_element() const override { return true; }
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 };
 
 }

@@ -11,8 +11,10 @@
 #include <LibJS/Runtime/PropertyDescriptor.h>
 #include <LibJS/Runtime/PropertyKey.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/HTML/CrossOrigin/AbstractOperations.h>
 #include <LibWeb/HTML/CrossOrigin/Reporting.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowProxy.h>
@@ -24,7 +26,7 @@ GC_DEFINE_ALLOCATOR(WindowProxy);
 
 // 7.4 The WindowProxy exotic object, https://html.spec.whatwg.org/multipage/window-object.html#the-windowproxy-exotic-object
 WindowProxy::WindowProxy(JS::Realm& realm)
-    : JS::Object(realm, nullptr, MayInterfereWithIndexedPropertyAccess::Yes)
+    : DOM::EventTarget(realm, MayInterfereWithIndexedPropertyAccess::Yes)
 {
 }
 
@@ -117,9 +119,11 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> WindowProxy::internal_ge
 
     // 6. If property is undefined and P is in W's document-tree child navigable target name property set, then:
     auto navigable_property_set = m_window->document_tree_child_navigable_target_name_property_set();
-    auto property_key_string = property_key.to_string().to_utf8_but_should_be_ported_to_utf16();
+    if (property_key.is_string()) {
+        auto navigable = navigable_property_set.get(property_key.as_string());
+        if (!navigable.has_value())
+            return TRY(cross_origin_property_fallback(vm, property_key));
 
-    if (auto navigable = navigable_property_set.get(property_key_string); navigable.has_value()) {
         // 1. Let value be the active WindowProxy of the named object of W with the name P.
         auto value = navigable.value()->active_window_proxy();
 
@@ -133,7 +137,7 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> WindowProxy::internal_ge
 }
 
 // 7.4.6 [[DefineOwnProperty]] ( P, Desc ), https://html.spec.whatwg.org/multipage/window-object.html#windowproxy-defineownproperty
-JS::ThrowCompletionOr<bool> WindowProxy::internal_define_own_property(JS::PropertyKey const& property_key, JS::PropertyDescriptor const& descriptor, Optional<JS::PropertyDescriptor>*)
+JS::ThrowCompletionOr<bool> WindowProxy::internal_define_own_property(JS::PropertyKey const& property_key, JS::PropertyDescriptor& descriptor, Optional<JS::PropertyDescriptor>*)
 {
     // 1. Let W be the value of the [[Window]] internal slot of this.
 
@@ -154,14 +158,14 @@ JS::ThrowCompletionOr<bool> WindowProxy::internal_define_own_property(JS::Proper
 
 // 7.4.7 [[Get]] ( P, Receiver ), https://html.spec.whatwg.org/multipage/nav-history-apis.html#windowproxy-get
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#windowproxy-get
-JS::ThrowCompletionOr<JS::Value> WindowProxy::internal_get(JS::PropertyKey const& property_key, JS::Value receiver, JS::CacheablePropertyMetadata*, PropertyLookupPhase) const
+JS::ThrowCompletionOr<JS::Value> WindowProxy::internal_get(JS::PropertyKey const& property_key, JS::Value receiver, JS::CacheableGetPropertyMetadata*, PropertyLookupPhase) const
 {
     auto& vm = this->vm();
 
     // 1. Let W be the value of the [[Window]] internal slot of this.
 
-    // 2. Check if an access between two browsing contexts should be reported, given the current principal global object's browsing context, W's browsing context, P, and the current principal settings object.
-    check_if_access_between_two_browsing_contexts_should_be_reported(as<Window>(current_principal_global_object()).browsing_context(), m_window->browsing_context(), property_key, current_principal_settings_object());
+    // 2. Check if an access between two browsing contexts should be reported, given the current global object's browsing context, W's browsing context, P, and the current settings object.
+    check_if_access_between_two_browsing_contexts_should_be_reported(as<Window>(current_global_object()).browsing_context(), m_window->browsing_context(), property_key, current_settings_object());
 
     // 3. If IsPlatformObjectSameOrigin(W) is true, then return ? OrdinaryGet(this, P, Receiver).
     // NOTE: this is passed rather than W as OrdinaryGet and CrossOriginGet will invoke the [[GetOwnProperty]] internal method.
@@ -175,14 +179,14 @@ JS::ThrowCompletionOr<JS::Value> WindowProxy::internal_get(JS::PropertyKey const
 
 // 7.4.8 [[Set]] ( P, V, Receiver ), https://html.spec.whatwg.org/multipage/nav-history-apis.html#windowproxy-set
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#windowproxy-set
-JS::ThrowCompletionOr<bool> WindowProxy::internal_set(JS::PropertyKey const& property_key, JS::Value value, JS::Value receiver, JS::CacheablePropertyMetadata*, PropertyLookupPhase)
+JS::ThrowCompletionOr<bool> WindowProxy::internal_set(JS::PropertyKey const& property_key, JS::Value value, JS::Value receiver, JS::CacheableSetPropertyMetadata*, PropertyLookupPhase)
 {
     auto& vm = this->vm();
 
     // 1. Let W be the value of the [[Window]] internal slot of this.
 
-    // 2. Check if an access between two browsing contexts should be reported, given the current principal global object's browsing context, W's browsing context, P, and the current principal settings object.
-    check_if_access_between_two_browsing_contexts_should_be_reported(as<Window>(current_principal_global_object()).browsing_context(), m_window->browsing_context(), property_key, current_principal_settings_object());
+    // 2. Check if an access between two browsing contexts should be reported, given the current global object's browsing context, W's browsing context, P, and the current settings object.
+    check_if_access_between_two_browsing_contexts_should_be_reported(as<Window>(current_global_object()).browsing_context(), m_window->browsing_context(), property_key, current_settings_object());
 
     // 3. If IsPlatformObjectSameOrigin(W) is true, then:
     if (is_platform_object_same_origin(*m_window)) {
@@ -236,7 +240,7 @@ JS::ThrowCompletionOr<GC::RootVector<JS::Value>> WindowProxy::internal_own_prope
     // 1. Let W be the value of the [[Window]] internal slot of this.
 
     // 2. Let keys be a new empty List.
-    auto keys = GC::RootVector<JS::Value> { vm.heap() };
+    GC::RootVector<JS::Value> keys;
 
     // 3. Let maxProperties be W's associated Document's document-tree child navigables's size.
     auto max_properties = m_window->associated_document().document_tree_child_navigables().size();
@@ -245,7 +249,7 @@ JS::ThrowCompletionOr<GC::RootVector<JS::Value>> WindowProxy::internal_own_prope
     // 5. Repeat while index < maxProperties,
     for (size_t i = 0; i < max_properties; ++i) {
         // 1. Add ! ToString(index) as the last element of keys.
-        keys.append(JS::PrimitiveString::create(vm, ByteString::number(i)));
+        keys.append(JS::PrimitiveString::create_from_unsigned_integer(vm, i));
 
         // 2. Increment index by 1.
     }

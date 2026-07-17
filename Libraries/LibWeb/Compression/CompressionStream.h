@@ -12,7 +12,7 @@
 #include <LibCompress/Forward.h>
 #include <LibGC/Ptr.h>
 #include <LibJS/Forward.h>
-#include <LibWeb/Bindings/CompressionStreamPrototype.h>
+#include <LibWeb/Bindings/CompressionStream.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Streams/GenericTransformStream.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -20,6 +20,7 @@
 namespace Web::Compression {
 
 using Compressor = Variant<
+    NonnullOwnPtr<Compress::BrotliCompressor>,
     NonnullOwnPtr<Compress::ZlibCompressor>,
     NonnullOwnPtr<Compress::DeflateCompressor>,
     NonnullOwnPtr<Compress::GzipCompressor>>;

@@ -6,7 +6,7 @@
 
 #include <LibJS/Runtime/ValueInlines.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
-#include <LibWeb/Bindings/HTMLOptionElementPrototype.h>
+#include <LibWeb/Bindings/HTMLOptionElement.h>
 #include <LibWeb/Bindings/OptionConstructor.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/Text.h>
@@ -14,6 +14,7 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Namespace.h>
+#include <LibWeb/WebIDL/AbstractOperations.h>
 
 namespace Web::Bindings {
 
@@ -30,8 +31,8 @@ void OptionConstructor::initialize(JS::Realm& realm)
     Base::initialize(realm);
 
     define_direct_property(vm.names.length, JS::Value(0), JS::Attribute::Configurable);
-    define_direct_property(vm.names.name, JS::PrimitiveString::create(vm, "Option"_string), JS::Attribute::Configurable);
-    define_direct_property(vm.names.prototype, &ensure_web_prototype<Bindings::HTMLOptionElementPrototype>(realm, "HTMLOptionElement"_fly_string), 0);
+    define_direct_property(vm.names.name, JS::PrimitiveString::create(vm, "Option"_utf16_fly_string), JS::Attribute::Configurable);
+    define_direct_property(vm.names.prototype, &ensure_web_prototype<Bindings::HTMLOptionElementPrototype>(realm, "HTMLOptionElement"_utf16_fly_string), 0);
 }
 
 JS::ThrowCompletionOr<JS::Value> OptionConstructor::call()
@@ -40,8 +41,8 @@ JS::ThrowCompletionOr<JS::Value> OptionConstructor::call()
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-option
-// https://whatpr.org/html/9893/form-elements.html#dom-option
-JS::ThrowCompletionOr<GC::Ref<JS::Object>> OptionConstructor::construct(FunctionObject&)
+// https://webidl.spec.whatwg.org/#legacy-factory-functions
+JS::ThrowCompletionOr<GC::Ref<JS::Object>> OptionConstructor::construct(FunctionObject& new_target)
 {
     auto& vm = this->vm();
     auto& realm = *vm.current_realm();
@@ -51,13 +52,16 @@ JS::ThrowCompletionOr<GC::Ref<JS::Object>> OptionConstructor::construct(Function
     if (text_value.is_undefined())
         text_value = &vm.empty_string();
 
-    // 1. Let document be the current principal global object's associated Document.
-    auto& window = as<HTML::Window>(HTML::current_principal_global_object());
+    // 1. Let document be the current global object's associated Document.
+    auto& window = as<HTML::Window>(HTML::current_global_object());
     auto& document = window.associated_document();
 
     // 2. Let option be the result of creating an element given document, "option", and the HTML namespace.
     auto element = TRY(Bindings::throw_dom_exception_if_needed(vm, [&]() { return DOM::create_element(document, HTML::TagNames::option, Namespace::HTML); }));
     GC::Ref<HTML::HTMLOptionElement> option_element = as<HTML::HTMLOptionElement>(*element);
+
+    // https://webidl.spec.whatwg.org/#internally-create-a-new-object-implementing-the-interface
+    TRY(WebIDL::set_prototype_from_new_target<HTMLOptionElementPrototype>(vm, new_target, "HTMLOptionElement"_utf16_fly_string, *option_element));
 
     // 3. If text is not the empty string, then append to option a new Text node whose data is text.
     auto text = TRY(text_value.to_utf16_string(vm));
@@ -68,15 +72,15 @@ JS::ThrowCompletionOr<GC::Ref<JS::Object>> OptionConstructor::construct(Function
 
     // 4. If value is given, then set an attribute value for option using "value" and value.
     if (!vm.argument(1).is_undefined()) {
-        auto value = TRY(vm.argument(1).to_string(vm));
-        MUST(option_element->set_attribute(HTML::AttributeNames::value, value));
+        auto value = TRY(vm.argument(1).to_utf16_string(vm));
+        option_element->set_attribute_value(HTML::AttributeNames::value, value);
     }
 
     // 5. If defaultSelected is true, then set an attribute value for option using "selected" and the empty string.
     if (vm.argument_count() > 2) {
         auto default_selected = vm.argument(2).to_boolean();
         if (default_selected) {
-            MUST(option_element->set_attribute(HTML::AttributeNames::selected, String {}));
+            option_element->set_attribute_value(HTML::AttributeNames::selected, Utf16String {});
         }
     }
 

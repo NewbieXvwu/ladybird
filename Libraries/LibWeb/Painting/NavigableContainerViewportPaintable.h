@@ -7,22 +7,20 @@
 #pragma once
 
 #include <LibWeb/Layout/NavigableContainerViewport.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 
 namespace Web::Painting {
 
-class NavigableContainerViewportPaintable final : public PaintableBox {
-    GC_CELL(NavigableContainerViewportPaintable, PaintableBox);
-    GC_DECLARE_ALLOCATOR(NavigableContainerViewportPaintable);
-
+class NavigableContainerViewportPaintable final : public Paintable {
 public:
     virtual bool is_navigable_container_viewport_paintable() const override { return true; }
 
-    static GC::Ref<NavigableContainerViewportPaintable> create(Layout::NavigableContainerViewport const&);
+    static NonnullRefPtr<NavigableContainerViewportPaintable> create(Layout::NavigableContainerViewport const&);
+    virtual StringView class_name() const override { return "NavigableContainerViewportPaintable"sv; }
 
     virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
 
-    Layout::NavigableContainerViewport const& layout_box() const;
+    auto const& navigable_container() const { return as<HTML::NavigableContainer>(*dom_node()); }
 
 private:
     NavigableContainerViewportPaintable(Layout::NavigableContainerViewport const&);

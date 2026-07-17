@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Ladybird contributors
+ * Copyright (c) 2025-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -22,11 +22,13 @@ public:
 
     virtual bool equals(StyleValue const&) const override;
     virtual Optional<Color> to_color(ColorResolutionContext) const override;
-    virtual String to_string(SerializationMode) const override;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    virtual bool is_computationally_independent() const override { return false; }
 
 private:
     LightDarkStyleValue(ValueComparingNonnullRefPtr<StyleValue const> light, ValueComparingNonnullRefPtr<StyleValue const> dark)
-        : ColorStyleValue(ColorStyleValue::ColorType::LightDark, ColorSyntax::Modern)
+        : ColorStyleValue({}, ColorSyntax::Modern)
         , m_properties { .light = move(light), .dark = move(dark) }
     {
     }

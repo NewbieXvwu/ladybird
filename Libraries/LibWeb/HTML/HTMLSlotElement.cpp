@@ -6,9 +6,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLSlotElementPrototype.h>
+#include <LibWeb/Bindings/HTMLSlotElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/HTML/HTMLSlotElement.h>
 
@@ -33,13 +34,11 @@ void HTMLSlotElement::visit_edges(JS::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     Slot::visit_edges(visitor);
-
-    for (auto const& node : m_manually_assigned_nodes)
-        node.visit([&](auto const& slottable) { visitor.visit(slottable); });
+    visitor.visit(m_manually_assigned_nodes);
 }
 
 // https://html.spec.whatwg.org/multipage/scripting.html#dom-slot-assignednodes
-Vector<GC::Root<DOM::Node>> HTMLSlotElement::assigned_nodes(AssignedNodesOptions options) const
+Vector<GC::Root<DOM::Node>> HTMLSlotElement::assigned_nodes(Bindings::AssignedNodesOptions options) const
 {
     // 1. If options["flatten"] is false, then return this's assigned nodes.
     if (!options.flatten) {
@@ -69,7 +68,7 @@ Vector<GC::Root<DOM::Node>> HTMLSlotElement::assigned_nodes(AssignedNodesOptions
 }
 
 // https://html.spec.whatwg.org/multipage/scripting.html#dom-slot-assignedelements
-Vector<GC::Root<DOM::Element>> HTMLSlotElement::assigned_elements(AssignedNodesOptions options) const
+Vector<GC::Root<DOM::Element>> HTMLSlotElement::assigned_elements(Bindings::AssignedNodesOptions options) const
 {
     // 1. If options["flatten"] is false, then return this's assigned nodes, filtered to contain only Element nodes.
     if (!options.flatten) {
@@ -94,7 +93,7 @@ Vector<GC::Root<DOM::Element>> HTMLSlotElement::assigned_elements(AssignedNodesO
 }
 
 // https://html.spec.whatwg.org/multipage/scripting.html#dom-slot-assign
-void HTMLSlotElement::assign(Vector<SlottableHandle> nodes)
+void HTMLSlotElement::assign(GC::ConservativeVector<SlottableHandle> nodes)
 {
     // 1. For each node of this's manually assigned nodes, set node's manual slot assignment to null.
     for (auto& node : m_manually_assigned_nodes) {
@@ -133,7 +132,7 @@ void HTMLSlotElement::assign(Vector<SlottableHandle> nodes)
 }
 
 // https://dom.spec.whatwg.org/#ref-for-concept-element-attributes-change-ext
-void HTMLSlotElement::attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLSlotElement::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(local_name, old_value, value, namespace_);
 
@@ -144,12 +143,17 @@ void HTMLSlotElement::attribute_changed(FlyString const& local_name, Optional<St
             return;
 
         // 2. If value is null and oldValue is the empty string, then return.
-        if (!value.has_value() && old_value == String {})
+        if (!value.has_value() && old_value == Utf16String {})
             return;
 
         // 3. If value is the empty string and oldValue is null, then return.
-        if (value == String {} && !old_value.has_value())
+        if (value == Utf16String {} && !old_value.has_value())
             return;
+
+        // OPTIMIZATION: Update the slot registry before changing the name.
+        auto* shadow_root = as_if<DOM::ShadowRoot>(root());
+        if (shadow_root)
+            shadow_root->unregister_slot(*this);
 
         // 4. If value is null or the empty string, then set element’s name to the empty string.
         if (!value.has_value())
@@ -157,6 +161,10 @@ void HTMLSlotElement::attribute_changed(FlyString const& local_name, Optional<St
         // 5. Otherwise, set element’s name to value.
         else
             set_slot_name(*value);
+
+        // OPTIMIZATION: Register the slot with its new name.
+        if (shadow_root)
+            shadow_root->register_slot(*this);
 
         // 6. Run assign slottables for a tree with element’s root.
         DOM::assign_slottables_for_a_tree(root());

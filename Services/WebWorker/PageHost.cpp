@@ -6,8 +6,10 @@
 
 #include <LibJS/Runtime/VM.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
+#include <LibWeb/HTML/WorkerAgentTypes.h>
 #include <WebWorker/ConnectionFromClient.h>
 #include <WebWorker/PageHost.h>
+#include <WebWorker/WebWorkerCompositorHost.h>
 
 namespace WebWorker {
 
@@ -57,6 +59,16 @@ Web::DevicePixelRect PageHost::screen_rect() const
     return {};
 }
 
+double PageHost::zoom_level() const
+{
+    return 1.0;
+}
+
+double PageHost::device_pixel_ratio() const
+{
+    return 1.0;
+}
+
 double PageHost::device_pixels_per_css_pixel() const
 {
     return 1.0;
@@ -77,14 +89,66 @@ Web::CSS::PreferredMotion PageHost::preferred_motion() const
     return Web::CSS::PreferredMotion::Auto;
 }
 
-String PageHost::page_did_request_cookie(URL::URL const& url, Web::Cookie::Source source)
+HTTP::Cookie::VersionedCookie PageHost::page_did_request_cookie(URL::URL const& url, HTTP::Cookie::Source source)
 {
     return m_client.did_request_cookie(url, source);
+}
+
+void PageHost::page_did_store_hsts_policy(String const& domain, HTTP::HSTS::ParsedHSTSPolicy const& policy)
+{
+    m_client.async_did_store_hsts_policy(domain, policy);
+}
+
+bool PageHost::page_did_is_known_hsts_host(String const& domain)
+{
+    return m_client.did_is_known_hsts_host(domain);
+}
+
+void PageHost::page_did_report_worker_exception(Utf16String const& message, Utf16String const& filename, u32 lineno, u32 colno)
+{
+    m_client.async_did_report_worker_exception(message, filename, lineno, colno);
+}
+
+void PageHost::page_did_post_broadcast_channel_message(Web::HTML::BroadcastChannelMessage const& message)
+{
+    m_client.async_did_post_broadcast_channel_message(message);
 }
 
 void PageHost::request_file(Web::FileRequest request)
 {
     m_client.request_file(move(request));
+}
+
+Web::HTML::WorkerAgentId PageHost::start_worker_agent(Web::HTML::WorkerAgentStartRequest&& request)
+{
+    return m_client.start_worker_agent(move(request));
+}
+
+void PageHost::close_worker_agent(Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token)
+{
+    m_client.async_close_worker_agent(agent_id, owner_token);
+}
+
+void PageHost::ensure_compositor_host()
+{
+    if (m_compositor_host)
+        return;
+    m_compositor_host = create_web_worker_compositor_host(m_client);
+}
+
+void PageHost::compositor_process_lost()
+{
+    page().notify_all_webgl_contexts_lost();
+}
+
+void PageHost::did_finish_loading_worker_script(bool worker_is_secure_context)
+{
+    m_client.async_did_finish_loading_worker_script(worker_is_secure_context);
+}
+
+void PageHost::did_fail_loading_worker_script()
+{
+    m_client.async_did_fail_loading_worker_script();
 }
 
 PageHost::PageHost(ConnectionFromClient& client)

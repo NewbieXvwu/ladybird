@@ -11,6 +11,7 @@
 #include <AK/Function.h>
 #include <AK/Stream.h>
 #include <AK/Time.h>
+#include <LibCore/Export.h>
 #include <LibCore/Notifier.h>
 #include <LibCore/SocketAddress.h>
 
@@ -18,7 +19,7 @@ namespace Core {
 
 /// The Socket class is the base class for all concrete BSD-style socket
 /// classes. Sockets are non-seekable streams which can be read byte-wise.
-class Socket : public Stream {
+class CORE_API Socket : public Stream {
 public:
     enum class PreventSIGPIPE {
         No,
@@ -56,9 +57,19 @@ public:
     /// Conversely, set_notifications_enabled(true) will re-enable notifications.
     virtual void set_notifications_enabled(bool) { }
 
+    // Address family preference for resolve_host. Maps to AF_UNSPEC / AF_INET /
+    // AF_INET6 on POSIX. Useful for issuing parallel A and AAAA queries on
+    // separate sockets to work around stub-resolver bugs that drop one of the
+    // two queries when both are sent over the same socket.
+    enum class AddressFamily : u8 {
+        Unspecified, // AF_UNSPEC — both A and AAAA via one getaddrinfo call.
+        IPv4Only,    // AF_INET   — only A.
+        IPv6Only,    // AF_INET6  — only AAAA.
+    };
+
     // FIXME: This will need to be updated when IPv6 socket arrives. Perhaps a
     //        base class for all address types is appropriate.
-    static ErrorOr<Vector<Variant<IPv4Address, IPv6Address>>> resolve_host(ByteString const&, SocketType);
+    static ErrorOr<Vector<Variant<IPv4Address, IPv6Address>>> resolve_host(ByteString const&, SocketType, AddressFamily = AddressFamily::Unspecified);
 
     Function<void()> on_ready_to_read;
 
@@ -105,13 +116,11 @@ public:
     virtual ErrorOr<void> reconnect(SocketAddress const&) = 0;
 };
 
-class PosixSocketHelper {
+class CORE_API PosixSocketHelper {
     AK_MAKE_NONCOPYABLE(PosixSocketHelper);
 
 public:
-    template<typename T>
-    PosixSocketHelper(Badge<T>)
-    requires(IsBaseOf<Socket, T>)
+    PosixSocketHelper(Badge<Socket>)
     {
     }
 
@@ -155,7 +164,7 @@ private:
     RefPtr<Core::Notifier> m_notifier;
 };
 
-class TCPSocket final : public Socket {
+class CORE_API TCPSocket final : public Socket {
 public:
     static ErrorOr<NonnullOwnPtr<TCPSocket>> connect(ByteString const& host, u16 port);
     static ErrorOr<NonnullOwnPtr<TCPSocket>> connect(SocketAddress const& address);
@@ -219,7 +228,7 @@ private:
     PosixSocketHelper m_helper { Badge<TCPSocket> {} };
 };
 
-class UDPSocket final : public Socket {
+class CORE_API UDPSocket final : public Socket {
 public:
     static ErrorOr<NonnullOwnPtr<UDPSocket>> connect(ByteString const& host, u16 port, Optional<AK::Duration> timeout = {});
     static ErrorOr<NonnullOwnPtr<UDPSocket>> connect(SocketAddress const& address, Optional<AK::Duration> timeout = {});
@@ -280,7 +289,7 @@ private:
     PosixSocketHelper m_helper { Badge<UDPSocket> {} };
 };
 
-class LocalSocket final : public Socket {
+class CORE_API LocalSocket final : public Socket {
 public:
     static ErrorOr<NonnullOwnPtr<LocalSocket>> connect(ByteString const& path, PreventSIGPIPE = PreventSIGPIPE::Yes);
     static ErrorOr<NonnullOwnPtr<LocalSocket>> adopt_fd(int fd, PreventSIGPIPE = PreventSIGPIPE::Yes);
@@ -322,7 +331,7 @@ public:
     ErrorOr<void> send_fd(int fd);
 
     ErrorOr<Bytes> receive_message(Bytes buffer, int flags, Vector<int>& fds);
-    ErrorOr<ssize_t> send_message(ReadonlyBytes msg, int flags, Vector<int, 1> fds = {});
+    ErrorOr<size_t> send_message(ReadonlyBytes msg, int flags, Vector<int, 1> fds = {});
 
     ErrorOr<pid_t> peer_pid() const;
     ErrorOr<Bytes> read_without_waiting(Bytes buffer);
@@ -338,7 +347,7 @@ public:
 
     virtual ~LocalSocket() { close(); }
 
-    static size_t const MAX_TRANSFER_FDS;
+    static constexpr size_t MAX_TRANSFER_FDS = 128;
 
 private:
     explicit LocalSocket(PreventSIGPIPE prevent_sigpipe = PreventSIGPIPE::Yes)

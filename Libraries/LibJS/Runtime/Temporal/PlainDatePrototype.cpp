@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2021, Idan Horowitz <idan.horowitz@serenityos.org>
  * Copyright (c) 2021-2023, Linus Groh <linusg@serenityos.org>
- * Copyright (c) 2024-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2024-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -36,7 +36,7 @@ void PlainDatePrototype::initialize(Realm& realm)
     auto& vm = this->vm();
 
     // 3.3.2 Temporal.PlainDate.prototype[ %Symbol.toStringTag% ], https://tc39.es/proposal-temporal/#sec-temporal.plaindate.prototype-%symbol.tostringtag%
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Temporal.PlainDate"_string), Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Temporal.PlainDate"_utf16_fly_string), Attribute::Configurable);
 
     define_native_accessor(realm, vm.names.calendarId, calendar_id_getter, {}, Attribute::Configurable);
     define_native_accessor(realm, vm.names.era, era_getter, {}, Attribute::Configurable);
@@ -161,8 +161,7 @@ JS_DEFINE_NATIVE_FUNCTION(PlainDatePrototype::month_code_getter)
     auto plain_date = TRY(typed_this_object(vm));
 
     // 3. Return CalendarISOToDate(plainDate.[[Calendar]], plainDate.[[ISODate]]).[[MonthCode]].
-    auto month_code = calendar_iso_to_date(plain_date->calendar(), plain_date->iso_date()).month_code;
-    return PrimitiveString::create(vm, move(month_code));
+    return PrimitiveString::create(vm, calendar_iso_to_date(plain_date->calendar(), plain_date->iso_date()).month_code);
 }
 
 // 3.3.12 get Temporal.PlainDate.prototype.weekOfYear, https://tc39.es/proposal-temporal/#sec-get-temporal.plaindate.prototype.weekofyear
@@ -398,13 +397,13 @@ JS_DEFINE_NATIVE_FUNCTION(PlainDatePrototype::to_zoned_date_time)
     // 2. Perform ? RequireInternalSlot(plainDate, [[InitializedTemporalDate]]).
     auto plain_date = TRY(typed_this_object(vm));
 
-    String time_zone;
+    Utf16String time_zone;
     Value temporal_time;
 
     // 3. If item is an Object, then
-    if (item.is_object()) {
+    if (auto object = item.as_if<Object>()) {
         // a. Let timeZoneLike be ? Get(item, "timeZone").
-        auto time_zone_like = TRY(item.as_object().get(vm.names.timeZone));
+        auto time_zone_like = TRY(object->get(vm.names.timeZone));
 
         // b. If timeZoneLike is undefined, then
         if (time_zone_like.is_undefined()) {
@@ -420,7 +419,7 @@ JS_DEFINE_NATIVE_FUNCTION(PlainDatePrototype::to_zoned_date_time)
             time_zone = TRY(to_temporal_time_zone_identifier(vm, time_zone_like));
 
             // ii. Let temporalTime be ? Get(item, "plainTime").
-            temporal_time = TRY(item.as_object().get(vm.names.plainTime));
+            temporal_time = TRY(object->get(vm.names.plainTime));
         }
     }
     // 4. Else,
@@ -477,7 +476,7 @@ JS_DEFINE_NATIVE_FUNCTION(PlainDatePrototype::to_string)
 }
 
 // 3.3.31 Temporal.PlainDate.prototype.toLocaleString ( [ locales [ , options ] ] ), https://tc39.es/proposal-temporal/#sec-temporal.plaindate.prototype.tolocalestring
-// 15.12.3.1 Temporal.PlainDate.prototype.toLocaleString ( [ locales [ , options ] ] ), https://tc39.es/proposal-temporal/#sup-temporal.plaindate.prototype.tolocalestring
+// 15.11.3.1 Temporal.PlainDate.prototype.toLocaleString ( [ locales [ , options ] ] ), https://tc39.es/proposal-temporal/#sup-temporal.plaindate.prototype.tolocalestring
 JS_DEFINE_NATIVE_FUNCTION(PlainDatePrototype::to_locale_string)
 {
     auto& realm = *vm.current_realm();

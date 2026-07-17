@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2020-2026, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2020-2021, Linus Groh <linusg@serenityos.org>
  * Copyright (c) 2022, Luke Wilde <lukew@serenityos.org>
  * Copyright (c) 2024-2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
@@ -9,6 +9,7 @@
 
 #include <LibGC/Heap.h>
 #include <LibJS/Bytecode/Executable.h>
+#include <LibJS/Runtime/DeclarativeEnvironment.h>
 #include <LibJS/Runtime/ExecutionContext.h>
 #include <LibJS/Runtime/FunctionObject.h>
 
@@ -16,9 +17,9 @@ namespace JS {
 
 class ExecutionContextAllocator {
 public:
-    NonnullOwnPtr<ExecutionContext> allocate(u32 registers_and_constants_and_locals_count, u32 arguments_count)
+    NonnullOwnPtr<ExecutionContext> allocate(u32 registers_and_locals_count, ReadonlySpan<Value> constants, u32 arguments_count)
     {
-        auto tail_size = registers_and_constants_and_locals_count + arguments_count;
+        auto tail_size = registers_and_locals_count + constants.size() + arguments_count;
 
         void* slot = nullptr;
         if (tail_size <= 4 && !m_execution_contexts_with_4_tail.is_empty()) {
@@ -36,7 +37,7 @@ public:
         }
 
         if (slot) {
-            return adopt_own(*new (slot) ExecutionContext(registers_and_constants_and_locals_count, arguments_count));
+            return adopt_own(*new (slot) ExecutionContext(registers_and_locals_count, constants, arguments_count));
         }
 
         auto tail_allocation_size = [tail_size] -> u32 {
@@ -56,7 +57,7 @@ public:
         };
 
         auto* memory = ::operator new(sizeof(ExecutionContext) + tail_allocation_size() * sizeof(Value));
-        return adopt_own(*::new (memory) ExecutionContext(registers_and_constants_and_locals_count, arguments_count));
+        return adopt_own(*::new (memory) ExecutionContext(registers_and_locals_count, constants, arguments_count));
     }
     void deallocate(void* ptr, u32 tail_size)
     {
@@ -88,9 +89,9 @@ private:
 
 static NeverDestroyed<ExecutionContextAllocator> s_execution_context_allocator;
 
-NonnullOwnPtr<ExecutionContext> ExecutionContext::create(u32 registers_and_constants_and_locals_count, u32 arguments_count)
+NonnullOwnPtr<ExecutionContext> ExecutionContext::create(u32 registers_and_locals_count, ReadonlySpan<Value> constants, u32 arguments_count)
 {
-    return s_execution_context_allocator->allocate(registers_and_constants_and_locals_count, arguments_count);
+    return s_execution_context_allocator->allocate(registers_and_locals_count, constants, arguments_count);
 }
 
 void ExecutionContext::operator delete(void* ptr)
@@ -99,23 +100,11 @@ void ExecutionContext::operator delete(void* ptr)
     s_execution_context_allocator->deallocate(ptr, execution_context->registers_and_constants_and_locals_and_arguments_count);
 }
 
-ExecutionContext::ExecutionContext(u32 registers_and_constants_and_locals_count, u32 arguments_count)
-{
-    registers_and_constants_and_locals_and_arguments_count = registers_and_constants_and_locals_count + arguments_count;
-    arguments_offset = registers_and_constants_and_locals_count;
-    auto* registers_and_constants_and_locals_and_arguments = this->registers_and_constants_and_locals_and_arguments();
-    for (size_t i = 0; i < registers_and_constants_and_locals_count; ++i)
-        registers_and_constants_and_locals_and_arguments[i] = js_special_empty_value();
-    arguments = { registers_and_constants_and_locals_and_arguments + arguments_offset, registers_and_constants_and_locals_and_arguments_count - arguments_offset };
-}
-
-ExecutionContext::~ExecutionContext()
-{
-}
-
 NonnullOwnPtr<ExecutionContext> ExecutionContext::copy() const
 {
-    auto copy = create(registers_and_constants_and_locals_and_arguments_count, arguments.size());
+    // NB: We pass the entire non-argument count as registers_and_locals_count with 0 constants.
+    //     This means all slots get initialized to empty, but we immediately overwrite them below.
+    auto copy = create(registers_and_constants_and_locals_and_arguments_count - argument_count, ReadonlySpan<Value> {}, argument_count);
     copy->function = function;
     copy->realm = realm;
     copy->script_or_module = script_or_module;
@@ -123,19 +112,17 @@ NonnullOwnPtr<ExecutionContext> ExecutionContext::copy() const
     copy->variable_environment = variable_environment;
     copy->private_environment = private_environment;
     copy->program_counter = program_counter;
-    copy->function_name = function_name;
+    copy->yield_continuation = yield_continuation;
+    copy->yield_is_await = yield_is_await;
+    copy->yield_value_is_iterator_result = yield_value_is_iterator_result;
+    copy->caller_is_construct = caller_is_construct;
     copy->this_value = this_value;
-    copy->is_strict_mode = is_strict_mode;
     copy->executable = executable;
-    copy->arguments_offset = arguments_offset;
     copy->passed_argument_count = passed_argument_count;
-    copy->unwind_contexts = unwind_contexts;
-    copy->saved_lexical_environments = saved_lexical_environments;
-    copy->previously_scheduled_jumps = previously_scheduled_jumps;
     copy->registers_and_constants_and_locals_and_arguments_count = registers_and_constants_and_locals_and_arguments_count;
     for (size_t i = 0; i < registers_and_constants_and_locals_and_arguments_count; ++i)
         copy->registers_and_constants_and_locals_and_arguments()[i] = registers_and_constants_and_locals_and_arguments()[i];
-    copy->arguments = { copy->registers_and_constants_and_locals_and_arguments() + copy->arguments_offset, arguments.size() };
+    copy->argument_count = argument_count;
     return copy;
 }
 
@@ -146,21 +133,10 @@ void ExecutionContext::visit_edges(Cell::Visitor& visitor)
     visitor.visit(variable_environment);
     visitor.visit(lexical_environment);
     visitor.visit(private_environment);
-    visitor.visit(context_owner);
-    if (this_value.has_value())
-        visitor.visit(*this_value);
+    visitor.visit(this_value);
     visitor.visit(executable);
-    visitor.visit(function_name);
     visitor.visit(registers_and_constants_and_locals_and_arguments_span());
-    for (auto& context : unwind_contexts) {
-        visitor.visit(context.lexical_environment);
-    }
-    visitor.visit(saved_lexical_environments);
-    script_or_module.visit(
-        [](Empty) {},
-        [&](auto& script_or_module) {
-            visitor.visit(script_or_module);
-        });
+    visitor.visit(script_or_module);
 }
 
 }

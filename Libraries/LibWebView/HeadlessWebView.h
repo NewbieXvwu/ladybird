@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibCore/Forward.h>
 #include <LibGfx/Forward.h>
 #include <LibWeb/Page/Page.h>
@@ -19,6 +20,19 @@ class WEBVIEW_API HeadlessWebView : public WebView::ViewImplementation {
 public:
     static NonnullOwnPtr<HeadlessWebView> create(Core::AnonymousBuffer theme, Web::DevicePixelSize window_size);
     static NonnullOwnPtr<HeadlessWebView> create_child(HeadlessWebView&, u64 page_index);
+
+    void reset_viewport_size(Web::DevicePixelSize);
+
+    void disconnect_child_crash_handlers()
+    {
+        // Disconnect crash handlers so child crashes don't propagate to parent.
+        // We don't destroy the children because there may be pending deferred_invokes
+        // that would cause use-after-free.
+        for (auto& child : m_child_web_views) {
+            child->on_web_content_crashed = nullptr;
+            child->disconnect_child_crash_handlers();
+        }
+    }
 
 protected:
     HeadlessWebView(Core::AnonymousBuffer theme, Web::DevicePixelSize viewport_size);
@@ -34,10 +48,10 @@ protected:
     Web::DevicePixelSize m_viewport_size;
 
     Web::Page::PendingDialog m_pending_dialog { Web::Page::PendingDialog::None };
-    Optional<String> m_pending_prompt_text;
+    Optional<Utf16String> m_pending_prompt_text;
 
-    // FIXME: We should implement UI-agnostic platform APIs to interact with the system clipboard.
-    Optional<Web::Clipboard::SystemClipboardItem> m_clipboard;
+    // When restoring from fullscreen, we need to know to what dimension.
+    Web::DevicePixelRect m_previous_dimensions;
 
     Vector<NonnullOwnPtr<HeadlessWebView>> m_child_web_views;
 };

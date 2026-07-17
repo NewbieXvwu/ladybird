@@ -19,17 +19,21 @@ void IncrementalReadLoopReadRequest::on_chunk(JS::Value chunk)
     GC::Ptr<GC::Function<void()>> continue_algorithm;
 
     // 2. If chunk is not a Uint8Array object, then set continueAlgorithm to this step: run processBodyError given a TypeError.
-    if (!chunk.is_object() || !is<JS::Uint8Array>(chunk.as_object())) {
+    auto uint8_array = chunk.as_if<JS::Uint8Array>();
+
+    if (!uint8_array) {
         continue_algorithm = GC::create_function(realm.heap(), [&realm, process_body_error = m_process_body_error] {
-            process_body_error->function()(JS::TypeError::create(realm, "Chunk data is not Uint8Array"sv));
+            process_body_error->function()(JS::TypeError::create(realm, "Chunk data is not Uint8Array"_utf16));
         });
     }
     // 3. Otherwise:
     else {
         // 1. Let bytes be a copy of chunk.
         // NOTE: Implementations are strongly encouraged to use an implementation strategy that avoids this copy where possible.
-        auto& uint8_array = static_cast<JS::Uint8Array&>(chunk.as_object());
-        auto bytes = MUST(ByteBuffer::copy(uint8_array.data()));
+        auto record = JS::make_typed_array_with_buffer_witness_record(*uint8_array, JS::ArrayBuffer::Order::SeqCst);
+        auto bytes = JS::is_typed_array_out_of_bounds(record)
+            ? ByteBuffer {}
+            : MUST(uint8_array->viewed_array_buffer()->copy_to_byte_buffer(uint8_array->byte_offset(), JS::typed_array_byte_length(record)));
         // 2. Set continueAlgorithm to these steps:
         continue_algorithm = GC::create_function(realm.heap(), [bytes = move(bytes), body = m_body, reader = m_reader, task_destination = m_task_destination, process_body_chunk = m_process_body_chunk, process_end_of_body = m_process_end_of_body, process_body_error = m_process_body_error] {
             HTML::TemporaryExecutionContext execution_context { reader->realm(), HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };

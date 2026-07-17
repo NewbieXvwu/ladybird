@@ -46,7 +46,7 @@ public:
     constexpr Matrix& operator=(Matrix const& other)
     {
 #ifndef __clang__
-        if (is_constant_evaluated()) {
+        if consteval {
             for (size_t i = 0; i < N; i++) {
                 for (size_t j = 0; j < N; j++) {
                     (*this)[i, j] = other[i, j];
@@ -231,6 +231,18 @@ public:
     constexpr bool is_invertible() const
     {
         return determinant() != static_cast<T>(0.0);
+    }
+
+    [[nodiscard]] bool is_identity() const
+    {
+        for (size_t i = 0; i < N; ++i) {
+            for (size_t j = 0; j < N; ++j) {
+                float expected = (i == j) ? 1.0f : 0.0f;
+                if ((*this)[i, j] != expected)
+                    return false;
+            }
+        }
+        return true;
     }
 
 private:

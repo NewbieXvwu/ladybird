@@ -15,8 +15,6 @@
 
 namespace Web::Painting {
 
-GC_DEFINE_ALLOCATOR(CheckBoxPaintable);
-
 static Gfx::Path check_mark_path(Gfx::IntRect checkbox_rect)
 {
     Gfx::Path path;
@@ -35,25 +33,15 @@ static Gfx::Path check_mark_path(Gfx::IntRect checkbox_rect)
     return path.copy_transformed(scale_checkmark_to_fit);
 }
 
-GC::Ref<CheckBoxPaintable>
+NonnullRefPtr<CheckBoxPaintable>
 CheckBoxPaintable::create(Layout::CheckBox const& layout_box)
 {
-    return layout_box.heap().allocate<CheckBoxPaintable>(layout_box);
+    return adopt_ref(*new CheckBoxPaintable(layout_box));
 }
 
 CheckBoxPaintable::CheckBoxPaintable(Layout::CheckBox const& layout_box)
-    : LabelablePaintable(layout_box)
+    : Paintable(layout_box)
 {
-}
-
-Layout::CheckBox const& CheckBoxPaintable::layout_box() const
-{
-    return static_cast<Layout::CheckBox const&>(layout_node());
-}
-
-Layout::CheckBox& CheckBoxPaintable::layout_box()
-{
-    return static_cast<Layout::CheckBox&>(layout_node());
 }
 
 void CheckBoxPaintable::paint(DisplayListRecordingContext& context, PaintPhase phase) const
@@ -61,14 +49,18 @@ void CheckBoxPaintable::paint(DisplayListRecordingContext& context, PaintPhase p
     if (!is_visible())
         return;
 
-    PaintableBox::paint(context, phase);
+    Paintable::paint(context, phase);
 
     if (phase != PaintPhase::Foreground)
         return;
 
-    auto const& checkbox = static_cast<HTML::HTMLInputElement const&>(layout_box().dom_node());
-    bool enabled = layout_box().dom_node().enabled();
-    auto checkbox_rect = context.enclosing_device_rect(absolute_rect()).to_type<int>();
+    auto const& checkbox = as<HTML::HTMLInputElement const>(*dom_node());
+    bool enabled = checkbox.enabled();
+
+    // Keep checkboxes painted as square, centered within the space they occupy.
+    auto outer_rect = absolute_rect();
+    auto checkbox_size = min(outer_rect.width(), outer_rect.height());
+    auto checkbox_rect = context.enclosing_device_rect(CSSPixelRect { 0, 0, checkbox_size, checkbox_size }.centered_within(outer_rect)).to_type<int>();
     auto checkbox_radius = checkbox_rect.width() / 5;
 
     auto shade = [&](Color color, float amount) {
@@ -76,7 +68,8 @@ void CheckBoxPaintable::paint(DisplayListRecordingContext& context, PaintPhase p
     };
 
     auto modify_color = [&](Color color) {
-        if (being_pressed() && enabled)
+        // FIXME: Make this only take effect while this element or its labels are hovered.
+        if (checkbox.is_being_activated() && enabled)
             return shade(color, 0.3f);
         return color;
     };

@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/PerformanceEventTimingPrototype.h>
+#include <LibWeb/Bindings/PerformanceEventTiming.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/EventTiming/PerformanceEventTiming.h>
 #include <LibWeb/PerformanceTimeline/EntryTypes.h>
@@ -15,8 +15,14 @@ namespace Web::EventTiming {
 GC_DEFINE_ALLOCATOR(PerformanceEventTiming);
 
 // https://www.w3.org/TR/event-timing/#sec-init-event-timing
-PerformanceEventTiming::PerformanceEventTiming(JS::Realm& realm, String const& name, HighResolutionTime::DOMHighResTimeStamp start_time, HighResolutionTime::DOMHighResTimeStamp duration,
-    DOM::Event const& event, HighResolutionTime::DOMHighResTimeStamp processing_start, unsigned long long interaction_id)
+PerformanceEventTiming::PerformanceEventTiming(
+    JS::Realm& realm,
+    Utf16String const& name,
+    HighResolutionTime::DOMHighResTimeStamp start_time,
+    HighResolutionTime::DOMHighResTimeStamp duration,
+    DOM::Event const& event,
+    HighResolutionTime::DOMHighResTimeStamp processing_start,
+    unsigned long long interaction_id)
     : PerformanceTimeline::PerformanceEntry(realm, name, start_time, duration)
     , m_entry_type(PerformanceTimeline::EntryTypes::event)
     , m_start_time(event.time_stamp())
@@ -29,7 +35,7 @@ PerformanceEventTiming::PerformanceEventTiming(JS::Realm& realm, String const& n
 
 PerformanceEventTiming::~PerformanceEventTiming() = default;
 
-FlyString const& PerformanceEventTiming::entry_type() const
+Utf16FlyString const& PerformanceEventTiming::entry_type() const
 {
     return m_entry_type;
 }
@@ -68,11 +74,11 @@ PerformanceTimeline::ShouldAddEntry PerformanceEventTiming::should_add_performan
 {
     dbgln("FIXME: Implement PerformanceEventTiming should_add_performance_event_timing()");
     // 1. If entry’s entryType attribute value equals to "first-input", return true.
-    if (entry_type() == "first-input")
+    if (entry_type() == PerformanceTimeline::EntryTypes::first_input)
         return PerformanceTimeline::ShouldAddEntry::Yes;
 
     // 2. Assert that entry’s entryType attribute value equals "event".
-    VERIFY(entry_type() == "event");
+    VERIFY(entry_type() == PerformanceTimeline::EntryTypes::event);
 
     // FIXME: 3. Let minDuration be computed as follows:
     // FIXME: 3.1. If options is not present or if options’s durationThreshold is not present, let minDuration be 104.
@@ -105,7 +111,7 @@ Optional<u64> PerformanceEventTiming::max_buffer_size()
 }
 
 // https://w3c.github.io/timing-entrytypes-registry/#dfn-should-add-entry
-PerformanceTimeline::ShouldAddEntry PerformanceEventTiming::should_add_entry(Optional<PerformanceTimeline::PerformanceObserverInit const&>) const
+PerformanceTimeline::ShouldAddEntry PerformanceEventTiming::should_add_entry(Optional<Bindings::PerformanceObserverInit const&>) const
 {
     return should_add_performance_event_timing();
 }

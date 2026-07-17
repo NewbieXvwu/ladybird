@@ -1,17 +1,17 @@
 /*
- * Copyright (c) 2025, Ladybird contributors
+ * Copyright (c) 2025-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16String.h>
 #include <AK/Variant.h>
 #include <LibGfx/AffineTransform.h>
 #include <LibGfx/Color.h>
 #include <LibGfx/Forward.h>
-#include <LibGfx/Painter.h>
 #include <LibGfx/Path.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/DOM/EventTarget.h>
@@ -39,9 +39,9 @@ namespace Web::HTML {
 
 class OffscreenCanvasRenderingContext2D : public Bindings::PlatformObject
     , public CanvasState
-    , public CanvasTransform<OffscreenCanvasRenderingContext2D>
-    , public CanvasFillStrokeStyles<OffscreenCanvasRenderingContext2D>
-    , public CanvasShadowStyles<OffscreenCanvasRenderingContext2D>
+    , public CanvasTransform
+    , public CanvasFillStrokeStyles
+    , public CanvasShadowStyles
     , public CanvasFilters
     , public CanvasRect
     , public CanvasDrawPath
@@ -51,8 +51,8 @@ class OffscreenCanvasRenderingContext2D : public Bindings::PlatformObject
     , public CanvasImageSmoothing
     , public CanvasCompositing
     , public CanvasSettings
-    , public CanvasPathDrawingStyles<OffscreenCanvasRenderingContext2D>
-    , public CanvasTextDrawingStyles<OffscreenCanvasRenderingContext2D, OffscreenCanvas>
+    , public CanvasPathDrawingStyles
+    , public CanvasTextDrawingStyles<OffscreenCanvas>
     , public CanvasPath
 
 {
@@ -75,28 +75,29 @@ public:
     virtual void stroke() override;
     virtual void stroke(Path2D const& path) override;
 
-    virtual void fill_text(StringView, float x, float y, Optional<double> max_width) override;
-    virtual void stroke_text(StringView, float x, float y, Optional<double> max_width) override;
+    virtual void fill_text(Utf16View, float x, float y, Optional<double> max_width) override;
+    virtual void stroke_text(Utf16View, float x, float y, Optional<double> max_width) override;
 
-    virtual void fill(StringView fill_rule) override;
-    virtual void fill(Path2D& path, StringView fill_rule) override;
+    virtual void fill(Utf16FlyString const& fill_rule) override;
+    virtual void fill(Path2D& path, Utf16FlyString const& fill_rule) override;
 
-    virtual WebIDL::ExceptionOr<GC::Ref<ImageData>> create_image_data(int width, int height, Optional<ImageDataSettings> const& settings = {}) const override;
+    virtual WebIDL::ExceptionOr<GC::Ref<ImageData>> create_image_data(int width, int height, Optional<Bindings::ImageDataSettings> const& settings = {}) const override;
     virtual WebIDL::ExceptionOr<GC::Ref<ImageData>> create_image_data(ImageData const& image_data) const override;
-    virtual WebIDL::ExceptionOr<GC::Ptr<ImageData>> get_image_data(int x, int y, int width, int height, Optional<ImageDataSettings> const& settings = {}) const override;
-    virtual void put_image_data(ImageData&, float x, float y) override;
+    virtual WebIDL::ExceptionOr<GC::Ptr<ImageData>> get_image_data(int x, int y, int width, int height, Optional<Bindings::ImageDataSettings> const& settings = {}) override;
+    virtual WebIDL::ExceptionOr<void> put_image_data(ImageData&, float x, float y) override;
+    virtual WebIDL::ExceptionOr<void> put_image_data(ImageData&, float x, float y, float dirty_x, float dirty_y, float dirty_width, float dirty_height) override;
 
     virtual void reset_to_default_state() override;
 
-    virtual CanvasRenderingContext2DSettings get_context_attributes() const override { return m_context_attributes; }
+    virtual Bindings::CanvasRenderingContext2DSettings get_context_attributes() const override { return m_context_attributes; }
 
-    virtual GC::Ref<TextMetrics> measure_text(StringView text) override;
+    virtual GC::Ref<TextMetrics> measure_text(Utf16View) override;
 
-    virtual void clip(StringView fill_rule) override;
-    virtual void clip(Path2D& path, StringView fill_rule) override;
+    virtual void clip(Utf16FlyString const& fill_rule) override;
+    virtual void clip(Path2D& path, Utf16FlyString const& fill_rule) override;
 
-    virtual bool is_point_in_path(double x, double y, StringView fill_rule) override;
-    virtual bool is_point_in_path(Path2D const& path, double x, double y, StringView fill_rule) override;
+    virtual bool is_point_in_path(double x, double y, Utf16FlyString const& fill_rule) override;
+    virtual bool is_point_in_path(Path2D const& path, double x, double y, Utf16FlyString const& fill_rule) override;
 
     virtual bool image_smoothing_enabled() const override;
     virtual void set_image_smoothing_enabled(bool) override;
@@ -106,11 +107,11 @@ public:
     virtual float global_alpha() const override;
     virtual void set_global_alpha(float) override;
 
-    virtual String global_composite_operation() const override;
-    virtual void set_global_composite_operation(String) override;
+    virtual Utf16String global_composite_operation() const override;
+    virtual void set_global_composite_operation(Utf16View) override;
 
-    virtual String filter() const override;
-    virtual void set_filter(String) override;
+    virtual Utf16String filter() const override;
+    virtual void set_filter(Utf16View) override;
 
     virtual float shadow_offset_x() const override;
     virtual void set_shadow_offset_x(float) override;
@@ -118,32 +119,27 @@ public:
     virtual void set_shadow_offset_y(float) override;
     virtual float shadow_blur() const override;
     virtual void set_shadow_blur(float) override;
-    virtual String shadow_color() const override;
-    virtual void set_shadow_color(String) override;
-
-    OffscreenCanvas& canvas_element();
-    OffscreenCanvas const& canvas_element() const;
-
-    [[nodiscard]] Gfx::Painter* painter();
+    virtual Utf16String shadow_color() const override;
+    virtual void set_shadow_color(Utf16View) override;
 
     void set_size(Gfx::IntSize const&);
 
+protected:
+    [[nodiscard]] Gfx::CanvasCommandList* canvas_command_list() override;
+    Variant<GC::Ref<HTMLCanvasElement>, GC::Ref<OffscreenCanvas>> canvas_element() override { return m_canvas; }
+    Variant<GC::Ref<HTMLCanvasElement>, GC::Ref<OffscreenCanvas>> canvas_element() const override { return m_canvas; }
+    JS::Realm& my_realm() override { return realm(); }
+    Gfx::Path& mutable_path() override { return path(); }
+
 private:
-    explicit OffscreenCanvasRenderingContext2D(JS::Realm&, OffscreenCanvas&, CanvasRenderingContext2DSettings);
+    explicit OffscreenCanvasRenderingContext2D(JS::Realm&, OffscreenCanvas&, Bindings::CanvasRenderingContext2DSettings);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
-    virtual Gfx::Painter* painter_for_canvas_state() override
-    {
-        dbgln("(STUBBED) OffscreenCanvasRenderingContext2D::painter_for_canvas_state()");
-        return nullptr;
-    }
-    virtual Gfx::Path& path_for_canvas_state() override { return path(); }
-
     GC::Ref<OffscreenCanvas> m_canvas;
     Gfx::IntSize m_size;
-    CanvasRenderingContext2DSettings m_context_attributes;
+    Bindings::CanvasRenderingContext2DSettings m_context_attributes;
 };
 
 }

@@ -4,9 +4,14 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibTest/Macros.h>
 #include <LibTest/TestCase.h>
 
 #include <AK/Time.h>
+
+#ifdef AK_OS_WINDOWS
+#    include <time.h>
+#endif
 
 using AK::Duration;
 
@@ -387,7 +392,7 @@ TEST_CASE(days_since_epoch)
     EXPECT_EQ(days_since_epoch(2'147'483'647, 1, 1), 784351576412);   // Guess: 784351576411
     EXPECT_EQ(days_since_epoch(2'147'483'647, 12, 31), 784351576776); // Guess: 784351576777
     EXPECT_EQ(days_since_epoch(2'147'483'647, 12, 255), 784351577000);
-    // FIXME shouldn't crash: EXPECT_EQ(days_since_epoch(2'147'483'647, 255, 255), 784351577000);
+    // FIXME: shouldn't crash: EXPECT_EQ(days_since_epoch(2'147'483'647, 255, 255), 784351577000);
     // FIXME: Restrict interface to only take sensible types, and ensure callers pass only sensible values for that type.
 }
 
@@ -756,4 +761,278 @@ TEST_CASE(time_to_string)
     test("%n"sv, "\n"sv, 2023, 1, 1, 0, 0, 0);
     test("%t"sv, "\t"sv, 2023, 1, 1, 0, 0, 0);
     test("%%"sv, "%"sv, 2023, 1, 1, 0, 0, 0);
+}
+
+TEST_CASE(parse_time)
+{
+    auto test = [](auto format, auto time, int year, int month, int day, int hour, int minute, int second = 0) {
+        auto result = AK::UnixDateTime::parse(format, time);
+        VERIFY(result.has_value());
+
+        auto result_time = result.value().to_timespec();
+        struct tm tm {};
+#ifdef AK_OS_WINDOWS
+        VERIFY(gmtime_s(&tm, &result_time.tv_sec) == 0);
+#else
+        VERIFY(gmtime_r(&result_time.tv_sec, &tm) != nullptr);
+#endif
+
+        EXPECT_EQ(year, tm.tm_year + 1900);
+        EXPECT_EQ(month, tm.tm_mon + 1);
+        EXPECT_EQ(day, tm.tm_mday);
+        EXPECT_EQ(hour, tm.tm_hour);
+        EXPECT_EQ(minute, tm.tm_min);
+        EXPECT_EQ(second, tm.tm_sec);
+    };
+
+    test("%d-%m-%Y %H:%M"sv, "05-01-2023 00:00"sv, 2023, 1, 5, 0, 0);
+    test("%d-%m-%Y %H:%M GMT"sv, "05-01-2023 00:00 GMT"sv, 2023, 1, 5, 0, 0);
+    test("%Y/%m/%d %R"sv, "2023/01/23 10:50"sv, 2023, 1, 23, 10, 50);
+    test("%Y-%m-%d %H:%M"sv, "1999-12-31 23:59"sv, 1999, 12, 31, 23, 59);
+    test("%Y/%m/%d %R"sv, "1970/01/01 00:00"sv, 1970, 1, 1, 0, 0);
+    test("%Y/%m/%d %R"sv, "2000/02/29 12:34"sv, 2000, 2, 29, 12, 34); // Leap year
+
+    // %T: full time with seconds
+    test("%Y-%m-%d %T"sv, "2023-01-23 10:50:15"sv, 2023, 1, 23, 10, 50, 15);
+    // %S: seconds
+    test("%Y-%m-%d %H:%M:%S"sv, "2023-01-23 10:50:42"sv, 2023, 1, 23, 10, 50, 42);
+    // %I: 12-hour clock, %p: AM/PM
+    test("%Y-%m-%d %I:%M %p"sv, "2023-01-23 03:21 PM"sv, 2023, 1, 23, 15, 21, 0);
+    test("%Y-%m-%d %I:%M %p"sv, "2023-01-23 12:01 AM"sv, 2023, 1, 23, 0, 1, 0);
+    // %D: shortcut for %m/%d/%y
+    test("%D %H:%M:%S"sv, "01/23/23 10:50:59"sv, 2023, 1, 23, 10, 50, 59);
+    // %y: two-digit year, %C: century
+    test("%y %C %m %d %H:%M:%S"sv, "23 20 01 23 10:50:11"sv, 2023, 1, 23, 10, 50, 11);
+    // %a/%A: short/long weekday name (parsing ignores names, but test for correct date)
+    test("%Y-%m-%d %a"sv, "2023-01-23 Mon"sv, 2023, 1, 23, 0, 0, 0);
+    test("%Y-%m-%d %A"sv, "2023-01-23 Monday"sv, 2023, 1, 23, 0, 0, 0);
+    // %b/%B: short/long month name (parsing ignores names, but test for correct date)
+    test("%d %b %Y"sv, "05 Jan 2023"sv, 2023, 1, 5, 0, 0, 0);
+    test("%d %B %Y"sv, "05 January 2023"sv, 2023, 1, 5, 0, 0, 0);
+    // %j: day of year
+    test("%Y %j %H:%M:%S"sv, "2023 023 10:50:12"sv, 2023, 1, 23, 10, 50, 12);
+    // %w: weekday number (0=Sunday)
+    test("%Y-%m-%d %w %H:%M:%S"sv, "2023-01-23 1 10:50:13"sv, 2023, 1, 23, 10, 50, 13);
+    // %n: newline, %t: tab, %%: literal %
+    test("%Y-%m-%d%n%H:%M:%S"sv, "2023-01-23\n10:50:14"sv, 2023, 1, 23, 10, 50, 14);
+    test("%Y-%m-%d%t%H:%M:%S"sv, "2023-01-23\t10:50:15"sv, 2023, 1, 23, 10, 50, 15);
+    test("%Y-%m-%d %% %H:%M:%S"sv, "2023-01-23 % 10:50:16"sv, 2023, 1, 23, 10, 50, 16);
+}
+
+TEST_CASE(parse_wildcard_characters)
+{
+    EXPECT(!AK::UnixDateTime::parse("%+"sv, ""sv).has_value());
+    EXPECT(!AK::UnixDateTime::parse("foo%+"sv, "foo"sv).has_value());
+    EXPECT(!AK::UnixDateTime::parse("[%*]"sv, "[foo"sv).has_value());
+    EXPECT(!AK::UnixDateTime::parse("[%*]"sv, "foo]"sv).has_value());
+    EXPECT(!AK::UnixDateTime::parse("%+%b"sv, "fooJan"sv).has_value());
+
+    auto test = [](auto format, auto time, int year, int month, int day) {
+        auto result = AK::UnixDateTime::parse(format, time);
+        VERIFY(result.has_value());
+
+        auto result_time = result.value().to_timespec();
+        struct tm tm {};
+#ifdef AK_OS_WINDOWS
+        VERIFY(gmtime_s(&tm, &result_time.tv_sec) == 0);
+#else
+        VERIFY(gmtime_r(&result_time.tv_sec, &tm) != nullptr);
+#endif
+
+        EXPECT_EQ(year, tm.tm_year + 1900);
+        EXPECT_EQ(month, tm.tm_mon + 1);
+        EXPECT_EQ(day, tm.tm_mday);
+    };
+
+    test("%Y %+ %m %d"sv, "2023 whf 01 23"sv, 2023, 01, 23);
+    test("%Y %m %d %+"sv, "2023 01 23 whf"sv, 2023, 01, 23);
+    test("%Y [%+] %m %d"sv, "2023 [well hello friends!] 01 23"sv, 2023, 01, 23);
+    test("%Y %m %d [%+]"sv, "2023 01 23 [well hello friends!]"sv, 2023, 01, 23);
+}
+
+TEST_CASE(parse_time_from_gmt)
+{
+    // Test parsing with from_gmt = true (GMT time)
+    auto gmt_result = AK::UnixDateTime::parse("%Y-%m-%d %H:%M:%S"sv,
+        "2023-01-15 12:00:00"sv, true);
+    VERIFY(gmt_result.has_value());
+
+    // Parse a known GMT time and verify the timestamp
+    auto test_gmt = AK::UnixDateTime::parse("%Y-%m-%d %H:%M:%S"sv,
+        "1970-01-01 00:00:00"sv, true);
+    VERIFY(test_gmt.has_value());
+    EXPECT_EQ(test_gmt.value().seconds_since_epoch(), 0);
+
+    // Test another GMT time
+    auto test_gmt2 = AK::UnixDateTime::parse("%Y-%m-%d %H:%M:%S"sv,
+        "1970-01-01 01:00:00"sv, true);
+    VERIFY(test_gmt2.has_value());
+    EXPECT_EQ(test_gmt2.value().seconds_since_epoch(), 3600);
+
+    // Test with date components
+    auto test_gmt3 = AK::UnixDateTime::parse("%Y-%m-%d %H:%M:%S"sv,
+        "2023-06-15 18:30:45"sv, true);
+    VERIFY(test_gmt3.has_value());
+
+    // Verify the parsed time by converting back to tm structure
+    auto result_time = test_gmt3.value().to_timespec();
+    struct tm tm {};
+#ifdef AK_OS_WINDOWS
+    VERIFY(gmtime_s(&tm, &result_time.tv_sec) == 0);
+#else
+    VERIFY(gmtime_r(&result_time.tv_sec, &tm) != nullptr);
+#endif
+
+    EXPECT_EQ(tm.tm_year + 1900, 2023);
+    EXPECT_EQ(tm.tm_mon + 1, 6);
+    EXPECT_EQ(tm.tm_mday, 15);
+    EXPECT_EQ(tm.tm_hour, 18);
+    EXPECT_EQ(tm.tm_min, 30);
+    EXPECT_EQ(tm.tm_sec, 45);
+}
+
+TEST_CASE(formatter_unix_date_time)
+{
+    auto test = [](auto expected, i32 year, u8 month, u8 day, u8 hour, u8 minute, u8 second) {
+        auto data = AK::UnixDateTime::from_unix_time_parts(year, month, day, hour, minute, second, 0);
+        StringBuilder builder;
+        builder.appendff("{}", data);
+
+        auto result = builder.to_string();
+        VERIFY(!result.is_error());
+
+        EXPECT_EQ(expected, builder.to_string().value());
+    };
+
+    test("2023-01-05 00:00:00"sv, 2023, 1, 5, 0, 0, 0);
+    test("1970-01-01 00:00:00"sv, 1970, 1, 1, 0, 0, 0);      // Edge case for Unix epoch
+    test("1970-01-01 23:59:59"sv, 1970, 1, 1, 23, 59, 59);   // Edge case for Unix epoch
+    test("2000-02-29 12:34:56"sv, 2000, 2, 29, 12, 34, 56);  // Leap year (valid)
+    test("1999-12-31 23:59:59"sv, 1999, 12, 31, 23, 59, 59); // Y2K edge
+    test("2024-02-29 23:59:59"sv, 2024, 2, 29, 23, 59, 59);  // Next leap year
+    test("1980-01-01 00:00:00"sv, 1980, 1, 1, 0, 0, 0);      // Another leap year start
+    test("2038-01-19 03:14:07"sv, 2038, 1, 19, 3, 14, 7);    // 32-bit Unix time max
+    test("2022-12-31 23:59:59"sv, 2022, 12, 31, 23, 59, 59); // End of year
+    test("2023-04-01 00:00:00"sv, 2023, 4, 1, 0, 0, 0);      // Start of month
+}
+
+TEST_CASE(from_f64_seconds)
+{
+    constexpr auto max_seconds = Duration::from_seconds(NumericLimits<i64>::max());
+    EXPECT_EQ(Duration::from_seconds_f64(NumericLimits<float>::max()), max_seconds);
+    auto smaller_float = nextafterf(NumericLimits<float>::max(), 0.0f);
+    EXPECT_EQ(Duration::from_seconds_f64(smaller_float), max_seconds);
+    auto max_representable_float = nextafterf(static_cast<float>(NumericLimits<i64>::max()), 0.0f);
+    constexpr auto max_representable_float_as_integer = 9223371487098961920LL;
+    EXPECT_EQ(Duration::from_seconds_f64(max_representable_float), Duration::from_seconds(max_representable_float_as_integer));
+
+    constexpr auto min_seconds = Duration::from_seconds(NumericLimits<i64>::min());
+    EXPECT_EQ(Duration::from_seconds_f64(NumericLimits<float>::lowest()), min_seconds);
+    EXPECT_EQ(Duration::from_seconds_f64(-smaller_float), min_seconds);
+    EXPECT_EQ(Duration::from_seconds_f64(-max_representable_float), Duration::from_seconds(-max_representable_float_as_integer));
+
+    EXPECT_EQ(Duration::from_seconds_f64(1.5f), Duration::from_milliseconds(1500));
+    EXPECT_EQ(Duration::from_seconds_f64(205321.25f), Duration::from_milliseconds(205321250));
+    EXPECT_EQ(Duration::from_seconds_f64(-0.25f), Duration::from_milliseconds(-250));
+    EXPECT_EQ(Duration::from_seconds_f64(-1.75f), Duration::from_milliseconds(-1750));
+
+    EXPECT_DEATH("Converting float NaN seconds", (void)Duration::from_seconds_f64(NAN));
+}
+
+TEST_CASE(time_units)
+{
+    EXPECT_EQ(Duration::from_time_units(1, 1, 1), Duration::from_seconds(1));
+    EXPECT_EQ(Duration::from_time_units(-312, 1, 48'000), Duration::from_microseconds(-6'500));
+    EXPECT_EQ(Duration::from_time_units(960, 1, 48'000), Duration::from_microseconds(20'000));
+    EXPECT_EQ(Duration::from_time_units(8, 4, 1), Duration::from_seconds(32));
+    EXPECT_EQ(Duration::from_time_units(3, 3, 2'000'000'000), Duration::from_nanoseconds(5));
+    EXPECT_EQ(Duration::from_time_units(4, 3, 2'000'000'000), Duration::from_nanoseconds(6));
+    EXPECT_EQ(Duration::from_time_units(999'999'998, 1, 2'000'000'000), Duration::from_nanoseconds(499'999'999));
+    EXPECT_EQ(Duration::from_time_units(999'999'999, 1, 2'000'000'000), Duration::from_nanoseconds(500'000'000));
+    EXPECT_EQ(Duration::from_time_units(1'000'000'000, 1, 2'000'000'000), Duration::from_nanoseconds(500'000'000));
+
+    EXPECT_EQ(Duration::from_time_units(NumericLimits<i64>::max(), 1, 2), Duration::from_seconds(NumericLimits<i64>::max() / 2) + Duration::from_milliseconds(500));
+    EXPECT_EQ(Duration::from_time_units((NumericLimits<i64>::max() / 2), 2, 1), Duration::from_seconds(NumericLimits<i64>::max() - 1));
+    EXPECT_EQ(Duration::from_time_units((NumericLimits<i64>::max() / 2) + 1, 2, 1), Duration::from_seconds(NumericLimits<i64>::max()));
+    EXPECT_EQ(Duration::from_time_units((NumericLimits<i64>::min() / 2), 2, 1), Duration::from_seconds(NumericLimits<i64>::min()));
+    EXPECT_EQ(Duration::from_time_units((NumericLimits<i64>::min() / 2) - 1, 2, 1), Duration::from_seconds(NumericLimits<i64>::min()));
+
+    EXPECT_EQ(Duration::from_time_units(-43776, 1, 14592), Duration::from_seconds(-3));
+
+    EXPECT_EQ(Duration::from_time_units(NumericLimits<i64>::min(), 1, 2), Duration::from_seconds(NumericLimits<i64>::min() / 2));
+    EXPECT_EQ(Duration::from_time_units(NumericLimits<i64>::min() + 1, 1, 2), Duration::from_seconds(NumericLimits<i64>::min() / 2) + Duration::from_milliseconds(500));
+    EXPECT_EQ(Duration::from_time_units(NumericLimits<i64>::min(), 1, 3), Duration::from_seconds(NumericLimits<i64>::min() / 3) - Duration::from_nanoseconds(666'666'667));
+
+    EXPECT_EQ(Duration::from_time_units(-1, 1, 2'000'000'000), Duration::zero());
+    EXPECT_EQ(Duration::from_time_units(-2, 1, 2'000'000'000), Duration::from_nanoseconds(-1));
+
+    EXPECT_EQ(Duration::from_milliseconds(999).to_time_units(1, 48'000), 47'952);
+    EXPECT_EQ(Duration::from_milliseconds(-12'500).to_time_units(1, 1'000), -12'500);
+
+    EXPECT_EQ(Duration::from_nanoseconds(154'489'696).to_time_units(1, 48'000), 7'416);
+    EXPECT_EQ(Duration::from_nanoseconds(154'489'375).to_time_units(1, 48'000), 7'415);
+    EXPECT_EQ(Duration::from_nanoseconds(-154'489'696).to_time_units(1, 48'000), -7'416);
+    EXPECT_EQ(Duration::from_nanoseconds(-154'489'375).to_time_units(1, 48'000), -7'415);
+    EXPECT_EQ(Duration::from_nanoseconds(1'900'000'000).to_time_units(3, 2), 1);
+    EXPECT_EQ(Duration::from_nanoseconds(1'800'000'000).to_time_units(3, 1), 1);
+    EXPECT_EQ(Duration::from_seconds(3).to_time_units(4, 1), 1);
+    EXPECT_EQ(Duration::from_seconds(4).to_time_units(4, 1), 1);
+    EXPECT_EQ(Duration::from_seconds(5).to_time_units(4, 1), 1);
+    EXPECT_EQ(Duration::from_seconds(6).to_time_units(4, 1), 2);
+
+    EXPECT_EQ(Duration::from_seconds(2'147'483'649).to_time_units(1, NumericLimits<u32>::max()), NumericLimits<i64>::max());
+    EXPECT_EQ(Duration::from_seconds(2'147'483'648).to_time_units(1, NumericLimits<u32>::max()), NumericLimits<i64>::max() - (NumericLimits<u32>::max() / 2));
+
+    EXPECT_EQ((Duration::from_seconds(1) + Duration::from_nanoseconds(999'999'999)).to_time_units(NumericLimits<u32>::max(), NumericLimits<u32>::max() - 1), 2);
+
+    EXPECT_DEATH("From time units with zero numerator", (void)Duration::from_time_units(1, 0, 1));
+    EXPECT_DEATH("From time units with zero denominator", (void)Duration::from_time_units(1, 1, 0));
+}
+
+TEST_CASE(scaled_by)
+{
+    // Identity and trivial cases.
+    EXPECT_EQ(Duration::zero().scaled_by(5, 7), Duration::zero());
+    EXPECT_EQ(Duration::from_seconds(7).scaled_by(0, 1), Duration::zero());
+    EXPECT_EQ(Duration::from_seconds(7).scaled_by(1, 1), Duration::from_seconds(7));
+    EXPECT_EQ(Duration::from_milliseconds(2'500).scaled_by(5, 5), Duration::from_milliseconds(2'500));
+
+    // Halving and doubling.
+    EXPECT_EQ(Duration::from_seconds(2).scaled_by(1, 2), Duration::from_seconds(1));
+    EXPECT_EQ(Duration::from_seconds(1).scaled_by(2, 1), Duration::from_seconds(2));
+    EXPECT_EQ(Duration::from_milliseconds(500).scaled_by(2, 1), Duration::from_seconds(1));
+    EXPECT_EQ(Duration::from_seconds(1).scaled_by(1, 2), Duration::from_milliseconds(500));
+
+    // Fractional scales using both seconds and nanoseconds parts.
+    EXPECT_EQ(Duration::from_milliseconds(2'500).scaled_by(1, 3), Duration::from_nanoseconds(833'333'333));
+    EXPECT_EQ(Duration::from_milliseconds(2'500).scaled_by(2, 3), Duration::from_nanoseconds(1'666'666'667));
+    EXPECT_EQ(Duration::from_seconds(3).scaled_by(7, 2), Duration::from_milliseconds(10'500));
+    EXPECT_EQ(Duration::from_milliseconds(1).scaled_by(48'000, 1'000), Duration::from_milliseconds(48));
+
+    // Negative durations: -1.5s × 2/3 → -1s exactly.
+    EXPECT_EQ(Duration::from_milliseconds(-1'500).scaled_by(2, 3), Duration::from_seconds(-1));
+    EXPECT_EQ(Duration::from_seconds(-3).scaled_by(2, 3), Duration::from_seconds(-2));
+    EXPECT_EQ(Duration::from_milliseconds(-500).scaled_by(3, 2), Duration::from_milliseconds(-750));
+    EXPECT_EQ(Duration::from_nanoseconds(-1).scaled_by(1, 1), Duration::from_nanoseconds(-1));
+
+    // Round-to-nearest at the nanosecond boundary.
+    EXPECT_EQ(Duration::from_nanoseconds(1).scaled_by(1, 2), Duration::from_nanoseconds(1)); // 0.5 ns rounds up
+    EXPECT_EQ(Duration::from_nanoseconds(1).scaled_by(1, 3), Duration::from_nanoseconds(0)); // 0.333 ns rounds down
+    EXPECT_EQ(Duration::from_nanoseconds(2).scaled_by(1, 3), Duration::from_nanoseconds(1)); // 0.667 ns rounds up
+    EXPECT_EQ(Duration::from_nanoseconds(3).scaled_by(2, 3), Duration::from_nanoseconds(2)); // 2.0 exact
+    EXPECT_EQ(Duration::from_nanoseconds(-1).scaled_by(1, 2), Duration::from_nanoseconds(0));
+
+    // Carrying nanoseconds past 1e9 into seconds.
+    EXPECT_EQ(Duration::from_nanoseconds(999'999'999).scaled_by(1, 1), Duration::from_nanoseconds(999'999'999));
+    EXPECT_EQ((Duration::from_seconds(0) + Duration::from_nanoseconds(999'999'999)).scaled_by(2, 1),
+        Duration::from_seconds(1) + Duration::from_nanoseconds(999'999'998));
+
+    // Saturation on m_seconds × numerator overflow.
+    EXPECT_EQ(Duration::from_seconds(NumericLimits<i64>::max()).scaled_by(2, 1),
+        Duration::from_seconds(NumericLimits<i64>::max()));
+    EXPECT_EQ(Duration::from_seconds(NumericLimits<i64>::min()).scaled_by(2, 1),
+        Duration::from_seconds(NumericLimits<i64>::min()));
+
+    // Death on zero denominator.
+    EXPECT_DEATH("Scaled by with zero denominator", (void)Duration::from_seconds(1).scaled_by(1, 0));
 }

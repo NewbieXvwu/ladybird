@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2025-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/Function.h>
+#include <AK/HashMap.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
@@ -26,22 +27,55 @@ enum class ActionID {
     NavigateBack,
     NavigateForward,
     Reload,
+    ViewDownloads,
+    ViewHistory,
+    ClearBrowsingData,
 
     CopySelection,
+    CutSelection,
     Paste,
     SelectAll,
 
+    LookUpSelectedText,
     SearchSelectedText,
 
     TakeVisibleScreenshot,
     TakeFullScreenshot,
 
+    ToggleVerticalTabsExpanded,
+
+    ToggleMenuBar,
+
+    ManageBookmarks,
+    ToggleBookmark,
+    ToggleBookmarkViaToolbar,
+    ToggleBookmarksBar,
+    BookmarkItem,
+
+    OpenAllBookmarksInTabs,
+    AddBookmark,
+    AddBookmarkAllTabs,
+    AddBookmarkFolder,
+    DeleteBookmark,
+    DeleteBookmarkFolder,
+    EditBookmark,
+    EditBookmarkFolder,
+
+    OpenAboutPage,
+    OpenProcessesPage,
+    OpenSettingsPage,
+    ToggleDevTools,
     ViewSource,
 
     OpenInNewTab,
+    OpenInNewWindow,
+    OpenInNewPrivateWindow,
+    DownloadLinkedFile,
+    DownloadLinkedFileAs,
     CopyURL,
 
     OpenImage,
+    SaveImage,
     CopyImage,
 
     OpenAudio,
@@ -50,8 +84,11 @@ enum class ActionID {
     PauseMedia,
     MuteMedia,
     UnmuteMedia,
-    ToggleMediaControlsState,
+    ShowControls,
+    HideControls,
     ToggleMediaLoopState,
+    EnterFullscreen,
+    ExitFullscreen,
 
     ZoomIn,
     ZoomOut,
@@ -67,49 +104,66 @@ enum class ActionID {
     DumpLayoutTree,
     DumpPaintTree,
     DumpStackingContextTree,
+    DumpSiteIsolationProcessTree,
     DumpDisplayList,
     DumpStyleSheets,
     DumpStyles,
     DumpCSSErrors,
     DumpCookies,
     DumpLocalStorage,
+    DumpSessionStorage,
     DumpGCGraph,
+    DumpWasmStats,
     ShowLineBoxBorders,
+    ShowCaretHitTestDebugOverlay,
     CollectGarbage,
-    ClearCache,
-    ClearCookies,
+    CrashCurrentPage,
+    CrashCompositorProcess,
     SpoofUserAgent,
     NavigatorCompatibilityMode,
     EnableScripting,
-    EnableContentFiltering,
+    EnableContentBlocking,
     BlockPopUps,
 };
+
+using ActionText = Variant<StringView, String>;
+
+inline StringView action_text_to_string_view(ActionText const& text)
+{
+    return text.visit([](auto const& text) -> StringView { return text; });
+}
 
 class WEBVIEW_API Action
     : public RefCounted<Action>
     , public Weakable<Action> {
 public:
-    static NonnullRefPtr<Action> create(Variant<StringView, String> text, ActionID id, Function<void()> action);
-    static NonnullRefPtr<Action> create_checkable(Variant<StringView, String> text, ActionID id, Function<void()> action);
+    static NonnullRefPtr<Action> create(ActionText text, ActionID id, Function<void()> action);
+    static NonnullRefPtr<Action> create_checkable(ActionText text, ActionID id, Function<void()> action);
 
     void activate() { m_action(); }
 
-    StringView text() const
-    {
-        return m_text.visit([](auto const& text) -> StringView { return text; });
-    }
-    void set_text(Variant<StringView, String>);
+    StringView text() const { return action_text_to_string_view(m_text); }
+    void set_text(ActionText);
 
-    StringView tooltip() const { return *m_tooltip; }
-    void set_tooltip(StringView);
+    StringView tooltip() const { return action_text_to_string_view(*m_tooltip); }
+    void set_tooltip(ActionText);
+
+    void set_base64_png_icon(Optional<String> base64_png_icon) { m_base64_png_icon = move(base64_png_icon); }
+    Optional<String const&> base64_png_icon() const { return m_base64_png_icon; }
 
     ActionID id() const { return m_id; }
+
+    HashMap<StringView, String> const& properties() const { return m_properties; }
+    void add_property(StringView name, String value) { m_properties.set(name, move(value)); }
 
     bool enabled() const { return m_enabled; }
     void set_enabled(bool);
 
     bool visible() const { return m_visible; }
     void set_visible(bool);
+
+    bool engaged() const { return m_engaged; }
+    void set_engaged(bool);
 
     bool is_checkable() const { return m_checked.has_value(); }
     bool checked() const { return *m_checked; }
@@ -122,6 +176,7 @@ public:
         virtual void on_tooltip_changed(Action&) { }
         virtual void on_enabled_state_changed(Action&) { }
         virtual void on_visible_state_changed(Action&) { }
+        virtual void on_engaged_state_changed(Action&) { }
         virtual void on_checked_state_changed(Action&) { }
     };
 
@@ -131,7 +186,7 @@ public:
     void set_group(Badge<Menu>, Menu& group) { m_group = group; }
 
 private:
-    Action(Variant<StringView, String> text, ActionID id, Function<void()> action)
+    Action(ActionText text, ActionID id, Function<void()> action)
         : m_text(move(text))
         , m_id(id)
         , m_action(move(action))
@@ -140,12 +195,16 @@ private:
 
     void set_checked_internal(bool checked);
 
-    Variant<StringView, String> m_text;
-    Optional<StringView> m_tooltip;
+    ActionText m_text;
+    Optional<ActionText> m_tooltip;
+    Optional<String> m_base64_png_icon;
+
     ActionID m_id;
+    HashMap<StringView, String> m_properties;
 
     bool m_enabled { true };
     bool m_visible { true };
+    bool m_engaged { false };
     Optional<bool> m_checked;
 
     Function<void()> m_action;
@@ -162,17 +221,29 @@ class WEBVIEW_API Menu
 public:
     using MenuItem = Variant<NonnullRefPtr<Action>, NonnullRefPtr<Menu>, Separator>;
 
-    static NonnullRefPtr<Menu> create(StringView name);
-    static NonnullRefPtr<Menu> create_group(StringView name);
+    static NonnullRefPtr<Menu> create(ActionText title);
+    static NonnullRefPtr<Menu> create_group(ActionText title);
 
     void add_action(NonnullRefPtr<Action> action);
     void add_submenu(NonnullRefPtr<Menu> submenu) { m_items.append(move(submenu)); }
     void add_separator() { m_items.append(Separator {}); }
 
-    StringView title() const { return m_title; }
+    size_t size() const { return m_items.size(); }
+    void shrink(size_t size) { m_items.shrink(size); }
+
+    StringView title() const { return action_text_to_string_view(m_title); }
 
     Span<MenuItem> items() { return m_items; }
     ReadonlySpan<MenuItem> items() const { return m_items; }
+
+    HashMap<StringView, String> const& properties() const { return m_properties; }
+    void add_property(StringView name, String value) { m_properties.set(name, move(value)); }
+
+    void set_render_group_icon(bool render_group_icon) { m_render_group_icon = render_group_icon; }
+    bool render_group_icon() const { return m_render_group_icon; }
+
+    bool visible() const { return m_visible; }
+    void set_visible(bool);
 
     template<typename Callback>
     void for_each_action(Callback const& callback)
@@ -185,18 +256,32 @@ public:
         }
     }
 
+    struct Observer {
+        virtual ~Observer() = default;
+
+        virtual void on_visible_state_changed(Menu&) { }
+    };
+
+    void add_observer(NonnullOwnPtr<Observer>);
+    void remove_observer(Observer const& observer);
+
     Function<void(Gfx::IntPoint)> on_activation;
 
 private:
-    explicit Menu(StringView title)
-        : m_title(title)
+    explicit Menu(ActionText title)
+        : m_title(move(title))
     {
     }
 
-    StringView m_title;
+    ActionText m_title;
     Vector<MenuItem> m_items;
 
+    HashMap<StringView, String> m_properties;
+    Vector<NonnullOwnPtr<Observer>, 1> m_observers;
+
     bool m_is_group { false };
+    bool m_render_group_icon { false };
+    bool m_visible { true };
 };
 
 }

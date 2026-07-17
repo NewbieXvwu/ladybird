@@ -8,7 +8,7 @@
 
 #include <AK/HashTable.h>
 #include <LibJS/Forward.h>
-#include <LibWeb/Bindings/SharedWorkerGlobalScopeGlobalMixin.h>
+#include <LibWeb/Bindings/SharedWorkerGlobalScope.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/WorkerGlobalScope.h>
 
@@ -24,6 +24,8 @@ class WEB_API SharedWorkerGlobalScope
     GC_DECLARE_ALLOCATOR(SharedWorkerGlobalScope);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~SharedWorkerGlobalScope() override;
 
     void set_constructor_origin(URL::Origin origin) { m_constructor_origin = move(origin); }

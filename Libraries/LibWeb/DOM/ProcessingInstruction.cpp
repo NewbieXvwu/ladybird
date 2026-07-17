@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ProcessingInstructionPrototype.h>
+#include <LibWeb/Bindings/ProcessingInstruction.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ProcessingInstruction.h>
 #include <LibWeb/Layout/TextNode.h>
@@ -14,7 +14,7 @@ namespace Web::DOM {
 
 GC_DEFINE_ALLOCATOR(ProcessingInstruction);
 
-ProcessingInstruction::ProcessingInstruction(Document& document, Utf16String data, String const& target)
+ProcessingInstruction::ProcessingInstruction(Document& document, Utf16String data, Utf16FlyString const& target)
     : CharacterData(document, NodeType::PROCESSING_INSTRUCTION_NODE, move(data))
     , m_target(target)
 {

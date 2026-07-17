@@ -50,12 +50,15 @@ public:
     [[nodiscard]] bool is_declarative_environment() const { return m_declarative; }
     virtual bool is_global_environment() const { return false; }
     virtual bool is_function_environment() const { return false; }
+    virtual bool is_catch_environment() const { return false; }
 
     template<typename T>
     bool fast_is() const = delete;
 
-    // This flag is set on the entire variable environment chain when direct eval() is performed.
-    // It is used to disable non-local variable access caching.
+    // This flag is set on environments within a function when direct eval() is performed in that function.
+    // It propagates up to the function boundary (not beyond) and is used to disable variable access caching.
+    // Code in parent functions is not affected because eval can only inject vars into its containing
+    // function's variable environment, not into parent function scopes.
     bool is_permanently_screwed_by_eval() const { return m_permanently_screwed_by_eval; }
     void set_permanently_screwed_by_eval();
 
@@ -68,11 +71,19 @@ protected:
 
     virtual void visit_edges(Visitor&) override;
 
+    // NB: This belongs to FunctionEnvironment, but we keep it here to pack better.
+    ThisBindingStatus m_this_binding_status { ThisBindingStatus::Uninitialized }; // [[ThisBindingStatus]]
+
 private:
+    virtual bool is_environment() const final { return true; }
+
     bool m_permanently_screwed_by_eval { false };
     bool m_declarative { false };
 
     GC::Ptr<Environment> m_outer_environment;
 };
+
+template<>
+inline bool Cell::fast_is<Environment>() const { return is_environment(); }
 
 }

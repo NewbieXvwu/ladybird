@@ -15,9 +15,7 @@
 #include <LibGfx/ImageFormats/JPEGLoader.h>
 #include <LibGfx/ImageFormats/JPEGXLLoader.h>
 #include <LibGfx/ImageFormats/PNGLoader.h>
-#include <LibGfx/ImageFormats/TIFFLoader.h>
 #include <LibGfx/ImageFormats/TIFFMetadata.h>
-#include <LibGfx/ImageFormats/TinyVGLoader.h>
 #include <LibGfx/ImageFormats/WebPLoader.h>
 #include <LibTest/TestCase.h>
 #include <stdio.h>
@@ -42,6 +40,48 @@ static ErrorOr<Gfx::ImageFrameDescriptor> expect_single_frame_of_size(Gfx::Image
     auto frame = TRY(expect_single_frame(plugin_decoder));
     EXPECT_EQ(frame.image->size(), size);
     return frame;
+}
+
+static ErrorOr<ByteBuffer> make_webp_with_declared_but_missing_iccp_chunk(ReadonlyBytes simple_webp)
+{
+    VERIFY(simple_webp.size() >= 20);
+    VERIFY(simple_webp.slice(0, 4) == "RIFF"sv.bytes());
+    VERIFY(simple_webp.slice(8, 4) == "WEBP"sv.bytes());
+    VERIFY(simple_webp.slice(12, 4) == "VP8 "sv.bytes());
+
+    auto vp8_chunk = simple_webp.slice(12);
+
+    ByteBuffer extended_webp;
+    auto append_u32_le = [&](u32 value) -> ErrorOr<void> {
+        TRY(extended_webp.try_append(static_cast<u8>(value)));
+        TRY(extended_webp.try_append(static_cast<u8>(value >> 8)));
+        TRY(extended_webp.try_append(static_cast<u8>(value >> 16)));
+        TRY(extended_webp.try_append(static_cast<u8>(value >> 24)));
+        return {};
+    };
+    auto append_u24_le = [&](u32 value) -> ErrorOr<void> {
+        VERIFY(value <= 0xffffff);
+        TRY(extended_webp.try_append(static_cast<u8>(value)));
+        TRY(extended_webp.try_append(static_cast<u8>(value >> 8)));
+        TRY(extended_webp.try_append(static_cast<u8>(value >> 16)));
+        return {};
+    };
+
+    TRY(extended_webp.try_append("RIFF"sv.bytes()));
+    TRY(append_u32_le(4 + 18 + vp8_chunk.size()));
+    TRY(extended_webp.try_append("WEBP"sv.bytes()));
+
+    TRY(extended_webp.try_append("VP8X"sv.bytes()));
+    TRY(append_u32_le(10));
+    TRY(extended_webp.try_append(0x20)); // ICCP flag, without a corresponding ICCP chunk.
+    TRY(extended_webp.try_append(0));
+    TRY(extended_webp.try_append(0));
+    TRY(extended_webp.try_append(0));
+    TRY(append_u24_le(239)); // simple-vp8.webp is 240x240, encoded as dimension - 1.
+    TRY(append_u24_le(239));
+
+    TRY(extended_webp.try_append(vp8_chunk));
+    return extended_webp;
 }
 
 TEST_CASE(test_bmp)
@@ -94,6 +134,21 @@ TEST_CASE(test_bmp_v4)
     EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
 }
 
+TEST_CASE(test_bmp_negative_int_min_height)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("bmp/negative-height-int-min.bmp"sv)));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::BMPImageDecoderPlugin::create(file->bytes()));
+    EXPECT(plugin_decoder->frame(0).is_error());
+}
+
+TEST_CASE(test_bmp_v5_icc_profile_out_of_bounds)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("bmp/v5-icc-profile-out-of-bounds.bmp"sv)));
+    EXPECT(Gfx::BMPImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::BMPImageDecoderPlugin::create(file->bytes()));
+    EXPECT(plugin_decoder->icc_data().is_error());
+}
+
 TEST_CASE(test_bmp_os2_3bit)
 {
     auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("bmp/os2_3bpc.bmp"sv)));
@@ -103,6 +158,20 @@ TEST_CASE(test_bmp_os2_3bit)
     auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 300, 200 }));
     EXPECT_EQ(frame.image->get_pixel(150, 100), Gfx::Color::NamedColor::Black);
     EXPECT_EQ(frame.image->get_pixel(152, 100), Gfx::Color::NamedColor::White);
+}
+
+TEST_CASE(test_bmp_rle24)
+{
+    // 2x1 OS/2 2.x BI_RLE24 image: one run of two BGR (0x33, 0x22, 0x11) pixels.
+    // Regression test for a misaligned u32 store in the RLE24 decoder (issue #9958).
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("bmp/rle24.bmp"sv)));
+    EXPECT(Gfx::BMPImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::BMPImageDecoderPlugin::create(file->bytes()));
+
+    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 2, 1 }));
+    EXPECT_EQ(frame.image->format(), Gfx::BitmapFormat::RGBx8888);
+    EXPECT_EQ(frame.image->begin()[0] & 0x00ffffffU, 0x00332211U);
+    EXPECT_EQ(frame.image->begin()[1] & 0x00ffffffU, 0x00332211U);
 }
 
 TEST_CASE(test_ico_malformed_frame)
@@ -119,6 +188,15 @@ TEST_CASE(test_ico_malformed_frame)
         auto frame_or_error = plugin_decoder->frame(0);
         EXPECT(frame_or_error.is_error());
     }
+}
+
+TEST_CASE(test_ico_selects_largest_image_with_same_bpp)
+{
+    auto input = TEST_INPUT("ico/multiple-sizes-with-same-bpp.ico"sv);
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(input));
+
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::ICOImageDecoderPlugin::create(file->bytes()));
+    EXPECT_EQ(plugin_decoder->size(), Gfx::IntSize(256, 256));
 }
 
 TEST_CASE(test_cur)
@@ -145,6 +223,33 @@ TEST_CASE(test_gif)
 
     auto frame = TRY_OR_FAIL(plugin_decoder->frame(1));
     EXPECT(frame.duration == 400);
+}
+
+TEST_CASE(test_gif_loop_count_from_netscape_extension)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("gif/loop-count-2.gif"sv)));
+    EXPECT(Gfx::GIFImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::GIFImageDecoderPlugin::create(file->bytes()));
+
+    EXPECT_EQ(plugin_decoder->frame_count(), 2u);
+    EXPECT(plugin_decoder->is_animated());
+
+    EXPECT_EQ(plugin_decoder->loop_count(), 3u);
+}
+
+TEST_CASE(test_gif_corrupt_second_frame)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("gif/corrupt-second-frame.gif"sv)));
+    EXPECT(Gfx::GIFImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::GIFImageDecoderPlugin::create(file->bytes()));
+
+    EXPECT_EQ(plugin_decoder->frame_count(), 2u);
+
+    auto first_frame = TRY_OR_FAIL(plugin_decoder->frame(0));
+    EXPECT_EQ(first_frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
+
+    EXPECT(plugin_decoder->frame(1).is_error());
+    EXPECT(!plugin_decoder->frame(0).is_error());
 }
 
 TEST_CASE(test_corrupted_gif)
@@ -213,6 +318,17 @@ TEST_CASE(test_gif_without_global_color_table)
     auto frame = TRY_OR_FAIL(plugin_decoder->frame(0));
     EXPECT_EQ(frame.image->size(), Gfx::IntSize(1, 1));
     EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
+}
+
+TEST_CASE(test_gif_empty_lzw_data)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("gif/minimal-1x1.gif"sv)));
+    EXPECT(Gfx::GIFImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::GIFImageDecoderPlugin::create(file->bytes()));
+
+    EXPECT_EQ(plugin_decoder->frame_count(), 1u);
+    auto frame = TRY_OR_FAIL(plugin_decoder->frame(0));
+    EXPECT_EQ(frame.image->size(), Gfx::IntSize(1, 1));
 }
 
 TEST_CASE(test_not_ico)
@@ -310,6 +426,42 @@ TEST_CASE(test_jpeg_ycck)
         // FIXME: For 2111, they're off by way more.
         EXPECT(frame.image->get_pixel(6, 319).distance_squared_to(frame.image->get_pixel(6, 320)) < 1.0f / 255.0f);
     }
+}
+
+TEST_CASE(test_jpeg_cmyk_no_adobe_marker)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("jpg/cmyk-no-adobe-marker.jpg"sv)));
+    EXPECT(Gfx::JPEGImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::JPEGImageDecoderPlugin::create(file->bytes()));
+    TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 10, 10 }));
+
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(8, 1), Gfx::Color(44, 184, 97));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(1, 8), Gfx::Color(184, 44, 97));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(9, 9), Gfx::Color(24, 24, 194));
+}
+
+TEST_CASE(test_jpeg_cmyk_adobe_transform_0)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("jpg/cmyk-adobe-transform-0.jpg"sv)));
+    EXPECT(Gfx::JPEGImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::JPEGImageDecoderPlugin::create(file->bytes()));
+    TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 10, 10 }));
+
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(8, 1), Gfx::Color(44, 184, 97));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(1, 8), Gfx::Color(184, 44, 97));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(9, 9), Gfx::Color(24, 24, 194));
+}
+
+TEST_CASE(test_jpeg_ycck_adobe_transform_2)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("jpg/ycck-adobe-transform-2.jpg"sv)));
+    EXPECT(Gfx::JPEGImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::JPEGImageDecoderPlugin::create(file->bytes()));
+    TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 10, 10 }));
+
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(8, 1), Gfx::Color(197, 27, 134));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(1, 8), Gfx::Color(24, 199, 134));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(9, 9), Gfx::Color(227, 224, 19));
 }
 
 TEST_CASE(test_jpeg_sof2_spectral_selection)
@@ -451,6 +603,22 @@ TEST_CASE(test_exif)
     EXPECT_EQ(frame.image->get_pixel(190, 10), Gfx::Color(255, 0, 0));
 }
 
+TEST_CASE(test_exif_orientation_transpose_non_square)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/exif-orientation-5.png"sv)));
+    EXPECT(Gfx::PNGImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::PNGImageDecoderPlugin::create(file->bytes()));
+
+    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 1, 3 }));
+    EXPECT(plugin_decoder->metadata().has_value());
+    auto const& exif_metadata = static_cast<Gfx::ExifMetadata const&>(plugin_decoder->metadata().value());
+    EXPECT_EQ(*exif_metadata.orientation(), Gfx::TIFF::Orientation::Rotate90ClockwiseThenFlipHorizontally);
+
+    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color(255, 0, 0));
+    EXPECT_EQ(frame.image->get_pixel(0, 1), Gfx::Color(0, 255, 0));
+    EXPECT_EQ(frame.image->get_pixel(0, 2), Gfx::Color(0, 0, 255));
+}
+
 TEST_CASE(test_png_malformed_frame)
 {
     Array test_inputs = {
@@ -469,274 +637,32 @@ TEST_CASE(test_png_malformed_frame)
     }
 }
 
-TEST_CASE(test_tiff_uncompressed)
+// Regression test: libpng longjmp() out of png_read_image() must not leak the in-flight row-pointers buffer or bitmap
+// from PNGLoadingContext::read_frames(). The fixture has a valid IHDR, but a corrupted IDAT body that decompresses past
+// its zlib end-of-block marker — forcing libpng to longjmp mid-decode.
+TEST_CASE(test_png_corrupt_idat_does_not_leak_on_libpng_longjmp)
 {
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/uncompressed.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/corrupt-idat.png"sv)));
+    auto plugin_or_error = Gfx::PNGImageDecoderPlugin::create(file->bytes());
+    // PNGImageDecoderPlugin::create() catches the libpng error and falls back to a single-frame placeholder — so we
+    // don't assert on the result here. The test passes if the run completes without LeakSanitizer reports.
+    if (!plugin_or_error.is_error())
+        (void)plugin_or_error.release_value()->frame(0);
 }
 
-TEST_CASE(test_tiff_ccitt_rle)
+TEST_CASE(test_png_large_dimensions)
 {
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/ccitt_rle.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/65535x1.png"sv)));
+    EXPECT(Gfx::PNGImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::PNGImageDecoderPlugin::create(file->bytes()));
+    TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 65535, 1 }));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
 
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Black);
-}
-
-TEST_CASE(test_tiff_ccitt3)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/ccitt3.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Black);
-}
-
-TEST_CASE(test_tiff_ccitt3_no_tags)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/ccitt3_no_tags.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 6, 4 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(3, 0), Gfx::Color::NamedColor::Black);
-    EXPECT_EQ(frame.image->get_pixel(2, 2), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(5, 3), Gfx::Color::NamedColor::White);
-}
-
-TEST_CASE(test_tiff_ccitt3_fill)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/ccitt3_1d_fill.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 6, 4 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(3, 0), Gfx::Color::NamedColor::Black);
-    EXPECT_EQ(frame.image->get_pixel(2, 2), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(5, 3), Gfx::Color::NamedColor::White);
-}
-
-TEST_CASE(test_tiff_ccitt3_2d)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/ccitt3_2d.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Black);
-}
-
-TEST_CASE(test_tiff_ccitt3_2d_fill)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/ccitt3_2d_fill.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Black);
-}
-
-TEST_CASE(test_tiff_ccitt4)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/ccitt4.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Black);
-}
-
-TEST_CASE(test_tiff_lzw)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/lzw.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_deflate)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/deflate.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_krita)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/krita.tif"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_orientation)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/orientation.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 300, 400 }));
-
-    // Orientation is Rotate90Clockwise
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(300 - 75, 60), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_packed_bits)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/packed_bits.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_grayscale)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/grayscale.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color(130, 130, 130));
-}
-
-TEST_CASE(test_tiff_grayscale_alpha)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/grayscale_alpha.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0).alpha(), 0);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color(130, 130, 130));
-}
-
-TEST_CASE(test_tiff_rgb_alpha)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/rgb_alpha.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0).alpha(), 0);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_palette_alpha)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/rgb_palette_alpha.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0).alpha(), 0);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_alpha_predictor)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/alpha_predictor.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0).alpha(), 255);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_16_bits)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/16_bits.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_cmyk)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/cmyk.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    // I stripped the ICC profile from the image, so we can't test for equality with Red here.
-    EXPECT_NE(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::White);
-}
-
-TEST_CASE(test_tiff_tiled)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/tiled.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 300 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::White);
-    EXPECT_EQ(frame.image->get_pixel(60, 75), Gfx::Color::NamedColor::Red);
-}
-
-TEST_CASE(test_tiff_invalid_tag)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/invalid_tag.tiff"sv)));
-    EXPECT(Gfx::TIFFImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TIFFImageDecoderPlugin::create(file->bytes()));
-
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 10, 10 }));
-
-    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::Black);
-    EXPECT_EQ(frame.image->get_pixel(0, 9), Gfx::Color::NamedColor::White);
+    file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/1x65535.png"sv)));
+    EXPECT(Gfx::PNGImageDecoderPlugin::sniff(file->bytes()));
+    plugin_decoder = TRY_OR_FAIL(Gfx::PNGImageDecoderPlugin::create(file->bytes()));
+    TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 1, 65535 }));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
 }
 
 TEST_CASE(test_webp_simple_lossy)
@@ -749,6 +675,20 @@ TEST_CASE(test_webp_simple_lossy)
 
     // While VP8 YUV contents are defined bit-exact, the YUV->RGB conversion isn't.
     // So pixels changing by 1 or so below is fine if you change code.
+    EXPECT_EQ(frame.image->get_pixel(120, 232), Gfx::Color(0xf1, 0xef, 0xf0, 255));
+    EXPECT_EQ(frame.image->get_pixel(198, 202), Gfx::Color(0x7a, 0xaa, 0xd5, 255));
+}
+
+TEST_CASE(test_webp_extended_missing_declared_icc_chunk)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("webp/simple-vp8.webp"sv)));
+    auto malformed_webp = TRY_OR_FAIL(make_webp_with_declared_but_missing_iccp_chunk(file->bytes()));
+
+    EXPECT(Gfx::WebPImageDecoderPlugin::sniff(malformed_webp));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(malformed_webp));
+    EXPECT(!TRY_OR_FAIL(plugin_decoder->icc_data()).has_value());
+
+    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 240, 240 }));
     EXPECT_EQ(frame.image->get_pixel(120, 232), Gfx::Color(0xf1, 0xef, 0xf0, 255));
     EXPECT_EQ(frame.image->get_pixel(198, 202), Gfx::Color(0x7a, 0xaa, 0xd5, 255));
 }
@@ -1038,56 +978,6 @@ TEST_CASE(test_webp_unpremultiplied_alpha)
     // Webp decodes with unpremultiplied color data, so {R,G,B} can be >A (unlike with premultiplied colors).
     EXPECT_EQ(frame.image->alpha_type(), Gfx::AlphaType::Unpremultiplied);
     EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color(255, 255, 255, 128));
-}
-
-TEST_CASE(test_tvg)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tvg/yak.tvg"sv)));
-    EXPECT(Gfx::TinyVGImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TinyVGImageDecoderPlugin::create(file->bytes()));
-
-    TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 1024, 1024 }));
-}
-
-TEST_CASE(test_everything_tvg)
-{
-    Array file_names {
-        TEST_INPUT("tvg/everything.tvg"sv),
-        TEST_INPUT("tvg/everything-32.tvg"sv)
-    };
-
-    for (auto file_name : file_names) {
-        auto file = TRY_OR_FAIL(Core::MappedFile::map(file_name));
-        EXPECT(Gfx::TinyVGImageDecoderPlugin::sniff(file->bytes()));
-        auto plugin_decoder = TRY_OR_FAIL(Gfx::TinyVGImageDecoderPlugin::create(file->bytes()));
-
-        TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 768 }));
-    }
-}
-
-TEST_CASE(test_tvg_malformed)
-{
-    Array test_inputs = {
-        TEST_INPUT("tvg/bogus-color-table-size.tvg"sv)
-    };
-
-    for (auto test_input : test_inputs) {
-        auto file = TRY_OR_FAIL(Core::MappedFile::map(test_input));
-        auto plugin_decoder = TRY_OR_FAIL(Gfx::TinyVGImageDecoderPlugin::create(file->bytes()));
-        auto frame_or_error = plugin_decoder->frame(0);
-        EXPECT(frame_or_error.is_error());
-    }
-}
-
-TEST_CASE(test_tvg_rgb565)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tvg/green-rgb565.tvg"sv)));
-    EXPECT(Gfx::TinyVGImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TinyVGImageDecoderPlugin::create(file->bytes()));
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 100, 100 }));
-
-    // Should be a solid dark green:
-    EXPECT_EQ(frame.image->get_pixel(50, 50), Gfx::Color(0, 130, 0));
 }
 
 TEST_CASE(test_jxl_modular_simple_tree_upsample2_10bits)

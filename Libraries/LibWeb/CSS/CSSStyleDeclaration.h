@@ -8,10 +8,14 @@
 #pragma once
 
 #include <AK/String.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/CSS/CSSRule.h>
 #include <LibWeb/CSS/StyleProperty.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/DOM/AbstractElement.h>
+#include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::CSS {
 
@@ -26,18 +30,18 @@ public:
     virtual void initialize(JS::Realm&) override;
 
     virtual size_t length() const = 0;
-    virtual String item(size_t index) const = 0;
+    virtual Utf16String item(size_t index) const = 0;
 
-    virtual WebIDL::ExceptionOr<void> set_property(StringView property_name, StringView css_text, StringView priority) = 0;
-    virtual WebIDL::ExceptionOr<String> remove_property(StringView property_name) = 0;
+    virtual WebIDL::ExceptionOr<void> set_property(Utf16FlyString const& property_name, Utf16View css_text, Utf16View priority) = 0;
+    virtual WebIDL::ExceptionOr<Utf16String> remove_property(Utf16FlyString const& property_name) = 0;
 
-    virtual String get_property_value(StringView property_name) const = 0;
-    virtual StringView get_property_priority(StringView property_name) const = 0;
+    virtual Utf16String get_property_value(Utf16FlyString const& property_name) const = 0;
+    virtual Utf16String get_property_priority(Utf16FlyString const& property_name) const = 0;
 
-    String css_text() const;
-    virtual WebIDL::ExceptionOr<void> set_css_text(StringView) = 0;
+    Utf16String css_text() const;
+    virtual WebIDL::ExceptionOr<void> set_css_text(Utf16View) = 0;
 
-    virtual String serialized() const = 0;
+    virtual Utf16String serialized() const = 0;
 
     // https://drafts.csswg.org/cssom/#cssstyledeclaration-computed-flag
     [[nodiscard]] bool is_computed() const { return m_computed; }
@@ -57,8 +61,9 @@ public:
     [[nodiscard]] bool is_updating() const { return m_updating; }
     void set_is_updating(bool value) { m_updating = value; }
 
-    virtual bool has_property(StringView property_name) const = 0;
-    virtual RefPtr<StyleValue const> get_property_style_value(StringView property_name) const = 0;
+    virtual bool has_property(PropertyNameAndID const&) const { VERIFY_NOT_REACHED(); }
+    virtual RefPtr<StyleValue const> get_property_style_value(PropertyNameAndID const&) const { VERIFY_NOT_REACHED(); }
+    virtual WebIDL::ExceptionOr<void> set_property_style_value(PropertyNameAndID const&, NonnullRefPtr<StyleValue const>) { VERIFY_NOT_REACHED(); }
 
 protected:
     enum class Computed : u8 {

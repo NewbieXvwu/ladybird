@@ -2,7 +2,7 @@
  * Copyright (c) 2018-2020, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021, Max Wipfli <mail@maxwipfli.ch>
  * Copyright (c) 2024, Sam Atkins <sam@ladybird.org>
- * Copyright (c) 2023-2025, Shannon Booth <shannon@serenityos.org>
+ * Copyright (c) 2023-2026, Shannon Booth <shannon@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -12,12 +12,14 @@
 #include <AK/Debug.h>
 #include <AK/LexicalPath.h>
 #include <AK/StringBuilder.h>
+#include <AK/Utf16View.h>
 #include <AK/Utf8View.h>
 #include <LibURL/Parser.h>
 #include <LibURL/PublicSuffixData.h>
-#include <LibURL/URL.h>
 
 namespace URL {
+
+static bool s_file_scheme_urls_have_tuple_origins = false;
 
 Optional<URL> URL::complete_url(StringView relative_url) const
 {
@@ -50,8 +52,22 @@ void URL::set_username(StringView username)
     m_data->username = percent_encode(username, PercentEncodeSet::Userinfo);
 }
 
+// https://url.spec.whatwg.org/#set-the-username
+void URL::set_username(Utf16View username)
+{
+    // To set the username given a url and username, set url’s username to the result of running UTF-8 percent-encode on username using the userinfo percent-encode set.
+    m_data->username = percent_encode(username, PercentEncodeSet::Userinfo);
+}
+
 // https://url.spec.whatwg.org/#set-the-password
 void URL::set_password(StringView password)
+{
+    // To set the password given a url and password, set url’s password to the result of running UTF-8 percent-encode on password using the userinfo percent-encode set.
+    m_data->password = percent_encode(password, PercentEncodeSet::Userinfo);
+}
+
+// https://url.spec.whatwg.org/#set-the-password
+void URL::set_password(Utf16View password)
 {
     // To set the password given a url and password, set url’s password to the result of running UTF-8 percent-encode on password using the userinfo percent-encode set.
     m_data->password = percent_encode(password, PercentEncodeSet::Userinfo);
@@ -99,31 +115,22 @@ void URL::append_path(StringView path)
 bool URL::cannot_have_a_username_or_password_or_port() const
 {
     // A URL cannot have a username/password/port if its host is null or the empty string, or its scheme is "file".
-
     return !m_data->host.has_value() || m_data->host->is_empty_host() || m_data->scheme == "file"sv;
 }
 
 // https://url.spec.whatwg.org/#default-port
 Optional<u16> default_port_for_scheme(StringView scheme)
 {
-    // Spec defined mappings with port:
-    if (scheme == "ftp")
+    if (scheme == "ftp"sv)
         return 21;
-    if (scheme == "http")
+    if (scheme == "http"sv)
         return 80;
-    if (scheme == "https")
+    if (scheme == "https"sv)
         return 443;
-    if (scheme == "ws")
+    if (scheme == "ws"sv)
         return 80;
-    if (scheme == "wss")
+    if (scheme == "wss"sv)
         return 443;
-
-    // NOTE: not in spec, but we support these too
-    if (scheme == "irc")
-        return 6667;
-    if (scheme == "ircs")
-        return 6697;
-
     return {};
 }
 
@@ -262,18 +269,11 @@ String URL::serialize(ExcludeFragment exclude_fragment) const
     }
 
     // 3. If url’s host is null, url does not have an opaque path, url’s path’s size is greater than 1, and url’s path[0] is the empty string, then append U+002F (/) followed by U+002E (.) to output.
+    if (!host().has_value() && !has_an_opaque_path() && paths().size() > 1 && paths()[0].is_empty())
+        output.append("/."sv);
+
     // 4. Append the result of URL path serializing url to output.
-    // FIXME: Implement this closer to spec steps.
-    if (has_an_opaque_path()) {
-        output.append(m_data->paths[0]);
-    } else {
-        if (!m_data->host.has_value() && m_data->paths.size() > 1 && m_data->paths[0].is_empty())
-            output.append("/."sv);
-        for (auto& segment : m_data->paths) {
-            output.append('/');
-            output.append(segment);
-        }
-    }
+    output.append(serialize_path());
 
     // 5. If url’s query is non-null, append U+003F (?), followed by url’s query, to output.
     if (m_data->query.has_value()) {
@@ -332,6 +332,17 @@ ByteString URL::serialize_for_display() const
     return builder.to_byte_string();
 }
 
+void set_file_scheme_urls_have_tuple_origins()
+{
+    VERIFY(!s_file_scheme_urls_have_tuple_origins);
+    s_file_scheme_urls_have_tuple_origins = true;
+}
+
+bool file_scheme_urls_have_tuple_origins()
+{
+    return s_file_scheme_urls_have_tuple_origins;
+}
+
 // https://url.spec.whatwg.org/#concept-url-origin
 Origin URL::origin() const
 {
@@ -367,12 +378,29 @@ Origin URL::origin() const
         return Origin(scheme(), host().value(), port());
     }
 
-    // -> "file"
-    // AD-HOC: Our resource:// is basically an alias to file://
-    if (scheme() == "file"sv || scheme() == "resource"sv) {
-        // Unfortunate as it is, this is left as an exercise to the reader. When in doubt, return a new opaque origin.
-        // Note: We must return an origin with the `file://' protocol for `file://' iframes to work from `file://' pages.
+    // AD-HOC: resource:// URLs are internal browser resources; give them a shared tuple origin
+    // so that same-origin checks pass between any two resource:// documents or worker scripts.
+    if (scheme() == "resource"sv)
         return Origin(scheme(), String {}, {});
+
+    // -> "file"
+    if (scheme() == "file"sv) {
+        // Unfortunate as it is, this is left as an exercise to the reader. When in doubt, return a new opaque origin.
+
+        // Our implementation-defined behavior is to return an opaque origin for file:// URLs,
+        // tagged explicitly as a "file" opaque origin rather than a fully anonymous one.
+        //
+        // This keeps file:// URLs opaque by default while still allowing downstream code to
+        // identify and special-case them where needed - for example, to match cases where
+        // other browsers treat a file:// origin as if it were a tuple origin.
+        //
+        // A process-wide flag can opt into tuple origins for file:// URLs instead. This is
+        // intended for development/testing scenarios where web features requiring a non-opaque
+        // origin (such as localStorage) need to work with file:// pages.
+        if (file_scheme_urls_have_tuple_origins())
+            return Origin { scheme(), String {}, {} };
+
+        return Origin::create_opaque(Origin::OpaqueData::Type::File);
     }
 
     // -> Otherwise
@@ -423,13 +451,8 @@ bool code_point_is_in_percent_encode_set(u32 code_point, PercentEncodeSet set)
         return code_point_is_in_percent_encode_set(code_point, PercentEncodeSet::Userinfo) || "$%&+,"sv.contains(static_cast<char>(code_point));
     case PercentEncodeSet::ApplicationXWWWFormUrlencoded:
         return code_point_is_in_percent_encode_set(code_point, PercentEncodeSet::Component) || "!'()~"sv.contains(static_cast<char>(code_point));
-    case PercentEncodeSet::EncodeURI:
-        // NOTE: This is the same percent encode set that JS encodeURI() uses.
-        // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURI
-        return code_point > 0x7E || (!is_ascii_alphanumeric(code_point) && !";,/?:@&=+$-_.!~*'()#"sv.contains(static_cast<char>(code_point)));
-    default:
-        VERIFY_NOT_REACHED();
     }
+    VERIFY_NOT_REACHED();
 }
 
 void append_percent_encoded_if_necessary(StringBuilder& builder, u32 code_point, PercentEncodeSet set)
@@ -444,6 +467,18 @@ String percent_encode(StringView input, PercentEncodeSet set, SpaceAsPlus space_
 {
     StringBuilder builder;
     for (auto code_point : Utf8View(input)) {
+        if (space_as_plus == SpaceAsPlus::Yes && code_point == ' ')
+            builder.append('+');
+        else
+            append_percent_encoded_if_necessary(builder, code_point, set);
+    }
+    return MUST(builder.to_string());
+}
+
+String percent_encode(Utf16View input, PercentEncodeSet set, SpaceAsPlus space_as_plus)
+{
+    StringBuilder builder;
+    for (auto code_point : input) {
         if (space_as_plus == SpaceAsPlus::Yes && code_point == ' ')
             builder.append('+');
         else
@@ -494,35 +529,6 @@ ByteString percent_decode(StringView input)
         }
     }
     return builder.to_byte_string();
-}
-
-bool is_public_suffix(StringView host)
-{
-    return PublicSuffixData::the()->is_public_suffix(host);
-}
-
-// https://github.com/publicsuffix/list/wiki/Format#algorithm
-Optional<String> get_registrable_domain(StringView host)
-{
-    // The registered or registrable domain is the public suffix plus one additional label.
-    auto public_suffix = PublicSuffixData::the()->get_public_suffix(host);
-    if (!public_suffix.has_value() || !host.ends_with(*public_suffix))
-        return {};
-
-    if (host == *public_suffix)
-        return {};
-
-    auto subhost = host.substring_view(0, host.length() - public_suffix->bytes_as_string_view().length());
-    subhost = subhost.trim("."sv, TrimMode::Right);
-
-    if (subhost.is_empty())
-        return {};
-
-    size_t start_index = 0;
-    if (auto index = subhost.find_last('.'); index.has_value())
-        start_index = *index + 1;
-
-    return MUST(String::from_utf8(host.substring_view(start_index)));
 }
 
 }

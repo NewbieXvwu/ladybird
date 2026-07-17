@@ -13,29 +13,21 @@
 
 namespace Web::Geometry {
 
-// https://drafts.fxtf.org/geometry/#dictdef-domquadinit
-struct DOMQuadInit {
-    DOMPointInit p1;
-    DOMPointInit p2;
-    DOMPointInit p3;
-    DOMPointInit p4;
-};
-
 // https://drafts.fxtf.org/geometry/#domquad
-class DOMQuad
+class WEB_API DOMQuad
     : public Bindings::PlatformObject
     , public Bindings::Serializable {
     WEB_PLATFORM_OBJECT(DOMQuad, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(DOMQuad);
 
 public:
-    static GC::Ref<DOMQuad> construct_impl(JS::Realm&, DOMPointInit const& p1, DOMPointInit const& p2, DOMPointInit const& p3, DOMPointInit const& p4);
+    static GC::Ref<DOMQuad> construct_impl(JS::Realm&, Bindings::DOMPointInit const& p1, Bindings::DOMPointInit const& p2, Bindings::DOMPointInit const& p3, Bindings::DOMPointInit const& p4);
     static GC::Ref<DOMQuad> create(JS::Realm& realm);
 
     virtual ~DOMQuad() override;
 
-    static GC::Ref<DOMQuad> from_rect(JS::VM&, DOMRectInit const&);
-    static GC::Ref<DOMQuad> from_quad(JS::VM&, DOMQuadInit const&);
+    static GC::Ref<DOMQuad> from_rect(JS::VM&, Bindings::DOMRectInit const&);
+    static GC::Ref<DOMQuad> from_quad(JS::VM&, Bindings::DOMQuadInit const&);
 
     GC::Ref<DOMPoint> p1() const { return m_p1; }
     GC::Ref<DOMPoint> p2() const { return m_p2; }
@@ -44,12 +36,11 @@ public:
 
     GC::Ref<DOMRect> get_bounds() const;
 
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::DOMQuad; }
-    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
-    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::StructuredSerializeWriter&, bool for_storage, HTML::SerializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::StructuredSerializeReader&, HTML::DeserializationMemory&) override;
 
 private:
-    DOMQuad(JS::Realm&, DOMPointInit const& p1, DOMPointInit const& p2, DOMPointInit const& p3, DOMPointInit const& p4);
+    DOMQuad(JS::Realm&, Bindings::DOMPointInit const& p1, Bindings::DOMPointInit const& p2, Bindings::DOMPointInit const& p3, Bindings::DOMPointInit const& p4);
     explicit DOMQuad(JS::Realm&);
 
     virtual void initialize(JS::Realm&) override;

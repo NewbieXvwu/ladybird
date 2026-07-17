@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2024-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -30,7 +30,7 @@
         self.web_view = web_view;
 
         if (self.web_view == nil)
-            self.web_view = [[LadybirdWebView alloc] init:nil];
+            self.web_view = [[LadybirdWebView alloc] init:nil isPrivate:WebView::IsPrivate::No];
 
         [self.web_view setClipsToBounds:YES];
     }
@@ -50,6 +50,14 @@
 {
     [self.web_view handleVisibility:!flag];
     [super setIsMiniaturized:flag];
+}
+
+- (void)becomeKeyWindow
+{
+    [super becomeKeyWindow];
+
+    if (self.preferred_first_responder && [self firstResponder] != self.preferred_first_responder)
+        [self makeFirstResponder:self.preferred_first_responder];
 }
 
 @end

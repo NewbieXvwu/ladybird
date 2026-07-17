@@ -6,28 +6,37 @@
 
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CredentialManagement/FederatedCredential.h>
+#include <LibWeb/CredentialManagement/FederatedCredentialOperations.h>
 
 namespace Web::CredentialManagement {
 
 GC_DEFINE_ALLOCATOR(FederatedCredential);
 
-GC::Ref<FederatedCredential> FederatedCredential::create(JS::Realm& realm)
-{
-    return realm.create<FederatedCredential>(realm);
-}
-
 // https://www.w3.org/TR/credential-management-1/#dom-federatedcredential-federatedcredential
-WebIDL::ExceptionOr<GC::Ref<FederatedCredential>> FederatedCredential::construct_impl(JS::Realm& realm, FederatedCredentialInit const&)
+WebIDL::ExceptionOr<GC::Ref<FederatedCredential>> FederatedCredential::construct_impl(JS::Realm& realm, Bindings::FederatedCredentialInit const& data)
 {
-    return realm.vm().throw_completion<JS::InternalError>(JS::ErrorType::NotImplemented, "construct"sv);
+    // 1. Let r be the result of executing Create a FederatedCredential from FederatedCredentialInit on data. If that
+    // threw an exception, rethrow that exception.
+    // 2. Return r.
+    return create_federated_credential(realm, data);
 }
 
 FederatedCredential::~FederatedCredential()
 {
 }
 
-FederatedCredential::FederatedCredential(JS::Realm& realm)
-    : Credential(realm)
+Utf16FlyString const& FederatedCredential::type() const
+{
+    static Utf16FlyString const& type = *new Utf16FlyString("federated"_utf16_fly_string);
+    return type;
+}
+
+FederatedCredential::FederatedCredential(JS::Realm& realm, Bindings::FederatedCredentialInit const& init, URL::Origin origin)
+    : Credential(realm, init.id)
+    , CredentialUserData(init.name.value_or(Utf16String {}), init.icon_url.value_or(Utf16String {}))
+    , m_provider(init.provider)
+    , m_protocol(init.protocol)
+    , m_origin(move(origin))
 {
 }
 

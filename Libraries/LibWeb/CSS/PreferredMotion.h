@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2024, the Ladybird developers.
+ * Copyright (c) 2024-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <AK/StringView.h>
+#include <AK/Utf16View.h>
 
 namespace Web::CSS {
 
@@ -16,7 +16,6 @@ enum class PreferredMotion {
     Reduce,
 };
 
-PreferredMotion preferred_motion_from_string(StringView);
-StringView preferred_motion_to_string(PreferredMotion);
+PreferredMotion preferred_motion_from_string(Utf16View);
 
 }

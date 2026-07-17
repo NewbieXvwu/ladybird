@@ -6,7 +6,8 @@
 
 #pragma once
 
-#include <LibWeb/Bindings/ServiceWorkerPrototype.h>
+#include <AK/Utf16String.h>
+#include <LibWeb/Bindings/ServiceWorker.h>
 #include <LibWeb/DOM/EventTarget.h>
 
 #define ENUMERATE_SERVICE_WORKER_EVENT_HANDLERS(E)  \
@@ -18,13 +19,14 @@ namespace Web::ServiceWorker {
 // https://w3c.github.io/ServiceWorker/#serviceworker-interface
 class ServiceWorker : public DOM::EventTarget {
     WEB_PLATFORM_OBJECT(ServiceWorker, DOM::EventTarget);
+    GC_DECLARE_ALLOCATOR(ServiceWorker);
 
 public:
     [[nodiscard]] static GC::Ref<ServiceWorker> create(JS::Realm& realm, ServiceWorkerRecord*);
 
     virtual ~ServiceWorker() override;
 
-    String script_url() const;
+    Utf16String script_url() const;
     Bindings::ServiceWorkerState service_worker_state() const { return m_state; }
     void set_service_worker_state(Bindings::ServiceWorkerState state) { m_state = state; }
 

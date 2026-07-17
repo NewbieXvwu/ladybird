@@ -1,5 +1,6 @@
 set(TEST_SOURCES
     TestAES.cpp
+    TestArgon2.cpp
     TestASN1.cpp
     TestBigFraction.cpp
     TestBigInteger.cpp
@@ -9,6 +10,7 @@ set(TEST_SOURCES
     TestHash.cpp
     TestHKDF.cpp
     TestHMAC.cpp
+    TestMLDSA.cpp
     TestOAEP.cpp
     TestPBKDF2.cpp
     TestPSS.cpp

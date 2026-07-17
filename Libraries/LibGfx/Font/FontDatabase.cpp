@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2026, Tim Ledbetter <tim.ledbetter@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,6 +9,7 @@
 #include <LibCore/StandardPaths.h>
 #include <LibGfx/Font/Font.h>
 #include <LibGfx/Font/FontDatabase.h>
+#include <LibGfx/Font/TypefaceSkia.h>
 
 #if defined(AK_OS_HAIKU)
 #    include <FindDirectory.h>
@@ -24,8 +26,8 @@ SystemFontProvider::~SystemFontProvider() = default;
 
 FontDatabase& FontDatabase::the()
 {
-    static FontDatabase s_the;
-    return s_the;
+    static FontDatabase& database = *new FontDatabase;
+    return database;
 }
 
 SystemFontProvider& FontDatabase::install_system_font_provider(NonnullOwnPtr<SystemFontProvider> provider)
@@ -43,9 +45,28 @@ StringView FontDatabase::system_font_provider_name() const
 
 FontDatabase::FontDatabase() = default;
 
-RefPtr<Gfx::Font> FontDatabase::get(FlyString const& family, float point_size, unsigned weight, unsigned width, unsigned slope)
+RefPtr<Gfx::Font> FontDatabase::get(FlyString const& family, float point_size, unsigned weight, unsigned width, unsigned slope, Optional<FontVariationSettings> const& font_variation_settings, Optional<Gfx::ShapeFeatures> const& shape_features)
 {
-    return m_system_font_provider->get_font(family, point_size, weight, width, slope);
+    return m_system_font_provider->get_font(family, point_size, weight, width, slope, font_variation_settings, shape_features);
+}
+
+RefPtr<Gfx::Font> FontDatabase::get_font_for_code_point(u32 code_point, float point_size, u16 weight, u16 width, u8 slope, bool prefer_color_emoji)
+{
+    CodePointFallbackKey key { code_point, weight, width, slope, prefer_color_emoji };
+    auto& entry = m_code_point_fallback_cache.ensure(key, [&]() -> CodePointFallbackEntry {
+        auto typeface_or_error = TypefaceSkia::find_typeface_for_code_point(code_point, weight, width, slope, prefer_color_emoji);
+        if (typeface_or_error.is_error() || !typeface_or_error.value())
+            return { {}, nullptr };
+
+        auto typeface = typeface_or_error.release_value();
+        return { typeface->family(), typeface };
+    });
+
+    // FIXME: Does it matter that we don't pass a FontVariationSettings or ShapeFeatures here?
+    if (entry.typeface)
+        return entry.typeface->font(point_size, {});
+
+    return nullptr;
 }
 
 void FontDatabase::for_each_typeface_with_family_name(FlyString const& family_name, Function<void(Typeface const&)> callback)

@@ -6,7 +6,7 @@
 
 #include <LibJS/Runtime/Realm.h>
 #include <LibJS/Runtime/VM.h>
-#include <LibWeb/Bindings/AudioTrackListPrototype.h>
+#include <LibWeb/Bindings/AudioTrackList.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/AudioTrackList.h>
 #include <LibWeb/HTML/EventNames.h>
@@ -44,19 +44,23 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> AudioTrackList::internal
     return Base::internal_get_own_property(property_name);
 }
 
-void AudioTrackList::add_track(Badge<HTMLMediaElement>, GC::Ref<AudioTrack> audio_track)
+void AudioTrackList::add_track(GC::Ref<AudioTrack> audio_track)
 {
     m_audio_tracks.append(audio_track);
     audio_track->set_audio_track_list({}, this);
 }
 
-void AudioTrackList::remove_all_tracks(Badge<HTMLMediaElement>)
+void AudioTrackList::remove_all_tracks()
 {
+    for (auto& audio_track : m_audio_tracks) {
+        audio_track->set_enabled(false);
+        audio_track->set_audio_track_list({}, nullptr);
+    }
     m_audio_tracks.clear();
 }
 
 // https://html.spec.whatwg.org/multipage/media.html#dom-audiotracklist-gettrackbyid
-GC::Ptr<AudioTrack> AudioTrackList::get_track_by_id(StringView id) const
+GC::Ptr<AudioTrack> AudioTrackList::get_track_by_id(Utf16View id) const
 {
     // The AudioTrackList getTrackById(id) and VideoTrackList getTrackById(id) methods must return the first AudioTrack
     // or VideoTrack object (respectively) in the AudioTrackList or VideoTrackList object (respectively) whose identifier

@@ -1,44 +1,49 @@
 /*
- * Copyright (c) 2023-2024, Tim Flynn <trflynn89@serenityos.org>
+ * Copyright (c) 2023-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <AK/Vector.h>
 #include <LibGfx/Point.h>
 #include <LibGfx/Rect.h>
 #include <LibGfx/Size.h>
 #include <LibWeb/Page/InputEvent.h>
+#include <LibWebView/PrivateBrowsing.h>
 #include <LibWebView/ViewImplementation.h>
 
 namespace Ladybird {
 
 class WebViewBridge final : public WebView::ViewImplementation {
 public:
-    static ErrorOr<NonnullOwnPtr<WebViewBridge>> create(Vector<Web::DevicePixelRect> screen_rects, float device_pixel_ratio, u64 maximum_frames_per_second);
+    static ErrorOr<NonnullOwnPtr<WebViewBridge>> create(WebView::IsPrivate, Vector<Web::DevicePixelRect> screen_rects, double device_pixel_ratio, u64 maximum_frames_per_second, Optional<u64> display_id);
     virtual ~WebViewBridge() override;
 
     virtual void initialize_client(CreateNewClient = CreateNewClient::Yes) override;
     void initialize_client_as_child(WebViewBridge& parent, u64 page_index);
 
-    float device_pixel_ratio() const { return m_device_pixel_ratio; }
-    void set_device_pixel_ratio(float device_pixel_ratio);
-    float inverse_device_pixel_ratio() const { return 1.0f / m_device_pixel_ratio; }
+    void set_device_pixel_ratio(double device_pixel_ratio);
+    void set_zoom_level(double zoom_level);
+    double inverse_device_pixel_ratio() const { return 1.0 / device_pixel_ratio(); }
 
     void set_viewport_rect(Gfx::IntRect);
 
-    void set_maximum_frames_per_second(u64 maximum_frames_per_second);
+    void set_display_metadata(u64 maximum_frames_per_second, Optional<u64> display_id);
+
+    void exit_fullscreen();
 
     void update_palette();
 
     void enqueue_input_event(Web::MouseEvent);
     void enqueue_input_event(Web::DragEvent);
     void enqueue_input_event(Web::KeyEvent);
+    void enqueue_input_event(Web::PinchEvent);
 
     struct Paintable {
-        Gfx::Bitmap const& bitmap;
+        Gfx::SharedImageBuffer const* shared_image_buffer { nullptr };
         Gfx::IntSize bitmap_size;
     };
     Optional<Paintable> paintable();
@@ -46,7 +51,9 @@ public:
     Function<void()> on_zoom_level_changed;
 
 private:
-    WebViewBridge(Vector<Web::DevicePixelRect> screen_rects, float device_pixel_ratio, u64 maximum_frames_per_second);
+    WebViewBridge(WebView::IsPrivate, Vector<Web::DevicePixelRect> screen_rects, double device_pixel_ratio, u64 maximum_frames_per_second, Optional<u64> display_id);
+
+    void update_compositor_display_metadata();
 
     virtual void update_zoom() override;
     virtual Web::DevicePixelSize viewport_size() const override;

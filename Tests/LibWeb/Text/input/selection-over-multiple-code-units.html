@@ -1,11 +1,12 @@
 <!DOCTYPE html>
+<meta charset="utf-8">
 <script src="include.js"></script>
 😭foobar😭
 <script>
 asyncTest(done => {
     window.addEventListener('load', () => {
         internals.mouseDown(55, 20);
-        internals.movePointerTo(110, 20);
+        internals.mouseMove(110, 20);
 
         const activeRange = window.getSelection().getRangeAt(0);
         printElement(activeRange.startContainer);

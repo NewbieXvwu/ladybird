@@ -6,10 +6,14 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/CharacterTypes.h>
 #include <AK/String.h>
+#include <AK/StringBuilder.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibURL/Parser.h>
 #include <LibURL/PublicSuffixData.h>
+#include <LibWebView/Application.h>
+#include <LibWebView/Autocomplete.h>
 #include <LibWebView/URL.h>
 
 namespace WebView {
@@ -36,22 +40,20 @@ Optional<URL::URL> sanitize_url(StringView location, Optional<SearchEngine> cons
 
     auto url = URL::create_with_url_or_path(location);
 
-    if (!url.has_value()) {
+    if (!url.has_value() || url->scheme() == "localhost"sv) {
         url = URL::create_with_url_or_path(ByteString::formatted("https://{}", location));
-
         if (!url.has_value())
             return search_url_or_error();
 
         https_scheme_was_guessed = true;
     }
 
+    // FIXME: Add support for other schemes, e.g. "mailto:". Firefox and Chrome open mailto: locations.
     static constexpr Array SUPPORTED_SCHEMES { "about"sv, "data"sv, "file"sv, "http"sv, "https"sv, "resource"sv };
     if (!any_of(SUPPORTED_SCHEMES, [&](StringView const& scheme) { return scheme == url->scheme(); }))
         return search_url_or_error();
-    // FIXME: Add support for other schemes, e.g. "mailto:". Firefox and Chrome open mailto: locations.
 
-    auto const& host = url->host();
-    if (host.has_value() && host->is_domain()) {
+    if (auto const& host = url->host(); host.has_value() && host->is_domain()) {
         auto const& domain = host->get<String>();
 
         if (domain.contains('"'))
@@ -62,7 +64,7 @@ Optional<URL::URL> sanitize_url(StringView location, Optional<SearchEngine> cons
         if (any_of(RESERVED_TLDS, [&](StringView const& tld) { return domain.byte_count() > tld.length() && domain.ends_with_bytes(tld); }))
             return url;
 
-        auto public_suffix = URL::PublicSuffixData::the()->get_public_suffix(domain);
+        auto public_suffix = URL::PublicSuffixData::find_matching_public_suffix(domain, URL::PublicSuffixData::IncludeStarRule::No);
         if (!public_suffix.has_value() || *public_suffix == domain) {
             if (append_tld == AppendTLD::Yes)
                 url->set_host(MUST(String::formatted("{}.com", domain)));
@@ -74,7 +76,82 @@ Optional<URL::URL> sanitize_url(StringView location, Optional<SearchEngine> cons
     return url;
 }
 
-Vector<URL::URL> sanitize_urls(ReadonlySpan<ByteString> raw_urls, URL::URL const& new_tab_page_url)
+bool location_looks_like_url(StringView location, AppendTLD append_tld)
+{
+    return sanitize_url(location, {}, append_tld).has_value();
+}
+
+Optional<URL::URL> url_from_text(StringView text)
+{
+    auto trimmed_text = text.trim_whitespace();
+    if (trimmed_text.is_empty() || trimmed_text.is_whitespace())
+        return {};
+
+    if (trimmed_text.starts_with('.') || trimmed_text.starts_with('/'))
+        return {};
+
+    return sanitize_url(trimmed_text);
+}
+
+bool autocomplete_urls_match(StringView left, StringView right)
+{
+    auto parse_destination = [](StringView value) {
+        auto url = URL::Parser::basic_parse(value);
+        if (url.has_value() && url->scheme().is_one_of("about"sv, "data"sv, "file"sv, "http"sv, "https"sv, "resource"sv))
+            return url;
+        return URL::Parser::basic_parse(MUST(String::formatted("https://{}", value)));
+    };
+
+    auto left_url = parse_destination(left);
+    auto right_url = parse_destination(right);
+    if (!left_url.has_value() || !right_url.has_value())
+        return false;
+
+    return left_url->equals(*right_url, URL::ExcludeFragment::Yes);
+}
+
+bool autocomplete_url_can_complete(StringView query, StringView suggestion)
+{
+    auto suggestion_url = URL::Parser::basic_parse(suggestion);
+    if (query.is_empty() || !suggestion_url.has_value())
+        return false;
+
+    auto can_complete_form = [&](StringView form) {
+        if (form.ends_with('/'))
+            form = form.substring_view(0, form.length() - 1);
+        return form.length() > query.length()
+            && form.starts_with(query, CaseSensitivity::CaseInsensitive);
+    };
+
+    auto serialized_suggestion = suggestion_url->serialize(URL::ExcludeFragment::Yes);
+    if (can_complete_form(serialized_suggestion))
+        return true;
+
+    if (!suggestion_url->scheme().is_one_of("http"sv, "https"sv))
+        return false;
+
+    auto serialized_suggestion_view = serialized_suggestion.bytes_as_string_view();
+    auto scheme_end = serialized_suggestion_view.find("://"sv);
+    VERIFY(scheme_end.has_value());
+    auto without_scheme = serialized_suggestion_view.substring_view(*scheme_end + 3);
+    if (can_complete_form(without_scheme))
+        return true;
+
+    if (without_scheme.starts_with("www."sv, CaseSensitivity::CaseInsensitive)) {
+        if (can_complete_form(without_scheme.substring_view(4)))
+            return true;
+
+        StringBuilder without_www;
+        without_www.append(serialized_suggestion_view.substring_view(0, *scheme_end + 3));
+        without_www.append(without_scheme.substring_view(4));
+        if (can_complete_form(without_www.string_view()))
+            return true;
+    }
+
+    return false;
+}
+
+Vector<URL::URL> sanitize_urls(ReadonlySpan<ByteString> raw_urls)
 {
     Vector<URL::URL> sanitized_urls;
     sanitized_urls.ensure_capacity(raw_urls.size());
@@ -85,9 +162,51 @@ Vector<URL::URL> sanitize_urls(ReadonlySpan<ByteString> raw_urls, URL::URL const
     }
 
     if (sanitized_urls.is_empty())
-        sanitized_urls.append(new_tab_page_url);
+        sanitized_urls.append(Application::settings().new_tab_page_url());
 
     return sanitized_urls;
+}
+
+String url_for_display(URL::URL const& url)
+{
+    if (!url.scheme().is_one_of("http"sv, "https"sv))
+        return url.serialize();
+
+    StringBuilder builder;
+
+    if (!url.username().is_empty() || !url.password().is_empty()) {
+        builder.append(url.username());
+        if (!url.password().is_empty()) {
+            builder.append(':');
+            builder.append(url.password());
+        }
+        builder.append('@');
+    }
+
+    auto host = url.serialized_host();
+    auto host_view = host.bytes_as_string_view();
+    if (host_view.starts_with("www."sv, CaseSensitivity::CaseInsensitive))
+        host_view = host_view.substring_view(4);
+    builder.append(host_view);
+
+    if (url.port().has_value())
+        builder.appendff(":{}", *url.port());
+
+    auto path = url.serialize_path();
+    if (path != "/"sv || url.query().has_value() || url.fragment().has_value())
+        builder.append(path);
+
+    if (url.query().has_value()) {
+        builder.append('?');
+        builder.append(*url.query());
+    }
+
+    if (url.fragment().has_value()) {
+        builder.append('#');
+        builder.append(*url.fragment());
+    }
+
+    return MUST(builder.to_string());
 }
 
 static URLParts break_internal_url_into_parts(URL::URL const& url, StringView url_string)
@@ -121,7 +240,7 @@ static URLParts break_web_url_into_parts(URL::URL const& url, StringView url_str
         domain = url_without_scheme;
     }
 
-    auto public_suffix = URL::PublicSuffixData::the()->get_public_suffix(domain);
+    auto public_suffix = URL::PublicSuffixData::find_matching_public_suffix(domain, URL::PublicSuffixData::IncludeStarRule::No);
     if (!public_suffix.has_value() || !domain.ends_with(*public_suffix))
         return { scheme, domain, remainder };
 

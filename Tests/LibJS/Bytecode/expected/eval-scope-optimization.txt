@@ -1,0 +1,27 @@
+$546ebce0 eval-scope-optimization.js:12:1
+  Registers: 7
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] GetGlobal dst:reg6, `outer`
+  [  10] Call dst:reg5, callee:reg6, this_value:Undefined, outer
+  [  30] End value:reg5
+
+
+outer$ae1b8240 eval-scope-optimization.js:9:5
+  Registers: 7
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+    [1] = Int32(42)
+
+block0:
+  [   0] CreateVariable `inner`, is_immutable:false, is_global:false, is_strict:false
+  [  10] InitializeVariableBinding `inner`, src:Undefined
+  [  28] NewFunction dst:reg5, shared_function_data_index:0
+  [  40] SetVariableBinding `inner`, src:reg5
+  [  58] GetGlobal dst:reg6, `Number`
+  [  68] CallConstruct dst:reg5, callee:reg6, Number, arguments:[Int32(42)]
+  [  88] Return value:reg5

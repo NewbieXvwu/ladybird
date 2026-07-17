@@ -7,19 +7,10 @@
 #pragma once
 
 #include <AK/DistinctNumeric.h>
-#include <AK/String.h>
-#include <AK/Vector.h>
-#include <LibRegex/RegexParser.h>
 
 namespace JS::Bytecode {
 
 AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u32, RegexTableIndex, Comparison);
-
-struct ParsedRegex {
-    regex::Parser::Result regex;
-    String pattern;
-    regex::RegexOptions<ECMAScriptFlags> flags;
-};
 
 class RegexTable {
     AK_MAKE_NONMOVABLE(RegexTable);
@@ -28,13 +19,8 @@ class RegexTable {
 public:
     RegexTable() = default;
 
-    RegexTableIndex insert(ParsedRegex);
-    ParsedRegex const& get(RegexTableIndex) const;
-    void dump() const;
-    bool is_empty() const { return m_regexes.is_empty(); }
-
-private:
-    Vector<ParsedRegex> m_regexes;
+    bool is_empty() const { return true; }
+    size_t external_memory_size() const { return 0; }
 };
 
 }

@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/StringBuilder.h>
 #include <AK/UnicodeUtils.h>
 #include <AK/Utf16String.h>
+#include <AK/Utf16StringBuilder.h>
 #include <AK/Utf16View.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
@@ -35,7 +35,7 @@ void StringConstructor::initialize(Realm& realm)
 
     u8 attr = Attribute::Writable | Attribute::Configurable;
     define_native_function(realm, vm.names.raw, raw, 1, attr);
-    define_native_function(realm, vm.names.fromCharCode, from_char_code, 1, attr);
+    define_native_function(realm, vm.names.fromCharCode, from_char_code, 1, attr, Bytecode::Builtin::StringFromCharCode);
     define_native_function(realm, vm.names.fromCodePoint, from_code_point, 1, attr);
 
     define_direct_property(vm.names.length, Value(1), Attribute::Configurable);
@@ -49,7 +49,7 @@ ThrowCompletionOr<Value> StringConstructor::call()
 
     // 1. If value is not present, let s be the empty String.
     if (!vm.argument_count())
-        return PrimitiveString::create(vm, String {});
+        return PrimitiveString::create(vm, Utf16String {});
 
     // 2. Else,
     // a. If NewTarget is undefined and value is a Symbol, return SymbolDescriptiveString(value).
@@ -72,7 +72,7 @@ ThrowCompletionOr<GC::Ref<Object>> StringConstructor::construct(FunctionObject& 
 
     // 1. If value is not present, let s be the empty String.
     if (!vm.argument_count()) {
-        primitive_string = PrimitiveString::create(vm, String {});
+        primitive_string = PrimitiveString::create(vm, Utf16String {});
     }
     // 2. Else,
     else {
@@ -86,10 +86,20 @@ ThrowCompletionOr<GC::Ref<Object>> StringConstructor::construct(FunctionObject& 
 }
 
 // 22.1.2.1 String.fromCharCode ( ...codeUnits ), https://tc39.es/ecma262/#sec-string.fromcharcode
+ThrowCompletionOr<Value> StringConstructor::from_char_code_impl(VM& vm, Value code_unit)
+{
+    auto value = static_cast<char16_t>(TRY(code_unit.to_u16(vm)));
+    return PrimitiveString::create(vm, Utf16View(&value, 1));
+}
+
+// 22.1.2.1 String.fromCharCode ( ...codeUnits ), https://tc39.es/ecma262/#sec-string.fromcharcode
 JS_DEFINE_NATIVE_FUNCTION(StringConstructor::from_char_code)
 {
+    if (vm.argument_count() == 1)
+        return from_char_code_impl(vm, vm.argument(0));
+
     // 1. Let result be the empty String.
-    StringBuilder builder(StringBuilder::Mode::UTF16, vm.argument_count());
+    Utf16StringBuilder builder(vm.argument_count());
 
     // 2. For each element next of codeUnits, do
     for (size_t i = 0; i < vm.argument_count(); ++i) {
@@ -101,7 +111,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringConstructor::from_char_code)
     }
 
     // 3. Return result.
-    return PrimitiveString::create(vm, builder.to_utf16_string());
+    return PrimitiveString::create(vm, builder.to_string());
 }
 
 // 22.1.2.2 String.fromCodePoint ( ...codePoints ), https://tc39.es/ecma262/#sec-string.fromcodepoint
@@ -109,7 +119,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringConstructor::from_code_point)
 {
     // 1. Let result be the empty String.
     // NOTE: This will be an under-estimate if any code point is > 0xffff.
-    StringBuilder builder(StringBuilder::Mode::UTF16, vm.argument_count());
+    Utf16StringBuilder builder(vm.argument_count());
 
     // 2. For each element next of codePoints, do
     for (size_t i = 0; i < vm.argument_count(); ++i) {
@@ -118,13 +128,13 @@ JS_DEFINE_NATIVE_FUNCTION(StringConstructor::from_code_point)
 
         // b. If IsIntegralNumber(nextCP) is false, throw a RangeError exception.
         if (!next_code_point.is_integral_number())
-            return vm.throw_completion<RangeError>(ErrorType::InvalidCodePoint, next_code_point.to_string_without_side_effects());
+            return vm.throw_completion<RangeError>(ErrorType::InvalidCodePoint, next_code_point);
 
         auto code_point = MUST(next_code_point.to_i32(vm));
 
         // c. If ℝ(nextCP) < 0 or ℝ(nextCP) > 0x10FFFF, throw a RangeError exception.
         if (code_point < 0 || code_point > 0x10FFFF)
-            return vm.throw_completion<RangeError>(ErrorType::InvalidCodePoint, next_code_point.to_string_without_side_effects());
+            return vm.throw_completion<RangeError>(ErrorType::InvalidCodePoint, next_code_point);
 
         // d. Set result to the string-concatenation of result and UTF16EncodeCodePoint(ℝ(nextCP)).
         (void)AK::UnicodeUtils::code_point_to_utf16(static_cast<u32>(code_point), [&](auto code_unit) {
@@ -137,7 +147,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringConstructor::from_code_point)
         VERIFY(builder.is_empty());
 
     // 4. Return result.
-    return PrimitiveString::create(vm, builder.to_utf16_string());
+    return PrimitiveString::create(vm, builder.to_string());
 }
 
 // 22.1.2.4 String.raw ( template, ...substitutions ), https://tc39.es/ecma262/#sec-string.raw
@@ -159,10 +169,10 @@ JS_DEFINE_NATIVE_FUNCTION(StringConstructor::raw)
 
     // 5. If literalCount ≤ 0, return the empty String.
     if (literal_count == 0)
-        return PrimitiveString::create(vm, String {});
+        return PrimitiveString::create(vm, Utf16String {});
 
     // 6. Let R be the empty String.
-    StringBuilder builder;
+    Utf16StringBuilder builder;
 
     // 7. Let nextIndex be 0.
     // 8. Repeat,
@@ -171,10 +181,10 @@ JS_DEFINE_NATIVE_FUNCTION(StringConstructor::raw)
         auto next_literal_value = TRY(literals->get(PropertyKey(i)));
 
         // b. Let nextLiteral be ? ToString(nextLiteralVal).
-        auto next_literal = TRY(next_literal_value.to_string(vm));
+        auto next_literal = TRY(next_literal_value.to_utf16_string(vm));
 
         // c. Set R to the string-concatenation of R and nextLiteral.
-        builder.append(next_literal);
+        builder.append(next_literal.utf16_view());
 
         // d. If nextIndex + 1 = literalCount, return R.
         if (i + 1 == literal_count)
@@ -186,15 +196,15 @@ JS_DEFINE_NATIVE_FUNCTION(StringConstructor::raw)
             auto next_substitution_value = vm.argument(i + 1);
 
             // ii. Let nextSub be ? ToString(nextSubVal).
-            auto next_substitution = TRY(next_substitution_value.to_string(vm));
+            auto next_substitution = TRY(next_substitution_value.to_utf16_string(vm));
 
             // iii. Set R to the string-concatenation of R and nextSub.
-            builder.append(next_substitution);
+            builder.append(next_substitution.utf16_view());
         }
 
         // f. Set nextIndex to nextIndex + 1.
     }
-    return PrimitiveString::create(vm, builder.to_byte_string());
+    return PrimitiveString::create(vm, builder.to_string());
 }
 
 }

@@ -6,15 +6,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/QuickSort.h>
-#include <LibWeb/Animations/Animatable.h>
-#include <LibWeb/Animations/Animation.h>
+#include "Animatable.h"
 #include <LibWeb/Animations/DocumentTimeline.h>
 #include <LibWeb/Animations/PseudoElementParsing.h>
+#include <LibWeb/CSS/CSSAnimation.h>
 #include <LibWeb/CSS/CSSTransition.h>
-#include <LibWeb/CSS/StyleValues/EasingStyleValue.h>
-#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
-#include <LibWeb/CSS/StyleValues/TimeStyleValue.h>
+#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 
@@ -23,14 +20,13 @@ namespace Web::Animations {
 struct Animatable::Transition {
     HashMap<CSS::PropertyID, size_t> transition_attribute_indices;
     Vector<TransitionAttributes> transition_attributes;
-    GC::Ptr<CSS::CSSStyleDeclaration const> cached_transition_property_source;
     HashMap<CSS::PropertyID, GC::Ref<CSS::CSSTransition>> associated_transitions;
 };
 
 Animatable::Impl::~Impl() = default;
 
 // https://www.w3.org/TR/web-animations-1/#dom-animatable-animate
-WebIDL::ExceptionOr<GC::Ref<Animation>> Animatable::animate(Optional<GC::Root<JS::Object>> keyframes, Variant<Empty, double, KeyframeAnimationOptions> options)
+WebIDL::ExceptionOr<GC::Ref<Animation>> Animatable::animate(GC::Ptr<JS::Object> keyframes, Variant<Empty, double, Bindings::KeyframeAnimationOptions> const& options)
 {
     // 1. Let target be the object on which this method was called.
     GC::Ref target { *static_cast<DOM::Element*>(this) };
@@ -49,19 +45,19 @@ WebIDL::ExceptionOr<GC::Ref<Animation>> Animatable::animate(Optional<GC::Root<JS
     //    timeline member of options is missing, be the default document timeline of the node document of the element
     //    on which this method was called.
     Optional<GC::Ptr<AnimationTimeline>> timeline;
-    if (options.has<KeyframeAnimationOptions>())
-        timeline = options.get<KeyframeAnimationOptions>().timeline;
+    if (options.has<Bindings::KeyframeAnimationOptions>() && options.get<Bindings::KeyframeAnimationOptions>().timeline.has_value())
+        timeline = options.get<Bindings::KeyframeAnimationOptions>().timeline.value();
     if (!timeline.has_value())
         timeline = target->document().timeline();
 
     // 4. Construct a new Animation object, animation, in the relevant Realm of target by using the same procedure as
     //    the Animation() constructor, passing effect and timeline as arguments of the same name.
-    auto animation = TRY(Animation::construct_impl(realm, effect, move(timeline)));
+    auto animation = Animation::create(realm, effect, move(timeline));
 
     // 5. If options is a KeyframeAnimationOptions object, assign the value of the id member of options to animation’s
     //    id attribute.
-    if (options.has<KeyframeAnimationOptions>())
-        animation->set_id(options.get<KeyframeAnimationOptions>().id);
+    if (options.has<Bindings::KeyframeAnimationOptions>())
+        animation->set_id(options.get<Bindings::KeyframeAnimationOptions>().id);
 
     //  6. Run the procedure to play an animation for animation with the auto-rewind flag set to true.
     TRY(animation->play_an_animation(Animation::AutoRewind::Yes));
@@ -71,13 +67,13 @@ WebIDL::ExceptionOr<GC::Ref<Animation>> Animatable::animate(Optional<GC::Root<JS
 }
 
 // https://drafts.csswg.org/web-animations-1/#dom-animatable-getanimations
-WebIDL::ExceptionOr<Vector<GC::Ref<Animation>>> Animatable::get_animations(Optional<GetAnimationsOptions> options)
+WebIDL::ExceptionOr<Vector<GC::Ref<Animation>>> Animatable::get_animations(Optional<Bindings::GetAnimationsOptions> const& options)
 {
     as<DOM::Element>(*this).document().update_style();
-    return get_animations_internal(options);
+    return get_animations_internal(GetAnimationsSorted::Yes, options);
 }
 
-WebIDL::ExceptionOr<Vector<GC::Ref<Animation>>> Animatable::get_animations_internal(Optional<GetAnimationsOptions> options)
+WebIDL::ExceptionOr<Vector<GC::Ref<Animation>>> Animatable::get_animations_internal(GetAnimationsSorted sorted, Optional<Bindings::GetAnimationsOptions> const& options)
 {
     // 1. Let object be the object on which this method was called.
 
@@ -109,20 +105,35 @@ WebIDL::ExceptionOr<Vector<GC::Ref<Animation>>> Animatable::get_animations_inter
     if (options.has_value() && options->subtree) {
         Optional<WebIDL::Exception> exception;
         TRY(target->for_each_child_of_type_fallible<DOM::Element>([&](auto& child) -> WebIDL::ExceptionOr<IterationDecision> {
-            relevant_animations.extend(TRY(child.get_animations(options)));
+            relevant_animations.extend(TRY(child.get_animations_internal(GetAnimationsSorted::No, options)));
             return IterationDecision::Continue;
         }));
     }
 
     // The returned list is sorted using the composite order described for the associated animations of effects in
     // §5.4.2 The effect stack.
-    quick_sort(relevant_animations, [](GC::Ref<Animation>& a, GC::Ref<Animation>& b) {
-        auto& a_effect = as<KeyframeEffect>(*a->effect());
-        auto& b_effect = as<KeyframeEffect>(*b->effect());
-        return KeyframeEffect::composite_order(a_effect, b_effect) < 0;
-    });
+    if (sorted == GetAnimationsSorted::Yes) {
+        quick_sort(relevant_animations, [](GC::Ref<Animation>& a, GC::Ref<Animation>& b) {
+            auto& a_effect = as<KeyframeEffect>(*a->effect());
+            auto& b_effect = as<KeyframeEffect>(*b->effect());
+            return KeyframeEffect::composite_order(a_effect, b_effect) < 0;
+        });
+    }
 
     return relevant_animations;
+}
+
+bool Animatable::has_relevant_animations() const
+{
+    if (!m_impl)
+        return false;
+
+    for (auto const& animation : m_impl->associated_animations) {
+        if (animation->is_relevant())
+            return true;
+    }
+
+    return false;
 }
 
 void Animatable::associate_with_animation(GC::Ref<Animation> animation)
@@ -130,55 +141,53 @@ void Animatable::associate_with_animation(GC::Ref<Animation> animation)
     auto& impl = ensure_impl();
     impl.associated_animations.append(animation);
     impl.is_sorted_by_composite_order = false;
+
+    as<DOM::Element>(*this).document().associate_with_animation(animation);
 }
 
 void Animatable::disassociate_with_animation(GC::Ref<Animation> animation)
 {
     auto& impl = *m_impl;
     impl.associated_animations.remove_first_matching([&](auto element) { return animation == element; });
+
+    as<DOM::Element>(*this).document().disassociate_with_animation(animation);
 }
 
-void Animatable::add_transitioned_properties(Optional<CSS::PseudoElement> pseudo_element, Vector<Vector<CSS::PropertyID>> properties, CSS::StyleValueVector delays, CSS::StyleValueVector durations, CSS::StyleValueVector timing_functions, CSS::StyleValueVector transition_behaviors)
+void Animatable::on_document_changed(DOM::Document& old_document, DOM::Document& new_document)
 {
-    VERIFY(properties.size() == delays.size());
-    VERIFY(properties.size() == durations.size());
-    VERIFY(properties.size() == timing_functions.size());
-    VERIFY(properties.size() == transition_behaviors.size());
+    if (!m_impl)
+        return;
 
+    for (auto const& animation : m_impl->associated_animations) {
+        old_document.disassociate_with_animation(animation);
+        new_document.associate_with_animation(animation);
+    }
+}
+
+void Animatable::add_transitioned_properties(Optional<CSS::PseudoElement> pseudo_element, Vector<CSS::TransitionProperties> const& transitions)
+{
     auto* maybe_transition = ensure_transition(pseudo_element);
     if (!maybe_transition)
         return;
 
     auto& transition = *maybe_transition;
-    for (size_t i = 0; i < properties.size(); i++) {
+    for (size_t i = 0; i < transitions.size(); i++) {
         size_t index_of_this_transition = transition.transition_attributes.size();
-        double delay = 0.0;
-        if (delays[i]->is_time()) {
-            delay = delays[i]->as_time().time().to_milliseconds();
-        } else if (delays[i]->is_calculated() && delays[i]->as_calculated().resolves_to_time()) {
-            auto resolved_time = delays[i]->as_calculated().resolve_time({});
-            if (resolved_time.has_value()) {
-                delay = resolved_time.value().to_milliseconds();
-            }
-        }
+        transition.transition_attributes.empend(transitions[i].delay, transitions[i].duration, transitions[i].timing_function, transitions[i].transition_behavior);
 
-        double duration = 0.0;
-        if (durations[i]->is_time()) {
-            duration = durations[i]->as_time().time().to_milliseconds();
-        } else if (durations[i]->is_calculated() && durations[i]->as_calculated().resolves_to_time()) {
-            auto resolved_time = durations[i]->as_calculated().resolve_time({});
-            if (resolved_time.has_value()) {
-                duration = resolved_time.value().to_milliseconds();
-            }
-        }
-        auto timing_function = timing_functions[i]->is_easing() ? timing_functions[i]->as_easing().function() : CSS::EasingStyleValue::CubicBezier::ease();
-        auto transition_behavior = CSS::keyword_to_transition_behavior(transition_behaviors[i]->to_keyword()).value_or(CSS::TransitionBehavior::Normal);
-        VERIFY(timing_functions[i]->is_easing());
-        transition.transition_attributes.empend(delay, duration, timing_function, transition_behavior);
-
-        for (auto const& property : properties[i])
+        for (auto const& property : transitions[i].properties)
             transition.transition_attribute_indices.set(property, index_of_this_transition);
     }
+}
+
+Vector<CSS::PropertyID> Animatable::property_ids_with_matching_transition_property_entry(Optional<CSS::PseudoElement> pseudo_element) const
+{
+    auto const* maybe_transition = ensure_transition(pseudo_element);
+
+    if (!maybe_transition)
+        return {};
+
+    return maybe_transition->transition_attribute_indices.keys();
 }
 
 Optional<Animatable::TransitionAttributes const&> Animatable::property_transition_attributes(Optional<CSS::PseudoElement> pseudo_element, CSS::PropertyID property) const
@@ -190,6 +199,16 @@ Optional<Animatable::TransitionAttributes const&> Animatable::property_transitio
     if (auto maybe_attr_index = transition.transition_attribute_indices.get(property); maybe_attr_index.has_value())
         return transition.transition_attributes[maybe_attr_index.value()];
     return {};
+}
+
+Vector<CSS::PropertyID> Animatable::property_ids_with_existing_transitions(Optional<CSS::PseudoElement> pseudo_element) const
+{
+    auto const* maybe_transition = ensure_transition(pseudo_element);
+
+    if (!maybe_transition)
+        return {};
+
+    return maybe_transition->associated_transitions.keys();
 }
 
 GC::Ptr<CSS::CSSTransition> Animatable::property_transition(Optional<CSS::PseudoElement> pseudo_element, CSS::PropertyID property) const
@@ -223,114 +242,75 @@ void Animatable::remove_transition(Optional<CSS::PseudoElement> pseudo_element, 
     transition.associated_transitions.remove(property_id);
 }
 
-void Animatable::clear_transitions(Optional<CSS::PseudoElement> pseudo_element)
+void Animatable::clear_registered_transitions(Optional<CSS::PseudoElement> pseudo_element)
 {
     auto maybe_transition = ensure_transition(pseudo_element);
     if (!maybe_transition)
         return;
 
     auto& transition = *maybe_transition;
-    transition.associated_transitions.clear();
     transition.transition_attribute_indices.clear();
     transition.transition_attributes.clear();
 }
 
-void Animatable::remove_animations_from_timeline()
-{
-    // This is needed to avoid leaking Animation objects
-    auto& impl = ensure_impl();
-    for (auto animation : impl.associated_animations) {
-        animation->set_timeline({});
-    }
-}
-
 void Animatable::visit_edges(JS::Cell::Visitor& visitor)
 {
-    auto& impl = ensure_impl();
-    visitor.visit(impl.associated_animations);
-    for (auto const& cached_animation_source : impl.cached_animation_name_source)
-        visitor.visit(cached_animation_source);
-    for (auto const& cached_animation_name : impl.cached_animation_name_animation)
-        visitor.visit(cached_animation_name);
-    for (auto const& transition : impl.transitions) {
-        if (transition) {
-            visitor.visit(transition->cached_transition_property_source);
+    if (m_impl)
+        m_impl->visit_edges(visitor);
+}
+
+void Animatable::Impl::visit_edges(JS::Cell::Visitor& visitor)
+{
+    visitor.visit(associated_animations);
+    for (auto const& css_animation : css_defined_animations) {
+        if (css_animation)
+            visitor.visit(*css_animation);
+    }
+
+    for (auto const& transition : transitions) {
+        if (transition)
             visitor.visit(transition->associated_transitions);
-        }
     }
 }
 
-GC::Ptr<CSS::CSSStyleDeclaration const> Animatable::cached_animation_name_source(Optional<CSS::PseudoElement> pseudo_element) const
+bool Animatable::has_css_defined_animations() const
 {
     if (!m_impl)
-        return {};
-    auto& impl = *m_impl;
-    if (pseudo_element.has_value()) {
-        if (!CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(pseudo_element.value())) {
-            return {};
-        }
-        return impl.cached_animation_name_source[to_underlying(pseudo_element.value()) + 1];
-    }
-    return impl.cached_animation_name_source[0];
+        return false;
+
+    return m_impl->has_css_defined_animations;
 }
 
-void Animatable::set_cached_animation_name_source(GC::Ptr<CSS::CSSStyleDeclaration const> value, Optional<CSS::PseudoElement> pseudo_element)
+Vector<GC::Ref<CSS::CSSAnimation>> const* Animatable::css_defined_animations(Optional<CSS::PseudoElement> pseudo_element)
 {
     auto& impl = ensure_impl();
-    if (pseudo_element.has_value()) {
-        if (!CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(pseudo_element.value())) {
-            return;
-        }
-        impl.cached_animation_name_source[to_underlying(pseudo_element.value()) + 1] = value;
-    } else {
-        impl.cached_animation_name_source[0] = value;
-    }
+
+    if (pseudo_element.has_value() && !CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(pseudo_element.value()))
+        return nullptr;
+
+    auto index = pseudo_element
+                     .map([](CSS::PseudoElement pseudo_element_value) { return to_underlying(pseudo_element_value) + 1; })
+                     .value_or(0);
+
+    if (!impl.css_defined_animations[index])
+        impl.css_defined_animations[index] = make<Vector<GC::Ref<CSS::CSSAnimation>>>();
+
+    return impl.css_defined_animations[index];
 }
 
-GC::Ptr<Animations::Animation> Animatable::cached_animation_name_animation(Optional<CSS::PseudoElement> pseudo_element) const
-{
-    if (!m_impl)
-        return {};
-    auto& impl = *m_impl;
-
-    if (pseudo_element.has_value()) {
-        if (!CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(pseudo_element.value())) {
-            return {};
-        }
-
-        return impl.cached_animation_name_animation[to_underlying(pseudo_element.value()) + 1];
-    }
-    return impl.cached_animation_name_animation[0];
-}
-
-void Animatable::set_cached_animation_name_animation(GC::Ptr<Animations::Animation> value, Optional<CSS::PseudoElement> pseudo_element)
+void Animatable::set_css_defined_animations(Optional<CSS::PseudoElement> pseudo_element, Vector<GC::Ref<CSS::CSSAnimation>>&& animations)
 {
     auto& impl = ensure_impl();
-    if (pseudo_element.has_value()) {
-        if (!CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(pseudo_element.value())) {
-            return;
-        }
 
-        impl.cached_animation_name_animation[to_underlying(pseudo_element.value()) + 1] = value;
-    } else {
-        impl.cached_animation_name_animation[0] = value;
-    }
-}
-
-GC::Ptr<CSS::CSSStyleDeclaration const> Animatable::cached_transition_property_source(Optional<CSS::PseudoElement> pseudo_element) const
-{
-    auto* maybe_transition = ensure_transition(pseudo_element);
-    if (!maybe_transition)
-        return {};
-    return maybe_transition->cached_transition_property_source;
-}
-
-void Animatable::set_cached_transition_property_source(Optional<CSS::PseudoElement> pseudo_element, GC::Ptr<CSS::CSSStyleDeclaration const> value)
-{
-    auto* maybe_transition = ensure_transition(pseudo_element);
-    if (!maybe_transition)
+    if (pseudo_element.has_value() && !CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(pseudo_element.value()))
         return;
-    maybe_transition->cached_transition_property_source = value;
+
+    auto index = pseudo_element
+                     .map([](CSS::PseudoElement pseudo_element_value) { return to_underlying(pseudo_element_value) + 1; })
+                     .value_or(0);
+
+    impl.css_defined_animations[index] = make<Vector<GC::Ref<CSS::CSSAnimation>>>(move(animations));
+    impl.has_css_defined_animations = true;
 }
 
 Animatable::Impl& Animatable::ensure_impl() const

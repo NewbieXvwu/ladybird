@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/FormDataEventPrototype.h>
+#include <LibWeb/Bindings/FormDataEvent.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/FormDataEvent.h>
 
@@ -12,12 +12,12 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(FormDataEvent);
 
-WebIDL::ExceptionOr<GC::Ref<FormDataEvent>> FormDataEvent::construct_impl(JS::Realm& realm, FlyString const& event_name, FormDataEventInit const& event_init)
+WebIDL::ExceptionOr<GC::Ref<FormDataEvent>> FormDataEvent::construct_impl(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::FormDataEventInit const& event_init)
 {
     return realm.create<FormDataEvent>(realm, event_name, event_init);
 }
 
-FormDataEvent::FormDataEvent(JS::Realm& realm, FlyString const& event_name, FormDataEventInit const& event_init)
+FormDataEvent::FormDataEvent(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::FormDataEventInit const& event_init)
     : DOM::Event(realm, event_name, event_init)
     , m_form_data(event_init.form_data)
 {

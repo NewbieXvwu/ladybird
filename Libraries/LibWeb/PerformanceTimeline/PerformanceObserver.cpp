@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/PerformanceObserverPrototype.h>
+#include <LibWeb/Bindings/PerformanceObserver.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/SupportedPerformanceTypes.h>
 #include <LibWeb/PerformanceTimeline/EntryTypes.h>
@@ -45,7 +45,7 @@ void PerformanceObserver::visit_edges(Cell::Visitor& visitor)
 }
 
 // https://w3c.github.io/performance-timeline/#dom-performanceobserver-observe
-WebIDL::ExceptionOr<void> PerformanceObserver::observe(PerformanceObserverInit& options)
+WebIDL::ExceptionOr<void> PerformanceObserver::observe(Bindings::PerformanceObserverInit& options)
 {
     auto& realm = this->realm();
 
@@ -54,11 +54,11 @@ WebIDL::ExceptionOr<void> PerformanceObserver::observe(PerformanceObserverInit& 
 
     // 2. If options's entryTypes and type members are both omitted, then throw a "TypeError".
     if (!options.entry_types.has_value() && !options.type.has_value())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Must specify one of entryTypes or type"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Must specify one of entryTypes or type"_utf16 };
 
     // 3. If options's entryTypes is present and any other member is also present, then throw a "TypeError".
     if (options.entry_types.has_value() && (options.type.has_value() || options.buffered.has_value()))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot specify type or buffered if entryTypes is specified"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot specify type or buffered if entryTypes is specified"_utf16 };
 
     // 4. Update or check this's observer type by running these steps:
     // 1. If this's observer type is "undefined":
@@ -94,9 +94,9 @@ WebIDL::ExceptionOr<void> PerformanceObserver::observe(PerformanceObserverInit& 
         // 2. Remove all types from entry types that are not contained in relevantGlobal's frozen array of supported entry types.
         //    The user agent SHOULD notify developers if entry types is modified. For example, a console warning listing removed
         //    types might be appropriate.
-        entry_types.remove_all_matching([](String const& type) {
+        entry_types.remove_all_matching([](Utf16FlyString const& type) {
 #define __ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES(entry_type, cpp_class) \
-    if (entry_type == type)                                                  \
+    if (type == entry_type)                                                  \
         return false;
             ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES
 #undef __ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES
@@ -136,7 +136,7 @@ WebIDL::ExceptionOr<void> PerformanceObserver::observe(PerformanceObserverInit& 
         bool recognized_type = false;
 
 #define __ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES(entry_type, cpp_class) \
-    if (!recognized_type && entry_type == type)                              \
+    if (!recognized_type && type == entry_type)                              \
         recognized_type = true;
         ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES
 #undef __ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES
@@ -151,7 +151,7 @@ WebIDL::ExceptionOr<void> PerformanceObserver::observe(PerformanceObserverInit& 
         if (relevant_global.has_registered_performance_observer(*this)) {
             // 1. If obs's options list contains a PerformanceObserverInit item currentOptions whose type is equal to options's type,
             //    replace currentOptions with options in obs's options list.
-            auto index = m_options_list.find_first_index_if([&options](PerformanceObserverInit const& entry) {
+            auto index = m_options_list.find_first_index_if([&options](Bindings::PerformanceObserverInit const& entry) {
                 return entry.type == options.type;
             });
             if (index.has_value()) {

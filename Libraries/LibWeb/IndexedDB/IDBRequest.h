@@ -8,9 +8,8 @@
 
 #pragma once
 
-#include <LibWeb/Bindings/IDBRequestPrototype.h>
+#include <LibWeb/Bindings/IDBRequest.h>
 #include <LibWeb/DOM/EventTarget.h>
-#include <LibWeb/IndexedDB/Internal/RequestList.h>
 
 namespace Web::IndexedDB {
 
@@ -50,11 +49,15 @@ public:
     void set_onerror(WebIDL::CallbackType*);
     WebIDL::CallbackType* onerror();
 
+    [[nodiscard]] bool aborted() const { return m_aborted; }
+    void set_aborted(bool aborted) { m_aborted = aborted; }
+
 protected:
     explicit IDBRequest(JS::Realm&, IDBRequestSource);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Visitor& visitor) override;
+    virtual EventTarget* get_parent(DOM::Event const&) override;
 
 private:
     // A request has a processed flag which is initially false.
@@ -72,6 +75,9 @@ private:
 
     // A request has a transaction which is initially null.
     GC::Ptr<IDBTransaction> m_transaction;
+
+    // AD-HOC: Set to true to prevent queued operations and result events from executing.
+    bool m_aborted { false };
 
     // NOTE: Used for debug purposes
     String m_uuid;

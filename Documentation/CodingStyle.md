@@ -4,7 +4,7 @@ For low-level styling (spaces, parentheses, brace placement, etc), all code shou
 
 **Important: Make sure you use the correct version of `clang-format`!**
 
-See [lint-clang-format.py](../Meta/lint-clang-format.py) for the version enforced in CI.
+See [lint_clang_format.py](../Meta/Linters/lint_clang_format.py) for the version enforced in CI.
 
 See [AdvancedBuildInstructions.md](AdvancedBuildInstructions.md#clang-format-updates) for instructions on how to get an
 up-to-date version if your OS distribution does not ship the correct version.
@@ -587,6 +587,38 @@ catdog_widget.on_click = [&] {
     else
         advice_timer->start();
 };
+```
+
+#### Spec notes &amp; questions
+
+Many web specs include notes that are prefixed with `NOTE: ...`. To allow for verbatim copying of these notes into our
+code, we retain the `NOTE:` prefix and use [`NB:`](https://en.wikipedia.org/wiki/Nota_bene) for our own notes.
+
+This only applies to comments as part of code that is directly implementing a spec algorithm or behavior. Comments in
+other places do not need a prefix.
+
+Sometimes a draft spec text includes a spec question, which should be included with double square brackets:
+`[[ ... ]]`.
+
+##### Right:
+
+```cpp
+// 2. If property is in already serialized, continue with the steps labeled declaration loop.
+// NOTE: The prefabulated aluminite will not be suitable for use here. If the listed spec note is so long that we reach
+//       column 120, we wrap around and indent the lines to match up with the first line.
+// NB: We _can_ actually use the aluminite since we unprefabulated it in step 1 for performance reasons.
+
+// 3. For each property in window [[ in what order? ]]:
+```
+
+##### Wrong:
+
+```cpp
+// LB-NOTE: The aluminite might come pre-prefabulated at this point.
+// Spec-note: Another example of a custom note prefix that we shouldn't use.
+// There is no prefix whatsoever here, making it unclear whether this is a spec step, note or a developer note.
+
+// 3. For each property in window (in what order?):
 ```
 
 ### Overriding Virtual Methods

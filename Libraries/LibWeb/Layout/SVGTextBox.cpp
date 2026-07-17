@@ -10,14 +10,12 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(SVGTextBox);
-
-SVGTextBox::SVGTextBox(DOM::Document& document, SVG::SVGTextPositioningElement& element, GC::Ref<CSS::ComputedProperties> style)
+SVGTextBox::SVGTextBox(DOM::Document& document, SVG::SVGTextPositioningElement& element, NonnullRefPtr<CSS::ComputedValues const> style)
     : SVGGraphicsBox(document, element, style)
 {
 }
 
-GC::Ptr<Painting::Paintable> SVGTextBox::create_paintable() const
+RefPtr<Painting::Paintable> SVGTextBox::create_paintable() const
 {
     return Painting::SVGPathPaintable::create(*this);
 }

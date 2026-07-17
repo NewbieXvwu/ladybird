@@ -24,11 +24,15 @@ public:
 
     Angle const& angle() const { return m_angle; }
     virtual double raw_value() const override { return m_angle.raw_value(); }
-    virtual FlyString unit_name() const override { return m_angle.unit_name(); }
+    virtual Utf16FlyString unit_name() const override { return m_angle.unit_name(); }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
+
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool equals(StyleValue const& other) const override;
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     explicit AngleStyleValue(Angle angle);

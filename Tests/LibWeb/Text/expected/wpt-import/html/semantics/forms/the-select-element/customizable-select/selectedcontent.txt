@@ -1,0 +1,9 @@
+Harness status: OK
+
+Found 3 tests
+
+1 Pass
+2 Fail
+Fail	The <selectedcontent> element should reflect the HTML contents of the selected <option>.
+Fail	When there are multiple <selectedcontent> elements, both of them should be kept up to date.
+Pass	<seletedcontent> behavior in disconnected <select>.

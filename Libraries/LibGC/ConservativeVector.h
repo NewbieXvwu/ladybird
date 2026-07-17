@@ -8,21 +8,20 @@
 
 #include <AK/IntrusiveList.h>
 #include <AK/Vector.h>
-#include <LibGC/Cell.h>
 #include <LibGC/Forward.h>
-#include <LibGC/HeapRoot.h>
 
 namespace GC {
 
 class GC_API ConservativeVectorBase {
+    AK_MAKE_NONCOPYABLE(ConservativeVectorBase);
+
 public:
     virtual ReadonlySpan<FlatPtr> possible_values() const = 0;
 
 protected:
+    ConservativeVectorBase();
     explicit ConservativeVectorBase(Heap&);
     ~ConservativeVectorBase();
-
-    ConservativeVectorBase& operator=(ConservativeVectorBase const&);
 
     Heap* m_heap { nullptr };
     IntrusiveListNode<ConservativeVectorBase> m_list_node;
@@ -37,8 +36,14 @@ class GC_API ConservativeVector final
     , public Vector<T, inline_capacity> {
 
 public:
-    explicit ConservativeVector(Heap& heap)
-        : ConservativeVectorBase(heap)
+    ConservativeVector()
+        : ConservativeVectorBase()
+    {
+    }
+
+    ConservativeVector(Vector<T, inline_capacity> const& other)
+        : ConservativeVectorBase()
+        , Vector<T, inline_capacity>(other)
     {
     }
 
@@ -58,8 +63,9 @@ public:
 
     ConservativeVector& operator=(ConservativeVector const& other)
     {
+        if (&other == this)
+            return *this;
         Vector<T, inline_capacity>::operator=(other);
-        ConservativeVectorBase::operator=(other);
         return *this;
     }
 

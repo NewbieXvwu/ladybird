@@ -6,20 +6,24 @@
 
 #pragma once
 
-#include <AK/ByteBuffer.h>
+#include <AK/ByteString.h>
 #include <AK/Error.h>
 #include <AK/Forward.h>
 #include <AK/Optional.h>
 #include <AK/Time.h>
+#include <AK/Utf16String.h>
 #include <AK/Vector.h>
+#include <LibCore/ImmutableBytes.h>
 #include <LibGC/Ptr.h>
+#include <LibHTTP/HeaderList.h>
 #include <LibJS/Forward.h>
 #include <LibJS/Heap/Cell.h>
+#include <LibRequests/Forward.h>
+#include <LibRequests/Request.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
-#include <LibWeb/Fetch/Infrastructure/HTTP/Headers.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Statuses.h>
 
 namespace Web::Fetch::Infrastructure {
@@ -53,9 +57,15 @@ public:
         u64 decoded_size { 0 };
 
         // https://fetch.spec.whatwg.org/#response-body-info-content-type
-        String content_type {};
+        Utf16String content_type {};
 
         bool operator==(BodyInfo const&) const = default;
+    };
+
+    struct RequestServerRequest {
+        int client_id { -1 };
+        u64 request_id { 0 };
+        RefPtr<Requests::Request> request;
     };
 
     [[nodiscard]] static GC::Ref<Response> create(JS::VM&);
@@ -78,11 +88,11 @@ public:
     [[nodiscard]] virtual Status status() const { return m_status; }
     virtual void set_status(Status status) { m_status = status; }
 
-    [[nodiscard]] virtual ReadonlyBytes status_message() const LIFETIME_BOUND { return m_status_message; }
-    virtual void set_status_message(ByteBuffer status_message) { m_status_message = move(status_message); }
+    [[nodiscard]] virtual ByteString const& status_message() const { return m_status_message; }
+    virtual void set_status_message(ByteString status_message) { m_status_message = move(status_message); }
 
-    [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const { return m_header_list; }
-    virtual void set_header_list(GC::Ref<HeaderList> header_list) { m_header_list = header_list; }
+    virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const { return m_header_list; }
+    virtual void set_header_list(NonnullRefPtr<HTTP::HeaderList> header_list) { m_header_list = move(header_list); }
 
     [[nodiscard]] virtual GC::Ptr<Body> body() const { return m_body; }
     virtual void set_body(GC::Ptr<Body> body) { m_body = body; }
@@ -90,8 +100,8 @@ public:
     [[nodiscard]] virtual Optional<CacheState> const& cache_state() const { return m_cache_state; }
     virtual void set_cache_state(Optional<CacheState> cache_state) { m_cache_state = move(cache_state); }
 
-    [[nodiscard]] virtual Vector<ByteBuffer> const& cors_exposed_header_name_list() const { return m_cors_exposed_header_name_list; }
-    virtual void set_cors_exposed_header_name_list(Vector<ByteBuffer> cors_exposed_header_name_list) { m_cors_exposed_header_name_list = move(cors_exposed_header_name_list); }
+    [[nodiscard]] virtual Vector<ByteString> const& cors_exposed_header_name_list() const { return m_cors_exposed_header_name_list; }
+    virtual void set_cors_exposed_header_name_list(Vector<ByteString> cors_exposed_header_name_list) { m_cors_exposed_header_name_list = move(cors_exposed_header_name_list); }
 
     [[nodiscard]] virtual bool range_requested() const { return m_range_requested; }
     virtual void set_range_requested(bool range_requested) { m_range_requested = range_requested; }
@@ -103,10 +113,17 @@ public:
     virtual void set_timing_allow_passed(bool timing_allow_passed) { m_timing_allow_passed = timing_allow_passed; }
 
     [[nodiscard]] virtual BodyInfo const& body_info() const { return m_body_info; }
-    virtual void set_body_info(BodyInfo body_info) { m_body_info = body_info; }
+    virtual void set_body_info(BodyInfo body_info) { m_body_info = move(body_info); }
+
+    [[nodiscard]] Optional<Core::ImmutableBytes> const& javascript_bytecode_cache() const { return m_javascript_bytecode_cache; }
+    void set_javascript_bytecode_cache(Optional<Core::ImmutableBytes> javascript_bytecode_cache) { m_javascript_bytecode_cache = move(javascript_bytecode_cache); }
+    [[nodiscard]] Optional<u64> javascript_bytecode_cache_vary_key() const { return m_javascript_bytecode_cache_vary_key; }
+    void set_javascript_bytecode_cache_vary_key(Optional<u64> javascript_bytecode_cache_vary_key) { m_javascript_bytecode_cache_vary_key = javascript_bytecode_cache_vary_key; }
+    [[nodiscard]] Optional<NonnullRefPtr<HTTP::HeaderList>> const& javascript_bytecode_cache_memory_cache_request_headers() const { return m_javascript_bytecode_cache_memory_cache_request_headers; }
+    void set_javascript_bytecode_cache_memory_cache_request_headers(Optional<NonnullRefPtr<HTTP::HeaderList>> request_headers) { m_javascript_bytecode_cache_memory_cache_request_headers = move(request_headers); }
 
     [[nodiscard]] RedirectTaint redirect_taint() const { return m_redirect_taint; }
-    void set_redirect_taint(RedirectTaint redirect_taint) { m_redirect_taint = move(redirect_taint); }
+    void set_redirect_taint(RedirectTaint redirect_taint) { m_redirect_taint = redirect_taint; }
 
     [[nodiscard]] bool is_aborted_network_error() const;
     [[nodiscard]] bool is_network_error() const;
@@ -121,16 +138,17 @@ public:
     [[nodiscard]] bool is_cors_same_origin() const;
     [[nodiscard]] bool is_cors_cross_origin() const;
 
-    [[nodiscard]] bool is_fresh() const;
-    [[nodiscard]] bool is_stale_while_revalidate() const;
-    [[nodiscard]] bool is_stale() const;
-
     // Non-standard
     [[nodiscard]] Optional<String> const& network_error_message() const { return m_network_error_message; }
-    MonotonicTime response_time() const { return m_response_time; }
+    MonotonicTime monotonic_response_time() const { return m_monotonic_response_time; }
+    [[nodiscard]] virtual Optional<RequestServerRequest> const& request_server_request() const { return m_request_server_request; }
+    virtual void set_request_server_request(RequestServerRequest request) { m_request_server_request = move(request); }
+    virtual void release_request_for_transfer() const;
+    virtual void resume_body_delivery() const;
+    virtual void resume_body_delivery_up_to(size_t) const;
 
 protected:
-    explicit Response(GC::Ref<HeaderList>);
+    explicit Response(NonnullRefPtr<HTTP::HeaderList>);
 
     virtual void visit_edges(JS::Cell::Visitor&) override;
 
@@ -153,11 +171,11 @@ private:
 
     // https://fetch.spec.whatwg.org/#concept-response-status-message
     // A response has an associated status message. Unless stated otherwise it is the empty byte sequence.
-    ByteBuffer m_status_message;
+    ByteString m_status_message;
 
     // https://fetch.spec.whatwg.org/#concept-response-header-list
     // A response has an associated header list (a header list). Unless stated otherwise it is empty.
-    GC::Ref<HeaderList> m_header_list;
+    NonnullRefPtr<HTTP::HeaderList> m_header_list;
 
     // https://fetch.spec.whatwg.org/#concept-response-body
     // A response has an associated body (null or a body). Unless stated otherwise it is null.
@@ -169,7 +187,7 @@ private:
 
     // https://fetch.spec.whatwg.org/#concept-response-cors-exposed-header-name-list
     // A response has an associated CORS-exposed header-name list (a list of zero or more header names). The list is empty unless otherwise specified.
-    Vector<ByteBuffer> m_cors_exposed_header_name_list;
+    Vector<ByteString> m_cors_exposed_header_name_list;
 
     // https://fetch.spec.whatwg.org/#concept-response-range-requested-flag
     // A response has an associated range-requested flag, which is initially unset.
@@ -194,20 +212,19 @@ private:
     // A response has an associated redirect taint ("same-origin", "same-site", or "cross-site"), which is initially "same-origin".
     RedirectTaint m_redirect_taint { RedirectTaint::SameOrigin };
 
-    // FIXME is the type correct?
-    u64 current_age() const;
-    u64 freshness_lifetime() const;
-    u64 stale_while_revalidate_lifetime() const;
-
     // Non-standard
-    ByteBuffer m_method;
-    MonotonicTime m_response_time;
+    ByteString m_method;
+    MonotonicTime m_monotonic_response_time;
 
     Optional<String> m_network_error_message;
+    Optional<Core::ImmutableBytes> m_javascript_bytecode_cache;
+    Optional<u64> m_javascript_bytecode_cache_vary_key;
+    Optional<NonnullRefPtr<HTTP::HeaderList>> m_javascript_bytecode_cache_memory_cache_request_headers;
+    Optional<RequestServerRequest> m_request_server_request;
 
 public:
-    [[nodiscard]] ByteBuffer const& method() const { return m_method; }
-    void set_method(ByteBuffer method) { m_method = move(method); }
+    [[nodiscard]] ByteString const& method() const { return m_method; }
+    void set_method(ByteString method) { m_method = move(method); }
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response
@@ -215,7 +232,7 @@ class FilteredResponse : public Response {
     GC_CELL(FilteredResponse, Response);
 
 public:
-    FilteredResponse(GC::Ref<Response>, GC::Ref<HeaderList>);
+    FilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
     virtual ~FilteredResponse() = 0;
 
     [[nodiscard]] virtual Type type() const override { return m_internal_response->type(); }
@@ -230,11 +247,11 @@ public:
     [[nodiscard]] virtual Status status() const override { return m_internal_response->status(); }
     virtual void set_status(Status status) override { m_internal_response->set_status(status); }
 
-    [[nodiscard]] virtual ReadonlyBytes status_message() const LIFETIME_BOUND override { return m_internal_response->status_message(); }
-    virtual void set_status_message(ByteBuffer status_message) override { m_internal_response->set_status_message(move(status_message)); }
+    [[nodiscard]] virtual ByteString const& status_message() const override { return m_internal_response->status_message(); }
+    virtual void set_status_message(ByteString status_message) override { m_internal_response->set_status_message(move(status_message)); }
 
-    [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const override { return m_internal_response->header_list(); }
-    virtual void set_header_list(GC::Ref<HeaderList> header_list) override { m_internal_response->set_header_list(header_list); }
+    virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_internal_response->header_list(); }
+    virtual void set_header_list(NonnullRefPtr<HTTP::HeaderList> header_list) override { m_internal_response->set_header_list(header_list); }
 
     [[nodiscard]] virtual GC::Ptr<Body> body() const override { return m_internal_response->body(); }
     virtual void set_body(GC::Ptr<Body> body) override { m_internal_response->set_body(body); }
@@ -242,8 +259,8 @@ public:
     [[nodiscard]] virtual Optional<CacheState> const& cache_state() const override { return m_internal_response->cache_state(); }
     virtual void set_cache_state(Optional<CacheState> cache_state) override { m_internal_response->set_cache_state(move(cache_state)); }
 
-    [[nodiscard]] virtual Vector<ByteBuffer> const& cors_exposed_header_name_list() const override { return m_internal_response->cors_exposed_header_name_list(); }
-    virtual void set_cors_exposed_header_name_list(Vector<ByteBuffer> cors_exposed_header_name_list) override { m_internal_response->set_cors_exposed_header_name_list(move(cors_exposed_header_name_list)); }
+    [[nodiscard]] virtual Vector<ByteString> const& cors_exposed_header_name_list() const override { return m_internal_response->cors_exposed_header_name_list(); }
+    virtual void set_cors_exposed_header_name_list(Vector<ByteString> cors_exposed_header_name_list) override { m_internal_response->set_cors_exposed_header_name_list(move(cors_exposed_header_name_list)); }
 
     [[nodiscard]] virtual bool range_requested() const override { return m_internal_response->range_requested(); }
     virtual void set_range_requested(bool range_requested) override { m_internal_response->set_range_requested(range_requested); }
@@ -256,6 +273,11 @@ public:
 
     [[nodiscard]] virtual BodyInfo const& body_info() const override { return m_internal_response->body_info(); }
     virtual void set_body_info(BodyInfo body_info) override { m_internal_response->set_body_info(move(body_info)); }
+    [[nodiscard]] virtual Optional<RequestServerRequest> const& request_server_request() const override { return m_internal_response->request_server_request(); }
+    virtual void set_request_server_request(RequestServerRequest request) override { m_internal_response->set_request_server_request(move(request)); }
+    virtual void release_request_for_transfer() const override { m_internal_response->release_request_for_transfer(); }
+    virtual void resume_body_delivery() const override { m_internal_response->resume_body_delivery(); }
+    virtual void resume_body_delivery_up_to(size_t byte_count) const override { m_internal_response->resume_body_delivery_up_to(byte_count); }
 
     [[nodiscard]] GC::Ref<Response> internal_response() const { return m_internal_response; }
 
@@ -276,14 +298,12 @@ public:
     [[nodiscard]] static GC::Ref<BasicFilteredResponse> create(JS::VM&, GC::Ref<Response>);
 
     [[nodiscard]] virtual Type type() const override { return Type::Basic; }
-    [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const override { return m_header_list; }
+    virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_header_list; }
 
 private:
-    BasicFilteredResponse(GC::Ref<Response>, GC::Ref<HeaderList>);
+    BasicFilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
 
-    virtual void visit_edges(JS::Cell::Visitor&) override;
-
-    GC::Ref<HeaderList> m_header_list;
+    NonnullRefPtr<HTTP::HeaderList> m_header_list;
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-cors
@@ -295,14 +315,12 @@ public:
     [[nodiscard]] static GC::Ref<CORSFilteredResponse> create(JS::VM&, GC::Ref<Response>);
 
     [[nodiscard]] virtual Type type() const override { return Type::CORS; }
-    [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const override { return m_header_list; }
+    virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_header_list; }
 
 private:
-    CORSFilteredResponse(GC::Ref<Response>, GC::Ref<HeaderList>);
+    CORSFilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
 
-    virtual void visit_edges(JS::Cell::Visitor&) override;
-
-    GC::Ref<HeaderList> m_header_list;
+    NonnullRefPtr<HTTP::HeaderList> m_header_list;
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-opaque
@@ -317,17 +335,16 @@ public:
     [[nodiscard]] virtual Vector<URL::URL> const& url_list() const override { return m_url_list; }
     [[nodiscard]] virtual Vector<URL::URL>& url_list() override { return m_url_list; }
     [[nodiscard]] virtual Status status() const override { return 0; }
-    [[nodiscard]] virtual ReadonlyBytes status_message() const LIFETIME_BOUND override { return {}; }
-    [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const override { return m_header_list; }
+    [[nodiscard]] virtual ByteString const& status_message() const override { return m_method; }
+    virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_header_list; }
     [[nodiscard]] virtual GC::Ptr<Body> body() const override { return nullptr; }
 
 private:
-    OpaqueFilteredResponse(GC::Ref<Response>, GC::Ref<HeaderList>);
-
-    virtual void visit_edges(JS::Cell::Visitor&) override;
+    OpaqueFilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
 
     Vector<URL::URL> m_url_list;
-    GC::Ref<HeaderList> m_header_list;
+    ByteString const m_method;
+    NonnullRefPtr<HTTP::HeaderList> m_header_list;
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-opaque-redirect
@@ -340,16 +357,15 @@ public:
 
     [[nodiscard]] virtual Type type() const override { return Type::OpaqueRedirect; }
     [[nodiscard]] virtual Status status() const override { return 0; }
-    [[nodiscard]] virtual ReadonlyBytes status_message() const LIFETIME_BOUND override { return {}; }
-    [[nodiscard]] virtual GC::Ref<HeaderList> header_list() const override { return m_header_list; }
+    [[nodiscard]] virtual ByteString const& status_message() const override { return m_method; }
+    virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_header_list; }
     [[nodiscard]] virtual GC::Ptr<Body> body() const override { return nullptr; }
 
 private:
-    OpaqueRedirectFilteredResponse(GC::Ref<Response>, GC::Ref<HeaderList>);
+    OpaqueRedirectFilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
 
-    virtual void visit_edges(JS::Cell::Visitor&) override;
-
-    GC::Ref<HeaderList> m_header_list;
+    ByteString const m_method;
+    NonnullRefPtr<HTTP::HeaderList> m_header_list;
 };
 
 }

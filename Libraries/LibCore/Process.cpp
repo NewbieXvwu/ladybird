@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Assertions.h>
 #include <AK/ByteString.h>
 #include <AK/ScopeGuard.h>
 #include <AK/String.h>
@@ -16,8 +17,10 @@
 #include <LibCore/Process.h>
 #include <LibCore/System.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(AK_OS_SERENITY)
@@ -30,6 +33,9 @@
 extern "C" {
 #    include <hurd.h>
 }
+#endif
+#if defined(AK_OS_LINUX)
+#    include <sys/prctl.h>
 #endif
 #if defined(AK_OS_FREEBSD)
 #    include <sys/user.h>
@@ -63,31 +69,128 @@ struct ArgvList {
 
 Process::Process(Process&& other)
     : m_pid(exchange(other.m_pid, 0))
-    , m_should_disown(exchange(other.m_should_disown, false))
 {
 }
 
 Process& Process::operator=(Process&& other)
 {
     m_pid = exchange(other.m_pid, 0);
-    m_should_disown = exchange(other.m_should_disown, false);
     return *this;
 }
 
 Process::~Process()
 {
-    (void)disown();
 }
 
 Process Process::current()
 {
     auto p = Process { getpid() };
-    p.m_should_disown = false;
     return p;
 }
 
+#if defined(AK_OS_LINUX)
+static Optional<int> run_file_actions_in_child(Vector<ProcessSpawnOptions::FileActionType> const& file_actions)
+{
+    for (auto const& file_action : file_actions) {
+        auto error = file_action.visit(
+            [&](FileAction::OpenFile const& action) {
+                auto fd = open(
+                    action.path.characters(),
+                    File::open_mode_to_options(action.mode | Core::File::OpenMode::KeepOnExec),
+                    action.permissions);
+                if (fd < 0)
+                    return Optional<int> { errno };
+
+                if (fd != action.fd) {
+                    if (dup2(fd, action.fd) < 0) {
+                        auto saved_errno = errno;
+                        close(fd);
+                        return Optional<int> { saved_errno };
+                    }
+                    close(fd);
+                }
+                return Optional<int> {};
+            },
+            [&](FileAction::CloseFile const& action) {
+                close(action.fd);
+                return Optional<int> {};
+            },
+            [&](FileAction::DupFd const& action) {
+                if (dup2(action.write_fd, action.fd) < 0)
+                    return Optional<int> { errno };
+                return Optional<int> {};
+            });
+        if (error.has_value())
+            return error;
+    }
+    return {};
+}
+
+static ErrorOr<pid_t> fork_and_exec_with_parent_death_signal(ProcessSpawnOptions const& options, Span<char const*> arguments)
+{
+    auto error_pipe = TRY(System::pipe2(O_CLOEXEC));
+
+    auto parent_pid = getpid();
+    auto pid = fork();
+    if (pid < 0) {
+        auto saved_errno = errno;
+        MUST(System::close(error_pipe[0]));
+        MUST(System::close(error_pipe[1]));
+        return Error::from_syscall("fork"sv, saved_errno);
+    }
+
+    if (pid == 0) {
+        close(error_pipe[0]);
+
+        auto report_errno_and_exit = [&](int error) {
+            auto bytes_written = write(error_pipe[1], &error, sizeof(error));
+            (void)bytes_written;
+            _exit(127);
+        };
+
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0)
+            report_errno_and_exit(errno);
+        if (getppid() != parent_pid)
+            _exit(127);
+
+        if (auto error = run_file_actions_in_child(options.file_actions); error.has_value())
+            report_errno_and_exit(error.value());
+
+        if (options.search_for_executable_in_path)
+            execvp(options.executable.characters(), const_cast<char* const*>(arguments.data()));
+        else
+            execve(options.executable.characters(), const_cast<char* const*>(arguments.data()), Environment::raw_environ());
+
+        report_errno_and_exit(errno);
+    }
+
+    MUST(System::close(error_pipe[1]));
+
+    int child_errno = 0;
+    auto bytes_read = TRY(System::read(error_pipe[0], { &child_errno, sizeof(child_errno) }));
+    MUST(System::close(error_pipe[0]));
+
+    if (bytes_read > 0) {
+        int status = 0;
+        (void)waitpid(pid, &status, 0);
+        return Error::from_errno(child_errno);
+    }
+
+    return pid;
+}
+#endif
+
 ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
 {
+    ArgvList argv_list(options.executable, options.arguments.size());
+    for (auto const& argument : options.arguments)
+        argv_list.append(argument.characters());
+
+#if defined(AK_OS_LINUX)
+    if (options.die_with_parent)
+        return Process { TRY(fork_and_exec_with_parent_death_signal(options, argv_list.get())) };
+#endif
+
 #define CHECK(invocation)                  \
     if (int returned_errno = (invocation)) \
         return Error::from_errno(returned_errno);
@@ -97,15 +200,6 @@ ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
     ScopeGuard cleanup_spawn_actions = [&] {
         posix_spawn_file_actions_destroy(&spawn_actions);
     };
-
-    if (options.working_directory.has_value()) {
-#ifdef AK_OS_SERENITY
-        CHECK(posix_spawn_file_actions_addchdir(&spawn_actions, options.working_directory->characters()));
-#else
-        // FIXME: Support ProcessSpawnOptions::working_directory n platforms that support it.
-        TODO();
-#endif
-    }
 
     for (auto const& file_action : options.file_actions) {
         TRY(file_action.visit(
@@ -130,10 +224,6 @@ ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
 
 #undef CHECK
 
-    ArgvList argv_list(options.executable, options.arguments.size());
-    for (auto const& argument : options.arguments)
-        argv_list.append(argument.characters());
-
     pid_t pid;
     if (options.search_for_executable_in_path) {
         pid = TRY(System::posix_spawnp(options.executable.view(), &spawn_actions, nullptr, const_cast<char**>(argv_list.get().data()), Core::Environment::raw_environ()));
@@ -143,21 +233,17 @@ ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
     return Process { pid };
 }
 
-ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<ByteString> arguments, ByteString working_directory, KeepAsChild keep_as_child)
+ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<ByteString> arguments)
 {
     auto process = TRY(spawn({
         .executable = path,
         .arguments = Vector<ByteString> { arguments },
-        .working_directory = working_directory.is_empty() ? Optional<ByteString> {} : Optional<ByteString> { working_directory },
     }));
-
-    if (keep_as_child == KeepAsChild::No)
-        TRY(process.disown());
 
     return process;
 }
 
-ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<StringView> arguments, ByteString working_directory, KeepAsChild keep_as_child)
+ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<StringView> arguments)
 {
     Vector<ByteString> backing_strings;
     backing_strings.ensure_capacity(arguments.size());
@@ -167,13 +253,20 @@ ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<StringView> argume
     auto process = TRY(spawn({
         .executable = path,
         .arguments = backing_strings,
-        .working_directory = working_directory.is_empty() ? Optional<ByteString> {} : Optional<ByteString> { working_directory },
     }));
 
-    if (keep_as_child == KeepAsChild::No)
-        TRY(process.disown());
-
     return process;
+}
+
+void Process::terminate_immediately(int status)
+{
+    _exit(status);
+    VERIFY_NOT_REACHED();
+}
+
+ErrorOr<void> Process::terminate_process(pid_t pid, TerminationMode mode)
+{
+    return System::kill(pid, mode == TerminationMode::Graceful ? SIGTERM : SIGKILL);
 }
 
 ErrorOr<String> Process::get_name()
@@ -192,25 +285,6 @@ ErrorOr<String> Process::get_name()
 #else
     // FIXME: Implement Process::get_name() for other platforms.
     return "???"_string;
-#endif
-}
-
-ErrorOr<void> Process::set_name([[maybe_unused]] StringView name, [[maybe_unused]] SetThreadName set_thread_name)
-{
-#if defined(AK_OS_SERENITY)
-    int rc = set_process_name(name.characters_without_null_termination(), name.length());
-    if (rc != 0)
-        return Error::from_syscall("set_process_name"sv, rc);
-    if (set_thread_name == SetThreadName::No)
-        return {};
-
-    rc = prctl(PR_SET_THREAD_NAME, gettid(), name.characters_without_null_termination(), name.length());
-    if (rc != 0)
-        return Error::from_syscall("set_thread_name"sv, rc);
-    return {};
-#else
-    // FIXME: Implement Process::set_name() for other platforms.
-    return {};
 #endif
 }
 
@@ -323,22 +397,7 @@ pid_t Process::pid() const
     return m_pid;
 }
 
-ErrorOr<void> Process::disown()
-{
-    if (m_pid != 0 && m_should_disown) {
-#ifdef AK_OS_SERENITY
-        TRY(System::disown(m_pid));
-#else
-        // FIXME: Support disown outside Serenity.
-#endif
-        m_should_disown = false;
-        return {};
-    } else {
-        return Error::from_errno(EINVAL);
-    }
-}
-
-ErrorOr<int> Process::wait_for_termination()
+ErrorOr<int> Process::wait_for_termination() const
 {
     VERIFY(m_pid > 0);
 
@@ -358,7 +417,6 @@ ErrorOr<int> Process::wait_for_termination()
         VERIFY_NOT_REACHED();
     }
 
-    m_should_disown = false;
     return exit_code;
 }
 

@@ -6,17 +6,13 @@
 
 #include <LibWeb/HTML/HTMLAudioElement.h>
 #include <LibWeb/Layout/AudioBox.h>
-#include <LibWeb/Painting/AudioPaintable.h>
+#include <LibWeb/Painting/Paintable.h>
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(AudioBox);
-
-AudioBox::AudioBox(DOM::Document& document, DOM::Element& element, GC::Ref<CSS::ComputedProperties> style)
-    : ReplacedBox(document, element, move(style))
+AudioBox::AudioBox(DOM::Document& document, DOM::Element& element, NonnullRefPtr<CSS::ComputedValues const> style)
+    : ReplacedBox(document, element, style)
 {
-    set_natural_width(300);
-    set_natural_height(40);
 }
 
 HTML::HTMLAudioElement& AudioBox::dom_node()
@@ -29,26 +25,15 @@ HTML::HTMLAudioElement const& AudioBox::dom_node() const
     return static_cast<HTML::HTMLAudioElement const&>(*ReplacedBox::dom_node());
 }
 
-GC::Ptr<Painting::Paintable> AudioBox::create_paintable() const
+bool AudioBox::can_have_children() const
 {
-    return Painting::AudioPaintable::create(*this);
+    // If we allow children when controls are disabled, innerText may be non-empty.
+    return dom_node().shadow_root() != nullptr;
 }
 
-bool AudioBox::should_paint() const
+RefPtr<Painting::Paintable> AudioBox::create_paintable() const
 {
-    auto const& audio_element = dom_node();
-    return audio_element.has_attribute(HTML::AttributeNames::controls) || audio_element.is_scripting_disabled();
-}
-
-void AudioBox::prepare_for_replaced_layout()
-{
-    if (should_paint()) {
-        set_natural_width(300);
-        set_natural_height(40);
-    } else {
-        set_natural_width(0);
-        set_natural_height(0);
-    }
+    return Painting::Paintable::create(*this);
 }
 
 }

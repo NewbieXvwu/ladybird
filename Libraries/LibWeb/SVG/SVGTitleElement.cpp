@@ -5,8 +5,9 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGTitleElementPrototype.h>
+#include <LibWeb/Bindings/SVGTitleElement.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Layout/Node.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/SVG/SVGTitleElement.h>
 
@@ -25,12 +26,12 @@ void SVGTitleElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-GC::Ptr<Layout::Node> SVGTitleElement::create_layout_node(GC::Ref<CSS::ComputedProperties>)
+RefPtr<Layout::Node> SVGTitleElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const>)
 {
     return nullptr;
 }
 
-void SVGTitleElement::children_changed(ChildrenChangedMetadata const* metadata)
+void SVGTitleElement::children_changed(ChildrenChangedMetadata const& metadata)
 {
     Base::children_changed(metadata);
 

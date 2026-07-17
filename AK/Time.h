@@ -8,12 +8,15 @@
 
 #include <AK/Array.h>
 #include <AK/Assertions.h>
-#include <AK/Badge.h>
 #include <AK/Checked.h>
 #include <AK/Platform.h>
+#include <AK/String.h>
 #include <AK/StringView.h>
 #include <AK/Types.h>
+#include <math.h>
+
 #ifdef AK_OS_WINDOWS
+#    include <time.h>
 // https://learn.microsoft.com/en-us/windows/win32/api/winsock/ns-winsock-timeval
 struct timeval {
     long tv_sec { 0 };
@@ -57,10 +60,12 @@ unsigned day_of_week(int year, unsigned month, int day);
 // can be negative.
 constexpr int day_of_year(int year, unsigned month, int day)
 {
-    if (is_constant_evaluated())
+    if consteval {
         VERIFY(month >= 1 && month <= 12); // Note that this prevents bad constexpr months, but never actually prints anything.
-    else if (!(month >= 1 && month <= 12))
-        return 0;
+    } else {
+        if (!(month >= 1 && month <= 12))
+            return 0;
+    }
 
     constexpr Array seek_table = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
     int day_of_year = seek_table[month - 1] + day - 1;
@@ -210,6 +215,19 @@ private:
 
 public:
     [[nodiscard]] constexpr static Duration from_seconds(i64 seconds) { return Duration(seconds, 0); }
+    [[nodiscard]] constexpr static Duration from_seconds_f64(f64 seconds)
+    {
+        VERIFY(!isnan(seconds));
+        if (seconds >= static_cast<f64>(NumericLimits<i64>::max()))
+            return from_seconds(NumericLimits<i64>::max());
+        if (seconds <= static_cast<f64>(NumericLimits<i64>::min()))
+            return from_seconds(NumericLimits<i64>::min());
+        i64 integer_seconds = static_cast<i64>(seconds);
+        if (static_cast<f64>(integer_seconds) > seconds)
+            integer_seconds--;
+        u32 integer_nanoseconds = static_cast<u32>((seconds - static_cast<f64>(integer_seconds)) * 1'000'000'000);
+        return Duration(integer_seconds, integer_nanoseconds);
+    }
     [[nodiscard]] constexpr static Duration from_nanoseconds(i64 nanoseconds)
     {
         i64 seconds = sane_mod(nanoseconds, 1'000'000'000);
@@ -228,6 +246,8 @@ public:
     [[nodiscard]] static Duration from_ticks(clock_t, time_t);
     [[nodiscard]] static Duration from_timespec(const struct timespec&);
     [[nodiscard]] static Duration from_timeval(const struct timeval&);
+    [[nodiscard]] static Duration from_time_units(i64 units, u32 numerator, u32 denominator);
+    [[nodiscard]] Duration scaled_by(u32 numerator, u32 denominator) const;
     // We don't pull in <stdint.h> for the pretty min/max definitions because this file is also included in the Kernel
     [[nodiscard]] constexpr static Duration min() { return Duration(-__INT64_MAX__ - 1LL, 0); }
     [[nodiscard]] constexpr static Duration zero() { return Duration(0, 0); }
@@ -239,12 +259,14 @@ public:
     [[nodiscard]] i64 to_truncated_microseconds() const;
     // Rounds away from zero (2.3s to 3s, -2.3s to -3s).
     [[nodiscard]] i64 to_seconds() const;
+    [[nodiscard]] f64 to_seconds_f64() const;
     [[nodiscard]] i64 to_milliseconds() const;
     [[nodiscard]] i64 to_microseconds() const;
     [[nodiscard]] i64 to_nanoseconds() const;
     [[nodiscard]] timespec to_timespec() const;
     // Rounds towards -inf (it was the easiest to implement).
     [[nodiscard]] timeval to_timeval() const;
+    [[nodiscard]] i64 to_time_units(u32 numerator, u32 denominator) const;
 
     [[nodiscard]] bool is_zero() const { return (m_seconds == 0) && (m_nanoseconds == 0); }
     [[nodiscard]] bool is_negative() const { return m_seconds < 0; }
@@ -335,6 +357,8 @@ public:
     }
 
 private:
+    friend struct Formatter<Duration>;
+
     constexpr explicit Duration(i64 seconds, u32 nanoseconds)
         : m_seconds(seconds)
         , m_nanoseconds(nanoseconds)
@@ -345,6 +369,11 @@ private:
 
     i64 m_seconds { 0 };
     u32 m_nanoseconds { 0 }; // Always less than 1'000'000'000
+};
+
+template<>
+struct Formatter<Duration> : StandardFormatter {
+    ErrorOr<void> format(FormatBuilder&, Duration);
 };
 
 namespace Detail {
@@ -420,6 +449,11 @@ public:
         return UnixDateTime { Duration::from_milliseconds(milliseconds) };
     }
 
+    [[nodiscard]] constexpr static UnixDateTime from_microseconds_since_epoch(i64 microseconds)
+    {
+        return UnixDateTime { Duration::from_microseconds(microseconds) };
+    }
+
     [[nodiscard]] constexpr static UnixDateTime from_nanoseconds_since_epoch(i64 nanoseconds)
     {
         return UnixDateTime { Duration::from_nanoseconds(nanoseconds) };
@@ -477,6 +511,9 @@ public:
     ErrorOr<String> to_string(StringView format = "%Y-%m-%d %H:%M:%S"sv, LocalTime = LocalTime::Yes) const;
     Utf16String to_utf16_string(StringView format = "%Y-%m-%d %H:%M:%S"sv, LocalTime = LocalTime::Yes) const;
     ByteString to_byte_string(StringView format = "%Y-%m-%d %H:%M:%S"sv, LocalTime = LocalTime::Yes) const;
+    // Parses a string in the given format. Does not support time zone-related format specifiers.
+    // If 'from_gmt' is true, the string is parsed as a GMT time, otherwise it is parsed as a local time.
+    static Optional<UnixDateTime> parse(StringView format, StringView string, bool from_gmt = false);
 
     // Offsetting a UNIX time by a duration yields another UNIX time.
     constexpr UnixDateTime operator+(Duration const& other) const { return UnixDateTime { m_offset + other }; }
@@ -632,6 +669,25 @@ constexpr Duration operator""_ms(unsigned long long milliseconds) { return Durat
 constexpr Duration operator""_sec(unsigned long long seconds) { return Duration::from_seconds(static_cast<i64>(seconds)); }
 
 }
+
+template<>
+struct Formatter<UnixDateTime> : StandardFormatter {
+    ErrorOr<void> format(FormatBuilder& builder, UnixDateTime const& value)
+    {
+        auto result_time = value.to_timespec().tv_sec;
+        struct tm tm;
+#ifdef AK_OS_WINDOWS
+        if (gmtime_s(&tm, &result_time) != 0)
+#else
+        if (gmtime_r(&result_time, &tm) == nullptr)
+#endif
+            return Error::from_string_literal("Formatter<UnixDateTime>::format gmtime_r failed");
+
+        return builder.builder().try_appendff("{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}",
+            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+            tm.tm_hour, tm.tm_min, tm.tm_sec);
+    }
+};
 
 }
 

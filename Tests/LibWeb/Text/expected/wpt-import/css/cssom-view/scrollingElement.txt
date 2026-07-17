@@ -1,0 +1,13 @@
+Harness status: OK
+
+Found 8 tests
+
+8 Pass
+Pass	scrollingElement in quirks mode
+Pass	scrollingElement in no-quirks mode 
+Pass	scrollingElement in quirks mode (body table)
+Pass	scrollingElement in no-quirks mode  (body table)
+Pass	scrollingElement in quirks mode (root table)
+Pass	scrollingElement in no-quirks mode  (root table)
+Pass	scrollingElement in quirks mode (root table, body table)
+Pass	scrollingElement in no-quirks mode  (root table, body table)

@@ -8,8 +8,8 @@
 
 #include <LibGC/Ptr.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/TrustedTypes/TrustedHTML.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::HTML {
@@ -24,7 +24,7 @@ public:
 
     virtual ~DOMParser() override;
 
-    GC::Ref<DOM::Document> parse_from_string(StringView, Bindings::DOMParserSupportedType type);
+    WebIDL::ExceptionOr<GC::Ref<DOM::Document>> parse_from_string(TrustedTypes::TrustedHTMLOrString, Bindings::DOMParserSupportedType type);
 
 private:
     explicit DOMParser(JS::Realm&);

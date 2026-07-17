@@ -20,10 +20,13 @@
 
 namespace JS {
 
-class JS_API TypedArrayBase : public Object {
+class JS_API TypedArrayBase : public Object
+    , public CachedTypedArrayView {
     JS_OBJECT(TypedArrayBase, Object);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     enum class ContentType {
         BigInt,
         Number,
@@ -42,10 +45,26 @@ public:
     ContentType content_type() const { return m_content_type; }
     ArrayBuffer* viewed_array_buffer() const { return m_viewed_array_buffer; }
 
+    static constexpr size_t invalid_cached_data_offset = GC::PrimitiveStorage::invalid_offset;
+
+    // Cached cage offset: viewed_array_buffer->data_offset() + byte_offset.
+    // invalid_cached_data_offset means "not cached, use slow path".
+    size_t cached_data_offset() const { return m_cached_data_offset; }
+    void set_cached_data_offset(size_t offset) { m_cached_data_offset = offset; }
+
     void set_array_length(ByteLength length) { m_array_length = move(length); }
     void set_byte_length(ByteLength length) { m_byte_length = move(length); }
-    void set_byte_offset(u32 offset) { m_byte_offset = offset; }
-    void set_viewed_array_buffer(ArrayBuffer* array_buffer) { m_viewed_array_buffer = array_buffer; }
+    void set_byte_offset(u32 offset)
+    {
+        m_byte_offset = offset;
+        update_cached_data_offset();
+    }
+
+    void set_viewed_array_buffer(ArrayBuffer* array_buffer)
+    {
+        m_viewed_array_buffer = array_buffer;
+        update_cached_data_offset();
+    }
 
     [[nodiscard]] Kind kind() const { return m_kind; }
 
@@ -65,6 +84,12 @@ public:
 
     virtual GC::Ref<NativeFunction> intrinsic_constructor(Realm&) const = 0;
 
+    // OPTIMIZATION: Fast-path factories used by TypedArraySpeciesCreate when the resolved species constructor is the
+    // default intrinsic. These bypass the public TypedArray constructor (which would otherwise allocate a throwaway
+    // ArrayBuffer in the `is_object()` branch of its argument handling).
+    virtual ThrowCompletionOr<GC::Ref<TypedArrayBase>> create_default(Realm&, u32 array_length) const = 0;
+    virtual GC::Ref<TypedArrayBase> create_default_view_on_buffer(Realm&, ArrayBuffer&) const = 0;
+
 protected:
     TypedArrayBase(Object& prototype, Kind kind, u32 element_size)
         : Object(ConstructWithPrototypeTag::Tag, prototype, MayInterfereWithIndexedPropertyAccess::Yes)
@@ -74,6 +99,29 @@ protected:
         set_is_typed_array();
     }
 
+    void update_cached_data_offset()
+    {
+        if (!m_viewed_array_buffer || !m_viewed_array_buffer->can_cache_typed_array_view_data_offset()) {
+            remove_from_cached_view_list();
+            m_cached_data_offset = invalid_cached_data_offset;
+            return;
+        }
+
+        auto data_offset = m_viewed_array_buffer->data_offset();
+        if (data_offset == invalid_cached_data_offset) {
+            remove_from_cached_view_list();
+            m_cached_data_offset = invalid_cached_data_offset;
+            return;
+        }
+
+        Checked<size_t> cached_data_offset = data_offset;
+        cached_data_offset += m_byte_offset;
+        VERIFY(!cached_data_offset.has_overflow());
+
+        m_viewed_array_buffer->register_cached_typed_array_view(*this);
+        m_cached_data_offset = cached_data_offset.value();
+    }
+
     u32 m_element_size { 0 };
     ByteLength m_array_length { 0 };
     ByteLength m_byte_length { 0 };
@@ -81,10 +129,17 @@ protected:
     ContentType m_content_type { ContentType::Number };
     Kind m_kind {};
     GC::Ptr<ArrayBuffer> m_viewed_array_buffer;
+    size_t m_cached_data_offset { invalid_cached_data_offset };
 
 private:
+    virtual bool is_typed_array_base() const final { return true; }
+    virtual void finalize() override;
     virtual void visit_edges(Visitor&) override;
+    virtual bool eligible_for_own_property_enumeration_fast_path() const final override { return false; }
 };
+
+template<>
+inline bool Object::fast_is<TypedArrayBase>() const { return is_typed_array_base(); }
 
 // 10.4.5.9 TypedArray With Buffer Witness Records, https://tc39.es/ecma262/#sec-typedarray-with-buffer-witness-records
 struct TypedArrayWithBufferWitness {
@@ -278,7 +333,7 @@ public:
     }
 
     // 10.4.5.4 [[DefineOwnProperty]] ( P, Desc ), https://tc39.es/ecma262/#sec-integer-indexed-exotic-objects-defineownproperty-p-desc
-    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const& property_key, PropertyDescriptor const& property_descriptor, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr) override
+    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const& property_key, PropertyDescriptor& property_descriptor, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr) override
     {
         // NOTE: If the property name is a number type (An implementation-defined optimized
         // property key type), it can be treated as a string property that will transparently be
@@ -325,7 +380,7 @@ public:
     }
 
     // 10.4.5.5 [[Get]] ( P, Receiver ), https://tc39.es/ecma262/#sec-typedarray-get
-    virtual ThrowCompletionOr<Value> internal_get(PropertyKey const& property_key, Value receiver, CacheablePropertyMetadata* cacheable_metadata, PropertyLookupPhase phase) const override
+    virtual ThrowCompletionOr<Value> internal_get(PropertyKey const& property_key, Value receiver, CacheableGetPropertyMetadata* cacheable_metadata, PropertyLookupPhase phase) const override
     {
         VERIFY(!receiver.is_special_empty_value());
 
@@ -350,7 +405,7 @@ public:
     }
 
     // 10.4.5.6 [[Set]] ( P, V, Receiver ), https://tc39.es/ecma262/#sec-integer-indexed-exotic-objects-set-p-v-receiver
-    virtual ThrowCompletionOr<bool> internal_set(PropertyKey const& property_key, Value value, Value receiver, CacheablePropertyMetadata*, PropertyLookupPhase) override
+    virtual ThrowCompletionOr<bool> internal_set(PropertyKey const& property_key, Value value, Value receiver, CacheableSetPropertyMetadata*, PropertyLookupPhase) override
     {
         VERIFY(!value.is_special_empty_value());
         VERIFY(!receiver.is_special_empty_value());
@@ -419,7 +474,7 @@ public:
         auto typed_array_record = make_typed_array_with_buffer_witness_record(*this, ArrayBuffer::Order::SeqCst);
 
         // 2. Let keys be a new empty List.
-        auto keys = GC::RootVector<Value> { heap() };
+        GC::RootVector<Value> keys;
 
         // 3. If IsTypedArrayOutOfBounds(taRecord) is false, then
         if (!is_typed_array_out_of_bounds(typed_array_record)) {
@@ -429,54 +484,28 @@ public:
             // b. For each integer i such that 0 ≤ i < length, in ascending order, do
             for (size_t i = 0; i < length; ++i) {
                 // i. Append ! ToString(𝔽(i)) to keys.
-                keys.append(PrimitiveString::create(vm, String::number(i)));
+                keys.append(PrimitiveString::create_from_unsigned_integer(vm, i));
             }
         }
 
         // 4. For each own property key P of O such that P is a String and P is not an integer index, in ascending chronological order of property creation, do
-        for (auto& it : shape().property_table()) {
-            if (it.key.is_string()) {
+        shape().for_each_property_in_insertion_order([&](auto const& property_key, auto const&) {
+            if (property_key.is_string()) {
                 // a. Append P to keys.
-                keys.append(it.key.to_value(vm));
+                keys.append(property_key.to_value(vm));
             }
-        }
+        });
 
         // 5. For each own property key P of O such that P is a Symbol, in ascending chronological order of property creation, do
-        for (auto& it : shape().property_table()) {
-            if (it.key.is_symbol()) {
+        shape().for_each_property_in_insertion_order([&](auto const& property_key, auto const&) {
+            if (property_key.is_symbol()) {
                 // a. Append P to keys.
-                keys.append(it.key.to_value(vm));
+                keys.append(property_key.to_value(vm));
             }
-        }
+        });
 
         // 6. Return keys.
         return { move(keys) };
-    }
-
-    ReadonlySpan<UnderlyingBufferDataType> data() const
-    {
-        auto typed_array_record = make_typed_array_with_buffer_witness_record(*this, ArrayBuffer::Order::SeqCst);
-
-        if (is_typed_array_out_of_bounds(typed_array_record)) {
-            // FIXME: Propagate this as an error?
-            return {};
-        }
-
-        auto length = typed_array_length(typed_array_record);
-        return { reinterpret_cast<UnderlyingBufferDataType const*>(m_viewed_array_buffer->buffer().data() + m_byte_offset), length };
-    }
-
-    Span<UnderlyingBufferDataType> data()
-    {
-        auto typed_array_record = make_typed_array_with_buffer_witness_record(*this, ArrayBuffer::Order::SeqCst);
-
-        if (is_typed_array_out_of_bounds(typed_array_record)) {
-            // FIXME: Propagate this as an error?
-            return {};
-        }
-
-        auto length = typed_array_length(typed_array_record);
-        return { reinterpret_cast<UnderlyingBufferDataType*>(m_viewed_array_buffer->buffer().data() + m_byte_offset), length };
     }
 
     bool is_unclamped_integer_element_type() const override
@@ -500,22 +529,23 @@ protected:
         : TypedArrayBase(prototype, kind, sizeof(UnderlyingBufferDataType))
     {
         VERIFY(!Checked<u32>::multiplication_would_overflow(array_length, sizeof(UnderlyingBufferDataType)));
-        m_viewed_array_buffer = &array_buffer;
+        set_viewed_array_buffer(&array_buffer);
         if (array_length)
-            VERIFY(!data().is_null());
+            VERIFY(m_viewed_array_buffer->data_at(0));
         m_array_length = array_length;
         m_byte_length = m_viewed_array_buffer->byte_length();
     }
 };
 
 JS_API ThrowCompletionOr<TypedArrayBase*> typed_array_from(VM&, Value);
+ThrowCompletionOr<void> initialize_typed_array_from_array_buffer(VM&, TypedArrayBase&, ArrayBuffer&, Value byte_offset, Value length);
 ThrowCompletionOr<TypedArrayBase*> typed_array_create(VM&, FunctionObject& constructor, GC::RootVector<Value> arguments);
 ThrowCompletionOr<TypedArrayBase*> typed_array_create_same_type(VM&, TypedArrayBase const& exemplar, GC::RootVector<Value> arguments);
 ThrowCompletionOr<TypedArrayWithBufferWitness> validate_typed_array(VM&, Object const&, ArrayBuffer::Order);
 ThrowCompletionOr<double> compare_typed_array_elements(VM&, Value x, Value y, FunctionObject* comparefn);
 
 #define JS_DECLARE_TYPED_ARRAY(ClassName, snake_name, PrototypeName, ConstructorName, Type)                  \
-    class JS_API ClassName : public TypedArray<Type> {                                                       \
+    class JS_API ClassName final : public TypedArray<Type> {                                                 \
         JS_OBJECT(ClassName, TypedArray);                                                                    \
         GC_DECLARE_ALLOCATOR(ClassName);                                                                     \
                                                                                                              \
@@ -526,9 +556,14 @@ ThrowCompletionOr<double> compare_typed_array_elements(VM&, Value x, Value y, Fu
         static GC::Ref<ClassName> create(Realm&, u32 length, ArrayBuffer& buffer);                           \
         virtual Utf16FlyString const& element_name() const override;                                         \
         virtual GC::Ref<NativeFunction> intrinsic_constructor(Realm&) const override;                        \
+        virtual ThrowCompletionOr<GC::Ref<TypedArrayBase>> create_default(Realm&, u32) const override;       \
+        virtual GC::Ref<TypedArrayBase> create_default_view_on_buffer(Realm&, ArrayBuffer&) const override;  \
                                                                                                              \
     protected:                                                                                               \
         ClassName(Object& prototype, u32 length, ArrayBuffer& array_buffer);                                 \
+                                                                                                             \
+    private:                                                                                                 \
+        virtual bool is_##snake_name() const final { return true; }                                          \
     };                                                                                                       \
     class PrototypeName final : public Object {                                                              \
         JS_OBJECT(PrototypeName, Object);                                                                    \
@@ -558,7 +593,9 @@ ThrowCompletionOr<double> compare_typed_array_elements(VM&, Value x, Value y, Fu
         {                                                                                                    \
             return true;                                                                                     \
         }                                                                                                    \
-    };
+    };                                                                                                       \
+    template<>                                                                                               \
+    inline bool Object::fast_is<ClassName>() const { return is_##snake_name(); }
 
 #define __JS_ENUMERATE(ClassName, snake_name, PrototypeName, ConstructorName, Type) \
     JS_DECLARE_TYPED_ARRAY(ClassName, snake_name, PrototypeName, ConstructorName, Type);

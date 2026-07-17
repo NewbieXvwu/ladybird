@@ -22,6 +22,10 @@ on:
         required: false
         type: boolean
         default: false
+      container:
+        required: false
+        type: string
+        default: 'null'
 
 env:
   # runner.workspace = /home/runner/work/ladybird
@@ -39,21 +43,23 @@ env:
 jobs:
   CI:
     runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    container: ${{ fromJSON(inputs.container) }}
 
     steps:
       # Pull requests can trail behind `master` and can cause breakage if merging before running the CI checks on an updated branch.
       # Luckily, GitHub creates and maintains a merge branch that is updated whenever the target or source branch is modified. By
       # checking this branch out, we gain a stabler `master` at the cost of reproducibility.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.0
         if: ${{ github.event_name != 'pull_request' }}
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.0
         if: ${{ github.event_name == 'pull_request' }}
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
 
       - name: Set Up Environment
         uses: ./.github/actions/setup
+        id: 'setup'
         with:
           os: ${{ inputs.os_name }}
           arch: ${{ inputs.arch }}
@@ -65,18 +71,21 @@ jobs:
         if: ${{ inputs.os_name != 'Windows' }}
         id: 'build-parameters'
         run: |
-          CMAKE_OPTIONS=""
-          if ${{ inputs.toolchain == 'Swift' }} ; then
-            echo "host_cc=$(swiftly use --print-location)/usr/bin/clang" >> "$GITHUB_OUTPUT"
-            echo "host_cxx=$(swiftly use --print-location)/usr/bin/clang++" >> "$GITHUB_OUTPUT"
-            CMAKE_OPTIONS="$CMAKE_OPTIONS -DENABLE_SWIFT=ON"
-          elif ${{ inputs.os_name == 'Linux' }} ; then
+          CMAKE_OPTIONS="-DENABLE_CI_BASELINE_CPU=ON"
+          if ${{ inputs.os_name == 'Linux' }} ; then
+            # FIXME: https://github.com/WebAssembly/wabt/issues/2533
+            #        wabt doesn't have binary releases for arm64 Linux
+            if ${{ inputs.arch == 'arm64' }} ; then
+              PKGCONFIG=$(which pkg-config)
+              CMAKE_OPTIONS="$CMAKE_OPTIONS -DPKG_CONFIG_EXECUTABLE=$PKGCONFIG"
+            fi
+
             if ${{ inputs.toolchain == 'Clang' }} ; then
-              echo "host_cc=clang-20" >> "$GITHUB_OUTPUT"
-              echo "host_cxx=clang++-20" >> "$GITHUB_OUTPUT"
+              echo "host_cc=clang" >> "$GITHUB_OUTPUT"
+              echo "host_cxx=clang++" >> "$GITHUB_OUTPUT"
             elif ${{ inputs.toolchain == 'GNU' }} ; then
-              echo "host_cc=gcc-14" >> "$GITHUB_OUTPUT"
-              echo "host_cxx=g++-14" >> "$GITHUB_OUTPUT"
+              echo "host_cc=gcc" >> "$GITHUB_OUTPUT"
+              echo "host_cxx=g++" >> "$GITHUB_OUTPUT"
             fi
           elif ${{ inputs.os_name == 'macOS' }} ; then
             echo "host_cc=$(xcrun --find clang)" >> "$GITHUB_OUTPUT"
@@ -88,14 +97,7 @@ jobs:
             CMAKE_OPTIONS="$CMAKE_OPTIONS -DENABLE_CLANG_PLUGINS=ON"
           else
             echo "ccache_key=${{ inputs.build_preset }}" >> "$GITHUB_OUTPUT"
-            if ${{ inputs.os_name == 'Linux' && inputs.arch == 'arm64' }} ; then
-                # FIXME: https://github.com/WebAssembly/wabt/issues/2533
-                #        wabt doesn't have binary releases for arm64 Linux
-                PKGCONFIG=$(which pkg-config)
-                CMAKE_OPTIONS="$CMAKE_OPTIONS -DPKG_CONFIG_EXECUTABLE=$PKGCONFIG"
-            else
-              CMAKE_OPTIONS="$CMAKE_OPTIONS -DINCLUDE_WASM_SPEC_TESTS=ON -DWASM_SPEC_TEST_SKIP_FORMATTING=ON"
-            fi
+            CMAKE_OPTIONS="$CMAKE_OPTIONS -DINCLUDE_WASM_SPEC_TESTS=ON -DWASM_SPEC_TEST_SKIP_FORMATTING=ON"
           fi
 
           echo "cmake_options=$CMAKE_OPTIONS" >> "$GITHUB_OUTPUT"
@@ -104,14 +106,19 @@ jobs:
         uses: ./.github/actions/cache-restore
         id: 'cache-restore'
         with:
-          runner_labels: ${{ inputs.runner_labels }}
           os: ${{ inputs.os_name }}
           arch: ${{ inputs.arch }}
           toolchain: ${{ inputs.toolchain }}
           cache_key_extra: ${{ inputs.os_name == 'Windows' && inputs.build_preset || steps.build-parameters.outputs.ccache_key }}
-          ccache_path: ${{ env.CCACHE_DIR }}
-          download_cache_path: ${{ github.workspace }}/Build/caches
-          vcpkg_cache_path: ${{ github.workspace }}/Build/caches/vcpkg-binary-cache
+          ccache_path: ${{ steps.setup.outputs.ccache_path }}
+          vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
+
+      - name: Cache the WebAssembly spec test suite
+        if: ${{ inputs.os_name != 'Windows' }}
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/caches/WasmSpecTests
+          key: wasm-spec-test-suite | ${{ hashFiles('Meta/CMake/wasm_spec_tests.cmake') }}
 
       - name: Set dynamic environment variables
         if: ${{ inputs.os_name != 'Windows' }}
@@ -140,7 +147,8 @@ jobs:
           VCPKG_CACHE_SAS: ${{ github.ref == 'refs/heads/master' && secrets.VCPKG_CACHE_SAS || '' }}
           VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && 'write' || '' }}
         run: |
-          cmake --preset ${{ inputs.build_preset }} -B Build
+          cmake --preset ${{ inputs.build_preset }} -B Build `
+            -DENABLE_CI_BASELINE_CPU=ON
 
       - name: Create Build Environment (Fuzzers)
         if: ${{ inputs.build_preset == 'Fuzzers' }}
@@ -149,20 +157,11 @@ jobs:
           VCPKG_CACHE_SAS: ${{ github.ref == 'refs/heads/master' && secrets.VCPKG_CACHE_SAS || '' }}
           VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && 'write' || '' }}
         run: |
-          cmake --preset=Distribution -S Meta/Lagom -B ${{ github.workspace }}/Build/tools-build \
-            -DLAGOM_TOOLS_ONLY=ON \
-            -DINSTALL_LAGOM_TOOLS=ON \
-            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/Build/tools-install \
-            -DPython3_EXECUTABLE=${{ env.pythonLocation }}/bin/python \
-            -Dpackage=LagomTools
-
-          ninja -C ${{ github.workspace }}/Build/tools-build install
-
           cmake --preset ${{ inputs.build_preset }} -B Build \
+            ${{ steps.build-parameters.outputs.cmake_options }} \
             -DPython3_EXECUTABLE=${{ env.pythonLocation }}/bin/python \
             -DCMAKE_C_COMPILER=${{ steps.build-parameters.outputs.host_cc }} \
-            -DCMAKE_CXX_COMPILER=${{ steps.build-parameters.outputs.host_cxx }} \
-            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/Build/tools-install
+            -DCMAKE_CXX_COMPILER=${{ steps.build-parameters.outputs.host_cxx }}
 
       # === BUILD ===
 
@@ -170,71 +169,98 @@ jobs:
         working-directory: ${{ github.workspace }}/Build
         run: |
           cmake --build .
-          cmake --install . --strip --prefix ${{ github.workspace }}/Install
+          cmake --install . --strip --prefix "${GITHUB_WORKSPACE}/Install"
 
-      - name: Build - macOS with Qt
+      - name: Build with Qt
         if: ${{ inputs.os_name == 'macOS' && inputs.build_preset == 'Sanitizer' }}
         working-directory: ${{ github.workspace }}
         run: |
-          cmake --preset ${{ inputs.build_preset }} -B Build -DENABLE_QT=ON
+          cmake --preset ${{ inputs.build_preset }} -B Build -DLADYBIRD_GUI_FRAMEWORK=Qt
           cmake --build Build
 
       - name: Save Caches
         uses: ./.github/actions/cache-save
         with:
-          runner_labels: ${{ inputs.runner_labels }}
           arch: ${{ inputs.arch }}
-          ccache_path: ${{ env.CCACHE_DIR }}
+          ccache_path: ${{ steps.setup.outputs.ccache_path }}
           ccache_primary_key: ${{ steps.cache-restore.outputs.ccache_primary_key }}
-          vcpkg_cache_path: ${{ github.workspace }}/Build/caches/vcpkg-binary-cache
+          vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
           vcpkg_cache_primary_key: ${{ steps.cache-restore.outputs.vcpkg_cache_primary_key }}
 
       # === TEST ===
 
+      - name: Start PulseAudio
+        if: ${{ inputs.os_name == 'Linux' }}
+        run: |
+          echo "PULSE_SERVER=unix:/tmp/pulse-native" >> "$GITHUB_ENV"
+          pulseaudio --system -D --exit-idle-time=1800 \
+            --load="module-native-protocol-unix auth-anonymous=1 socket=/tmp/pulse-native" \
+            --load="module-null-sink sink_name=virtual_sink"
+
+      - name: Check new tests for flakiness
+        if: ${{ github.event_name == 'pull_request' && inputs.build_preset == 'Sanitizer' && (inputs.os_name == 'Linux' || inputs.os_name == 'macOS') }}
+        timeout-minutes: 30
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
+          "${{ env.pythonLocation }}/bin/python" Meta/check-test-flakiness.py \
+            --test-web-binary Build/bin/test-web \
+            --base-ref ${{ github.event.pull_request.base.sha }} \
+            --deadline-seconds 1200 \
+            --python-executable "${{ env.pythonLocation }}/bin/python" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Run WPT Smoke Tests
+        if: ${{ inputs.os_name == 'Linux' && (inputs.build_preset == 'Release' || inputs.build_preset == 'Sanitizer') }}
+        timeout-minutes: 5
+        working-directory: ${{ github.workspace }}
+        run: Meta/WPT.sh run --test-list Tests/LibWeb/WPT/ci-smoke-tests.txt
+        env:
+          BUILD_LADYBIRD: 'false'
+          LADYBIRD_BINARY: ${{ github.workspace }}/Build/bin/Ladybird
+          WEBDRIVER_BINARY: ${{ github.workspace }}/Build/bin/WebDriver
+          WPT_PROCESSES: '4'
+          ASAN_OPTIONS: 'log_path=${{ github.workspace }}/Build/asan.log'
+          UBSAN_OPTIONS: 'log_path=${{ github.workspace }}/Build/ubsan.log'
+
       - name: Test
-        if: ${{ contains(inputs.build_preset, 'Sanitizer') }}
+        if: ${{ inputs.build_preset == 'Sanitizer' }}
         working-directory: ${{ github.workspace }}
         run: ctest --preset ${{ inputs.build_preset }} --output-on-failure --test-dir Build --timeout 1800
         env:
           TESTS_ONLY: 1
           # NOTE: These are appended to the preset's options.
-          ASAN_OPTIONS: 'log_path="${{ github.workspace }}/asan.log"'
-          UBSAN_OPTIONS: 'log_path="${{ github.workspace }}/ubsan.log"'
+          ASAN_OPTIONS: 'log_path=asan.log'
+          UBSAN_OPTIONS: 'log_path=ubsan.log'
 
       - name: Test
-        if: ${{ inputs.build_preset != 'Fuzzers' && !contains(inputs.build_preset, 'Sanitizer') }}
+        if: ${{ inputs.build_preset != 'Fuzzers' && inputs.build_preset != 'All_Debug' && inputs.build_preset != 'Sanitizer' }}
         working-directory: ${{ github.workspace }}
         run: ctest --output-on-failure --test-dir Build --timeout 1800
         env:
           TESTS_ONLY: 1
 
       - name: Upload LibWeb Test Artifacts
-        if: ${{ always() && inputs.build_preset != 'Fuzzers' }}
-        uses: actions/upload-artifact@v4
+        if: ${{ always() && inputs.build_preset != 'Fuzzers' && inputs.build_preset != 'All_Debug' }}
+        uses: actions/upload-artifact@v7
         with:
-          name: libweb-test-artifacts-${{ inputs.os_name }}-${{ inputs.build_preset }}-${{ inputs.toolchain }}-${{ inputs.clang-plugins }}
-          path: ${{ github.workspace }}/Build/Lagom/Tests/LibWeb/test-web/test-dumps/
+          name: libweb-test-artifacts-${{ inputs.os_name }}-${{ inputs.arch }}-${{ inputs.build_preset }}-${{ inputs.toolchain }}-${{ inputs.clang_plugins }}
+          path: |
+            Build/Tests/LibWeb/test-web/test-dumps/
+            Build/**/asan.log.*
+            Build/**/ubsan.log.*
           retention-days: 0
           if-no-files-found: ignore
 
       - name: Sanitizer Output
-        if: ${{ !cancelled() && inputs.build_preset == 'Sanitizer' }}
+        if: ${{ !cancelled() && inputs.os_name != 'Windows' && inputs.build_preset == 'Sanitizer' }}
         working-directory: ${{ github.workspace }}
         run: |
-          log_output=$(find . -maxdepth 1 \( -name 'asan.log.*' -o -name 'ubsan.log.*' \) -exec cat {} \; )
+          log_output=$(find Build \( -name 'asan.log.*' -o -name 'ubsan.log.*' \) -exec cat {} \; )
           if [ -z "$log_output" ]; then
             echo "No sanitizer issues found."
           else
             echo "$log_output"
             echo "Sanitizer errors happened while running tests; see the Test step above."
           fi
-
-      - name: Lints
-        if: ${{ inputs.os_name == 'Linux' && inputs.build_preset == 'Sanitizer' }}
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -e
-          git ls-files '*.ipc' | xargs ./Build/bin/IPCMagicLinter
-        env:
-          ASAN_OPTIONS: 'strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=1:allocator_may_return_null=1'
-          UBSAN_OPTIONS: 'print_stacktrace=1:print_summary=1:halt_on_error=1'

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2021-2025, Andreas Kling <andreas@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,151 +7,66 @@
 #pragma once
 
 #include <AK/Forward.h>
-#include <AK/Function.h>
-#include <AK/Span.h>
-#include <LibJS/Bytecode/Executable.h>
+#include <LibJS/Bytecode/IdentifierTable.h>
+#include <LibJS/Bytecode/Label.h>
+#include <LibJS/Bytecode/OpCodes.h>
+#include <LibJS/Bytecode/Operand.h>
+#include <LibJS/Bytecode/PropertyKeyTable.h>
+#include <LibJS/Bytecode/StringTable.h>
 #include <LibJS/Forward.h>
-#include <LibJS/SourceRange.h>
+#include <LibJS/Runtime/EnvironmentCoordinate.h>
 
-#define ENUMERATE_BYTECODE_OPS(O)      \
-    O(Add)                             \
-    O(AddPrivateName)                  \
-    O(ArrayAppend)                     \
-    O(AsyncIteratorClose)              \
-    O(Await)                           \
-    O(BitwiseAnd)                      \
-    O(BitwiseNot)                      \
-    O(BitwiseOr)                       \
-    O(BitwiseXor)                      \
-    O(BlockDeclarationInstantiation)   \
-    O(Call)                            \
-    O(CallBuiltin)                     \
-    O(CallConstruct)                   \
-    O(CallConstructWithArgumentArray)  \
-    O(CallDirectEval)                  \
-    O(CallDirectEvalWithArgumentArray) \
-    O(CallWithArgumentArray)           \
-    O(Catch)                           \
-    O(ConcatString)                    \
-    O(ContinuePendingUnwind)           \
-    O(CopyObjectExcludingProperties)   \
-    O(CreateArguments)                 \
-    O(CreateLexicalEnvironment)        \
-    O(CreatePrivateEnvironment)        \
-    O(CreateRestParams)                \
-    O(CreateVariable)                  \
-    O(CreateVariableEnvironment)       \
-    O(Decrement)                       \
-    O(DeleteById)                      \
-    O(DeleteByIdWithThis)              \
-    O(DeleteByValue)                   \
-    O(DeleteByValueWithThis)           \
-    O(DeleteVariable)                  \
-    O(Div)                             \
-    O(Dump)                            \
-    O(End)                             \
-    O(EnterObjectEnvironment)          \
-    O(EnterUnwindContext)              \
-    O(Exp)                             \
-    O(GetById)                         \
-    O(GetByIdWithThis)                 \
-    O(GetByValue)                      \
-    O(GetByValueWithThis)              \
-    O(GetCalleeAndThisFromEnvironment) \
-    O(GetCompletionFields)             \
-    O(GetGlobal)                       \
-    O(GetImportMeta)                   \
-    O(GetIterator)                     \
-    O(GetLength)                       \
-    O(GetLengthWithThis)               \
-    O(GetMethod)                       \
-    O(GetNewTarget)                    \
-    O(GetNextMethodFromIteratorRecord) \
-    O(GetObjectFromIteratorRecord)     \
-    O(GetObjectPropertyIterator)       \
-    O(GetPrivateById)                  \
-    O(GetBinding)                      \
-    O(GetInitializedBinding)           \
-    O(GreaterThan)                     \
-    O(GreaterThanEquals)               \
-    O(HasPrivateId)                    \
-    O(ImportCall)                      \
-    O(In)                              \
-    O(Increment)                       \
-    O(InitializeLexicalBinding)        \
-    O(InitializeVariableBinding)       \
-    O(InstanceOf)                      \
-    O(IteratorClose)                   \
-    O(IteratorNext)                    \
-    O(IteratorNextUnpack)              \
-    O(IteratorToArray)                 \
-    O(Jump)                            \
-    O(JumpFalse)                       \
-    O(JumpGreaterThan)                 \
-    O(JumpGreaterThanEquals)           \
-    O(JumpIf)                          \
-    O(JumpLessThan)                    \
-    O(JumpLessThanEquals)              \
-    O(JumpLooselyEquals)               \
-    O(JumpLooselyInequals)             \
-    O(JumpNullish)                     \
-    O(JumpStrictlyEquals)              \
-    O(JumpStrictlyInequals)            \
-    O(JumpTrue)                        \
-    O(JumpUndefined)                   \
-    O(LeaveFinally)                    \
-    O(LeaveLexicalEnvironment)         \
-    O(LeavePrivateEnvironment)         \
-    O(LeaveUnwindContext)              \
-    O(LeftShift)                       \
-    O(LessThan)                        \
-    O(LessThanEquals)                  \
-    O(LooselyEquals)                   \
-    O(LooselyInequals)                 \
-    O(Mod)                             \
-    O(Mov)                             \
-    O(Mul)                             \
-    O(NewArray)                        \
-    O(NewClass)                        \
-    O(NewFunction)                     \
-    O(NewObject)                       \
-    O(NewPrimitiveArray)               \
-    O(NewRegExp)                       \
-    O(NewTypeError)                    \
-    O(Not)                             \
-    O(PrepareYield)                    \
-    O(PostfixDecrement)                \
-    O(PostfixIncrement)                \
-    O(PutById)                         \
-    O(PutByIdWithThis)                 \
-    O(PutBySpread)                     \
-    O(PutByValue)                      \
-    O(PutByValueWithThis)              \
-    O(PutPrivateById)                  \
-    O(ResolveSuperBase)                \
-    O(ResolveThisBinding)              \
-    O(RestoreScheduledJump)            \
-    O(Return)                          \
-    O(RightShift)                      \
-    O(ScheduleJump)                    \
-    O(SetCompletionType)               \
-    O(SetGlobal)                       \
-    O(SetLexicalBinding)               \
-    O(SetVariableBinding)              \
-    O(StrictlyEquals)                  \
-    O(StrictlyInequals)                \
-    O(Sub)                             \
-    O(SuperCallWithArgumentArray)      \
-    O(Throw)                           \
-    O(ThrowIfNotObject)                \
-    O(ThrowIfNullish)                  \
-    O(ThrowIfTDZ)                      \
-    O(Typeof)                          \
-    O(TypeofBinding)                   \
-    O(UnaryMinus)                      \
-    O(UnaryPlus)                       \
-    O(UnsignedRightShift)              \
-    O(Yield)
+namespace JS::Bytecode::Op {
+
+#define JS_ENUMERATE_COMMON_BINARY_OPS_WITHOUT_FAST_PATH(O) \
+    O(LooselyInequals, loosely_inequals)                    \
+    O(LooselyEquals, loosely_equals)                        \
+    O(StrictlyInequals, strict_inequals)                    \
+    O(StrictlyEquals, strict_equals)
+
+#define JS_ENUMERATE_COMMON_UNARY_OPS(O) \
+    O(BitwiseNot, bitwise_not)           \
+    O(UnaryPlus, unary_plus)             \
+    O(UnaryMinus, unary_minus)
+
+#define JS_ENUMERATE_COMPARISON_OPS(X)            \
+    X(LessThan, less_than, <)                     \
+    X(LessThanEquals, less_than_equals, <=)       \
+    X(GreaterThan, greater_than, >)               \
+    X(GreaterThanEquals, greater_than_equals, >=) \
+    X(LooselyEquals, loosely_equals, ==)          \
+    X(LooselyInequals, loosely_inequals, !=)      \
+    X(StrictlyEquals, strict_equals, ==)          \
+    X(StrictlyInequals, strict_inequals, !=)
+
+enum class EnvironmentMode {
+    Lexical,
+    Var,
+};
+
+enum class BindingInitializationMode {
+    Initialize,
+    Set,
+};
+
+enum class CallType {
+    Call,
+    Construct,
+    DirectEval,
+};
+
+enum class ArgumentsKind {
+    Mapped,
+    Unmapped,
+};
+
+enum class FunctionNamePrefix {
+    None,
+    Get,
+    Set,
+};
+
+}
 
 namespace JS::Bytecode {
 
@@ -160,7 +75,7 @@ public:
     constexpr static bool IsTerminator = false;
     static constexpr bool IsVariableLength = false;
 
-    enum class Type {
+    enum class Type : u8 {
 #define __BYTECODE_OP(op) \
     op,
         ENUMERATE_BYTECODE_OPS(__BYTECODE_OP)
@@ -169,10 +84,9 @@ public:
 
     Type type() const { return m_type; }
     size_t length() const;
-    ByteString to_byte_string(Bytecode::Executable const&) const;
-    void visit_labels(Function<void(Label&)> visitor);
-    void visit_operands(Function<void(Operand&)> visitor);
-    static void destroy(Instruction&);
+
+    Strict strict() const { return m_strict; }
+    void set_strict(Strict strict) { m_strict = strict; }
 
 protected:
     explicit Instruction(Type type)
@@ -180,44 +94,9 @@ protected:
     {
     }
 
-    void visit_labels_impl(Function<void(Label&)>) { }
-    void visit_operands_impl(Function<void(Operand&)>) { }
-
 private:
     Type m_type {};
-};
-
-class InstructionStreamIterator {
-public:
-    InstructionStreamIterator(ReadonlyBytes bytes, Executable const* executable = nullptr, size_t offset = 0)
-        : m_begin(bytes.data())
-        , m_end(bytes.data() + bytes.size())
-        , m_ptr(bytes.data() + offset)
-        , m_executable(executable)
-    {
-    }
-
-    size_t offset() const { return m_ptr - m_begin; }
-    bool at_end() const { return m_ptr >= m_end; }
-
-    Instruction const& operator*() const { return dereference(); }
-
-    ALWAYS_INLINE void operator++()
-    {
-        m_ptr += dereference().length();
-    }
-
-    UnrealizedSourceRange source_range() const;
-
-    Executable const* executable() const { return m_executable; }
-
-private:
-    Instruction const& dereference() const { return *reinterpret_cast<Instruction const*>(m_ptr); }
-
-    u8 const* m_begin { nullptr };
-    u8 const* m_end { nullptr };
-    u8 const* m_ptr { nullptr };
-    GC::Ptr<Executable const> m_executable;
+    Strict m_strict {};
 };
 
 }

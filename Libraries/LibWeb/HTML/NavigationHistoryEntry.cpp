@@ -7,24 +7,27 @@
 #include <LibGC/Heap.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/NavigationHistoryEntryPrototype.h>
+#include <LibWeb/Bindings/NavigationHistoryEntry.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/DocumentState.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Navigation.h>
 #include <LibWeb/HTML/NavigationHistoryEntry.h>
+#include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/Infra/SerializedURL.h>
 
 namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(NavigationHistoryEntry);
 
-GC::Ref<NavigationHistoryEntry> NavigationHistoryEntry::create(JS::Realm& realm, GC::Ref<SessionHistoryEntry> she)
+GC::Ref<NavigationHistoryEntry> NavigationHistoryEntry::create(JS::Realm& realm, NonnullRefPtr<SessionHistoryEntry> she)
 {
     return realm.create<NavigationHistoryEntry>(realm, she);
 }
 
-NavigationHistoryEntry::NavigationHistoryEntry(JS::Realm& realm, GC::Ref<SessionHistoryEntry> she)
+NavigationHistoryEntry::NavigationHistoryEntry(JS::Realm& realm, NonnullRefPtr<SessionHistoryEntry> she)
     : DOM::EventTarget(realm)
     , m_session_history_entry(she)
 {
@@ -38,14 +41,8 @@ void NavigationHistoryEntry::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void NavigationHistoryEntry::visit_edges(JS::Cell::Visitor& visitor)
-{
-    Base::visit_edges(visitor);
-    visitor.visit(m_session_history_entry);
-}
-
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-navigationhistoryentry-url
-Optional<String> NavigationHistoryEntry::url() const
+Optional<Utf16String> NavigationHistoryEntry::url() const
 {
     // The url getter steps are:
     // 1. Let document be this's relevant global object's associated Document.
@@ -53,24 +50,24 @@ Optional<String> NavigationHistoryEntry::url() const
 
     // 2. If document is not fully active, then return the empty string.
     if (!document.is_fully_active())
-        return String {};
+        return Utf16String {};
 
     // 3. Let she be this's session history entry.
     auto const& she = this->m_session_history_entry;
 
     // 4. If she's document does not equal document, and she's document state's request referrer policy
     //    is "no-referrer" or "origin", then return null.
-    if ((she->document() != &document)
+    if ((she->document_state()->document_id() != document.unique_id())
         && (she->document_state()->request_referrer_policy() == ReferrerPolicy::ReferrerPolicy::NoReferrer
             || she->document_state()->request_referrer_policy() == ReferrerPolicy::ReferrerPolicy::Origin))
         return OptionalNone {};
 
     // 5. Return she's URL, serialized.
-    return she->url().serialize();
+    return utf16_string_from_url_ascii(she->url().serialize());
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#concept-navigationhistoryentry-key
-String NavigationHistoryEntry::key() const
+Utf16String NavigationHistoryEntry::key() const
 {
     // The key of a NavigationHistoryEntry nhe is given by the return value of the following algorithm:
     // 1. If nhe's relevant global object's associated Document is not fully active, then return the empty string.
@@ -83,7 +80,7 @@ String NavigationHistoryEntry::key() const
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#concept-navigationhistoryentry-id
-String NavigationHistoryEntry::id() const
+Utf16String NavigationHistoryEntry::id() const
 {
     // The ID of a NavigationHistoryEntry nhe is given by the return value of the following algorithm:
     // 1. If nhe's relevant global object's associated Document is not fully active, then return the empty string.
@@ -121,7 +118,7 @@ bool NavigationHistoryEntry::same_document() const
         return false;
 
     // 3. Return true if this's session history entry's document equals document, and false otherwise.
-    return m_session_history_entry->document() == &document;
+    return m_session_history_entry->document_state()->document_id() == document.unique_id();
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-navigationhistoryentry-getstate

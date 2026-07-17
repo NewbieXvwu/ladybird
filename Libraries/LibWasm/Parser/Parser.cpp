@@ -7,6 +7,7 @@
 #include <AK/ConstrainedStream.h>
 #include <AK/Debug.h>
 #include <AK/Endian.h>
+#include <AK/Enumerate.h>
 #include <AK/LEB128.h>
 #include <AK/MemoryStream.h>
 #include <AK/ScopeLogger.h>
@@ -98,6 +99,104 @@ static ParseResult<ByteString> parse_name(ConstrainedStream& stream)
     return string;
 }
 
+// https://webassembly.github.io/spec/core/binary/values.html#integers
+template<size_t N>
+static ParseResult<i64> parse_signed_integer_of_size(Stream& stream)
+{
+    static_assert(N <= 64);
+    constexpr size_t max_bytes = (N + 6) / 7;
+    i64 result = 0;
+    size_t shift = 0;
+    for (size_t i = 0; i < max_bytes; ++i) {
+        auto n = TRY_READ(stream, u8, ParseError::ExpectedSignedImmediate);
+        if (0 == (n & 0x80)) {
+            auto const remaining_bits = min(N - 7 * i, 7uz);
+            u8 const sign_bit = 1u << (remaining_bits - 1);
+            u8 const unused_mask = static_cast<u8>(0x7f & ~(static_cast<u8>(sign_bit << 1) - 1));
+            if ((n & sign_bit) ? ((n & unused_mask) != unused_mask) : ((n & unused_mask) != 0))
+                return with_eof_check(stream, ParseError::InvalidImmediate);
+            result |= static_cast<i64>(n & 0x7f) << shift;
+            shift += 7;
+            if (shift < 64 && (n & 0x40))
+                result |= ~static_cast<i64>(0) << shift;
+            return result;
+        }
+        result |= static_cast<i64>(n & 0x7f) << shift;
+        shift += 7;
+    }
+    return with_eof_check(stream, ParseError::InvalidImmediate);
+}
+
+// https://webassembly.github.io/spec/core/binary/types.html#heap-types
+static Optional<ValueType::Kind> abstract_heap_type_from_tag(u8 tag)
+{
+    switch (tag) {
+    case Constants::exn_reference_tag:
+        return ValueType::ExceptionReference;
+    case Constants::array_reference_tag:
+        return ValueType::ArrayReference;
+    case Constants::struct_reference_tag:
+        return ValueType::StructReference;
+    case Constants::i31_reference_tag:
+        return ValueType::I31Reference;
+    case Constants::eq_reference_tag:
+        return ValueType::EqReference;
+    case Constants::any_reference_tag:
+        return ValueType::AnyReference;
+    case Constants::extern_reference_tag:
+        return ValueType::ExternReference;
+    case Constants::function_reference_tag:
+        return ValueType::FunctionReference;
+    case Constants::none_reference_tag:
+        return ValueType::NoneReference;
+    case Constants::noextern_reference_tag:
+        return ValueType::NoExternReference;
+    case Constants::nofunc_reference_tag:
+        return ValueType::NoFunctionReference;
+    case Constants::noexn_reference_tag:
+        return ValueType::NoExceptionReference;
+    default:
+        return {};
+    }
+}
+
+// https://webassembly.github.io/spec/core/binary/types.html#heap-types
+// NOTE: Nullable by default, caller must explicitly set nullability if needed.
+static ParseResult<ValueType> parse_heap_type(Stream& stream)
+{
+    auto tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+    if (auto kind = abstract_heap_type_from_tag(tag); kind.has_value())
+        return ValueType(*kind);
+
+    ReconsumableStream new_stream { stream };
+    new_stream.unread({ &tag, 1 });
+    auto type_index = TRY(parse_signed_integer_of_size<33>(new_stream));
+    if (type_index < 0)
+        return with_eof_check(stream, ParseError::InvalidIndex);
+    if (type_index > NumericLimits<u32>::max())
+        return with_eof_check(stream, ParseError::InvalidIndex);
+    return ValueType(ValueType::TypeUseReference, TypeIndex(static_cast<u32>(type_index)));
+}
+
+// https://webassembly.github.io/spec/core/binary/types.html#reference-types
+static ParseResult<ValueType> parse_reference_type(Stream& stream, u8 tag)
+{
+    switch (tag) {
+    case Constants::nullable_reference_tag_tag:
+    case Constants::non_nullable_reference_tag_tag: {
+        bool nullable = tag == Constants::nullable_reference_tag_tag;
+        auto type = TRY(parse_heap_type(stream));
+        type.set_nullable(nullable);
+        return type;
+    }
+    default:
+        if (auto kind = abstract_heap_type_from_tag(tag); kind.has_value())
+            return ValueType(*kind);
+        return with_eof_check(stream, ParseError::InvalidType);
+    }
+}
+
+// https://webassembly.github.io/spec/core/binary/types.html#value-types
 ParseResult<ValueType> ValueType::parse(Stream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("ValueType"sv);
@@ -114,12 +213,25 @@ ParseResult<ValueType> ValueType::parse(Stream& stream)
         return ValueType(F64);
     case Constants::v128_tag:
         return ValueType(V128);
-    case Constants::function_reference_tag:
-        return ValueType(FunctionReference);
-    case Constants::extern_reference_tag:
-        return ValueType(ExternReference);
     default:
-        return ParseError::InvalidTag;
+        return parse_reference_type(stream, tag);
+    }
+}
+
+// https://webassembly.github.io/spec/core/binary/types.html#composite-types
+static ParseResult<ValueType> parse_storage_type(Stream& stream)
+{
+    auto tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+    switch (tag) {
+    case Constants::i16_tag:
+        return ValueType(ValueType::I16);
+    case Constants::i8_tag:
+        return ValueType(ValueType::I8);
+    default: {
+        ReconsumableStream new_stream { stream };
+        new_stream.unread({ &tag, 1 });
+        return ValueType::parse(new_stream);
+    }
     }
 }
 
@@ -133,12 +245,6 @@ ParseResult<ResultType> ResultType::parse(ConstrainedStream& stream)
 ParseResult<FunctionType> FunctionType::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("FunctionType"sv);
-    auto tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
-
-    if (tag != Constants::function_signature_tag) {
-        dbgln("Expected 0x60, but found {:#x}", tag);
-        return with_eof_check(stream, ParseError::InvalidTag);
-    }
 
     auto parameters_result = TRY(parse_vector<ValueType>(stream));
     auto results_result = TRY(parse_vector<ValueType>(stream));
@@ -146,28 +252,63 @@ ParseResult<FunctionType> FunctionType::parse(ConstrainedStream& stream)
     return FunctionType { parameters_result, results_result };
 }
 
+// https://webassembly.github.io/spec/core/binary/types.html#composite-types
+ParseResult<FieldType> FieldType::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("FieldType"sv);
+
+    auto type_ = TRY(parse_storage_type(stream));
+
+    auto mutable_ = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+    if (mutable_ > 1)
+        return with_eof_check(stream, ParseError::InvalidTag);
+
+    return FieldType { mutable_ == 0x01, type_ };
+}
+
+ParseResult<StructType> StructType::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("StructType"sv);
+
+    auto fields = TRY(parse_vector<FieldType>(stream));
+
+    return StructType { fields };
+}
+
+ParseResult<ArrayType> ArrayType::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("ArrayType"sv);
+
+    auto type = TRY(FieldType::parse(stream));
+
+    return ArrayType { type };
+}
+
 ParseResult<Limits> Limits::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("Limits"sv);
     auto flag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
 
-    if (flag > 1)
+    // Proposal 'memory64': flags 0/1 refer to 32-bit limits, flags 4/5 refer to 64-bit limits.
+    if (flag & ~0b00000101)
         return with_eof_check(stream, ParseError::InvalidTag);
 
-    auto min_or_error = stream.read_value<LEB128<u32>>();
+    auto address_type = (flag & 0b00000100) ? AddressType::I64 : AddressType::I32;
+
+    auto min_or_error = stream.read_value<LEB128<u64>>();
     if (min_or_error.is_error())
         return with_eof_check(stream, ParseError::ExpectedSize);
-    size_t min = min_or_error.release_value();
+    u64 min = min_or_error.release_value();
 
-    Optional<u32> max;
-    if (flag) {
-        auto value_or_error = stream.read_value<LEB128<u32>>();
+    Optional<u64> max;
+    if (flag & 1) {
+        auto value_or_error = stream.read_value<LEB128<u64>>();
         if (value_or_error.is_error())
             return with_eof_check(stream, ParseError::ExpectedSize);
         max = value_or_error.release_value();
     }
 
-    return Limits { static_cast<u32>(min), move(max) };
+    return Limits { address_type, min, move(max) };
 }
 
 ParseResult<MemoryType> MemoryType::parse(ConstrainedStream& stream)
@@ -199,6 +340,17 @@ ParseResult<GlobalType> GlobalType::parse(ConstrainedStream& stream)
     return GlobalType { type_result, mutable_ == 0x01 };
 }
 
+ParseResult<TagType> TagType::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("TagType"sv);
+    auto flags = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+    if (flags != 0)
+        return ParseError::InvalidTag;
+    auto index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+    return TagType { index, static_cast<TagType::Flags>(flags) };
+}
+
+// https://webassembly.github.io/spec/core/binary/instructions.html#control-instructions
 ParseResult<BlockType> BlockType::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("BlockType"sv);
@@ -207,25 +359,63 @@ ParseResult<BlockType> BlockType::parse(ConstrainedStream& stream)
     if (kind == Constants::empty_block_tag)
         return BlockType {};
 
-    {
-        FixedMemoryStream value_stream { ReadonlyBytes { &kind, 1 } };
-        if (auto value_type = ValueType::parse(value_stream); !value_type.is_error())
-            return BlockType { value_type.release_value() };
+    switch (kind) {
+    case Constants::i32_tag:
+    case Constants::i64_tag:
+    case Constants::f32_tag:
+    case Constants::f64_tag:
+    case Constants::v128_tag:
+    case Constants::nullable_reference_tag_tag:
+    case Constants::non_nullable_reference_tag_tag: {
+        ReconsumableStream value_stream { stream };
+        value_stream.unread({ &kind, 1 });
+        return BlockType { TRY(ValueType::parse(value_stream)) };
+    }
+    default:
+        break;
     }
 
-    ReconsumableStream new_stream { stream };
-    new_stream.unread({ &kind, 1 });
+    if (auto abstract_kind = abstract_heap_type_from_tag(kind); abstract_kind.has_value())
+        return BlockType { ValueType(*abstract_kind) };
 
-    // FIXME: should be an i33. Right now, we're missing a potential last bit at
-    // the end. See https://webassembly.github.io/spec/core/binary/instructions.html#binary-blocktype
-    i32 index_value = TRY_READ(new_stream, LEB128<i32>, ParseError::ExpectedIndex);
-
-    if (index_value < 0) {
-        dbgln("Invalid type index {}", index_value);
+    ReconsumableStream index_stream { stream };
+    index_stream.unread({ &kind, 1 });
+    auto type_index = TRY(parse_signed_integer_of_size<33>(index_stream));
+    if (type_index < 0 || type_index > NumericLimits<u32>::max())
         return with_eof_check(stream, ParseError::InvalidIndex);
-    }
+    return BlockType { TypeIndex(static_cast<u32>(type_index)) };
+}
 
-    return BlockType { TypeIndex(index_value) };
+ParseResult<Catch> Catch::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("Catch"sv);
+    auto kind = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+    switch (kind) {
+    case 0: {
+        // catch x l
+        auto tag_index = TRY(GenericIndexParser<TagIndex>::parse(stream));
+        auto label_index = TRY(GenericIndexParser<LabelIndex>::parse(stream));
+        return Catch { false, tag_index, label_index };
+    }
+    case 1: {
+        // catch_ref x l
+        auto tag_index = TRY(GenericIndexParser<TagIndex>::parse(stream));
+        auto label_index = TRY(GenericIndexParser<LabelIndex>::parse(stream));
+        return Catch { true, tag_index, label_index };
+    }
+    case 2: {
+        // catch_all l
+        auto label_index = TRY(GenericIndexParser<LabelIndex>::parse(stream));
+        return Catch { false, label_index };
+    }
+    case 3: {
+        // catch_all_ref l
+        auto label_index = TRY(GenericIndexParser<LabelIndex>::parse(stream));
+        return Catch { true, label_index };
+    }
+    default:
+        return ParseError::InvalidTag;
+    }
 }
 
 ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
@@ -246,11 +436,31 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
             opcode, StructuredInstructionArgs { block_type, {}, {} }
         };
     }
+    case Instructions::try_table.value(): {
+        // try_table block_type (catch*) (instruction*) end
+        auto block_type = TRY(BlockType::parse(stream));
+        auto catch_types = TRY(parse_vector<Catch>(stream));
+        return Instruction {
+            opcode, TryTableArgs { block_type, {}, catch_types.span() }
+        };
+    }
+    case Instructions::throw_.value(): {
+        auto tag_index = TRY(GenericIndexParser<TagIndex>::parse(stream));
+        return Instruction { opcode, tag_index };
+    }
     case Instructions::br.value():
     case Instructions::br_if.value(): {
         // branches with a single label immediate
         auto index = TRY(GenericIndexParser<LabelIndex>::parse(stream));
-        return Instruction { opcode, index };
+        return Instruction { opcode, BranchArgs { index } };
+    }
+    // https://webassembly.github.io/spec/core/binary/instructions.html#control-instructions
+    //  0xD5 l:labelidx => br_on_null l
+    //  0xD6 l:labelidx => br_on_non_null l
+    case Instructions::br_on_null.value():
+    case Instructions::br_on_non_null.value(): {
+        auto index = TRY(GenericIndexParser<LabelIndex>::parse(stream));
+        return Instruction { opcode, BranchArgs { index } };
     }
     case Instructions::br_table.value(): {
         // br_table label* label
@@ -268,6 +478,22 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
         auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
         auto table_index = TRY(GenericIndexParser<TableIndex>::parse(stream));
         return Instruction { opcode, IndirectCallArgs { type_index, table_index } };
+    }
+    case Instructions::return_call.value(): {
+        // return_call function
+        auto function_index = TRY(GenericIndexParser<FunctionIndex>::parse(stream));
+        return Instruction { opcode, function_index };
+    }
+    case Instructions::return_call_indirect.value(): {
+        // return_call_indirect type table
+        auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+        auto table_index = TRY(GenericIndexParser<TableIndex>::parse(stream));
+        return Instruction { opcode, IndirectCallArgs { type_index, table_index } };
+    }
+    case Instructions::call_ref.value():
+    case Instructions::return_call_ref.value(): {
+        auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+        return Instruction { opcode, type_index };
     }
     case Instructions::i32_load.value():
     case Instructions::i64_load.value():
@@ -302,7 +528,8 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
             memory_index = TRY_READ(stream, LEB128<u32>, ParseError::InvalidInput);
         }
 
-        auto offset = TRY_READ(stream, LEB128<u32>, ParseError::InvalidInput);
+        // Proposal 'memory64': memarg offsets are u64 instead of u32.
+        auto offset = TRY_READ(stream, LEB128<u64>, ParseError::InvalidInput);
 
         return Instruction { opcode, MemoryArgument { align, offset, MemoryIndex(memory_index) } };
     }
@@ -320,7 +547,7 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
     case Instructions::memory_size.value():
     case Instructions::memory_grow.value(): {
         // op [multi-memory: memindex]|0x00
-        auto memory_index = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+        u32 memory_index = TRY_READ(stream, LEB128<u32>, ParseError::ExpectedKindTag);
 
         return Instruction { opcode, MemoryIndexArgument { MemoryIndex(memory_index) } };
     }
@@ -359,19 +586,23 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
         return Instruction { opcode, types };
     }
     case Instructions::ref_null.value(): {
-        auto type = TRY(ValueType::parse(stream));
-        if (!type.is_reference())
-            return ParseError::InvalidType;
-
+        // https://webassembly.github.io/spec/core/binary/instructions.html#reference-instructions
+        auto type = TRY(parse_heap_type(stream));
         return Instruction { opcode, type };
     }
     case Instructions::ref_func.value(): {
         auto index = TRY(GenericIndexParser<FunctionIndex>::parse(stream));
         return Instruction { opcode, index };
     }
+    case Instructions::throw_ref.value():
     case Instructions::structured_end.value():
     case Instructions::structured_else.value():
     case Instructions::ref_is_null.value():
+    // https://webassembly.github.io/spec/core/binary/instructions.html#reference-instructions
+    //  0xD3 => ref.eq
+    //  0xD4 => ref.as_non_null
+    case Instructions::ref_eq.value():
+    case Instructions::ref_as_non_null.value():
     case Instructions::unreachable.value():
     case Instructions::nop.value():
     case Instructions::return_.value():
@@ -506,11 +737,15 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
     case Instructions::i64_extend16_s.value():
     case Instructions::i64_extend32_s.value():
         return Instruction { opcode };
+    case 0xfb:
     case 0xfc:
     case 0xfd: {
         // These are multibyte instructions.
         auto selector = TRY_READ(stream, LEB128<u32>, ParseError::InvalidInput);
-        OpCode full_opcode = static_cast<u64>(opcode.value()) << 56 | selector;
+        if (selector > 0xffffff)
+            return ParseError::UnknownInstruction;
+
+        OpCode full_opcode = static_cast<u32>(opcode.value()) << 24 | selector;
 
         switch (full_opcode.value()) {
         case Instructions::i32_trunc_sat_f32_s.value():
@@ -525,8 +760,8 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
         case Instructions::memory_init.value(): {
             auto index = TRY(GenericIndexParser<DataIndex>::parse(stream));
 
-            // Proposal "multi-memory", literal 0x00 is replaced with a memory index.
-            auto memory_index = TRY_READ(stream, u8, ParseError::InvalidInput);
+            // Proposal "multi-memory", literal 0x00 is replaced with a memory index (LEB-128).
+            u32 memory_index = TRY_READ(stream, LEB128<u32>, ParseError::InvalidInput);
 
             return Instruction { full_opcode, MemoryInitArgs { index, MemoryIndex(memory_index) } };
         }
@@ -535,18 +770,18 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
             return Instruction { full_opcode, index };
         }
         case Instructions::memory_copy.value(): {
-            // Proposal "multi-memory", literal 0x00 is replaced with two memory indices, destination and source, respectively.
+            // Proposal "multi-memory", literal 0x00 is replaced with two memory indices (LEB-128), destination and source, respectively.
             MemoryIndex indices[] = { 0, 0 };
 
             for (size_t i = 0; i < 2; ++i) {
-                auto memory_index = TRY_READ(stream, u8, ParseError::InvalidInput);
+                u32 memory_index = TRY_READ(stream, LEB128<u32>, ParseError::InvalidInput);
                 indices[i] = memory_index;
             }
             return Instruction { full_opcode, MemoryCopyArgs { indices[1], indices[0] } };
         }
         case Instructions::memory_fill.value(): {
-            // Proposal "multi-memory", literal 0x00 is replaced with a memory index.
-            auto memory_index = TRY_READ(stream, u8, ParseError::InvalidInput);
+            // Proposal "multi-memory", literal 0x00 is replaced with a memory index (LEB-128).
+            u32 memory_index = TRY_READ(stream, LEB128<u32>, ParseError::InvalidInput);
             return Instruction { full_opcode, MemoryIndexArgument { MemoryIndex { memory_index } } };
         }
         case Instructions::table_init.value(): {
@@ -569,6 +804,123 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
             auto index = TRY(GenericIndexParser<TableIndex>::parse(stream));
             return Instruction { full_opcode, index };
         }
+        // https://webassembly.github.io/spec/core/binary/instructions.html#aggregate-instructions
+        // instr ::= ...
+        //         | 0xFB 0:u32 x:typeidx => struct.new x
+        //         | 0xFB 1:u32 x:typeidx => struct.new_default x
+        case Instructions::struct_new.value():
+        case Instructions::struct_new_default.value(): {
+            auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+            return Instruction { full_opcode, type_index };
+        }
+        //         | 0xFB 2:u32 x:typeidx i:fieldidx => struct.get x i
+        //         | 0xFB 3:u32 x:typeidx i:fieldidx => struct.get_s x i
+        //         | 0xFB 4:u32 x:typeidx i:fieldidx => struct.get_u x i
+        //         | 0xFB 5:u32 x:typeidx i:fieldidx => struct.set x i
+        case Instructions::struct_get.value():
+        case Instructions::struct_get_s.value():
+        case Instructions::struct_get_u.value():
+        case Instructions::struct_set.value(): {
+            auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+            u32 field_index = TRY_READ(stream, LEB128<u32>, ParseError::ExpectedIndex);
+            return Instruction { full_opcode, StructFieldArgs { type_index, field_index } };
+        }
+        //         | 0xFB 6:u32 x:typeidx  => array.new x
+        //         | 0xFB 7:u32 x:typeidx  => array.new_default x
+        //         | 0xFB 11:u32 x:typeidx => array.get x
+        //         | 0xFB 12:u32 x:typeidx => array.get_s x
+        //         | 0xFB 13:u32 x:typeidx => array.get_u x
+        //         | 0xFB 14:u32 x:typeidx => array.set x
+        //         | 0xFB 16:u32 x:typeidx => array.fill x
+        case Instructions::array_new.value():
+        case Instructions::array_new_default.value():
+        case Instructions::array_get.value():
+        case Instructions::array_get_s.value():
+        case Instructions::array_get_u.value():
+        case Instructions::array_set.value():
+        case Instructions::array_fill.value(): {
+            auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+            return Instruction { full_opcode, type_index };
+        }
+        //         | 0xFB 8:u32 x:typeidx n:u32 => array.new_fixed x n
+        case Instructions::array_new_fixed.value(): {
+            auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+            u32 count = TRY_READ(stream, LEB128<u32>, ParseError::InvalidImmediate);
+            return Instruction { full_opcode, ArrayNewFixedArgs { type_index, count } };
+        }
+        //         | 0xFB 9:u32 x:typeidx y:dataidx  => array.new_data x y
+        //         | 0xFB 18:u32 x:typeidx y:dataidx => array.init_data x y
+        case Instructions::array_new_data.value():
+        case Instructions::array_init_data.value(): {
+            auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+            auto data_index = TRY(GenericIndexParser<DataIndex>::parse(stream));
+            return Instruction { full_opcode, ArrayDataArgs { type_index, data_index } };
+        }
+        //         | 0xFB 10:u32 x:typeidx y:elemidx => array.new_elem x y
+        //         | 0xFB 19:u32 x:typeidx y:elemidx => array.init_elem x y
+        case Instructions::array_new_elem.value():
+        case Instructions::array_init_elem.value(): {
+            auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+            auto element_index = TRY(GenericIndexParser<ElementIndex>::parse(stream));
+            return Instruction { full_opcode, ArrayElemArgs { type_index, element_index } };
+        }
+        //         | 0xFB 17:u32 x_1:typeidx x_2:typeidx => array.copy x_1 x_2
+        case Instructions::array_copy.value(): {
+            auto destination_type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+            auto source_type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+            return Instruction { full_opcode, ArrayCopyArgs { destination_type_index, source_type_index } };
+        }
+        // https://webassembly.github.io/spec/core/binary/instructions.html#reference-instructions
+        // instr ::= ...
+        //         | 0xFB 20:u32 ht:heaptype => ref.test (ref ht)
+        //         | 0xFB 21:u32 ht:heaptype => ref.test (ref null ht)
+        //         | 0xFB 22:u32 ht:heaptype => ref.cast (ref ht)
+        //         | 0xFB 23:u32 ht:heaptype => ref.cast (ref null ht)
+        case Instructions::ref_test.value():
+        case Instructions::ref_test_null.value():
+        case Instructions::ref_cast.value():
+        case Instructions::ref_cast_null.value(): {
+            auto type = TRY(parse_heap_type(stream));
+            type.set_nullable(full_opcode == Instructions::ref_test_null || full_opcode == Instructions::ref_cast_null);
+            return Instruction { full_opcode, type };
+        }
+        // https://webassembly.github.io/spec/core/binary/instructions.html#control-instructions
+        // instr ::= ...
+        //         | 0xFB 24:u32 (null_1?, null_2?):castop l:labelidx ht_1:heaptype ht_2:heaptype
+        //             => br_on_cast l (ref null_1? ht_1) (ref null_2? ht_2)
+        //         | 0xFB 25:u32 (null_1?, null_2?):castop l:labelidx ht_1:heaptype ht_2:heaptype
+        //             => br_on_cast_fail l (ref null_1? ht_1) (ref null_2? ht_2)
+        // castop ::= 0x00 => (ε, ε)
+        //          | 0x01 => (null, ε)
+        //          | 0x02 => (ε, null)
+        //          | 0x03 => (null, null)
+        case Instructions::br_on_cast.value():
+        case Instructions::br_on_cast_fail.value(): {
+            auto cast_op = TRY_READ(stream, u8, ParseError::InvalidImmediate);
+            if (cast_op > 3)
+                return ParseError::InvalidImmediate;
+            auto label = TRY(GenericIndexParser<LabelIndex>::parse(stream));
+            auto source_type = TRY(parse_heap_type(stream));
+            source_type.set_nullable((cast_op & 0b01) != 0);
+            auto target_type = TRY(parse_heap_type(stream));
+            target_type.set_nullable((cast_op & 0b10) != 0);
+            return Instruction { full_opcode, BranchOnCastArgs { BranchArgs { label }, source_type, target_type } };
+        }
+        // https://webassembly.github.io/spec/core/binary/instructions.html#aggregate-instructions
+        // instr ::= ...
+        //         | 0xFB 15:u32 => array.len
+        //         | 0xFB 26:u32 => any.convert_extern
+        //         | 0xFB 27:u32 => extern.convert_any
+        //         | 0xFB 28:u32 => ref.i31
+        //         | 0xFB 29:u32 => i31.get_s
+        //         | 0xFB 30:u32 => i31.get_u
+        case Instructions::array_len.value():
+        case Instructions::any_convert_extern.value():
+        case Instructions::extern_convert_any.value():
+        case Instructions::ref_i31.value():
+        case Instructions::i31_get_s.value():
+        case Instructions::i31_get_u.value():
+            return Instruction { full_opcode };
         case Instructions::v128_load.value():
         case Instructions::v128_load8x8_s.value():
         case Instructions::v128_load8x8_u.value():
@@ -593,7 +945,8 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
                 memory_index = TRY_READ(stream, LEB128<u32>, ParseError::InvalidInput);
             }
 
-            auto offset = TRY_READ(stream, LEB128<u32>, ParseError::ExpectedIndex);
+            // Proposal 'memory64': memarg offsets are u64 instead of u32.
+            auto offset = TRY_READ(stream, LEB128<u64>, ParseError::ExpectedIndex);
 
             return Instruction { full_opcode, MemoryArgument { align, offset, MemoryIndex(memory_index) } };
         }
@@ -615,7 +968,8 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
                 memory_index = TRY_READ(stream, LEB128<u32>, ParseError::InvalidInput);
             }
 
-            auto offset = TRY_READ(stream, LEB128<u32>, ParseError::ExpectedIndex);
+            // Proposal 'memory64': memarg offsets are u64 instead of u32.
+            auto offset = TRY_READ(stream, LEB128<u64>, ParseError::ExpectedIndex);
             auto index = TRY_READ(stream, u8, ParseError::InvalidInput);
 
             return Instruction { full_opcode, MemoryAndLaneArgument { { align, offset, MemoryIndex(memory_index) }, index } };
@@ -850,6 +1204,26 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
         case Instructions::i32x4_trunc_sat_f64x2_u_zero.value():
         case Instructions::f64x2_convert_low_i32x4_s.value():
         case Instructions::f64x2_convert_low_i32x4_u.value():
+        case Instructions::i8x16_relaxed_swizzle.value():
+        case Instructions::i32x4_relaxed_trunc_f32x4_s.value():
+        case Instructions::i32x4_relaxed_trunc_f32x4_u.value():
+        case Instructions::i32x4_relaxed_trunc_f64x2_s_zero.value():
+        case Instructions::i32x4_relaxed_trunc_f64x2_u_zero.value():
+        case Instructions::f32x4_relaxed_madd.value():
+        case Instructions::f32x4_relaxed_nmadd.value():
+        case Instructions::f64x2_relaxed_madd.value():
+        case Instructions::f64x2_relaxed_nmadd.value():
+        case Instructions::i8x16_relaxed_laneselect.value():
+        case Instructions::i16x8_relaxed_laneselect.value():
+        case Instructions::i32x4_relaxed_laneselect.value():
+        case Instructions::i64x2_relaxed_laneselect.value():
+        case Instructions::f32x4_relaxed_min.value():
+        case Instructions::f32x4_relaxed_max.value():
+        case Instructions::f64x2_relaxed_min.value():
+        case Instructions::f64x2_relaxed_max.value():
+        case Instructions::i16x8_relaxed_q15mulr_s.value():
+        case Instructions::i16x8_relaxed_dot_i8x16_i7x16_s.value():
+        case Instructions::i32x4_relaxed_dot_i8x16_i7x16_add_s.value():
             // op
             return Instruction { full_opcode };
         default:
@@ -882,10 +1256,72 @@ ParseResult<CustomSection> CustomSection::parse(ConstrainedStream& stream)
     return CustomSection(name, move(data_buffer));
 }
 
+// https://webassembly.github.io/spec/core/binary/types.html#recursive-types
+ParseResult<TypeSection::Type> TypeSection::Type::parse(ConstrainedStream& stream, Optional<u8> leading_tag)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("Type"sv);
+    u8 tag;
+    if (leading_tag.has_value())
+        tag = *leading_tag;
+    else
+        tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+
+    bool is_final = true;
+    Vector<TypeIndex> supertypes;
+    if (tag == Constants::sub_type_tag || tag == Constants::sub_final_type_tag) {
+        is_final = tag == Constants::sub_final_type_tag;
+        supertypes = TRY(parse_vector<GenericIndexParser<TypeIndex>>(stream));
+        tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+    }
+
+    switch (tag) {
+    case Constants::function_signature_tag:
+        return Type { TRY(FunctionType::parse(stream)), move(supertypes), is_final };
+    case Constants::struct_tag:
+        return Type { TRY(StructType::parse(stream)), move(supertypes), is_final };
+    case Constants::array_tag:
+        return Type { TRY(ArrayType::parse(stream)), move(supertypes), is_final };
+    default:
+        return ParseError::InvalidTag;
+    }
+}
+
+// https://webassembly.github.io/spec/core/binary/modules.html#type-section
+// https://webassembly.github.io/spec/core/binary/types.html#recursive-types
 ParseResult<TypeSection> TypeSection::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("TypeSection"sv);
-    auto types = TRY(parse_vector<FunctionType>(stream));
+
+    auto rec_type_count_or_error = stream.read_value<LEB128<u32>>();
+    if (rec_type_count_or_error.is_error())
+        return with_eof_check(stream, ParseError::ExpectedSize);
+    size_t rec_type_count = rec_type_count_or_error.release_value();
+
+    Vector<Type> types;
+    types.ensure_capacity(rec_type_count);
+    for (size_t rec_type_index = 0; rec_type_index < rec_type_count; ++rec_type_index) {
+        auto tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+
+        auto first_type_index = types.size();
+        if (tag == Constants::rec_group_tag) {
+            auto sub_type_count_or_error = stream.read_value<LEB128<u32>>();
+            if (sub_type_count_or_error.is_error())
+                return with_eof_check(stream, ParseError::ExpectedSize);
+            size_t sub_type_count = sub_type_count_or_error.release_value();
+            for (size_t i = 0; i < sub_type_count; ++i)
+                types.append(TRY(Type::parse(stream)));
+        } else {
+            types.append(TRY(Type::parse(stream, tag)));
+        }
+
+        Type::RecGroupSpan const span {
+            static_cast<u32>(first_type_index),
+            static_cast<u32>(types.size() - first_type_index),
+        };
+        for (size_t i = first_type_index; i < types.size(); ++i)
+            types[i].set_rec_group(span);
+    }
+
     return TypeSection { types };
 }
 
@@ -907,6 +1343,8 @@ ParseResult<ImportSection::Import> ImportSection::Import::parse(ConstrainedStrea
         return parse_with_type<MemoryType>(stream, module, name);
     case Constants::extern_global_tag:
         return parse_with_type<GlobalType>(stream, module, name);
+    case Constants::extern_tag_tag:
+        return parse_with_type<TagType>(stream, module, name);
     default:
         return ParseError::InvalidTag;
     }
@@ -932,18 +1370,42 @@ ParseResult<FunctionSection> FunctionSection::parse(ConstrainedStream& stream)
     return FunctionSection { move(typed_indices) };
 }
 
+// https://webassembly.github.io/spec/core/binary/modules.html#table-section
+// table ::= tt:tabletype                  => table tt (ref.null ht)  (if tt = at lim (ref null? ht))
+//         | 0x40 0x00 tt:tabletype e:expr => table tt e
 ParseResult<TableSection::Table> TableSection::Table::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("Table"sv);
-    auto type = TRY(TableType::parse(stream));
-    return Table { type };
+
+    auto tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+    if (tag == 0x40) {
+        auto reserved = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+        if (reserved != 0x00)
+            return ParseError::InvalidTag;
+        auto type = TRY(TableType::parse(stream));
+        auto initializer = TRY(Expression::parse(stream));
+        return Table { type, move(initializer) };
+    }
+
+    auto element_type = TRY(parse_reference_type(stream, tag));
+    auto limits = TRY(Limits::parse(stream));
+    auto type = TableType { element_type, limits };
+
+    // Synthesize the implicit initializer (ref.null ht).
+    auto null_element = element_type;
+    null_element.set_nullable(true);
+    Vector<Instruction> instructions {
+        Instruction(Instructions::ref_null, null_element),
+        Instruction(Instructions::synthetic_end_expression),
+    };
+    return Table { type, Expression { move(instructions) } };
 }
 
 ParseResult<TableSection> TableSection::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("TableSection"sv);
     auto tables = TRY(parse_vector<Table>(stream));
-    return TableSection { tables };
+    return TableSection { move(tables) };
 }
 
 ParseResult<MemorySection::Memory> MemorySection::Memory::parse(ConstrainedStream& stream)
@@ -975,6 +1437,7 @@ ParseResult<Expression> Expression::parse(ConstrainedStream& stream, Optional<si
         case Instructions::block.value():
         case Instructions::loop.value():
         case Instructions::if_.value():
+        case Instructions::try_table.value():
             stack.append(ip);
             break;
         case Instructions::structured_end.value(): {
@@ -982,18 +1445,33 @@ ParseResult<Expression> Expression::parse(ConstrainedStream& stream, Optional<si
                 instructions.empend(Instructions::synthetic_end_expression); // Synthetic noop to mark the end of the expression.
                 return Expression { move(instructions) };
             }
-            auto entry = stack.take_last();
-            auto& args = instructions[entry.value()].arguments().get<Instruction::StructuredInstructionArgs>();
             // Patch the end_ip of the last structured instruction
-            args.end_ip = ip + (args.else_ip.has_value() ? 1 : 0);
+            auto entry = stack.take_last();
+            bool valid_type = instructions[entry.value()].arguments().visit(
+                [&](Instruction::StructuredInstructionArgs& args) {
+                    args.end_ip = ip + (args.else_ip().has_value() ? 1 : 0);
+                    return true;
+                },
+                [&](Instruction::TryTableArgs& args) {
+                    args.end_ip = ip;
+                    return true;
+                },
+                [](auto&) { return false; });
+
+            if (!valid_type)
+                return ParseError::InvalidType;
+
             break;
         }
         case Instructions::structured_else.value(): {
             if (stack.is_empty())
                 return ParseError::UnknownInstruction;
             auto entry = stack.last();
-            auto& args = instructions[entry.value()].arguments().get<Instruction::StructuredInstructionArgs>();
-            args.else_ip = ip + 1;
+            auto* args = instructions[entry.value()].arguments().get_pointer<Instruction::StructuredInstructionArgs>();
+            if (!args)
+                return ParseError::InvalidType;
+
+            args->else_ip() = ip + 1;
             break;
         }
         }
@@ -1011,14 +1489,14 @@ ParseResult<GlobalSection::Global> GlobalSection::Global::parse(ConstrainedStrea
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("Global"sv);
     auto type = TRY(GlobalType::parse(stream));
     auto exprs = TRY(Expression::parse(stream));
-    return Global { type, exprs };
+    return Global { type, move(exprs) };
 }
 
 ParseResult<GlobalSection> GlobalSection::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("GlobalSection"sv);
     auto result = TRY(parse_vector<Global>(stream));
-    return GlobalSection { result };
+    return GlobalSection { move(result) };
 }
 
 ParseResult<ExportSection::Export> ExportSection::Export::parse(ConstrainedStream& stream)
@@ -1038,6 +1516,8 @@ ParseResult<ExportSection::Export> ExportSection::Export::parse(ConstrainedStrea
         return Export { name, ExportDesc { MemoryIndex { index } } };
     case Constants::extern_global_tag:
         return Export { name, ExportDesc { GlobalIndex { index } } };
+    case Constants::extern_tag_tag:
+        return Export { name, ExportDesc { TagIndex { index } } };
     default:
         return ParseError::InvalidTag;
     }
@@ -1088,10 +1568,12 @@ ParseResult<ElementSection::Element> ElementSection::Element::parse(ConstrainedS
         if (has_explicit_index)
             table_index = TRY(GenericIndexParser<TableIndex>::parse(stream));
         auto expression = TRY(Expression::parse(stream));
-        mode = Active { table_index, expression };
+        mode = Active { table_index, move(expression) };
     }
 
-    auto type = ValueType(ValueType::FunctionReference);
+    // https://webassembly.github.io/spec/core/binary/modules.html#element-section
+    // elemkind ::= 0x00 => (ref func)
+    auto type = has_exprs ? ValueType(ValueType::FunctionReference) : ValueType(ValueType::FunctionReference, false);
     if (has_passive || has_explicit_index) {
         if (has_exprs) {
             type = TRY(ValueType::parse(stream));
@@ -1102,7 +1584,7 @@ ParseResult<ElementSection::Element> ElementSection::Element::parse(ConstrainedS
             if (extern_ != 0x00) {
                 return ParseError::InvalidType;
             }
-            type = ValueType(ValueType::FunctionReference);
+            type = ValueType(ValueType::FunctionReference, false);
         }
     }
 
@@ -1127,7 +1609,7 @@ ParseResult<ElementSection> ElementSection::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("ElementSection"sv);
     auto result = TRY(parse_vector<Element>(stream));
-    return ElementSection { result };
+    return ElementSection { move(result) };
 }
 
 ParseResult<Locals> Locals::parse(ConstrainedStream& stream)
@@ -1156,9 +1638,15 @@ ParseResult<CodeSection::Code> CodeSection::Code::parse(ConstrainedStream& strea
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("Code"sv);
     auto size = TRY_READ(stream, LEB128<u32>, ParseError::InvalidSize);
 
+    // Constrain to the declared size so an invalid entry fails here instead of desyncing the remaining entries in the section.
+    auto code_stream = ConstrainedStream { MaybeOwned<Stream>(stream), size };
+
     // Empirically, if there are `size` bytes to be read, then there's around
     // `size / 2` instructions, so we pass that as our size hint.
-    auto func = TRY(Func::parse(stream, size / 2));
+    auto func = TRY(Func::parse(code_stream, size / 2));
+
+    if (code_stream.remaining() != 0)
+        return ParseError::SectionSizeMismatch;
 
     return Code { size, move(func) };
 }
@@ -1181,17 +1669,17 @@ ParseResult<DataSection::Data> DataSection::Data::parse(ConstrainedStream& strea
     if (tag == 0x00) {
         auto expr = TRY(Expression::parse(stream));
         auto init = TRY(parse_vector<u8>(stream));
-        return Data { Active { init, { 0 }, expr } };
+        return Data { Active { move(init), { 0 }, move(expr) } };
     }
     if (tag == 0x01) {
         auto init = TRY(parse_vector<u8>(stream));
-        return Data { Passive { init } };
+        return Data { Passive { move(init) } };
     }
     if (tag == 0x02) {
         auto index = TRY(GenericIndexParser<MemoryIndex>::parse(stream));
         auto expr = TRY(Expression::parse(stream));
         auto init = TRY(parse_vector<u8>(stream));
-        return Data { Active { init, index, expr } };
+        return Data { Active { move(init), index, move(expr) } };
     }
     VERIFY_NOT_REACHED();
 }
@@ -1200,7 +1688,7 @@ ParseResult<DataSection> DataSection::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("DataSection"sv);
     auto data = TRY(parse_vector<Data>(stream));
-    return DataSection { data };
+    return DataSection { move(data) };
 }
 
 ParseResult<DataCountSection> DataCountSection::parse(ConstrainedStream& stream)
@@ -1217,6 +1705,14 @@ ParseResult<DataCountSection> DataCountSection::parse(ConstrainedStream& stream)
     u32 value = value_or_error.release_value();
 
     return DataCountSection { value };
+}
+
+ParseResult<TagSection> TagSection::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("TagSection"sv);
+    // https://webassembly.github.io/exception-handling/core/binary/modules.html#binary-tagsec
+    auto tags = TRY(parse_vector<TagType>(stream));
+    return TagSection { move(tags) };
 }
 
 ParseResult<SectionId> SectionId::parse(Stream& stream)
@@ -1249,6 +1745,8 @@ ParseResult<SectionId> SectionId::parse(Stream& stream)
         return SectionId(SectionIdKind::Data);
     case 0x0c:
         return SectionId(SectionIdKind::DataCount);
+    case 0x0d:
+        return SectionId(SectionIdKind::Tag);
     default:
         return ParseError::InvalidIndex;
     }
@@ -1269,6 +1767,7 @@ ParseResult<NonnullRefPtr<Module>> Module::parse(Stream& stream)
         return with_eof_check(stream, ParseError::InvalidModuleVersion);
 
     auto last_section_id = SectionId::SectionIdKind::Custom;
+    u32 seen_section_kinds = 0;
     auto module_ptr = make_ref_counted<Module>();
     auto& module = *module_ptr;
 
@@ -1277,8 +1776,12 @@ ParseResult<NonnullRefPtr<Module>> Module::parse(Stream& stream)
         size_t section_size = TRY_READ(stream, LEB128<u32>, ParseError::ExpectedSize);
         auto section_stream = ConstrainedStream { MaybeOwned<Stream>(stream), section_size };
 
-        if (section_id.kind() != SectionId::SectionIdKind::Custom && section_id.kind() == last_section_id)
-            return ParseError::DuplicateSection;
+        if (section_id.kind() != SectionId::SectionIdKind::Custom) {
+            auto kind_bit = 1u << to_underlying(section_id.kind());
+            if (seen_section_kinds & kind_bit)
+                return ParseError::DuplicateSection;
+            seen_section_kinds |= kind_bit;
+        }
 
         switch (section_id.kind()) {
         case SectionId::SectionIdKind::Custom:
@@ -1320,19 +1823,28 @@ ParseResult<NonnullRefPtr<Module>> Module::parse(Stream& stream)
         case SectionId::SectionIdKind::DataCount:
             module.data_count_section() = TRY(DataCountSection::parse(section_stream));
             break;
+        case SectionId::SectionIdKind::Tag:
+            module.tag_section() = TRY(TagSection::parse(section_stream));
+            break;
         default:
             return ParseError::InvalidIndex;
         }
-        if (section_id.kind() != SectionId::SectionIdKind::Custom) {
-            if (section_id.kind() < last_section_id)
-                return ParseError::SectionOutOfOrder;
+        if (!section_id.can_appear_after(last_section_id))
+            return ParseError::SectionOutOfOrder;
+        // Custom sections don't participate in ordering.
+        if (section_id.kind() != SectionId::SectionIdKind::Custom)
             last_section_id = section_id.kind();
-        }
         if (section_stream.remaining() != 0)
             return ParseError::SectionSizeMismatch;
     }
 
+    module_ptr->preprocess();
+
     return module_ptr;
+}
+
+void Module::preprocess()
+{
 }
 
 ByteString parse_error_to_byte_string(ParseError error)

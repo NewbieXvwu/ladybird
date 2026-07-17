@@ -9,9 +9,7 @@
 
 #pragma once
 
-#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/PercentageOr.h>
-#include <LibWeb/CSS/Serialize.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 
@@ -21,25 +19,28 @@ class AbstractImageStyleValue : public StyleValue {
 public:
     using StyleValue::StyleValue;
 
-    virtual Optional<CSSPixels> natural_width() const { return {}; }
-    virtual Optional<CSSPixels> natural_height() const { return {}; }
+    virtual Optional<CSSPixels> natural_width(DOM::Document const&) const { return {}; }
+    virtual Optional<CSSPixels> natural_height(DOM::Document const&) const { return {}; }
 
-    virtual Optional<CSSPixelFraction> natural_aspect_ratio() const
+    virtual Optional<CSSPixelFraction> natural_aspect_ratio(DOM::Document const& document) const
     {
-        auto width = natural_width();
-        auto height = natural_height();
-        if (width.has_value() && height.has_value())
+        auto width = natural_width(document);
+        auto height = natural_height(document);
+        if (width.has_value() && height.has_value() && *height != 0)
             return *width / *height;
         return {};
     }
 
     virtual void load_any_resources(DOM::Document&) { }
+    virtual void load_any_resources(Layout::NodeWithStyle const&);
     virtual void resolve_for_size(Layout::NodeWithStyle const&, CSSPixelSize) const { }
 
-    virtual bool is_paintable() const = 0;
-    virtual void paint(DisplayListRecordingContext& context, DevicePixelRect const& dest_rect, ImageRendering) const = 0;
+    virtual bool is_paintable(DOM::Document const&) const = 0;
+    virtual void paint(DisplayListRecordingContext& context, DOM::Document const&, DevicePixelRect const& dest_rect, ImageRendering) const = 0;
 
-    virtual Optional<Gfx::Color> color_if_single_pixel_bitmap() const { return {}; }
+    virtual Optional<Gfx::Color> color_if_single_pixel_bitmap(DOM::Document const&) const { return {}; }
+
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, Utf16FlyString const& associated_property) const override;
 };
 
 // And now, some gradient related things. Maybe these should live somewhere else.
@@ -49,151 +50,25 @@ enum class GradientRepeating {
     No
 };
 
-enum class GradientSpace : u8 {
-    sRGB,
-    sRGBLinear,
-    DisplayP3,
-    A98RGB,
-    ProPhotoRGB,
-    Rec2020,
-    Lab,
-    OKLab,
-    XYZD50,
-    XYZD65,
-    HSL,
-    HWB,
-    LCH,
-    OKLCH,
-};
-
-enum class HueMethod : u8 {
-    Shorter,
-    Longer,
-    Increasing,
-    Decreasing,
-};
-
-struct InterpolationMethod {
-    GradientSpace color_space;
-    HueMethod hue_method = HueMethod::Shorter;
-
-    String to_string() const
-    {
-        StringBuilder builder;
-
-        switch (color_space) {
-        case GradientSpace::OKLab:
-            builder.append("in oklab"sv);
-            break;
-        case GradientSpace::sRGB:
-            builder.append("in srgb"sv);
-            break;
-        case GradientSpace::sRGBLinear:
-            builder.append("in srgb-linear"sv);
-            break;
-        case GradientSpace::DisplayP3:
-            builder.append("in display-p3"sv);
-            break;
-        case GradientSpace::A98RGB:
-            builder.append("in a98-rgb"sv);
-            break;
-        case GradientSpace::ProPhotoRGB:
-            builder.append("in prophoto-rgb"sv);
-            break;
-        case GradientSpace::Rec2020:
-            builder.append("in rec2020"sv);
-            break;
-        case GradientSpace::Lab:
-            builder.append("in lab"sv);
-            break;
-        case GradientSpace::XYZD50:
-            builder.append("in xyz-d50"sv);
-            break;
-        case GradientSpace::XYZD65:
-            builder.append("in xyz-d65"sv);
-            break;
-        case GradientSpace::HSL:
-            builder.append("in hsl"sv);
-            break;
-        case GradientSpace::HWB:
-            builder.append("in hwb"sv);
-            break;
-        case GradientSpace::LCH:
-            builder.append("in lch"sv);
-            break;
-        case GradientSpace::OKLCH:
-            builder.append("in oklch"sv);
-            break;
-        }
-
-        switch (hue_method) {
-        case HueMethod::Shorter:
-            // "shorter" is the default value and isn't serialized
-            break;
-        case HueMethod::Longer:
-            builder.append(" longer hue"sv);
-            break;
-        case HueMethod::Increasing:
-            builder.append(" increasing hue"sv);
-            break;
-        case HueMethod::Decreasing:
-            builder.append(" decreasing hue"sv);
-            break;
-        }
-
-        return MUST(builder.to_string());
-    }
-
-    static GradientSpace default_color_space(ColorSyntax color_syntax)
-    {
-        if (color_syntax == ColorSyntax::Legacy)
-            return GradientSpace::sRGB;
-
-        return GradientSpace::OKLab;
-    }
-
-    bool operator==(InterpolationMethod const&) const = default;
-};
-
-template<typename TPosition>
 struct ColorStopListElement {
-    using PositionType = TPosition;
-    struct ColorHint {
-        TPosition value;
-        inline bool operator==(ColorHint const&) const = default;
-    };
-
-    Optional<ColorHint> transition_hint;
+    ValueComparingRefPtr<StyleValue const> transition_hint;
     struct ColorStop {
-        RefPtr<StyleValue const> color;
-        Optional<TPosition> position;
-        Optional<TPosition> second_position = {};
-        inline bool operator==(ColorStop const&) const = default;
+        ValueComparingRefPtr<StyleValue const> color;
+        ValueComparingRefPtr<StyleValue const> position;
+        ValueComparingRefPtr<StyleValue const> second_position {};
+        bool operator==(ColorStop const&) const = default;
     } color_stop;
 
-    inline bool operator==(ColorStopListElement const&) const = default;
-};
-
-using LinearColorStopListElement = ColorStopListElement<LengthPercentage>;
-using AngularColorStopListElement = ColorStopListElement<AnglePercentage>;
-
-static void serialize_color_stop_list(StringBuilder& builder, auto const& color_stop_list, SerializationMode mode)
-{
-    bool first = true;
-    for (auto const& element : color_stop_list) {
-        if (!first)
-            builder.append(", "sv);
-
-        if (element.transition_hint.has_value())
-            builder.appendff("{}, "sv, element.transition_hint->value.to_string(mode));
-
-        builder.append(element.color_stop.color->to_string(mode));
-        for (auto position : Array { &element.color_stop.position, &element.color_stop.second_position }) {
-            if (position->has_value())
-                builder.appendff(" {}"sv, (*position)->to_string(mode));
-        }
-        first = false;
+    bool operator==(ColorStopListElement const&) const = default;
+    ColorStopListElement absolutized(ComputationContext const& context) const;
+    bool is_computationally_independent() const
+    {
+        return (!transition_hint || transition_hint->is_computationally_independent())
+            && (!color_stop.color || color_stop.color->is_computationally_independent())
+            && (!color_stop.position || color_stop.position->is_computationally_independent())
+            && (!color_stop.second_position || color_stop.second_position->is_computationally_independent());
     }
-}
+};
+void serialize_color_stop_list(StringBuilder&, Vector<ColorStopListElement> const&, SerializationMode);
 
 }

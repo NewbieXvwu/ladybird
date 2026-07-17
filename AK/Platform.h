@@ -56,12 +56,6 @@
 #    define AK_IS_ARCH_PPC() 0
 #endif
 
-#ifdef __wasm32__
-#    define AK_IS_ARCH_WASM32() 1
-#else
-#    define AK_IS_ARCH_WASM32() 0
-#endif
-
 #if (defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8) || defined(_WIN64)
 #    define AK_ARCH_64_BIT
 #else
@@ -156,29 +150,7 @@
 #    define AK_OS_ANDROID
 #endif
 
-#if defined(__EMSCRIPTEN__)
-#    define AK_OS_EMSCRIPTEN
-#endif
-
 #define ARCH(arch) (AK_IS_ARCH_##arch())
-
-#if ARCH(X86_64) || ARCH(I386)
-#    define VALIDATE_IS_X86()
-#else
-#    define VALIDATE_IS_X86() static_assert(false, "Trying to include x86 only header on non x86 platform");
-#endif
-
-#if ARCH(AARCH64)
-#    define VALIDATE_IS_AARCH64()
-#else
-#    define VALIDATE_IS_AARCH64() static_assert(false, "Trying to include aarch64 only header on non aarch64 platform");
-#endif
-
-#if ARCH(RISCV64)
-#    define VALIDATE_IS_RISCV64()
-#else
-#    define VALIDATE_IS_RISCV64() static_assert(false, "Trying to include riscv64 only header on non riscv64 platform");
-#endif
 
 #ifdef ALWAYS_INLINE
 #    undef ALWAYS_INLINE
@@ -189,6 +161,16 @@
 #    undef NEVER_INLINE
 #endif
 #define NEVER_INLINE __attribute__((noinline))
+
+#ifdef COLD
+#    undef COLD
+#endif
+#define COLD __attribute__((cold))
+
+#ifdef HOT
+#    undef HOT
+#endif
+#define HOT __attribute__((hot))
 
 #ifdef FLATTEN
 #    undef FLATTEN
@@ -216,19 +198,6 @@
 #    define NO_SANITIZE_ADDRESS __attribute__((no_sanitize("address")))
 #else
 #    define NO_SANITIZE_ADDRESS __attribute__((no_sanitize_address))
-#endif
-
-#ifdef NAKED
-#    undef NAKED
-#endif
-#if !ARCH(AARCH64) || defined(AK_COMPILER_CLANG)
-#    define NAKED __attribute__((naked))
-#else
-// GCC doesn't support __attribute__((naked)) on AArch64. We use NAKED to mark functions
-// that are entirely written in inline assembly; having these be inlined would cause
-// various problems, such as explicit `ret` instructions accidentally exiting the caller
-// function or GCC discarding function arguments as they appear "dead".
-#    define NAKED NEVER_INLINE
 #endif
 
 #ifdef DISALLOW
@@ -265,6 +234,15 @@
 #    define LIFETIME_BOUND
 #endif
 
+#if defined(MUST_UPCALL)
+#    undef MUST_UPCALL
+#endif
+#if defined(AK_COMPILER_CLANG)
+#    define MUST_UPCALL [[clang::annotate("must_upcall")]]
+#else
+#    define MUST_UPCALL
+#endif
+
 // GCC doesn't have __has_feature but clang does
 #ifndef __has_feature
 #    define __has_feature(...) 0
@@ -276,18 +254,20 @@
 #    define ASAN_UNPOISON_MEMORY_REGION(addr, size) __asan_unpoison_memory_region(addr, size)
 #    define LSAN_REGISTER_ROOT_REGION(base, size) __lsan_register_root_region(base, size)
 #    define LSAN_UNREGISTER_ROOT_REGION(base, size) __lsan_unregister_root_region(base, size)
+#    define LSAN_IGNORE_OBJECT(base) __lsan_ignore_object(base)
 #else
 #    define ASAN_POISON_MEMORY_REGION(addr, size)
 #    define ASAN_UNPOISON_MEMORY_REGION(addr, size)
 #    define LSAN_REGISTER_ROOT_REGION(base, size)
 #    define LSAN_UNREGISTER_ROOT_REGION(base, size)
+#    define LSAN_IGNORE_OBJECT(base)
 #endif
 
-#if __has_feature(blocks)
+#if __has_feature(blocks) && defined(AK_OS_MACOS)
 #    define AK_HAS_BLOCKS
 #endif
 
-#if __has_feature(objc_arc)
+#if __has_feature(objc_arc) && defined(AK_OS_MACOS)
 #    define AK_HAS_OBJC_ARC
 #endif
 
@@ -312,12 +292,8 @@
 #endif
 
 #ifndef AK_SYSTEM_CACHE_ALIGNMENT_SIZE
-#    if ARCH(AARCH64) || ARCH(X86_64)
-#        define AK_SYSTEM_CACHE_ALIGNMENT_SIZE 64
-#    else
-#        define AK_SYSTEM_CACHE_ALIGNMENT_SIZE 128
-#    endif
-#endif /* AK_SYSTEM_CACHE_ALIGNMENT_SIZE */
+#    define AK_SYSTEM_CACHE_ALIGNMENT_SIZE __GCC_DESTRUCTIVE_SIZE
+#endif
 
 #ifdef AK_CACHE_ALIGNED
 #    undef AK_CACHE_ALIGNED

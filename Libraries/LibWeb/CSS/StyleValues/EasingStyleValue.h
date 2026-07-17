@@ -10,7 +10,6 @@
 
 #pragma once
 
-#include <LibWeb/CSS/CalculatedOr.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/Export.h>
 
@@ -19,15 +18,9 @@ namespace Web::CSS {
 class EasingStyleValue final : public StyleValueWithDefaultOperators<EasingStyleValue> {
 public:
     struct Linear {
-        static Linear identity();
-
         struct Stop {
-            double output;
-            Optional<double> input;
-
-            // "NOTE: Serialization relies on whether or not an input progress value was originally supplied,
-            // so that information should be retained in the internal representation."
-            bool had_explicit_input;
+            ValueComparingNonnullRefPtr<StyleValue const> output;
+            ValueComparingRefPtr<StyleValue const> input;
 
             bool operator==(Stop const&) const = default;
         };
@@ -36,22 +29,29 @@ public:
 
         bool operator==(Linear const&) const = default;
 
-        double evaluate_at(double input_progress, bool before_flag) const;
-        String to_string(SerializationMode) const;
+        bool is_computationally_independent() const
+        {
+            return all_of(stops, [](Stop const& stop) { return stop.output->is_computationally_independent() && (!stop.input || stop.input->is_computationally_independent()); });
+        }
 
-        Linear(Vector<Stop> stops);
+        void serialize(Utf16StringBuilder&, SerializationMode) const;
+        String to_string(SerializationMode mode) const
+        {
+            return to_utf16_string(mode).to_utf8();
+        }
+        Utf16String to_utf16_string(SerializationMode mode) const
+        {
+            Utf16StringBuilder builder;
+            serialize(builder, mode);
+            return builder.to_string();
+        }
     };
 
     struct CubicBezier {
-        static CubicBezier ease();
-        static CubicBezier ease_in();
-        static CubicBezier ease_out();
-        static CubicBezier ease_in_out();
-
-        NumberOrCalculated x1 { 0 };
-        NumberOrCalculated y1 { 0 };
-        NumberOrCalculated x2 { 0 };
-        NumberOrCalculated y2 { 0 };
+        ValueComparingNonnullRefPtr<StyleValue const> x1;
+        ValueComparingNonnullRefPtr<StyleValue const> y1;
+        ValueComparingNonnullRefPtr<StyleValue const> x2;
+        ValueComparingNonnullRefPtr<StyleValue const> y2;
 
         struct CachedSample {
             double x;
@@ -61,39 +61,58 @@ public:
 
         mutable Vector<CachedSample> m_cached_x_samples {};
 
-        bool operator==(CubicBezier const&) const;
+        bool operator==(CubicBezier const& other) const
+        {
+            return x1 == other.x1 && y1 == other.y1 && x2 == other.x2 && y2 == other.y2;
+        }
 
-        double evaluate_at(double input_progress, bool before_flag) const;
-        String to_string(SerializationMode) const;
+        bool is_computationally_independent() const
+        {
+            return x1->is_computationally_independent() && y1->is_computationally_independent() && x2->is_computationally_independent() && y2->is_computationally_independent();
+        }
+
+        void serialize(Utf16StringBuilder&, SerializationMode) const;
+        String to_string(SerializationMode mode) const
+        {
+            return to_utf16_string(mode).to_utf8();
+        }
+        Utf16String to_utf16_string(SerializationMode mode) const
+        {
+            Utf16StringBuilder builder;
+            serialize(builder, mode);
+            return builder.to_string();
+        }
     };
 
     struct Steps {
-        enum class Position {
-            JumpStart,
-            JumpEnd,
-            JumpNone,
-            JumpBoth,
-            Start,
-            End,
-        };
-
-        static Steps step_start();
-        static Steps step_end();
-
-        IntegerOrCalculated number_of_intervals { 1 };
-        Position position { Position::End };
+        ValueComparingNonnullRefPtr<StyleValue const> number_of_intervals;
+        StepPosition position;
 
         bool operator==(Steps const&) const = default;
 
-        double evaluate_at(double input_progress, bool before_flag) const;
-        String to_string(SerializationMode) const;
+        bool is_computationally_independent() const
+        {
+            return number_of_intervals->is_computationally_independent();
+        }
+
+        void serialize(Utf16StringBuilder&, SerializationMode) const;
+        String to_string(SerializationMode mode) const
+        {
+            return to_utf16_string(mode).to_utf8();
+        }
+        Utf16String to_utf16_string(SerializationMode mode) const
+        {
+            Utf16StringBuilder builder;
+            serialize(builder, mode);
+            return builder.to_string();
+        }
     };
 
     struct WEB_API Function : public Variant<Linear, CubicBezier, Steps> {
         using Variant::Variant;
 
-        double evaluate_at(double input_progress, bool before_flag) const;
-        String to_string(SerializationMode) const;
+        void serialize(StringBuilder&, SerializationMode) const;
+        void serialize(Utf16StringBuilder&, SerializationMode) const;
     };
 
     static ValueComparingNonnullRefPtr<EasingStyleValue const> create(Function const& function)
@@ -104,9 +123,17 @@ public:
 
     Function const& function() const { return m_function; }
 
-    virtual String to_string(SerializationMode mode) const override { return m_function.to_string(mode); }
+    virtual void serialize(StringBuilder& builder, SerializationMode mode) const override { m_function.serialize(builder, mode); }
+    virtual void serialize(Utf16StringBuilder& builder, SerializationMode mode) const override { m_function.serialize(builder, mode); }
+
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(EasingStyleValue const& other) const { return m_function == other.m_function; }
+
+    virtual bool is_computationally_independent() const override
+    {
+        return m_function.visit([](auto const& function) { return function.is_computationally_independent(); });
+    }
 
 private:
     EasingStyleValue(Function const& function)

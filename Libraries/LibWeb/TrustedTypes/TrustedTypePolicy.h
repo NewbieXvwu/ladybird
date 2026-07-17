@@ -6,18 +6,20 @@
 
 #pragma once
 
+#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/Bindings/TrustedTypePolicyPrototype.h>
+#include <LibWeb/Bindings/TrustedTypePolicy.h>
 #include <LibWeb/TrustedTypes/InjectionSink.h>
 
 namespace Web::TrustedTypes {
 
 // https://www.w3.org/TR/trusted-types/#typedefdef-trustedtype
 using TrustedType = Variant<
-    GC::Root<TrustedHTML>,
-    GC::Root<TrustedScript>,
-    GC::Root<TrustedScriptURL>>;
+    GC::Ref<TrustedHTML>,
+    GC::Ref<TrustedScript>,
+    GC::Ref<TrustedScriptURL>>;
 
 using TrustedTypesVariants = WebIDL::ExceptionOr<TrustedType>;
 
@@ -34,12 +36,6 @@ enum class ThrowIfCallbackMissing {
     No
 };
 
-struct TrustedTypePolicyOptions {
-    GC::Root<WebIDL::CallbackType> create_html;
-    GC::Root<WebIDL::CallbackType> create_script;
-    GC::Root<WebIDL::CallbackType> create_script_url;
-};
-
 class TrustedTypePolicy final : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(TrustedTypePolicy, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(TrustedTypePolicy);
@@ -49,24 +45,38 @@ public:
 
     Utf16String const& name() const { return m_name; }
 
-    WebIDL::ExceptionOr<GC::Root<TrustedHTML>> create_html(Utf16String const&, GC::RootVector<JS::Value> const&);
-    WebIDL::ExceptionOr<GC::Root<TrustedScript>> create_script(Utf16String const&, GC::RootVector<JS::Value> const&);
-    WebIDL::ExceptionOr<GC::Root<TrustedScriptURL>> create_script_url(Utf16String const&, GC::RootVector<JS::Value> const&);
+    WebIDL::ExceptionOr<GC::Ref<TrustedHTML>> create_html(Utf16String const&, GC::RootVector<JS::Value> const&);
+    WebIDL::ExceptionOr<GC::Ref<TrustedScript>> create_script(Utf16String const&, GC::RootVector<JS::Value> const&);
+    WebIDL::ExceptionOr<GC::Ref<TrustedScriptURL>> create_script_url(Utf16String const&, GC::RootVector<JS::Value> const&);
 
     WebIDL::ExceptionOr<JS::Value> get_trusted_type_policy_value(TrustedTypeName, Utf16String const& value, GC::RootVector<JS::Value> const& values, ThrowIfCallbackMissing throw_if_missing);
 
+    virtual void visit_edges(Visitor&) override;
+
 private:
-    explicit TrustedTypePolicy(JS::Realm&, Utf16String const&, TrustedTypePolicyOptions const&);
+    explicit TrustedTypePolicy(JS::Realm&, Utf16String const&, Bindings::TrustedTypePolicyOptions const&);
     virtual void initialize(JS::Realm&) override;
 
     TrustedTypesVariants create_a_trusted_type(TrustedTypeName, Utf16String const&, GC::RootVector<JS::Value> const& values);
 
     Utf16String const m_name;
-    TrustedTypePolicyOptions const m_options;
+    GC::Ptr<WebIDL::CallbackType> const m_create_html;
+    GC::Ptr<WebIDL::CallbackType> const m_create_script;
+    GC::Ptr<WebIDL::CallbackType> const m_create_script_url;
 };
 
-WebIDL::ExceptionOr<Optional<TrustedType>> process_value_with_a_default_policy(TrustedTypeName, JS::Object&, Variant<GC::Root<TrustedHTML>, GC::Root<TrustedScript>, GC::Root<TrustedScriptURL>, Utf16String>, InjectionSink);
+WebIDL::ExceptionOr<Optional<TrustedType>> process_value_with_a_default_policy(TrustedTypeName, JS::Object&, Variant<GC::Ref<TrustedHTML>, GC::Ref<TrustedScript>, GC::Ref<TrustedScriptURL>, Utf16String>, InjectionSink);
 
-WebIDL::ExceptionOr<Utf16String> get_trusted_type_compliant_string(TrustedTypeName, JS::Object&, Variant<GC::Root<TrustedHTML>, GC::Root<TrustedScript>, GC::Root<TrustedScriptURL>, Utf16String> input, InjectionSink sink, String sink_group);
+WebIDL::ExceptionOr<Utf16String> get_trusted_type_compliant_string(TrustedTypeName, JS::Object&, Variant<GC::Ref<TrustedHTML>, GC::Ref<TrustedScript>, GC::Ref<TrustedScriptURL>, Utf16String> input, InjectionSink sink, Utf16View sink_group);
+
+WebIDL::ExceptionOr<Utf16String> get_trusted_types_compliant_attribute_value(Utf16FlyString const& attribute_name, Optional<Utf16FlyString> attribute_ns, DOM::Element const& element, Variant<GC::Ref<TrustedHTML>, GC::Ref<TrustedScript>, GC::Ref<TrustedScriptURL>, Utf16String> const& new_value);
+
+// FIXME: Add-hoc definition of an element interface
+struct ElementInterface {
+    Utf16String element_name;
+    Utf16FlyString element_ns;
+};
+
+ElementInterface element_interface(Utf16FlyString const& local_name, Utf16FlyString const& element_ns);
 
 }

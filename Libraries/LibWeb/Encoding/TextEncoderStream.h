@@ -20,7 +20,7 @@ class TextEncoderStream final
     GC_DECLARE_ALLOCATOR(TextEncoderStream);
 
 public:
-    static WebIDL::ExceptionOr<GC::Ref<TextEncoderStream>> construct_impl(JS::Realm&);
+    static GC::Ref<TextEncoderStream> construct_impl(JS::Realm&);
     virtual ~TextEncoderStream() override;
 
 private:
@@ -32,7 +32,7 @@ private:
     WebIDL::ExceptionOr<void> encode_and_enqueue_chunk(JS::Value);
     WebIDL::ExceptionOr<void> encode_and_flush();
 
-    Optional<u32> convert_code_unit_to_scalar_value(u32 item, Utf8CodePointIterator& code_point_iterator);
+    Optional<u32> convert_code_unit_to_scalar_value(u32 item, size_t& code_unit_index);
 
     // https://encoding.spec.whatwg.org/#textencoderstream-pending-high-surrogate
     Optional<u32> m_leading_surrogate;

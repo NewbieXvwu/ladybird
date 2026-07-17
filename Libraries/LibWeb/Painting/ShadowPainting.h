@@ -10,7 +10,6 @@
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/DisplayListRecordingContext.h>
-#include <LibWeb/Painting/PaintBoxShadowParams.h>
 #include <LibWeb/Painting/PaintableFragment.h>
 #include <LibWeb/Painting/ShadowData.h>
 
@@ -23,6 +22,6 @@ WEB_API void paint_box_shadow(
     BordersData const& borders_data,
     BorderRadiiData const&,
     Vector<ShadowData> const&);
-WEB_API void paint_text_shadow(DisplayListRecordingContext&, PaintableFragment const&, Vector<ShadowData> const&);
+WEB_API void paint_text_shadow(DisplayListRecordingContext&, PaintableFragment::FragmentSpan const&);
 
 }

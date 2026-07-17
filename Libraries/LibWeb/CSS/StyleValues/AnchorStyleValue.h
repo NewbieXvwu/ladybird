@@ -6,25 +6,28 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/CSS/PercentageOr.h>
-#include <LibWeb/CSS/StyleValues/StyleValue.h>
+#include <LibWeb/CSS/StyleValues/AbstractNonMathCalcFunctionStyleValue.h>
 
 namespace Web::CSS {
 
-// https://drafts.csswg.org/css-anchor-position-1/#funcdef-anchor-size
-class AnchorStyleValue final : public StyleValueWithDefaultOperators<AnchorStyleValue> {
+// https://drafts.csswg.org/css-anchor-position-1/#funcdef-anchor
+class AnchorStyleValue final : public AbstractNonMathCalcFunctionStyleValue {
 public:
-    static ValueComparingNonnullRefPtr<AnchorStyleValue const> create(Optional<FlyString> const& anchor_name,
+    static ValueComparingNonnullRefPtr<AnchorStyleValue const> create(Optional<Utf16FlyString> const& anchor_name,
         ValueComparingNonnullRefPtr<StyleValue const> const& anchor_side,
         ValueComparingRefPtr<StyleValue const> const& fallback_value);
     virtual ~AnchorStyleValue() override = default;
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    virtual RefPtr<CalculationNode const> resolve_to_calculation_node(CalculationContext const&, CalculationResolutionContext const&) const override;
 
-    bool properties_equal(AnchorStyleValue const& other) const { return m_properties == other.m_properties; }
+    virtual bool equals(StyleValue const& other) const override;
 
-    Optional<FlyString const&> anchor_name() const { return m_properties.anchor_name; }
+    virtual bool is_computationally_independent() const override { return true; }
+
+    Optional<Utf16FlyString const&> anchor_name() const { return m_properties.anchor_name; }
     ValueComparingNonnullRefPtr<StyleValue const> anchor_side() const
     {
         return m_properties.anchor_side;
@@ -35,10 +38,10 @@ public:
     }
 
 private:
-    AnchorStyleValue(Optional<FlyString> const& anchor_name, ValueComparingNonnullRefPtr<StyleValue const> const& anchor_side, ValueComparingRefPtr<StyleValue const> const& fallback_value);
+    AnchorStyleValue(Optional<Utf16FlyString> const& anchor_name, ValueComparingNonnullRefPtr<StyleValue const> const& anchor_side, ValueComparingRefPtr<StyleValue const> const& fallback_value);
 
     struct Properties {
-        Optional<FlyString> anchor_name;
+        Optional<Utf16FlyString> anchor_name;
         ValueComparingNonnullRefPtr<StyleValue const> anchor_side;
         ValueComparingRefPtr<StyleValue const> fallback_value;
         bool operator==(Properties const&) const = default;

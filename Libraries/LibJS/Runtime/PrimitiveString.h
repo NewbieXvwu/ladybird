@@ -25,26 +25,23 @@ class JS_API PrimitiveString : public Cell {
     GC_DECLARE_ALLOCATOR(PrimitiveString);
 
 public:
-    [[nodiscard]] static GC::Ref<PrimitiveString> create(VM&, Utf16String);
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
+    [[nodiscard]] static GC::Ref<PrimitiveString> create(VM&, Utf16String const&);
     [[nodiscard]] static GC::Ref<PrimitiveString> create(VM&, Utf16View const&);
     [[nodiscard]] static GC::Ref<PrimitiveString> create(VM&, Utf16FlyString const&);
 
-    [[nodiscard]] static GC::Ref<PrimitiveString> create(VM&, String);
-    [[nodiscard]] static GC::Ref<PrimitiveString> create(VM&, StringView);
-    [[nodiscard]] static GC::Ref<PrimitiveString> create(VM&, FlyString const&);
-
     [[nodiscard]] static GC::Ref<PrimitiveString> create(VM&, PrimitiveString&, PrimitiveString&);
+    [[nodiscard]] static GC::Ref<PrimitiveString> create(VM&, PrimitiveString const&, size_t code_unit_offset, size_t code_unit_length);
 
-    virtual ~PrimitiveString();
+    [[nodiscard]] static GC::Ref<PrimitiveString> create_from_unsigned_integer(VM&, u64);
+
+    virtual ~PrimitiveString() override;
 
     PrimitiveString(PrimitiveString const&) = delete;
     PrimitiveString& operator=(PrimitiveString const&) = delete;
 
     bool is_empty() const;
-
-    [[nodiscard]] String utf8_string() const;
-    [[nodiscard]] StringView utf8_string_view() const;
-    bool has_utf8_string() const { return m_utf8_string.has_value(); }
 
     [[nodiscard]] Utf16String utf16_string() const;
     [[nodiscard]] Utf16View utf16_string_view() const;
@@ -57,29 +54,35 @@ public:
     [[nodiscard]] bool operator==(PrimitiveString const&) const;
 
 protected:
-    enum class RopeTag { Rope };
-    explicit PrimitiveString(RopeTag)
-        : m_is_rope(true)
+    enum class DeferredKind : u8 {
+        None,
+        Rope,
+        Substring,
+    };
+
+    explicit PrimitiveString(DeferredKind deferred_kind)
+        : m_deferred_kind(deferred_kind)
     {
     }
 
-    mutable bool m_is_rope { false };
+    mutable DeferredKind m_deferred_kind { DeferredKind::None };
 
-    mutable Optional<String> m_utf8_string;
     mutable Optional<Utf16String> m_utf16_string;
 
-    enum class EncodingPreference {
-        UTF8,
-        UTF16,
-    };
+    bool m_utf16_string_is_in_cache { false };
 
 private:
     friend class RopeString;
+    friend class Substring;
+
+    virtual void finalize() override;
+    virtual size_t external_memory_size() const override;
 
     explicit PrimitiveString(Utf16String);
-    explicit PrimitiveString(String);
 
-    void resolve_rope_if_needed(EncodingPreference) const;
+    void resolve_if_needed() const;
+    Optional<StringView> short_flat_string_storage_view() const;
+    static GC::Ptr<PrimitiveString> try_create_short_flat_concatenated_string(VM&, PrimitiveString const& lhs, PrimitiveString const& rhs);
 };
 
 class RopeString final : public PrimitiveString {
@@ -96,10 +99,31 @@ private:
 
     virtual void visit_edges(Visitor&) override;
 
-    void resolve(EncodingPreference) const;
+    void resolve() const;
 
     mutable GC::Ptr<PrimitiveString> m_lhs;
     mutable GC::Ptr<PrimitiveString> m_rhs;
+};
+
+class Substring final : public PrimitiveString {
+    GC_CELL(Substring, PrimitiveString);
+    GC_DECLARE_ALLOCATOR(Substring);
+
+public:
+    virtual ~Substring() override;
+
+private:
+    friend class PrimitiveString;
+
+    explicit Substring(GC::Ref<PrimitiveString>, size_t code_unit_offset, size_t code_unit_length);
+
+    virtual void visit_edges(Visitor&) override;
+
+    void resolve() const;
+
+    mutable GC::Ptr<PrimitiveString> m_source_string;
+    size_t m_code_unit_offset { 0 };
+    size_t m_code_unit_length { 0 };
 };
 
 }

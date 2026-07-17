@@ -14,9 +14,13 @@
 #include <AK/RefCounted.h>
 #include <AK/RefPtr.h>
 #include <AK/String.h>
+#include <AK/StringBuilder.h>
 #include <AK/StringView.h>
+#include <AK/Utf16StringBuilder.h>
+#include <AK/ValueComparingRefPtr.h>
 #include <AK/Vector.h>
 #include <AK/WeakPtr.h>
+#include <AK/kmalloc.h>
 #include <LibGfx/Color.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibURL/URL.h>
@@ -30,124 +34,85 @@
 
 namespace Web::CSS {
 
-#define ENUMERATE_CSS_STYLE_VALUE_TYPES                                                                        \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Anchor, anchor, AnchorStyleValue)                                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(AnchorSize, anchor_size, AnchorSizeStyleValue)                            \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Angle, angle, AngleStyleValue)                                            \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BackgroundSize, background_size, BackgroundSizeStyleValue)                \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BasicShape, basic_shape, BasicShapeStyleValue)                            \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BorderImageSlice, border_image_slice, BorderImageSliceStyleValue)         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BorderRadius, border_radius, BorderRadiusStyleValue)                      \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Calculated, calculated, CalculatedStyleValue)                             \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ColorScheme, color_scheme, ColorSchemeStyleValue)                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Color, color, ColorStyleValue)                                            \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ConicGradient, conic_gradient, ConicGradientStyleValue)                   \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Content, content, ContentStyleValue)                                      \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Counter, counter, CounterStyleValue)                                      \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(CounterDefinitions, counter_definitions, CounterDefinitionsStyleValue)    \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Cursor, cursor, CursorStyleValue)                                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(CustomIdent, custom_ident, CustomIdentStyleValue)                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Display, display, DisplayStyleValue)                                      \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Easing, easing, EasingStyleValue)                                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Edge, edge, EdgeStyleValue)                                               \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(FilterValueList, filter_value_list, FilterValueListStyleValue)            \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(FitContent, fit_content, FitContentStyleValue)                            \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Flex, flex, FlexStyleValue)                                               \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(FontSource, font_source, FontSourceStyleValue)                            \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(FontStyle, font_style, FontStyleStyleValue)                               \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Frequency, frequency, FrequencyStyleValue)                                \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GridAutoFlow, grid_auto_flow, GridAutoFlowStyleValue)                     \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GridTemplateArea, grid_template_area, GridTemplateAreaStyleValue)         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GridTrackPlacement, grid_track_placement, GridTrackPlacementStyleValue)   \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GridTrackSizeList, grid_track_size_list, GridTrackSizeListStyleValue)     \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GuaranteedInvalid, guaranteed_invalid, GuaranteedInvalidStyleValue)       \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Image, image, ImageStyleValue)                                            \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Integer, integer, IntegerStyleValue)                                      \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Keyword, keyword, KeywordStyleValue)                                      \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Length, length, LengthStyleValue)                                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(LinearGradient, linear_gradient, LinearGradientStyleValue)                \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(MathDepth, math_depth, MathDepthStyleValue)                               \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Number, number, NumberStyleValue)                                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(OpenTypeTagged, open_type_tagged, OpenTypeTaggedStyleValue)               \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(PendingSubstitution, pending_substitution, PendingSubstitutionStyleValue) \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Percentage, percentage, PercentageStyleValue)                             \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Position, position, PositionStyleValue)                                   \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(RadialGradient, radial_gradient, RadialGradientStyleValue)                \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Ratio, ratio, RatioStyleValue)                                            \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Rect, rect, RectStyleValue)                                               \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(RepeatStyle, repeat_style, RepeatStyleStyleValue)                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Resolution, resolution, ResolutionStyleValue)                             \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ScrollbarColor, scrollbar_color, ScrollbarColorStyleValue)                \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ScrollbarGutter, scrollbar_gutter, ScrollbarGutterStyleValue)             \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Shadow, shadow, ShadowStyleValue)                                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Shorthand, shorthand, ShorthandStyleValue)                                \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(String, string, StringStyleValue)                                         \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Time, time, TimeStyleValue)                                               \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Transformation, transformation, TransformationStyleValue)                 \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Transition, transition, TransitionStyleValue)                             \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(UnicodeRange, unicode_range, UnicodeRangeStyleValue)                      \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Unresolved, unresolved, UnresolvedStyleValue)                             \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(URL, url, URLStyleValue)                                                  \
+#define ENUMERATE_CSS_STYLE_VALUE_TYPES                                                                                        \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Anchor, anchor, AnchorStyleValue)                                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(AnchorSize, anchor_size, AnchorSizeStyleValue)                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Angle, angle, AngleStyleValue)                                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BackgroundSize, background_size, BackgroundSizeStyleValue)                                \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BasicShape, basic_shape, BasicShapeStyleValue)                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BorderImageSlice, border_image_slice, BorderImageSliceStyleValue)                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BorderRadius, border_radius, BorderRadiusStyleValue)                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BorderRadiusRect, border_radius_rect, BorderRadiusRectStyleValue)                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Calculated, calculated, CalculatedStyleValue)                                             \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ColorInterpolationMethod, color_interpolation_method, ColorInterpolationMethodStyleValue) \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ColorScheme, color_scheme, ColorSchemeStyleValue)                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Color, color, ColorStyleValue)                                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ConicGradient, conic_gradient, ConicGradientStyleValue)                                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Content, content, ContentStyleValue)                                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ContrastColor, contrast_color, ContrastColorStyleValue)                                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Counter, counter, CounterStyleValue)                                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(CounterStyle, counter_style, CounterStyleStyleValue)                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(CounterDefinitions, counter_definitions, CounterDefinitionsStyleValue)                    \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(CounterStyleSystem, counter_style_system, CounterStyleSystemStyleValue)                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Cursor, cursor, CursorStyleValue)                                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(CustomIdent, custom_ident, CustomIdentStyleValue)                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Display, display, DisplayStyleValue)                                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Easing, easing, EasingStyleValue)                                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Edge, edge, EdgeStyleValue)                                                               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(EmptyOptional, empty_optional, EmptyOptionalStyleValue)                                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Filter, filter, FilterStyleValue)                                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Function, function, FunctionStyleValue)                                                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Flex, flex, FlexStyleValue)                                                               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(FontSource, font_source, FontSourceStyleValue)                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(FontStyle, font_style, FontStyleStyleValue)                                               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Frequency, frequency, FrequencyStyleValue)                                                \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GridAutoFlow, grid_auto_flow, GridAutoFlowStyleValue)                                     \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GridTemplateArea, grid_template_area, GridTemplateAreaStyleValue)                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GridTrackPlacement, grid_track_placement, GridTrackPlacementStyleValue)                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GridTrackSizeList, grid_track_size_list, GridTrackSizeListStyleValue)                     \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(GuaranteedInvalid, guaranteed_invalid, GuaranteedInvalidStyleValue)                       \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Image, image, ImageStyleValue)                                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ImageSet, image_set, ImageSetStyleValue)                                                  \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Integer, integer, IntegerStyleValue)                                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Keyword, keyword, KeywordStyleValue)                                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Length, length, LengthStyleValue)                                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(LinearGradient, linear_gradient, LinearGradientStyleValue)                                \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Number, number, NumberStyleValue)                                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(OpacityValue, opacity_value, OpacityValueStyleValue)                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(OpenTypeTagged, open_type_tagged, OpenTypeTaggedStyleValue)                               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(OverflowClipMargin, overflow_clip_margin, OverflowClipMarginStyleValue)                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(PendingSubstitution, pending_substitution, PendingSubstitutionStyleValue)                 \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Percentage, percentage, PercentageStyleValue)                                             \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Position, position, PositionStyleValue)                                                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(RadialGradient, radial_gradient, RadialGradientStyleValue)                                \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(RadialSize, radial_size, RadialSizeStyleValue)                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(RandomValueSharing, random_value_sharing, RandomValueSharingStyleValue)                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Ratio, ratio, RatioStyleValue)                                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Rect, rect, RectStyleValue)                                                               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(RepeatStyle, repeat_style, RepeatStyleStyleValue)                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Resolution, resolution, ResolutionStyleValue)                                             \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ScrollbarColor, scrollbar_color, ScrollbarColorStyleValue)                                \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ScrollbarGutter, scrollbar_gutter, ScrollbarGutterStyleValue)                             \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Shadow, shadow, ShadowStyleValue)                                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Shorthand, shorthand, ShorthandStyleValue)                                                \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(String, string, StringStyleValue)                                                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Superellipse, superellipse, SuperellipseStyleValue)                                       \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(TextIndent, text_indent, TextIndentStyleValue)                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(TextUnderlinePosition, text_underline_position, TextUnderlinePositionStyleValue)          \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Time, time, TimeStyleValue)                                                               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Transformation, transformation, TransformationStyleValue)                                 \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(TreeCountingFunction, tree_counting_function, TreeCountingFunctionStyleValue)             \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Tuple, tuple, TupleStyleValue)                                                            \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(UnicodeRange, unicode_range, UnicodeRangeStyleValue)                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Unresolved, unresolved, UnresolvedStyleValue)                                             \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(URL, url, URLStyleValue)                                                                  \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(ValueList, value_list, StyleValueList)
-
-template<typename T>
-struct ValueComparingNonnullRefPtr : public NonnullRefPtr<T> {
-    using NonnullRefPtr<T>::NonnullRefPtr;
-
-    ValueComparingNonnullRefPtr(NonnullRefPtr<T> const& other)
-        : NonnullRefPtr<T>(other)
-    {
-    }
-
-    ValueComparingNonnullRefPtr(NonnullRefPtr<T>&& other)
-        : NonnullRefPtr<T>(move(other))
-    {
-    }
-
-    bool operator==(ValueComparingNonnullRefPtr const& other) const
-    {
-        return this->ptr() == other.ptr() || this->ptr()->equals(*other);
-    }
-
-private:
-    using NonnullRefPtr<T>::operator==;
-};
-
-template<typename T>
-struct ValueComparingRefPtr : public RefPtr<T> {
-    using RefPtr<T>::RefPtr;
-
-    ValueComparingRefPtr(RefPtr<T> const& other)
-        : RefPtr<T>(other)
-    {
-    }
-
-    ValueComparingRefPtr(RefPtr<T>&& other)
-        : RefPtr<T>(move(other))
-    {
-    }
-
-    template<typename U>
-    bool operator==(ValueComparingNonnullRefPtr<U> const& other) const
-    {
-        return this->ptr() == other.ptr() || (this->ptr() && this->ptr()->equals(*other));
-    }
-
-    bool operator==(ValueComparingRefPtr const& other) const
-    {
-        return this->ptr() == other.ptr() || (this->ptr() && other.ptr() && this->ptr()->equals(*other));
-    }
-
-private:
-    using RefPtr<T>::operator==;
-};
-
-using StyleValueVector = Vector<ValueComparingNonnullRefPtr<StyleValue const>>;
 
 struct ColorResolutionContext {
     Optional<PreferredColorScheme> color_scheme;
     Optional<Color> current_color;
-    GC::Ptr<DOM::Document const> document;
+    // Unlike current_color, this preserves precision and missing components, as needed by relative color origins.
+    RefPtr<StyleValue const> current_color_style_value {};
     CalculationResolutionContext calculation_resolution_context;
 
     [[nodiscard]] static ColorResolutionContext for_element(DOM::AbstractElement const&);
@@ -156,6 +121,8 @@ struct ColorResolutionContext {
 
 class WEB_API StyleValue : public RefCounted<StyleValue> {
 public:
+    AK_ALLOC_WITH_KMALLOC;
+
     virtual ~StyleValue() = default;
 
     enum class Type {
@@ -168,7 +135,7 @@ public:
 
     bool is_abstract_image() const
     {
-        return AK::first_is_one_of(type(), Type::Image, Type::LinearGradient, Type::ConicGradient, Type::RadialGradient);
+        return AK::first_is_one_of(type(), Type::Image, Type::ImageSet, Type::LinearGradient, Type::ConicGradient, Type::RadialGradient);
     }
     AbstractImageStyleValue const& as_abstract_image() const;
     AbstractImageStyleValue& as_abstract_image() { return const_cast<AbstractImageStyleValue&>(const_cast<StyleValue const&>(*this).as_abstract_image()); }
@@ -181,6 +148,8 @@ public:
     DimensionStyleValue& as_dimension() { return const_cast<DimensionStyleValue&>(const_cast<StyleValue const&>(*this).as_dimension()); }
 
     virtual bool is_color_function() const { return false; }
+
+    virtual bool depends_on_current_color() const { return to_keyword() == Keyword::Currentcolor; }
 
 #define __ENUMERATE_CSS_STYLE_VALUE_TYPE(title_case, snake_case, style_value_class_name) \
     bool is_##snake_case() const { return type() == Type::title_case; }                  \
@@ -201,21 +170,20 @@ public:
     bool has_auto() const;
     virtual bool has_color() const { return false; }
 
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const;
 
     virtual Optional<Color> to_color(ColorResolutionContext) const { return {}; }
     Keyword to_keyword() const;
 
-    virtual String to_string(SerializationMode) const = 0;
+    String to_string(SerializationMode) const;
+    Utf16String to_utf16_string(SerializationMode) const;
+    virtual void serialize(StringBuilder&, SerializationMode) const = 0;
+    virtual void serialize(Utf16StringBuilder&, SerializationMode) const;
     virtual Vector<Parser::ComponentValue> tokenize() const;
-    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, String const& associated_property) const;
-
-    [[nodiscard]] int to_font_weight() const;
-    [[nodiscard]] int to_font_slope() const;
-    [[nodiscard]] int to_font_width() const;
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, Utf16FlyString const& associated_property) const;
+    virtual StyleValueVector subdivide_into_iterations(PropertyNameAndID const&) const;
 
     virtual void set_style_sheet(GC::Ptr<CSSStyleSheet>) { }
-    virtual void visit_edges(JS::Cell::Visitor&) const { }
 
     virtual bool equals(StyleValue const& other) const = 0;
 
@@ -223,6 +191,11 @@ public:
     {
         return this->equals(other);
     }
+
+    // https://drafts.css-houdini.org/css-properties-values-api/#computationally-independent
+    // A property value is computationally independent if it can be converted into a computed value using only the value
+    // of the property on the element, and "global" information that cannot be changed by CSS.
+    virtual bool is_computationally_independent() const = 0;
 
 protected:
     explicit StyleValue(Type);
@@ -244,6 +217,10 @@ struct StyleValueWithDefaultOperators : public StyleValue {
         return static_cast<T const&>(*this).properties_equal(typed_other);
     }
 };
+
+i32 int_from_style_value(NonnullRefPtr<StyleValue const> const& style_value);
+double number_from_style_value(NonnullRefPtr<StyleValue const> const& style_value, Optional<double> percentage_basis);
+Utf16FlyString const& string_from_style_value(NonnullRefPtr<StyleValue const> const& style_value);
 
 }
 

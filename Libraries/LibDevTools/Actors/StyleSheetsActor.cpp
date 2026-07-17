@@ -25,10 +25,9 @@ StyleSheetsActor::StyleSheetsActor(DevToolsServer& devtools, String name, WeakPt
     if (auto tab = m_tab.strong_ref()) {
         devtools.delegate().listen_for_style_sheet_sources(
             tab->description(),
-            [weak_self = make_weak_ptr<StyleSheetsActor>()](Web::CSS::StyleSheetIdentifier const& style_sheet, String source) {
-                if (auto self = weak_self.strong_ref())
-                    self->style_sheet_source_received(style_sheet, move(source));
-            });
+            weak_callback(*this, [](auto& self, Web::CSS::StyleSheetIdentifier const& style_sheet, Utf16String source) {
+                self.style_sheet_source_received(style_sheet, move(source));
+            }));
     }
 }
 
@@ -36,6 +35,11 @@ StyleSheetsActor::~StyleSheetsActor()
 {
     if (auto tab = m_tab.strong_ref())
         devtools().delegate().stop_listening_for_style_sheet_sources(tab->description());
+}
+
+String StyleSheetsActor::resource_id_for_index(StringView actor_name, size_t index)
+{
+    return MUST(String::formatted("{}-stylesheet:{}", actor_name, index));
 }
 
 void StyleSheetsActor::handle_message(Message const& message)
@@ -67,11 +71,17 @@ void StyleSheetsActor::set_style_sheets(Vector<Web::CSS::StyleSheetIdentifier> s
     m_style_sheets = move(style_sheets);
 }
 
-void StyleSheetsActor::style_sheet_source_received(Web::CSS::StyleSheetIdentifier const& style_sheet, String source)
+Optional<String> StyleSheetsActor::resource_id_for(Web::CSS::StyleSheetIdentifier const& style_sheet) const
 {
-    auto index = m_style_sheets.find_first_index_if([&](auto const& candidate) {
-        return candidate.type == style_sheet.type && candidate.url == style_sheet.url;
-    });
+    auto index = m_style_sheets.find_first_index(style_sheet);
+    if (!index.has_value())
+        return {};
+    return resource_id_for_index(name(), *index);
+}
+
+void StyleSheetsActor::style_sheet_source_received(Web::CSS::StyleSheetIdentifier const& style_sheet, Utf16String source)
+{
+    auto index = m_style_sheets.find_first_index(style_sheet);
     if (!index.has_value())
         return;
 
@@ -82,7 +92,7 @@ void StyleSheetsActor::style_sheet_source_received(Web::CSS::StyleSheetIdentifie
     // FIXME: Support the `longString` message type so that we don't have to send the entire style sheet
     //        source at once for large sheets.
     JsonObject response;
-    response.set("text"sv, move(source));
+    response.set("text"sv, source.to_utf8());
     send_response(*pending_message, move(response));
 }
 

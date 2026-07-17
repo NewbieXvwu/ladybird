@@ -5,7 +5,7 @@
  */
 
 #include <LibJS/Runtime/VM.h>
-#include <LibWeb/Bindings/NodeFilterPrototype.h>
+#include <LibWeb/Bindings/NodeFilter.h>
 #include <LibWeb/DOM/NodeFilter.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
@@ -13,12 +13,12 @@ namespace Web::DOM {
 
 GC_DEFINE_ALLOCATOR(NodeFilter);
 
-GC::Ref<NodeFilter> NodeFilter::create(JS::Realm& realm, WebIDL::CallbackType& callback)
+GC::Ref<NodeFilter> NodeFilter::create(JS::Realm& realm, GC::Ref<WebIDL::CallbackType> callback)
 {
     return realm.create<NodeFilter>(realm, callback);
 }
 
-NodeFilter::NodeFilter(JS::Realm& realm, WebIDL::CallbackType& callback)
+NodeFilter::NodeFilter(JS::Realm& realm, GC::Ref<WebIDL::CallbackType> callback)
     : PlatformObject(realm.intrinsics().object_prototype())
     , m_callback(callback)
 {

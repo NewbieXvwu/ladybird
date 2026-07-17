@@ -5,25 +5,31 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ByteBuffer.h>
 #include <AK/QuickSort.h>
+#include <AK/Utf16String.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibRequests/RequestClient.h>
 #include <LibURL/Origin.h>
+#include <LibWeb/Bindings/MessageEvent.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
-#include <LibWeb/Bindings/WebSocketPrototype.h>
+#include <LibWeb/Bindings/WebSocket.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/DOMURL/DOMURL.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP.h>
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/HTML/CloseEvent.h>
 #include <LibWeb/HTML/EventHandler.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/MessageEvent.h>
+#include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/Loader/ResourceLoader.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/Buffers.h>
@@ -36,7 +42,7 @@ namespace Web::WebSockets {
 GC_DEFINE_ALLOCATOR(WebSocket);
 
 // https://websockets.spec.whatwg.org/#dom-websocket-websocket
-WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& realm, String const& url, Optional<Variant<String, Vector<String>>> const& protocols)
+WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& realm, Utf16String const& url, Optional<Variant<Utf16String, Vector<Utf16String>>> const& protocols)
 {
     auto& vm = realm.vm();
 
@@ -47,7 +53,7 @@ WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& rea
     auto base_url = relevant_settings_object.api_base_url();
 
     // 2. Let urlRecord be the result of applying the URL parser to url with baseURL.
-    auto url_record = DOMURL::parse(url, base_url);
+    auto url_record = DOMURL::parse(url.utf16_view(), base_url);
 
     // 3. If urlRecord is failure, then throw a "SyntaxError" DOMException.
     if (!url_record.has_value())
@@ -68,12 +74,12 @@ WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& rea
     if (url_record->fragment().has_value())
         return WebIDL::SyntaxError::create(realm, "Presence of URL fragment is invalid"_utf16);
 
-    Vector<String> protocols_sequence;
+    Vector<Utf16String> protocols_sequence;
     // 8. If protocols is a string, set protocols to a sequence consisting of just that string.
-    if (protocols.has_value() && protocols->has<String>())
-        protocols_sequence = { protocols.value().get<String>() };
-    else if (protocols.has_value() && protocols->has<Vector<String>>())
-        protocols_sequence = protocols.value().get<Vector<String>>();
+    if (protocols.has_value() && protocols->has<Utf16String>())
+        protocols_sequence = { protocols.value().get<Utf16String>() };
+    else if (protocols.has_value() && protocols->has<Vector<Utf16String>>())
+        protocols_sequence = protocols.value().get<Vector<Utf16String>>();
     else
         protocols_sequence = {};
 
@@ -86,9 +92,11 @@ WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& rea
         // The elements that comprise this value MUST be non-empty strings with characters in the range U+0021 to U+007E not including
         // separator characters as defined in [RFC2616] and MUST all be unique strings.
         auto protocol = sorted_protocols[i];
+        if (protocol.is_empty())
+            return WebIDL::SyntaxError::create(realm, "Found empty protocol name"_utf16);
         if (i < sorted_protocols.size() - 1 && protocol == sorted_protocols[i + 1])
             return WebIDL::SyntaxError::create(realm, "Found a duplicate protocol name in the specified list"_utf16);
-        for (auto code_point : protocol.code_points()) {
+        for (auto code_point : protocol.utf16_view()) {
             if (code_point < '\x21' || code_point > '\x7E')
                 return WebIDL::SyntaxError::create(realm, "Found invalid character in subprotocol name"_utf16);
         }
@@ -102,8 +110,13 @@ WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& rea
     Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(vm.heap(), [web_socket, url_record, protocols_sequence = move(protocols_sequence)]() {
         auto& client = HTML::relevant_settings_object(*web_socket);
 
-        //  1. Establish a WebSocket connection given urlRecord, protocols, and client. [FETCH]
-        (void)web_socket->establish_web_socket_connection(*url_record, protocols_sequence, client);
+        // 1. Establish a WebSocket connection given urlRecord, protocols, and client. [FETCH]
+        // AD-HOC: We don't yet implement this method to spec, so it's possible for the connection to fail before we
+        //         make a Requests::WebSocket. If so, we need to manually error and close it.
+        if (web_socket->establish_web_socket_connection(*url_record, protocols_sequence, client).is_error()) {
+            web_socket->on_error();
+            web_socket->on_close(to_underlying(::WebSocket::CloseStatusCode::AbnormalClosure), Utf16String {}, false);
+        }
     }));
 
     return web_socket;
@@ -112,7 +125,6 @@ WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& rea
 WebSocket::WebSocket(JS::Realm& realm)
     : EventTarget(realm)
 {
-    set_overrides_must_survive_garbage_collection(true);
 }
 
 WebSocket::~WebSocket() = default;
@@ -129,6 +141,8 @@ void WebSocket::initialize(JS::Realm& realm)
 // https://html.spec.whatwg.org/multipage/server-sent-events.html#garbage-collection
 void WebSocket::finalize()
 {
+    Base::finalize();
+
     auto ready_state = this->ready_state();
 
     // If a WebSocket object is garbage collected while its connection is still open, the user agent must start the
@@ -186,29 +200,30 @@ bool WebSocket::must_survive_garbage_collection() const
     return false;
 }
 
-ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_record, Vector<String> const& protocols, HTML::EnvironmentSettingsObject& client)
+ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_record, Vector<Utf16String> const& protocols, HTML::EnvironmentSettingsObject& client)
 {
     // FIXME: Integrate properly with FETCH as per https://fetch.spec.whatwg.org/#websocket-opening-handshake
+    //        That means following https://websockets.spec.whatwg.org/#concept-websocket-establish
 
     auto& window_or_worker = as<HTML::WindowOrWorkerGlobalScopeMixin>(client.global_object());
     auto origin_string = window_or_worker.origin().to_byte_string();
 
     Vector<ByteString> protocol_byte_strings;
     for (auto const& protocol : protocols)
-        TRY(protocol_byte_strings.try_append(protocol.to_byte_string()));
+        TRY(protocol_byte_strings.try_append(protocol.to_utf8().to_byte_string()));
 
-    HTTP::HeaderMap additional_headers;
+    auto additional_headers = HTTP::HeaderList::create();
 
     auto cookies = ([&] {
-        auto& page = Bindings::principal_host_defined_page(HTML::principal_realm(realm()));
-        return page.client().page_did_request_cookie(url_record, Cookie::Source::Http);
+        auto& page = Bindings::principal_host_defined_page(realm());
+        return page.client().page_did_request_cookie(url_record, HTTP::Cookie::Source::Http).cookie;
     })();
 
     if (!cookies.is_empty()) {
-        additional_headers.set("Cookie", cookies.to_byte_string());
+        additional_headers->append({ "Cookie"sv, cookies.to_byte_string() });
     }
 
-    additional_headers.set("User-Agent", ResourceLoader::the().user_agent().to_byte_string());
+    additional_headers->append({ "User-Agent"sv, Fetch::Infrastructure::default_user_agent_value() });
 
     auto request_client = ResourceLoader::the().request_client();
 
@@ -218,30 +233,18 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
 
     m_websocket = request_client->websocket_connect(url_record, origin_string, protocol_byte_strings, {}, additional_headers);
 
-    m_websocket->on_open = [weak_this = make_weak_ptr<WebSocket>()] {
-        if (!weak_this)
-            return;
-        auto& websocket = const_cast<WebSocket&>(*weak_this);
-        websocket.on_open();
-    };
-    m_websocket->on_message = [weak_this = make_weak_ptr<WebSocket>()](auto message) {
-        if (!weak_this)
-            return;
-        auto& websocket = const_cast<WebSocket&>(*weak_this);
-        websocket.on_message(move(message.data), message.is_text);
-    };
-    m_websocket->on_close = [weak_this = make_weak_ptr<WebSocket>()](auto code, auto reason, bool was_clean) {
-        if (!weak_this)
-            return;
-        auto& websocket = const_cast<WebSocket&>(*weak_this);
-        websocket.on_close(code, String::from_byte_string(reason).release_value_but_fixme_should_propagate_errors(), was_clean);
-    };
-    m_websocket->on_error = [weak_this = make_weak_ptr<WebSocket>()](auto) {
-        if (!weak_this)
-            return;
-        auto& websocket = const_cast<WebSocket&>(*weak_this);
-        websocket.on_error();
-    };
+    m_websocket->on_open = GC::weak_callback(*this, [](auto& self) {
+        self.on_open();
+    });
+    m_websocket->on_message = GC::weak_callback(*this, [](auto& self, auto message) {
+        self.on_message(move(message.data), message.is_text);
+    });
+    m_websocket->on_close = GC::weak_callback(*this, [](auto& self, auto code, auto reason, bool was_clean) {
+        self.on_close(code, Utf16String::from_utf8(StringView { reason.bytes() }), was_clean);
+    });
+    m_websocket->on_error = GC::weak_callback(*this, [](auto& self, auto) {
+        self.on_error();
+    });
 
     return {};
 }
@@ -255,34 +258,38 @@ Requests::WebSocket::ReadyState WebSocket::ready_state() const
 }
 
 // https://websockets.spec.whatwg.org/#dom-websocket-extensions
-String WebSocket::extensions() const
+Utf16String WebSocket::extensions() const
 {
     if (!m_websocket)
-        return String {};
+        return {};
     // https://websockets.spec.whatwg.org/#feedback-from-the-protocol
     // FIXME: Change the extensions attribute's value to the extensions in use, if it is not the null value.
-    return String {};
+    return {};
 }
 
 // https://websockets.spec.whatwg.org/#dom-websocket-protocol
-WebIDL::ExceptionOr<String> WebSocket::protocol() const
+WebIDL::ExceptionOr<Utf16String> WebSocket::protocol() const
 {
     if (!m_websocket)
-        return String {};
-    return TRY_OR_THROW_OOM(vm(), String::from_byte_string(m_websocket->subprotocol_in_use()));
+        return Utf16String {};
+    auto subprotocol_in_use = m_websocket->subprotocol_in_use();
+    return Utf16String::from_utf8(subprotocol_in_use.view());
 }
 
 // https://websockets.spec.whatwg.org/#dom-websocket-close
-WebIDL::ExceptionOr<void> WebSocket::close(Optional<u16> code, Optional<String> reason)
+WebIDL::ExceptionOr<void> WebSocket::close(Optional<u16> code, Optional<Utf16String> reason)
 {
     // 1. If code is present, but is neither an integer equal to 1000 nor an integer in the range 3000 to 4999, inclusive, throw an "InvalidAccessError" DOMException.
     if (code.has_value() && *code != 1000 && (*code < 3000 || *code > 4999))
         return WebIDL::InvalidAccessError::create(realm(), "The close error code is invalid"_utf16);
     // 2. If reason is present, then run these substeps:
+    String encoded_reason;
     if (reason.has_value()) {
         // 1. Let reasonBytes be the result of encoding reason.
+        encoded_reason = reason->to_utf8();
+
         // 2. If reasonBytes is longer than 123 bytes, then throw a "SyntaxError" DOMException.
-        if (reason->bytes().size() > 123)
+        if (encoded_reason.bytes().size() > 123)
             return WebIDL::SyntaxError::create(realm(), "The close reason is longer than 123 bytes"_utf16);
     }
     // 3. Run the first matching steps from the following list:
@@ -293,37 +300,44 @@ WebIDL::ExceptionOr<void> WebSocket::close(Optional<u16> code, Optional<String> 
     // -> If the WebSocket connection is not yet established [WSP]
     // -> If the WebSocket closing handshake has not yet been started [WSP]
     // -> Otherwise
-    // NOTE: All of these are handled by the WebSocket Protocol when calling close()
+    // NB: All of these are handled by the WebSocket Protocol when calling close(). We still set the ready state to
+    //     CLOSING now though (which every case above expects), to prevent handling any messages from the remote server
+    //     in the meantime.
+    m_websocket->set_ready_state(Requests::WebSocket::ReadyState::Closing);
+
     // FIXME: LibProtocol does not yet support sending empty Close messages, so we use default values for now
-    m_websocket->close(code.value_or(1000), reason.value_or(String {}).to_byte_string());
+    m_websocket->close(code.value_or(1000), encoded_reason.to_byte_string());
     return {};
 }
 
 // https://websockets.spec.whatwg.org/#dom-websocket-send
-WebIDL::ExceptionOr<void> WebSocket::send(Variant<GC::Root<WebIDL::BufferSource>, GC::Root<FileAPI::Blob>, String> const& data)
+WebIDL::ExceptionOr<void> WebSocket::send(WebSocketSendData const& data)
 {
     auto state = ready_state();
     if (state == Requests::WebSocket::ReadyState::Connecting)
         return WebIDL::InvalidStateError::create(realm(), "Websocket is still CONNECTING"_utf16);
     if (state == Requests::WebSocket::ReadyState::Open) {
-        TRY_OR_THROW_OOM(vm(),
-            data.visit(
-                [this](String const& string) -> ErrorOr<void> {
-                    m_websocket->send(string);
-                    return {};
-                },
-                [this](GC::Root<WebIDL::BufferSource> const& buffer_source) -> ErrorOr<void> {
-                    // FIXME: While the spec doesn't say to do this, it's not observable except from potentially throwing OOM.
-                    //        Can we avoid this copy?
-                    auto data_buffer = TRY(WebIDL::get_buffer_source_copy(*buffer_source->raw_object()));
-                    m_websocket->send(data_buffer, false);
-                    return {};
-                },
-                [this](GC::Root<FileAPI::Blob> const& blob) -> ErrorOr<void> {
-                    auto byte_buffer = TRY(ByteBuffer::copy(blob->raw_bytes()));
-                    m_websocket->send(byte_buffer, false);
-                    return {};
-                }));
+        data.visit(
+            [this](Utf16String const& string) {
+                auto encoded_string = string.to_utf8();
+                m_websocket->send(encoded_string);
+            },
+            [this](WebIDL::BufferSourceVariant buffer_source_variant) {
+                auto buffer_source = WebIDL::BufferSource { buffer_source_variant };
+                ByteBuffer buffer_storage;
+                ReadonlyBytes buffer;
+
+                if (auto array_buffer = buffer_source.viewed_array_buffer(); array_buffer && !array_buffer->is_detached() && !buffer_source.is_out_of_bounds()) {
+                    buffer_storage = MUST(ByteBuffer::create_uninitialized(buffer_source.byte_length()));
+                    array_buffer->copy_to(buffer_source.byte_offset(), buffer_storage);
+                    buffer = buffer_storage;
+                }
+
+                m_websocket->send(buffer, false);
+            },
+            [this](GC::Ref<FileAPI::Blob> blob) {
+                m_websocket->send(blob->raw_bytes(), false);
+            });
         // TODO : If the data cannot be sent, e.g. because it would need to be buffered but the buffer is full, the user agent must flag the WebSocket as full and then close the WebSocket connection.
         // TODO : Any invocation of this method with a string argument that does not throw an exception must increase the bufferedAmount attribute by the number of bytes needed to express the argument as UTF-8.
     }
@@ -352,13 +366,13 @@ void WebSocket::on_error()
 }
 
 // https://websockets.spec.whatwg.org/#feedback-from-the-protocol
-void WebSocket::on_close(u16 code, String reason, bool was_clean)
+void WebSocket::on_close(u16 code, Utf16String reason, bool was_clean)
 {
     // When the WebSocket connection is closed, possibly cleanly, the user agent must queue a task to run the following substeps:
     HTML::queue_a_task(HTML::Task::Source::WebSocket, nullptr, nullptr, GC::create_function(heap(), [this, code, reason = move(reason), was_clean] {
         // 1. Change the readyState attribute's value to CLOSED. This is handled by the Protocol's WebSocket
         // 2. If [needed], fire an event named error at the WebSocket object. This is handled by the Protocol's WebSocket
-        HTML::CloseEventInit event_init {};
+        Bindings::CloseEventInit event_init {};
         event_init.was_clean = was_clean;
         event_init.code = code;
         event_init.reason = reason;
@@ -375,27 +389,23 @@ void WebSocket::on_message(ByteBuffer message, bool is_text)
     // When a WebSocket message has been received with type type and data data, the user agent must queue a task to follow these steps:
     HTML::queue_a_task(HTML::Task::Source::WebSocket, nullptr, nullptr, GC::create_function(heap(), [this, message = move(message), is_text] {
         if (is_text) {
-            auto text_message = ByteString(ReadonlyBytes(message));
-            HTML::MessageEventInit event_init;
-            event_init.data = JS::PrimitiveString::create(vm(), text_message);
-            event_init.origin = url();
-            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init));
+            Bindings::MessageEventInit event_init;
+            event_init.data = JS::PrimitiveString::create(vm(), Utf16String::from_utf8(StringView { ReadonlyBytes(message) }));
+            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init, m_url.origin()));
             return;
         }
 
-        if (m_binary_type == "blob") {
+        if (m_binary_type == "blob"sv) {
             // type indicates that the data is Binary and binaryType is "blob"
-            HTML::MessageEventInit event_init;
-            event_init.data = FileAPI::Blob::create(realm(), message, "text/plain;charset=utf-8"_string);
-            event_init.origin = url();
-            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init));
+            Bindings::MessageEventInit event_init;
+            event_init.data = FileAPI::Blob::create(realm(), message, "text/plain;charset=utf-8"_utf16);
+            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init, m_url.origin()));
             return;
-        } else if (m_binary_type == "arraybuffer") {
+        } else if (m_binary_type == "arraybuffer"sv) {
             // type indicates that the data is Binary and binaryType is "arraybuffer"
-            HTML::MessageEventInit event_init;
+            Bindings::MessageEventInit event_init;
             event_init.data = JS::ArrayBuffer::create(realm(), message);
-            event_init.origin = url();
-            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init));
+            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init, m_url.origin()));
             return;
         }
 

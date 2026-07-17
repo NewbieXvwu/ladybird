@@ -6,9 +6,10 @@
 
 #pragma once
 
+#include <AK/Utf16FlyString.h>
 #include <AK/Vector.h>
-#include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/Range.h>
+#include <LibWeb/Forward.h>
 #include <LibWeb/Selection/Selection.h>
 
 namespace Web::Editing {
@@ -16,13 +17,13 @@ namespace Web::Editing {
 // https://w3c.github.io/editing/docs/execCommand/#record-the-values
 struct RecordedNodeValue {
     GC::Ref<DOM::Node> node;
-    FlyString command;
+    Utf16FlyString command;
     Optional<Utf16String> specified_command_value;
 };
 
 // https://w3c.github.io/editing/docs/execCommand/#record-current-states-and-values
 struct RecordedOverride {
-    FlyString command;
+    Utf16FlyString command;
     Variant<Utf16String, bool> value;
 };
 
@@ -56,16 +57,15 @@ GC::Ref<DOM::Range> block_extend_a_range(GC::Ref<DOM::Range>);
 GC::Ptr<DOM::Node> block_node_of_node(GC::Ref<DOM::Node>);
 Utf16String canonical_space_sequence(size_t length, bool non_breaking_start, bool non_breaking_end);
 void canonicalize_whitespace(DOM::BoundaryPoint, bool fix_collapsed_space = true);
-Vector<GC::Ref<DOM::Node>> clear_the_value(FlyString const&, GC::Ref<DOM::Element>);
-void delete_the_selection(Selection&, bool block_merging = true, bool strip_wrappers = true,
-    Selection::Direction direction = Selection::Direction::Forwards);
-Optional<Utf16String> effective_command_value(GC::Ptr<DOM::Node>, FlyString const& command);
+Vector<GC::Ref<DOM::Node>> clear_the_value(Utf16FlyString const&, GC::Ref<DOM::Element>);
+void delete_the_selection(Selection&, bool block_merging = true, bool strip_wrappers = true, Selection::Direction = Selection::Direction::Forwards);
+Optional<Utf16String> effective_command_value(GC::Ptr<DOM::Node>, Utf16FlyString const& command);
 DOM::BoundaryPoint first_equivalent_point(DOM::BoundaryPoint);
 void fix_disallowed_ancestors_of_node(GC::Ref<DOM::Node>);
 bool follows_a_line_break(GC::Ref<DOM::Node>);
-void force_the_value(GC::Ref<DOM::Node>, FlyString const&, Optional<Utf16String const&>);
+void force_the_value(GC::Ref<DOM::Node>, Utf16FlyString const&, Optional<Utf16View>);
 void indent(Vector<GC::Ref<DOM::Node>>);
-bool is_allowed_child_of_node(Variant<GC::Ref<DOM::Node>, FlyString> child, Variant<GC::Ref<DOM::Node>, FlyString> parent);
+bool is_allowed_child_of_node(Variant<GC::Ref<DOM::Node>, Utf16FlyString> child, Variant<GC::Ref<DOM::Node>, Utf16FlyString> parent);
 bool is_block_boundary_point(DOM::BoundaryPoint);
 bool is_block_end_point(DOM::BoundaryPoint);
 bool is_block_node(GC::Ref<DOM::Node>);
@@ -76,17 +76,18 @@ bool is_collapsed_whitespace_node(GC::Ref<DOM::Node>);
 bool is_effectively_contained_in_range(GC::Ref<DOM::Node>, GC::Ref<DOM::Range>);
 bool is_element_with_inline_contents(GC::Ref<DOM::Node>);
 bool is_extraneous_line_break(GC::Ref<DOM::Node>);
-bool is_formattable_block_name(FlyString const&);
+Optional<Utf16FlyString const&> formattable_block_name_from_utf16(Utf16View);
+bool is_formattable_block_name(Utf16FlyString const&);
 bool is_formattable_node(GC::Ref<DOM::Node>);
 bool is_in_same_editing_host(GC::Ref<DOM::Node>, GC::Ref<DOM::Node>);
 bool is_indentation_element(GC::Ref<DOM::Node>);
 bool is_inline_node(GC::Ref<DOM::Node>);
 bool is_invisible_node(GC::Ref<DOM::Node>);
 bool is_modifiable_element(GC::Ref<DOM::Node>);
-bool is_name_of_an_element_with_inline_contents(FlyString const&);
+bool is_name_of_an_element_with_inline_contents(Utf16FlyString const&);
 bool is_non_list_single_line_container(GC::Ref<DOM::Node>);
 bool is_prohibited_paragraph_child(GC::Ref<DOM::Node>);
-bool is_prohibited_paragraph_child_name(FlyString const&);
+bool is_prohibited_paragraph_child_name(Utf16FlyString const&);
 bool is_remove_format_candidate(GC::Ref<DOM::Node>);
 bool is_simple_indentation_element(GC::Ref<DOM::Node>);
 bool is_simple_modifiable_element(GC::Ref<DOM::Node>);
@@ -102,25 +103,27 @@ void normalize_sublists_in_node(GC::Ref<DOM::Node>);
 void outdent(GC::Ref<DOM::Node>);
 bool precedes_a_line_break(GC::Ref<DOM::Node>);
 Optional<DOM::BoundaryPoint> previous_equivalent_point(DOM::BoundaryPoint);
-void push_down_values(FlyString const&, GC::Ref<DOM::Node>, Optional<Utf16String const&>);
+void push_down_values(Utf16FlyString const&, GC::Ref<DOM::Node>, Optional<Utf16View>);
 Vector<RecordedOverride> record_current_overrides(DOM::Document const&);
 Vector<RecordedOverride> record_current_states_and_values(DOM::Document const&);
-GC::ConservativeVector<RecordedNodeValue> record_the_values_of_nodes(GC::Heap&, Vector<GC::Ref<DOM::Node>> const&);
+GC::ConservativeVector<RecordedNodeValue> record_the_values_of_nodes(Vector<GC::Ref<DOM::Node>> const&);
 void remove_extraneous_line_breaks_at_the_end_of_node(GC::Ref<DOM::Node>);
 void remove_extraneous_line_breaks_before_node(GC::Ref<DOM::Node>);
 void remove_extraneous_line_breaks_from_a_node(GC::Ref<DOM::Node>);
 void remove_node_preserving_its_descendants(GC::Ref<DOM::Node>);
-void reorder_modifiable_descendants(GC::Ref<DOM::Node>, FlyString const&, Optional<Utf16String const&>);
+void reorder_modifiable_descendants(GC::Ref<DOM::Node>, Utf16FlyString const&, Optional<Utf16View>);
 void restore_states_and_values(DOM::Document&, Vector<RecordedOverride> const&);
 void restore_the_values_of_nodes(Vector<RecordedNodeValue> const&);
 SelectionsListState selections_list_state(DOM::Document const&);
-void set_the_selections_value(DOM::Document&, FlyString const&, Optional<Utf16String const&>);
-GC::Ref<DOM::Element> set_the_tag_name(GC::Ref<DOM::Element>, FlyString const&);
-Optional<Utf16String> specified_command_value(GC::Ref<DOM::Element>, FlyString const& command);
+void set_the_selections_value(DOM::Document&, Utf16FlyString const&, Optional<Utf16View>);
+GC::Ref<DOM::Element> set_the_tag_name(GC::Ref<DOM::Element>, Utf16FlyString const&);
+Optional<Utf16String> specified_command_value(GC::Ref<DOM::Element>, Utf16FlyString const& command);
 void split_the_parent_of_nodes(Vector<GC::Ref<DOM::Node>> const&);
-void toggle_lists(DOM::Document&, FlyString const&);
-bool values_are_equivalent(FlyString const&, Optional<Utf16String const&>, Optional<Utf16String const&>);
-bool values_are_loosely_equivalent(FlyString const&, Optional<Utf16String const&>, Optional<Utf16String const&>);
+bool standard_inline_indeterminate(DOM::Document const&, Utf16FlyString const& command);
+Utf16String standard_inline_value(DOM::Document const&, Utf16FlyString const& command);
+void toggle_lists(DOM::Document&, Utf16FlyString const&);
+bool values_are_equivalent(Utf16FlyString const&, Optional<Utf16View>, Optional<Utf16View>);
+bool values_are_loosely_equivalent(Utf16FlyString const&, Optional<Utf16View>, Optional<Utf16View>);
 GC::Ptr<DOM::Node> wrap(Vector<GC::Ref<DOM::Node>>, Function<bool(GC::Ref<DOM::Node>)> sibling_criteria, Function<GC::Ptr<DOM::Node>()> new_parent_instructions);
 
 // Utility methods:
@@ -129,14 +132,14 @@ GC::Ptr<DOM::Node> first_formattable_node_effectively_contained(GC::Ptr<DOM::Ran
 CSSPixels font_size_to_pixel_size(Utf16View const&);
 void for_each_node_effectively_contained_in_range(GC::Ptr<DOM::Range>, Function<TraversalDecision(GC::Ref<DOM::Node>)>);
 bool has_visible_children(GC::Ref<DOM::Node>);
-bool is_heading(FlyString const&);
+bool is_heading(Utf16FlyString const&);
 Utf16String justify_alignment_to_string(JustifyAlignment);
 Array<Utf16View, 7> named_font_sizes();
-Optional<NonnullRefPtr<CSS::StyleValue const>> property_in_style_attribute(GC::Ref<DOM::Element>, CSS::PropertyID);
+RefPtr<CSS::StyleValue const> property_in_style_attribute(GC::Ref<DOM::Element>, CSS::PropertyID);
 Optional<CSS::Display> resolved_display(GC::Ref<DOM::Node>);
 Optional<CSS::Keyword> resolved_keyword(GC::Ref<DOM::Node>, CSS::PropertyID);
-Optional<NonnullRefPtr<CSS::StyleValue const>> resolved_value(GC::Ref<DOM::Node>, CSS::PropertyID);
-void take_the_action_for_command(DOM::Document&, FlyString const&, Utf16String const&);
+RefPtr<CSS::StyleValue const> resolved_value(GC::Ref<DOM::Node>, CSS::PropertyID);
+void take_the_action_for_command(DOM::Document&, Utf16FlyString const&, Utf16View);
 bool value_contains_keyword(CSS::StyleValue const&, CSS::Keyword);
 
 }

@@ -11,14 +11,10 @@ endif()
 include("Meta/CMake/use_linker.cmake")
 
 if (APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    if (ENABLE_SWIFT)
-        set(CMAKE_OSX_DEPLOYMENT_TARGET 15.0)
-    else()
-        set(CMAKE_OSX_DEPLOYMENT_TARGET 14.0)
-    endif()
+    set(CMAKE_OSX_DEPLOYMENT_TARGET 14.0)
 endif()
 
-# Pass additional information to vcpkg toolchain files if we are using vcpkg.
+# Pass additional information to vcpkg if we are using it.
 if (CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg.cmake$")
     set(CMAKE_PROJECT_ladybird_INCLUDE_BEFORE "Meta/CMake/vcpkg/generate_vcpkg_toolchain_variables.cmake")
 endif()
@@ -28,10 +24,10 @@ if (APPLE AND NOT CMAKE_OSX_SYSROOT)
 endif()
 
 project(ladybird
-        VERSION 0.1.0
-        LANGUAGES C CXX
-        DESCRIPTION "Ladybird Web Browser"
-        HOMEPAGE_URL "https://ladybird.org"
+    VERSION 0.1.0
+    LANGUAGES C CXX
+    DESCRIPTION "Ladybird Web Browser"
+    HOMEPAGE_URL "https://ladybird.org"
 )
 
 if (ANDROID OR IOS)
@@ -40,39 +36,102 @@ endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Ensure that when single-value arguments are passed to `cmake_parse_arguments()`
+# with no or empty string arguments, they are still defined.
+if (POLICY CMP0174)
+    cmake_policy(SET CMP0174 NEW)
+endif()
+
 set(LADYBIRD_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 list(APPEND CMAKE_MODULE_PATH "${LADYBIRD_SOURCE_DIR}/Meta/CMake")
 
-include(UI/cmake/EnableLagom.cmake)
-include(lagom_options NO_POLICY_SCOPE)
-include(lagom_compile_options)
+include(compile_options)
+include(check_for_dependencies)
+include(cmake_options)
+include(ladybird_helper_processes)
 
-if (HAIKU)
-    # Haiku needs some extra compile definitions to make important stuff in its headers available.
-    add_compile_definitions(_DEFAULT_SOURCE)
-    add_compile_definitions(_GNU_SOURCE)
-    add_compile_definitions(__USE_GNU)
+if(ENABLE_ALL_THE_DEBUG_MACROS)
+    include(all_the_debug_macros)
 endif()
 
-add_cxx_compile_options(-Wno-expansion-to-defined)
-add_cxx_compile_options(-Wno-user-defined-literals)
-
-if (ANDROID AND ENABLE_QT)
-    message(STATUS "Disabling Qt for Android")
-    set(ENABLE_QT OFF CACHE BOOL "" FORCE)
+if (ENABLE_LAGOM_CCACHE)
+    include(setup_ccache)
 endif()
 
-if (ENABLE_QT AND ENABLE_GUI_TARGETS)
-    set(CMAKE_AUTOMOC ON)
-    set(CMAKE_AUTORCC ON)
-    set(CMAKE_AUTOUIC ON)
-    find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
+if (ENABLE_FUZZERS_LIBFUZZER OR ENABLE_FUZZERS_OSSFUZZ)
+    set(ENABLE_FUZZERS ON)
 endif()
 
-# We need to find OpenSSL in order to link it explicitly with all targets.
-find_package(OpenSSL REQUIRED)
+if (ENABLE_COMPILETIME_FORMAT_CHECK)
+    add_compile_definitions(ENABLE_COMPILETIME_FORMAT_CHECK)
+endif()
 
-include(CTest) # for BUILD_TESTING option, default ON
+add_library(JSClangPlugin INTERFACE)
+add_library(GenericClangPlugin INTERFACE)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang$")
+    if (ENABLE_FUZZERS_LIBFUZZER)
+        add_cxx_compile_options(-fsanitize=fuzzer)
+        set(LINKER_FLAGS "${LINKER_FLAGS} -fsanitize=fuzzer")
+    endif()
+
+    # Vanilla host builds only for building the clang plugins
+    if (ENABLE_CLANG_PLUGINS AND NOT CROSS_COMPILING AND NOT ENABLE_FUZZERS AND NOT ENABLE_COMPILER_EXPLORER_BUILD)
+        add_subdirectory(Meta/ClangPlugins)
+        depend_on_clang_plugin(JSClangPlugin LibJSGCClangPlugin)
+        depend_on_clang_plugin(GenericClangPlugin LambdaCaptureClangPlugin)
+    endif()
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if (ENABLE_FUZZERS_LIBFUZZER)
+        message(FATAL_ERROR
+            "Fuzzer Sanitizer (-fsanitize=fuzzer) is only supported for Fuzzer targets with LLVM. "
+            "Reconfigure CMake with -DCMAKE_C_COMPILER and -DCMAKE_CXX_COMPILER pointing to a clang-based toolchain "
+     "or build binaries without built-in fuzzing support by setting -DENABLE_FUZZERS instead."
+        )
+    endif()
+endif()
+
+# These are here to support Fuzzili builds further down the directory stack
+set(ORIGINAL_CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+set(ORIGINAL_CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+set(ORIGINAL_CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS}")
+
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${LINKER_FLAGS}")
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${LINKER_FLAGS}")
+set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} ${LINKER_FLAGS}")
+
+include_directories(${LADYBIRD_SOURCE_DIR})
+include_directories(Libraries)
+include_directories(Services)
+include_directories(${CMAKE_BINARY_DIR})
+include_directories(${CMAKE_BINARY_DIR}/Libraries)
+include_directories(${CMAKE_BINARY_DIR}/Services)
+
+include(lagom_install)
+
+include(rust_crate)
+include(targets)
+
+# Plugins need to be installed in order to be used by non-lagom builds
+add_lagom_library_install_rules(GenericClangPlugin)
+add_lagom_library_install_rules(JSClangPlugin)
+
+add_subdirectory(AK)
+add_subdirectory(Libraries)
+
+if (ENABLE_FUZZERS)
+    add_subdirectory(Meta/Fuzzers)
+endif()
+
+# No utilities or tests in these configs
+if (NOT (ENABLE_FUZZERS OR ENABLE_COMPILER_EXPLORER_BUILD OR ANDROID OR IOS))
+    add_subdirectory(Utilities)
+
+    include(CTest)
+    if (BUILD_TESTING)
+        add_subdirectory(Tests)
+    endif()
+endif()
 
 if (ENABLE_GUI_TARGETS)
     add_subdirectory(Services)
@@ -80,14 +139,11 @@ if (ENABLE_GUI_TARGETS)
 endif()
 
 add_custom_target(lint-shell-scripts
-    COMMAND "${ladybird_SOURCE_DIR}/Meta/lint-shell-scripts.sh"
+    COMMAND "${ladybird_SOURCE_DIR}/Meta/Linters/lint_shell_scripts.sh"
     USES_TERMINAL
 )
 
-find_package(Python3 COMPONENTS Interpreter)
-if (Python3_FOUND)
-    add_custom_target(check-style
-        COMMAND ${Python3_EXECUTABLE} "${ladybird_SOURCE_DIR}/Meta/check-style.py"
-        USES_TERMINAL
-    )
-endif()
+add_custom_target(check-style
+    COMMAND ${Python3_EXECUTABLE} "${ladybird_SOURCE_DIR}/Meta/Linters/check_style.py"
+    USES_TERMINAL
+)

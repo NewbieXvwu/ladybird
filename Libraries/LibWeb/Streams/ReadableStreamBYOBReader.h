@@ -11,16 +11,13 @@
 #include <AK/Function.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Bindings/ReadableStreamBYOBReader.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Streams/ReadableStreamGenericReader.h>
+#include <LibWeb/WebIDL/Buffers.h>
 #include <LibWeb/WebIDL/Types.h>
 
 namespace Web::Streams {
-
-// https://streams.spec.whatwg.org/#dictdef-readablestreambyobreaderreadoptions
-struct ReadableStreamBYOBReaderReadOptions {
-    WebIDL::UnsignedLongLong min = 1;
-};
 
 // https://streams.spec.whatwg.org/#read-into-request
 class ReadIntoRequest : public JS::Cell {
@@ -51,7 +48,7 @@ public:
 
     virtual ~ReadableStreamBYOBReader() override = default;
 
-    GC::Ref<WebIDL::Promise> read(GC::Root<WebIDL::ArrayBufferView>&, ReadableStreamBYOBReaderReadOptions options = {});
+    GC::Ref<WebIDL::Promise> read(WebIDL::ArrayBufferView, Bindings::ReadableStreamBYOBReaderReadOptions options = {});
 
     void release_lock();
 

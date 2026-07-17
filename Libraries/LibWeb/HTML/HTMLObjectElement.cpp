@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGfx/Bitmap.h>
-#include <LibWeb/Bindings/HTMLObjectElementPrototype.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibWeb/Bindings/HTMLObjectElement.h>
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/Invalidation/EmbeddedContentInvalidator.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
@@ -18,15 +19,19 @@
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
+#include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/HTMLObjectElement.h>
 #include <LibWeb/HTML/ImageRequest.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Numbers.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Layout/ImageBox.h>
 #include <LibWeb/Layout/NavigableContainerViewport.h>
 #include <LibWeb/Loader/ResourceLoader.h>
@@ -76,12 +81,21 @@ void HTMLObjectElement::initialize(JS::Realm& realm)
 void HTMLObjectElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    image_provider_visit_edges(visitor);
     visitor.visit(m_resource_request);
     visitor.visit(m_document_observer);
 }
 
-void HTMLObjectElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const&, Optional<FlyString> const&)
+void HTMLObjectElement::adopted_from(DOM::Document& old_document)
+{
+    Base::adopted_from(old_document);
+
+    for (auto& delayer : m_document_load_event_delayer_for_object_representation_task)
+        delayer = DOM::DocumentLoadEventDelayer { document() };
+    for (auto& delayer : m_document_load_event_delayer_for_resource_load)
+        delayer = DOM::DocumentLoadEventDelayer { document() };
+}
+
+void HTMLObjectElement::form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const&, Optional<Utf16String> const&, Optional<Utf16FlyString> const&)
 {
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-object-element
     // Whenever one of the following conditions occur:
@@ -103,7 +117,7 @@ void HTMLObjectElement::form_associated_element_was_removed(DOM::Node*)
     destroy_the_child_navigable();
 }
 
-bool HTMLObjectElement::is_presentational_hint(FlyString const& name) const
+bool HTMLObjectElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -117,56 +131,62 @@ bool HTMLObjectElement::is_presentational_hint(FlyString const& name) const
         HTML::AttributeNames::width);
 }
 
-void HTMLObjectElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void HTMLObjectElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
-    for_each_attribute([&](auto& name, auto& value) {
+    Base::apply_presentational_hints(properties);
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == HTML::AttributeNames::align) {
-            if (value.equals_ignoring_ascii_case("center"sv))
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::Center));
-            else if (value.equals_ignoring_ascii_case("middle"sv))
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::Middle));
+            // https://html.spec.whatwg.org/multipage/rendering.html#attributes-for-embedded-content-and-images
+            // When an embed, iframe, img, or object element, or an input element whose type attribute is in the Image Button state,
+            // has an align attribute whose value is an ASCII case-insensitive match for the string "center" or the string "middle",
+            // the user agent is expected to act as if the element's 'vertical-align' property was set to a value that aligns the
+            // vertical middle of the element with the parent element's baseline.
+            // FIXME: This should use legacy baseline-middle alignment instead of CSS vertical-align: middle,
+            //        as Firefox and Chrome do with engine-specific legacy values.
+            if (value.equals_ignoring_ascii_case(u"center"sv) || value.equals_ignoring_ascii_case(u"middle"sv))
+                properties.append({ .property_id = CSS::PropertyID::VerticalAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Middle) });
         } else if (name == HTML::AttributeNames::border) {
             if (auto parsed_value = parse_non_negative_integer(value); parsed_value.has_value()) {
                 auto width_style_value = CSS::LengthStyleValue::create(CSS::Length::make_px(*parsed_value));
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderTopWidth, width_style_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderRightWidth, width_style_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomWidth, width_style_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderLeftWidth, width_style_value);
+                properties.append({ .property_id = CSS::PropertyID::BorderTopWidth, .value = width_style_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderRightWidth, .value = width_style_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderBottomWidth, .value = width_style_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderLeftWidth, .value = width_style_value });
 
                 auto border_style_value = CSS::KeywordStyleValue::create(CSS::Keyword::Solid);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderTopStyle, border_style_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderRightStyle, border_style_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomStyle, border_style_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderLeftStyle, border_style_value);
+                properties.append({ .property_id = CSS::PropertyID::BorderTopStyle, .value = border_style_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderRightStyle, .value = border_style_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderBottomStyle, .value = border_style_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderLeftStyle, .value = border_style_value });
             }
         }
         // https://html.spec.whatwg.org/multipage/rendering.html#attributes-for-embedded-content-and-images:maps-to-the-dimension-property-3
         else if (name == HTML::AttributeNames::height) {
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Height, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::Height, .value = *parsed_value });
             }
         }
         // https://html.spec.whatwg.org/multipage/rendering.html#attributes-for-embedded-content-and-images:maps-to-the-dimension-property
         else if (name == HTML::AttributeNames::hspace) {
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginLeft, *parsed_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginRight, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::MarginLeft, .value = *parsed_value });
+                properties.append({ .property_id = CSS::PropertyID::MarginRight, .value = *parsed_value });
             }
         } else if (name == HTML::AttributeNames::vspace) {
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginTop, *parsed_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginBottom, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::MarginTop, .value = *parsed_value });
+                properties.append({ .property_id = CSS::PropertyID::MarginBottom, .value = *parsed_value });
             }
         } else if (name == HTML::AttributeNames::width) {
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Width, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::Width, .value = *parsed_value });
             }
         }
     });
 }
 
 // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#attr-object-data
-String HTMLObjectElement::data() const
+Utf16String HTMLObjectElement::data() const
 {
     auto data = get_attribute(HTML::AttributeNames::data);
     if (!data.has_value())
@@ -176,19 +196,24 @@ String HTMLObjectElement::data() const
     if (!maybe_url.has_value())
         return {};
 
-    return maybe_url->to_string();
+    return utf16_string_from_url_ascii(maybe_url->to_string());
 }
 
-GC::Ptr<Layout::Node> HTMLObjectElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+void HTMLObjectElement::set_data(Utf16View data)
+{
+    set_attribute_value(HTML::AttributeNames::data, data);
+}
+
+RefPtr<Layout::Node> HTMLObjectElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
     switch (m_representation) {
     case Representation::Children:
-        return NavigableContainer::create_layout_node(move(style));
+        return NavigableContainer::create_layout_node(style);
     case Representation::ContentNavigable:
-        return heap().allocate<Layout::NavigableContainerViewport>(document(), *this, move(style));
+        return make_ref_counted<Layout::NavigableContainerViewport>(document(), *this, style);
     case Representation::Image:
         if (image_data())
-            return heap().allocate<Layout::ImageBox>(document(), *this, move(style), *this);
+            return make_ref_counted<Layout::ImageBox>(document(), *this, style, *this);
         break;
     default:
         break;
@@ -197,7 +222,7 @@ GC::Ptr<Layout::Node> HTMLObjectElement::create_layout_node(GC::Ref<CSS::Compute
     return nullptr;
 }
 
-void HTMLObjectElement::adjust_computed_style(CSS::ComputedProperties& style)
+void HTMLObjectElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
 {
     // https://drafts.csswg.org/css-display-3/#unbox
     if (style.display().is_contents())
@@ -309,11 +334,7 @@ void HTMLObjectElement::queue_element_task_to_run_object_representation_steps()
             };
 
             // 5. Fetch request.
-            auto result = Fetch::Fetching::fetch(realm, request, Fetch::Infrastructure::FetchAlgorithms::create(vm, move(fetch_algorithms_input)));
-            if (result.is_error()) {
-                resource_did_fail();
-                return;
-            }
+            (void)Fetch::Fetching::fetch(realm, request, Fetch::Infrastructure::FetchAlgorithms::create(vm, move(fetch_algorithms_input)));
 
             //    Fetching the resource must delay the load event of the element's node document until the task that is
             //    queued by the networking task source once the resource has been fetched (defined next) has been run.
@@ -353,13 +374,13 @@ void HTMLObjectElement::resource_did_load(Fetch::Infrastructure::Response const&
     // 1. Let the resource type be unknown.
     Optional<MimeSniff::MimeType> resource_type;
 
-    // FIXME: 3. If the user agent is configured to strictly obey Content-Type headers for this resource, and the resource has
+    // FIXME: 2. If the user agent is configured to strictly obey Content-Type headers for this resource, and the resource has
     //           associated Content-Type metadata, then let the resource type be the type specified in the resource's Content-Type
     //           metadata, and jump to the step below labeled handler.
 
     // 3. Run the appropriate set of steps from the following list:
     // -> If the resource has associated Content-Type metadata
-    if (auto content_type = response.header_list()->extract_mime_type(); content_type.has_value()) {
+    if (auto content_type = Fetch::Infrastructure::extract_mime_type(response.header_list()); content_type.has_value()) {
         // 1. Let binary be false.
         bool binary = false;
 
@@ -394,7 +415,7 @@ void HTMLObjectElement::resource_did_load(Fetch::Infrastructure::Response const&
         else if (auto type = this->type(); !type.is_empty() && (type != "application/octet-stream"sv)) {
             // 1. If the attribute's value is a type that starts with "image/" that is not also an XML MIME type, then
             //    let the resource type be the type specified in that type attribute.
-            if (type.starts_with_bytes("image/"sv)) {
+            if (type.starts_with(u"image/"sv)) {
                 auto parsed_type = MimeSniff::MimeType::parse(type);
 
                 if (parsed_type.has_value() && !parsed_type->is_xml())
@@ -436,8 +457,7 @@ void HTMLObjectElement::run_object_representation_handler_steps(Fetch::Infrastru
     if (can_load_document_with_type(resource_type) && (resource_type.is_xml() || !resource_type.is_image())) {
         // If the object element's content navigable is null, then create a new child navigable for the element.
         if (!m_content_navigable && in_a_document_tree()) {
-            MUST(create_new_child_navigable());
-            set_content_navigable_has_session_history_entry_and_ready_for_navigation();
+            create_new_child_navigable();
         }
 
         // NOTE: Creating a new nested browsing context can fail if the document is not attached to a browsing context
@@ -449,7 +469,7 @@ void HTMLObjectElement::run_object_representation_handler_steps(Fetch::Infrastru
         // If response's URL does not match about:blank, then navigate the element's content navigable to response's URL
         // using the element's node document, with historyHandling set to "replace".
         if (response.url().has_value() && !url_matches_about_blank(*response.url())) {
-            MUST(m_content_navigable->navigate({
+            MUST(as<HTML::LocalNavigable>(*m_content_navigable).navigate({
                 .url = *response.url(),
                 .source_document = document(),
                 .history_handling = Bindings::NavigationHistoryBehavior::Replace,
@@ -517,7 +537,7 @@ void HTMLObjectElement::run_object_representation_fallback_steps()
 void HTMLObjectElement::load_image()
 {
     // FIXME: This currently reloads the image instead of reusing the resource we've already downloaded.
-    auto data = get_attribute_value(HTML::AttributeNames::data);
+    auto data = get_attribute_value_view(HTML::AttributeNames::data).value_or({});
     auto url = document().encoding_parse_url(data);
 
     if (!url.has_value()) {
@@ -555,7 +575,7 @@ void HTMLObjectElement::update_layout_and_child_objects(Representation represent
     }
 
     m_representation = representation;
-    invalidate_style(DOM::StyleInvalidationReason::HTMLObjectElementUpdateLayoutAndChildObjects);
+    CSS::Invalidation::invalidate_style_after_object_representation_change(*this);
 
     if (auto parent_element = this->parent_element())
         parent_element->set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::HTMLObjectElementUpdateLayoutAndChildObjects);
@@ -573,44 +593,6 @@ GC::Ptr<DecodedImageData> HTMLObjectElement::image_data() const
     if (!m_resource_request)
         return nullptr;
     return m_resource_request->image_data();
-}
-
-bool HTMLObjectElement::is_image_available() const
-{
-    return image_data() != nullptr;
-}
-
-Optional<CSSPixels> HTMLObjectElement::intrinsic_width() const
-{
-    if (auto image_data = this->image_data())
-        return image_data->intrinsic_width();
-    return {};
-}
-
-Optional<CSSPixels> HTMLObjectElement::intrinsic_height() const
-{
-    if (auto image_data = this->image_data())
-        return image_data->intrinsic_height();
-    return {};
-}
-
-Optional<CSSPixelFraction> HTMLObjectElement::intrinsic_aspect_ratio() const
-{
-    if (auto image_data = this->image_data())
-        return image_data->intrinsic_aspect_ratio();
-    return {};
-}
-
-RefPtr<Gfx::ImmutableBitmap> HTMLObjectElement::current_image_bitmap_sized(Gfx::IntSize size) const
-{
-    if (auto image_data = this->image_data())
-        return image_data->bitmap(0, size);
-    return nullptr;
-}
-
-void HTMLObjectElement::set_visible_in_viewport(bool)
-{
-    // FIXME: Loosen grip on image data when it's not visible, e.g via volatile memory.
 }
 
 }

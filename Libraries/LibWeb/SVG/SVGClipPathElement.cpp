@@ -5,7 +5,8 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGClipPathElementPrototype.h>
+#include <LibWeb/Bindings/SVGClipPathElement.h>
+#include <LibWeb/Layout/Node.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/SVGClipPathElement.h>
 
@@ -28,15 +29,15 @@ void SVGClipPathElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void SVGClipPathElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGClipPathElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
     if (name == AttributeNames::clipPathUnits)
-        m_clip_path_units = AttributeParser::parse_units(value.value_or(String {}));
+        m_clip_path_units = AttributeParser::parse_units(value.value_or({}));
 }
 
-GC::Ptr<Layout::Node> SVGClipPathElement::create_layout_node(GC::Ref<CSS::ComputedProperties>)
+RefPtr<Layout::Node> SVGClipPathElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const>)
 {
     // Clip paths are handled as a special case in the TreeBuilder.
     return nullptr;

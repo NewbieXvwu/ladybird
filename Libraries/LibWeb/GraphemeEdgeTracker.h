@@ -6,7 +6,10 @@
 
 #pragma once
 
+#include <AK/Forward.h>
 #include <AK/IterationDecision.h>
+#include <AK/Optional.h>
+#include <LibWeb/Forward.h>
 
 namespace Web {
 
@@ -73,5 +76,8 @@ private:
     float m_width_to_left_edge { 0 };
     float m_width_to_right_edge { 0 };
 };
+
+size_t find_line_start(Utf16View const&, size_t offset);
+size_t find_line_end(Utf16View const&, size_t offset);
 
 }

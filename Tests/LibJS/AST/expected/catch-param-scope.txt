@@ -1,0 +1,137 @@
+Program (script) @2:1
+├─ FunctionDeclaration "basic_catch" @2:1
+│  └─ body
+│     └─ FunctionBody @3:5
+│        └─ TryStatement @3:5
+│           ├─ block
+│           │  └─ BlockStatement @3:9
+│           │     └─ ThrowStatement @4:9
+│           │        └─ NumericLiteral 1 @4:15
+│           └─ handler
+│              └─ CatchClause @5:7
+│                 ├─ parameter
+│                 │  └─ Identifier "err" [variable:0] @5:14
+│                 └─ BlockStatement @5:19
+│                    └─ ReturnStatement @6:9
+│                       └─ Identifier "err" [variable:0] @6:16
+├─ FunctionDeclaration "catch_destruct" @11:1
+│  └─ body
+│     └─ FunctionBody @12:5
+│        └─ TryStatement @12:5
+│           ├─ block
+│           │  └─ BlockStatement @12:9
+│           │     └─ ThrowStatement @13:9
+│           │        └─ ObjectExpression @13:15
+│           │           ├─ ObjectProperty @13:15
+│           │           │  ├─ StringLiteral "msg" @13:17
+│           │           │  └─ StringLiteral "oops" @13:28
+│           │           └─ ObjectProperty @13:15
+│           │              ├─ StringLiteral "code" @13:30
+│           │              └─ NumericLiteral 42 @13:36
+│           └─ handler
+│              └─ CatchClause @14:7
+│                 ├─ parameter
+│                 │  └─ BindingPattern (object)
+│                 │     ├─ entry
+│                 │     │  └─ name
+│                 │     │     └─ Identifier "msg" [variable:0] @14:16
+│                 │     └─ entry
+│                 │        └─ name
+│                 │           └─ Identifier "code" [variable:1] @14:21
+│                 └─ BlockStatement @14:29
+│                    └─ ReturnStatement @15:9
+│                       └─ BinaryExpression (+) @15:20
+│                          ├─ Identifier "msg" [variable:0] @15:16
+│                          └─ Identifier "code" [variable:1] @15:22
+├─ FunctionDeclaration "catch_shadow" @20:1
+│  └─ body
+│     └─ FunctionBody @21:5
+│        ├─ VariableDeclaration (let) @21:5
+│        │  └─ VariableDeclarator @21:5
+│        │     ├─ Identifier "err" [variable:1] (let) @21:9
+│        │     └─ StringLiteral "outer" @21:22
+│        ├─ TryStatement @22:5
+│        │  ├─ block
+│        │  │  └─ BlockStatement @22:9
+│        │  │     └─ ThrowStatement @23:9
+│        │  │        └─ StringLiteral "inner" @23:22
+│        │  └─ handler
+│        │     └─ CatchClause @24:7
+│        │        ├─ parameter
+│        │        │  └─ Identifier "err" [variable:0] @24:14
+│        │        └─ BlockStatement @24:19
+│        │           └─ ExpressionStatement @25:9
+│        │              └─ Identifier "err" [variable:0] @25:9
+│        └─ ReturnStatement @27:5
+│           └─ Identifier "err" [variable:1] (let) @27:12
+├─ FunctionDeclaration "catch_no_param" @31:1
+│  └─ body
+│     └─ FunctionBody @32:5
+│        └─ TryStatement @32:5
+│           ├─ block
+│           │  └─ BlockStatement @32:9
+│           │     └─ ThrowStatement @33:9
+│           │        └─ NumericLiteral 1 @33:15
+│           └─ handler
+│              └─ CatchClause @34:7
+│                 └─ BlockStatement @34:13
+│                    └─ ReturnStatement @35:9
+│                       └─ NumericLiteral 2 @35:16
+├─ FunctionDeclaration "multiple_catch_destruct" @41:1
+│  └─ body
+│     └─ FunctionBody @42:5
+│        └─ TryStatement @42:5
+│           ├─ block
+│           │  └─ BlockStatement @42:9
+│           │     ├─ TryStatement @43:9
+│           │     │  ├─ block
+│           │     │  │  └─ BlockStatement @43:13
+│           │     │  │     └─ ThrowStatement @44:13
+│           │     │  │        └─ ObjectExpression @44:19
+│           │     │  │           └─ ObjectProperty @44:19
+│           │     │  │              ├─ StringLiteral "a" @44:21
+│           │     │  │              └─ NumericLiteral 1 @44:24
+│           │     │  └─ handler
+│           │     │     └─ CatchClause @45:11
+│           │     │        ├─ parameter
+│           │     │        │  └─ BindingPattern (object)
+│           │     │        │     └─ entry
+│           │     │        │        └─ name
+│           │     │        │           └─ Identifier "a" [variable:0] @45:20
+│           │     │        └─ BlockStatement @45:25
+│           │     │           └─ ExpressionStatement @46:13
+│           │     │              └─ Identifier "a" [variable:0] @46:13
+│           │     └─ ThrowStatement @48:9
+│           │        └─ ObjectExpression @48:15
+│           │           └─ ObjectProperty @48:15
+│           │              ├─ StringLiteral "b" @48:17
+│           │              └─ NumericLiteral 2 @48:20
+│           └─ handler
+│              └─ CatchClause @49:7
+│                 ├─ parameter
+│                 │  └─ BindingPattern (object)
+│                 │     └─ entry
+│                 │        └─ name
+│                 │           └─ Identifier "b" [variable:1] @49:16
+│                 └─ BlockStatement @49:21
+│                    └─ ReturnStatement @50:9
+│                       └─ Identifier "b" [variable:1] @50:16
+└─ FunctionDeclaration "catch_with_eval" [direct-eval] [uses-this] [might-need-arguments] @55:1
+   └─ body
+      └─ FunctionBody @56:5
+         └─ TryStatement @56:5
+            ├─ block
+            │  └─ BlockStatement @56:9
+            │     └─ ThrowStatement @57:9
+            │        └─ NumericLiteral 1 @57:15
+            └─ handler
+               └─ CatchClause @58:7
+                  ├─ parameter
+                  │  └─ Identifier "err" @58:14
+                  └─ BlockStatement @58:19
+                     ├─ ExpressionStatement @59:9
+                     │  └─ CallExpression @59:13
+                     │     ├─ Identifier "eval" [in-eval-scope] @59:9
+                     │     └─ StringLiteral "" @59:16
+                     └─ ReturnStatement @60:9
+                        └─ Identifier "err" [in-eval-scope] @60:16

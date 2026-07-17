@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/SaturatingMath.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/CountersSet.h>
 #include <LibWeb/DOM/AbstractElement.h>
@@ -19,7 +20,7 @@ void CountersSet::visit_edges(GC::Cell::Visitor& visitor)
 }
 
 // https://drafts.csswg.org/css-lists-3/#instantiate-counter
-Counter& CountersSet::instantiate_a_counter(FlyString name, DOM::AbstractElement const& element, bool reversed, Optional<CounterValue> value)
+Counter& CountersSet::instantiate_a_counter(Utf16FlyString name, DOM::AbstractElement const& element, bool reversed, Optional<CounterValue> value)
 {
     // 1. Let counters be element’s CSS counters set.
 
@@ -53,7 +54,7 @@ Counter& CountersSet::instantiate_a_counter(FlyString name, DOM::AbstractElement
 }
 
 // https://drafts.csswg.org/css-lists-3/#propdef-counter-set
-void CountersSet::set_a_counter(FlyString name, DOM::AbstractElement const& element, CounterValue value)
+void CountersSet::set_a_counter(Utf16FlyString name, DOM::AbstractElement const& element, CounterValue value)
 {
     if (auto existing_counter = last_counter_with_name(name); existing_counter.has_value()) {
         existing_counter->value = value;
@@ -68,12 +69,12 @@ void CountersSet::set_a_counter(FlyString name, DOM::AbstractElement const& elem
 }
 
 // https://drafts.csswg.org/css-lists-3/#propdef-counter-increment
-void CountersSet::increment_a_counter(FlyString name, DOM::AbstractElement const& element, CounterValue amount)
+void CountersSet::increment_a_counter(Utf16FlyString name, DOM::AbstractElement const& element, CounterValue amount)
 {
     if (auto existing_counter = last_counter_with_name(name); existing_counter.has_value()) {
         // FIXME: How should we handle existing counters with no value? Can that happen?
         VERIFY(existing_counter->value.has_value());
-        existing_counter->value->saturating_add(amount.value());
+        *existing_counter->value = saturating_add(*existing_counter->value, amount);
         return;
     }
 
@@ -81,10 +82,10 @@ void CountersSet::increment_a_counter(FlyString name, DOM::AbstractElement const
     // a new counter of the given name with a starting value of 0 before setting or incrementing its value.
     // https://drafts.csswg.org/css-lists-3/#valdef-counter-set-counter-name-integer
     auto& counter = instantiate_a_counter(name, element, false, 0);
-    counter.value->saturating_add(amount.value());
+    counter.value = saturating_add(*counter.value, amount);
 }
 
-Optional<Counter&> CountersSet::last_counter_with_name(FlyString const& name)
+Optional<Counter&> CountersSet::last_counter_with_name(Utf16FlyString const& name)
 {
     for (auto& counter : m_counters.in_reverse()) {
         if (counter.name == name)
@@ -93,7 +94,7 @@ Optional<Counter&> CountersSet::last_counter_with_name(FlyString const& name)
     return {};
 }
 
-Optional<Counter&> CountersSet::counter_with_same_name_and_creator(FlyString const& name, DOM::AbstractElement const& element)
+Optional<Counter&> CountersSet::counter_with_same_name_and_creator(Utf16FlyString const& name, DOM::AbstractElement const& element)
 {
     return m_counters.first_matching([&](auto& it) {
         return it.name == name && it.originating_element == element;
@@ -109,7 +110,7 @@ void CountersSet::append_copy(Counter const& counter)
 void resolve_counters(DOM::AbstractElement& element_reference)
 {
     // Resolving counter values on a given element is a multi-step process:
-    auto const& style = *element_reference.computed_properties();
+    auto const& style = *element_reference.computed_values();
 
     // 1. Existing counters are inherited from previous elements.
     inherit_counters(element_reference);
@@ -122,8 +123,7 @@ void resolve_counters(DOM::AbstractElement& element_reference)
         return;
 
     // 2. New counters are instantiated (counter-reset).
-    auto counter_reset = style.counter_data(PropertyID::CounterReset);
-    for (auto const& counter : counter_reset)
+    for (auto const& counter : style.counter_reset())
         element_reference.ensure_counters_set().instantiate_a_counter(counter.name, element_reference, counter.is_reversed, counter.value);
 
     // FIXME: Take style containment into account
@@ -133,13 +133,11 @@ void resolve_counters(DOM::AbstractElement& element_reference)
     //    new counter.
 
     // 3. Counter values are incremented (counter-increment).
-    auto counter_increment = style.counter_data(PropertyID::CounterIncrement);
-    for (auto const& counter : counter_increment)
+    for (auto const& counter : style.counter_increment())
         element_reference.ensure_counters_set().increment_a_counter(counter.name, element_reference, *counter.value);
 
     // 4. Counter values are explicitly set (counter-set).
-    auto counter_set = style.counter_data(PropertyID::CounterSet);
-    for (auto const& counter : counter_set)
+    for (auto const& counter : style.counter_set())
         element_reference.ensure_counters_set().set_a_counter(counter.name, element_reference, *counter.value);
 
     // 5. Counter values are used (counter()/counters()).
@@ -209,7 +207,7 @@ String CountersSet::dump() const
     StringBuilder builder;
     builder.append("{\n"sv);
     for (auto const& counter : m_counters) {
-        builder.appendff("    {} ({}) = {}\n", counter.name, counter.originating_element.debug_description(), counter.value);
+        builder.appendff("    {} ({}) = {}\n", MUST(counter.name.view().to_utf8()), counter.originating_element.debug_description(), counter.value);
     }
     builder.append('}');
     return builder.to_string_without_validation();

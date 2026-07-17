@@ -8,43 +8,73 @@
 
 #include <AK/Badge.h>
 #include <AK/Function.h>
-#include <AK/IntrusiveList.h>
+#include <AK/HashTable.h>
 #include <AK/Noncopyable.h>
 #include <AK/NonnullOwnPtr.h>
+#include <AK/RefPtr.h>
 #include <AK/StackInfo.h>
-#include <AK/Swift.h>
+#include <AK/String.h>
 #include <AK/Types.h>
 #include <AK/Vector.h>
 #include <LibCore/Forward.h>
 #include <LibGC/Cell.h>
 #include <LibGC/CellAllocator.h>
+#include <LibGC/ConservativeHashMap.h>
+#include <LibGC/ConservativeHashTable.h>
+#include <LibGC/ConservativeRangeProvider.h>
 #include <LibGC/ConservativeVector.h>
+#include <LibGC/CrossHeapMember.h>
 #include <LibGC/Forward.h>
 #include <LibGC/HeapRoot.h>
-#include <LibGC/Internals.h>
+#include <LibGC/IdleCollectionPolicy.h>
 #include <LibGC/Root.h>
 #include <LibGC/RootHashMap.h>
+#include <LibGC/RootHashTable.h>
 #include <LibGC/RootVector.h>
+#include <LibGC/WeakBlock.h>
 #include <LibGC/WeakContainer.h>
 
 namespace GC {
 
-class GC_API Heap : public HeapBase {
+struct StackFrameInfo {
+    String label;
+    size_t size_bytes { 0 };
+};
+
+class GC_API Heap {
     AK_MAKE_NONCOPYABLE(Heap);
     AK_MAKE_NONMOVABLE(Heap);
 
+    friend class HeapGroup;
+
 public:
-    explicit Heap(void* private_data, AK::Function<void(HashMap<Cell*, GC::HeapRoot>&)> gather_embedder_roots);
+    enum class BecomeProcessDefault {
+        No,
+        Yes,
+    };
+
+    explicit Heap(AK::Function<void(HashMap<Cell*, GC::HeapRoot>&)> gather_embedder_roots, BecomeProcessDefault = BecomeProcessDefault::Yes);
     ~Heap();
+
+    static Heap& the();
+    static void set_default_heap_for_testing(Heap&);
 
     template<typename T, typename... Args>
     Ref<T> allocate(Args&&... args)
     {
+        VERIFY(!m_collecting_garbage);
         auto* memory = allocate_cell<T>();
         defer_gc();
         new (memory) T(forward<Args>(args)...);
+        auto* cell = static_cast<T*>(memory);
+        // Cells allocated during incremental sweep must be marked so they
+        // survive until the next GC cycle clears and re-establishes marks.
+        if (m_incremental_sweep_active) {
+            cell->set_marked(true);
+            m_cells_allocated_during_sweep.append(cell);
+        }
         undefer_gc();
-        return *static_cast<T*>(memory);
+        return *cell;
     }
 
     enum class CollectionType {
@@ -56,6 +86,8 @@ public:
     AK::JsonObject dump_graph();
 
     bool should_collect_on_every_allocation() const { return m_should_collect_on_every_allocation; }
+
+    void set_incremental_sweep_enabled(bool enabled) { m_incremental_sweep_enabled = enabled; }
     void set_should_collect_on_every_allocation(bool b) { m_should_collect_on_every_allocation = b; }
 
     void did_create_root(Badge<RootImpl>, RootImpl&);
@@ -66,64 +98,96 @@ public:
 
     void did_create_root_hash_map(Badge<RootHashMapBase>, RootHashMapBase&);
     void did_destroy_root_hash_map(Badge<RootHashMapBase>, RootHashMapBase&);
+    void did_create_root_hash_table(Badge<RootHashTableBase>, RootHashTableBase&);
+    void did_destroy_root_hash_table(Badge<RootHashTableBase>, RootHashTableBase&);
 
+    void did_create_conservative_hash_map(Badge<ConservativeHashMapBase>, ConservativeHashMapBase&);
+    void did_destroy_conservative_hash_map(Badge<ConservativeHashMapBase>, ConservativeHashMapBase&);
+    void did_create_conservative_hash_table(Badge<ConservativeHashTableBase>, ConservativeHashTableBase&);
+    void did_destroy_conservative_hash_table(Badge<ConservativeHashTableBase>, ConservativeHashTableBase&);
     void did_create_conservative_vector(Badge<ConservativeVectorBase>, ConservativeVectorBase&);
     void did_destroy_conservative_vector(Badge<ConservativeVectorBase>, ConservativeVectorBase&);
+    void did_create_conservative_range_provider(Badge<ConservativeRangeProvider>, ConservativeRangeProvider&);
+    void did_destroy_conservative_range_provider(Badge<ConservativeRangeProvider>, ConservativeRangeProvider&);
+    void did_create_cross_heap_member(Badge<CrossHeapMemberBase>, CrossHeapMemberBase&);
+    void did_destroy_cross_heap_member(Badge<CrossHeapMemberBase>, CrossHeapMemberBase&);
 
     void did_create_weak_container(Badge<WeakContainer>, WeakContainer&);
     void did_destroy_weak_container(Badge<WeakContainer>, WeakContainer&);
 
+    void register_sweep_callback(AK::Function<void()>);
+
     void register_cell_allocator(Badge<CellAllocator>, CellAllocator&);
+    CellAllocator& cell_allocator_for(Badge<CellAllocatorDescriptorBase>, CellAllocatorDescriptorBase&);
 
     void uproot_cell(Cell* cell);
 
     bool is_gc_deferred() const { return m_gc_deferrals > 0; }
+    bool is_incremental_sweep_active() const { return m_incremental_sweep_active; }
+
+    void sweep_block(HeapBlock&);
+
+    bool is_live_heap_block(HeapBlock* block) const { return m_live_heap_blocks.contains(block); }
 
     void enqueue_post_gc_task(AK::Function<void()>);
 
+    WeakImpl* create_weak_impl(void*);
+
+    void did_allocate_external_memory(size_t);
+    void did_free_external_memory(size_t);
+
 private:
+    friend class CellAllocator;
+    friend class HeapBlock;
     friend class MarkingVisitor;
     friend class GraphConstructorVisitor;
     friend class DeferGC;
-    friend class ForeignCell;
 
     void defer_gc();
     void undefer_gc();
 
-    static bool cell_must_survive_garbage_collection(Cell const&);
+    void dump_allocators();
 
     template<typename T>
     Cell* allocate_cell()
     {
+        static_assert(requires { T::cell_allocator.for_heap(*this).allocate_cell(*this); }, "GC cell type must declare its own allocator using GC_DECLARE_ALLOCATOR(ClassName)");
+        static_assert(IsSame<T, typename decltype(T::cell_allocator)::CellType>,
+            "GC cell allocator type mismatch");
+
         will_allocate(sizeof(T));
-        if constexpr (requires { T::cell_allocator.allocator.get().allocate_cell(*this); }) {
-            if constexpr (IsSame<T, typename decltype(T::cell_allocator)::CellType>) {
-                return T::cell_allocator.allocator.get().allocate_cell(*this);
-            }
-        }
-        return allocator_for_size(sizeof(T)).allocate_cell(*this);
+        return T::cell_allocator.for_heap(*this).allocate_cell(*this);
     }
 
     void will_allocate(size_t);
+    void update_gc_bytes_threshold(size_t live_cell_bytes, size_t live_external_bytes);
 
     void find_min_and_max_block_addresses(FlatPtr& min_address, FlatPtr& max_address);
-    void gather_roots(HashMap<Cell*, HeapRoot>&);
-    void gather_conservative_roots(HashMap<Cell*, HeapRoot>&);
-    void gather_asan_fake_stack_roots(HashMap<FlatPtr, HeapRoot>&, FlatPtr, FlatPtr min_block_address, FlatPtr max_block_address);
+    enum class IncludeIncomingCrossHeapMembers {
+        No,
+        Yes,
+    };
+    void gather_roots(HashMap<Cell*, HeapRoot>&, Vector<StackFrameInfo>* out_stack_frames = nullptr, IncludeIncomingCrossHeapMembers = IncludeIncomingCrossHeapMembers::Yes);
+    static void mark_live_cells_across(ReadonlySpan<Heap* const>, HashMap<Cell*, HeapRoot> const& roots);
+    void run_post_mark_phases(bool report);
+    void gather_conservative_roots(HashMap<Cell*, HeapRoot>&, Vector<StackFrameInfo>* out_stack_frames = nullptr);
+    void gather_asan_fake_stack_roots(HashMap<FlatPtr, HeapRoot>&, FlatPtr, FlatPtr min_block_address, FlatPtr max_block_address, FlatPtr stack_reference, FlatPtr stack_top);
     void mark_live_cells(HashMap<Cell*, HeapRoot> const& live_cells);
     void finalize_unmarked_cells();
     void sweep_dead_cells(bool print_report, Core::ElapsedTimer const&);
+    void sweep_weak_blocks();
+    void run_post_gc_tasks();
 
-    ALWAYS_INLINE CellAllocator& allocator_for_size(size_t cell_size)
-    {
-        // FIXME: Use binary search?
-        for (auto& allocator : m_size_based_cell_allocators) {
-            if (allocator->cell_size() >= cell_size)
-                return *allocator;
-        }
-        dbgln("Cannot get CellAllocator for cell size {}, largest available is {}!", cell_size, m_size_based_cell_allocators.last()->cell_size());
-        VERIFY_NOT_REACHED();
-    }
+    bool sweep_next_block();
+    void start_incremental_sweep();
+    void finish_incremental_sweep();
+    void finish_pending_incremental_sweep();
+    void start_incremental_sweep_timer();
+    void stop_incremental_sweep_timer();
+    void sweep_on_timer();
+
+    void start_idle_gc_timer();
+    void idle_gc_on_timer();
 
     template<typename Callback>
     void for_each_block(Callback callback)
@@ -134,19 +198,25 @@ private:
         }
     }
 
-    static constexpr size_t GC_MIN_BYTES_THRESHOLD { 4 * 1024 * 1024 };
-    size_t m_gc_bytes_threshold { GC_MIN_BYTES_THRESHOLD };
+    size_t m_gc_bytes_threshold { 0 };
     size_t m_allocated_bytes_since_last_gc { 0 };
 
     bool m_should_collect_on_every_allocation { false };
 
-    Vector<NonnullOwnPtr<CellAllocator>> m_size_based_cell_allocators;
     CellAllocator::List m_all_cell_allocators;
+    HashMap<CellAllocatorDescriptorBase*, NonnullOwnPtr<CellAllocator>> m_cell_allocators_by_type;
 
     RootImpl::List m_roots;
     RootVectorBase::List m_root_vectors;
     RootHashMapBase::List m_root_hash_maps;
+    RootHashTableBase::List m_root_hash_tables;
+    ConservativeHashMapBase::List m_conservative_hash_maps;
+    ConservativeHashTableBase::List m_conservative_hash_tables;
     ConservativeVectorBase::List m_conservative_vectors;
+    ConservativeRangeProvider::List m_conservative_range_providers;
+    HashTable<CrossHeapMemberBase*> m_incoming_cross_heap_members;
+    HeapGroup* m_group { nullptr };
+    bool m_incremental_sweep_enabled { true };
     WeakContainer::List m_weak_containers;
 
     Vector<Ptr<Cell>> m_uprooted_cells;
@@ -159,7 +229,24 @@ private:
     AK::Function<void(HashMap<Cell*, GC::HeapRoot>&)> m_gather_embedder_roots;
 
     Vector<AK::Function<void()>> m_post_gc_tasks;
-} SWIFT_IMMORTAL_REFERENCE;
+    Vector<AK::Function<void()>> m_sweep_callbacks;
+
+    HashTable<HeapBlock*> m_live_heap_blocks;
+
+    WeakBlock::List m_usable_weak_blocks;
+    WeakBlock::List m_full_weak_blocks;
+
+    bool m_incremental_sweep_active { false };
+    size_t m_sweep_live_cell_bytes { 0 };
+    size_t m_sweep_live_external_bytes { 0 };
+    Vector<GC::Ptr<Cell>> m_cells_allocated_during_sweep;
+    CellAllocator::SweepList m_allocators_to_sweep;
+    RefPtr<Core::Timer> m_incremental_sweep_timer;
+
+    RefPtr<Core::Timer> m_idle_gc_timer;
+    u64 m_total_allocated_bytes { 0 };
+    IdleCollectionPolicy m_idle_collection_policy;
+};
 
 inline void Heap::did_create_root(Badge<RootImpl>, RootImpl& impl)
 {
@@ -197,6 +284,42 @@ inline void Heap::did_destroy_root_hash_map(Badge<RootHashMapBase>, RootHashMapB
     m_root_hash_maps.remove(hash_map);
 }
 
+inline void Heap::did_create_root_hash_table(Badge<RootHashTableBase>, RootHashTableBase& hash_table)
+{
+    VERIFY(!m_root_hash_tables.contains(hash_table));
+    m_root_hash_tables.append(hash_table);
+}
+
+inline void Heap::did_destroy_root_hash_table(Badge<RootHashTableBase>, RootHashTableBase& hash_table)
+{
+    VERIFY(m_root_hash_tables.contains(hash_table));
+    m_root_hash_tables.remove(hash_table);
+}
+
+inline void Heap::did_create_conservative_hash_map(Badge<ConservativeHashMapBase>, ConservativeHashMapBase& hash_map)
+{
+    VERIFY(!m_conservative_hash_maps.contains(hash_map));
+    m_conservative_hash_maps.append(hash_map);
+}
+
+inline void Heap::did_destroy_conservative_hash_map(Badge<ConservativeHashMapBase>, ConservativeHashMapBase& hash_map)
+{
+    VERIFY(m_conservative_hash_maps.contains(hash_map));
+    m_conservative_hash_maps.remove(hash_map);
+}
+
+inline void Heap::did_create_conservative_hash_table(Badge<ConservativeHashTableBase>, ConservativeHashTableBase& hash_table)
+{
+    VERIFY(!m_conservative_hash_tables.contains(hash_table));
+    m_conservative_hash_tables.append(hash_table);
+}
+
+inline void Heap::did_destroy_conservative_hash_table(Badge<ConservativeHashTableBase>, ConservativeHashTableBase& hash_table)
+{
+    VERIFY(m_conservative_hash_tables.contains(hash_table));
+    m_conservative_hash_tables.remove(hash_table);
+}
+
 inline void Heap::did_create_conservative_vector(Badge<ConservativeVectorBase>, ConservativeVectorBase& vector)
 {
     VERIFY(!m_conservative_vectors.contains(vector));
@@ -207,6 +330,30 @@ inline void Heap::did_destroy_conservative_vector(Badge<ConservativeVectorBase>,
 {
     VERIFY(m_conservative_vectors.contains(vector));
     m_conservative_vectors.remove(vector);
+}
+
+inline void Heap::did_create_conservative_range_provider(Badge<ConservativeRangeProvider>, ConservativeRangeProvider& provider)
+{
+    VERIFY(!m_conservative_range_providers.contains(provider));
+    m_conservative_range_providers.append(provider);
+}
+
+inline void Heap::did_destroy_conservative_range_provider(Badge<ConservativeRangeProvider>, ConservativeRangeProvider& provider)
+{
+    VERIFY(m_conservative_range_providers.contains(provider));
+    m_conservative_range_providers.remove(provider);
+}
+
+inline void Heap::did_create_cross_heap_member(Badge<CrossHeapMemberBase>, CrossHeapMemberBase& member)
+{
+    VERIFY(!m_incoming_cross_heap_members.contains(&member));
+    m_incoming_cross_heap_members.set(&member);
+}
+
+inline void Heap::did_destroy_cross_heap_member(Badge<CrossHeapMemberBase>, CrossHeapMemberBase& member)
+{
+    VERIFY(m_incoming_cross_heap_members.contains(&member));
+    m_incoming_cross_heap_members.remove(&member);
 }
 
 inline void Heap::did_create_weak_container(Badge<WeakContainer>, WeakContainer& set)

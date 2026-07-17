@@ -11,7 +11,7 @@
 namespace Web::Geometry {
 
 // https://drafts.fxtf.org/geometry/#DOMRect
-class DOMRect final : public DOMRectReadOnly {
+class WEB_API DOMRect final : public DOMRectReadOnly {
     WEB_PLATFORM_OBJECT(DOMRect, DOMRectReadOnly);
     GC_DECLARE_ALLOCATOR(DOMRect);
 
@@ -19,7 +19,7 @@ public:
     static WebIDL::ExceptionOr<GC::Ref<DOMRect>> construct_impl(JS::Realm&, double x = 0, double y = 0, double width = 0, double height = 0);
     [[nodiscard]] static GC::Ref<DOMRect> create(JS::Realm&, Gfx::FloatRect const&);
     [[nodiscard]] static GC::Ref<DOMRect> create(JS::Realm&);
-    [[nodiscard]] static GC::Ref<DOMRect> from_rect(JS::VM&, DOMRectInit const&);
+    [[nodiscard]] static GC::Ref<DOMRect> from_rect(JS::VM&, Bindings::DOMRectInit const&);
 
     virtual ~DOMRect() override;
 
@@ -32,8 +32,6 @@ public:
     void set_y(double y) { m_rect.set_y(y); }
     void set_width(double width) { m_rect.set_width(width); }
     void set_height(double height) { m_rect.set_height(height); }
-
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::DOMRect; }
 
 private:
     DOMRect(JS::Realm&, double x, double y, double width, double height);

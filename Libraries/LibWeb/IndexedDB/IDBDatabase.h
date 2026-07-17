@@ -7,9 +7,10 @@
 #pragma once
 
 #include <LibGC/Ptr.h>
-#include <LibWeb/Bindings/IDBDatabasePrototype.h>
+#include <LibWeb/Bindings/IDBDatabase.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/HTML/DOMStringList.h>
+#include <LibWeb/IndexedDB/ConnectionState.h>
 #include <LibWeb/IndexedDB/IDBRequest.h>
 #include <LibWeb/IndexedDB/IDBTransaction.h>
 #include <LibWeb/IndexedDB/Internal/Database.h>
@@ -18,18 +19,8 @@
 
 namespace Web::IndexedDB {
 
-using KeyPath = Variant<String, Vector<String>>;
-
-// https://w3c.github.io/IndexedDB/#dictdef-idbobjectstoreparameters
-struct IDBObjectStoreParameters {
-    Optional<KeyPath> key_path;
-    bool auto_increment { false };
-};
-
-// https://w3c.github.io/IndexedDB/#dictdef-idbtransactionoptions
-struct IDBTransactionOptions {
-    Bindings::IDBTransactionDurability durability = Bindings::IDBTransactionDurability::Default;
-};
+using KeyPath = Variant<Utf16String, Vector<Utf16String>>;
+using NullableKeyPath = Variant<Utf16String, Vector<Utf16String>, Empty>;
 
 // https://w3c.github.io/IndexedDB/#IDBDatabase-interface
 // https://www.w3.org/TR/IndexedDB/#database-connection
@@ -37,22 +28,20 @@ class IDBDatabase : public DOM::EventTarget {
     WEB_PLATFORM_OBJECT(IDBDatabase, DOM::EventTarget);
     GC_DECLARE_ALLOCATOR(IDBDatabase);
 
-    enum ConnectionState {
-        Open,
-        Closed,
-    };
-
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~IDBDatabase() override;
+    virtual void finalize() override;
 
     [[nodiscard]] static GC::Ref<IDBDatabase> create(JS::Realm&, Database&);
 
     void set_version(u64 version) { m_version = version; }
     void set_close_pending(bool close_pending) { m_close_pending = close_pending; }
-    void set_state(ConnectionState state) { m_state = state; }
+    void set_state(ConnectionState state);
 
     [[nodiscard]] String uuid() const { return m_uuid; }
-    [[nodiscard]] String name() const { return m_name; }
+    [[nodiscard]] Utf16String name() const { return m_name; }
     [[nodiscard]] u64 version() const { return m_version; }
     [[nodiscard]] bool close_pending() const { return m_close_pending; }
     [[nodiscard]] ConnectionState state() const { return m_state; }
@@ -68,10 +57,10 @@ public:
     void add_transaction(GC::Ref<IDBTransaction> transaction) { m_transactions.append(transaction); }
 
     [[nodiscard]] GC::Ref<HTML::DOMStringList> object_store_names();
-    WebIDL::ExceptionOr<GC::Ref<IDBObjectStore>> create_object_store(String const&, IDBObjectStoreParameters const&);
-    WebIDL::ExceptionOr<void> delete_object_store(String const&);
+    WebIDL::ExceptionOr<GC::Ref<IDBObjectStore>> create_object_store(Utf16String const&, Bindings::IDBObjectStoreParameters const&);
+    WebIDL::ExceptionOr<void> delete_object_store(Utf16String const&);
 
-    WebIDL::ExceptionOr<GC::Ref<IDBTransaction>> transaction(Variant<String, Vector<String>>, Bindings::IDBTransactionMode = Bindings::IDBTransactionMode::Readonly, IDBTransactionOptions = { .durability = Bindings::IDBTransactionDurability::Default });
+    WebIDL::ExceptionOr<GC::Ref<IDBTransaction>> transaction(Variant<Utf16String, Vector<Utf16String>>, Bindings::IDBTransactionMode = Bindings::IDBTransactionMode::Readonly, Bindings::IDBTransactionOptions = { .durability = Bindings::IDBTransactionDurability::Default });
 
     void close();
 
@@ -84,6 +73,10 @@ public:
     void set_onversionchange(WebIDL::CallbackType*);
     WebIDL::CallbackType* onversionchange();
 
+    void wait_for_transactions_to_finish(ReadonlySpan<GC::Ref<IDBTransaction>>, GC::Ref<GC::Function<void()>> on_complete);
+    void check_pending_transaction_waits();
+    void block_on_conflicting_transactions(GC::Ref<IDBTransaction>);
+
 protected:
     explicit IDBDatabase(JS::Realm&, Database&);
 
@@ -91,8 +84,15 @@ protected:
     virtual void visit_edges(Visitor& visitor) override;
 
 private:
+    struct PendingTransactionWait {
+        Vector<GC::Ref<IDBTransaction>> transactions;
+        GC::Ref<GC::Function<void()>> callback;
+    };
+
+    Vector<PendingTransactionWait> m_pending_transaction_waits;
+
     u64 m_version { 0 };
-    String m_name;
+    Utf16String m_name;
 
     // Each connection has a close pending flag which is initially false.
     bool m_close_pending { false };

@@ -6,8 +6,9 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/MouseEventPrototype.h>
+#include <LibWeb/Bindings/MouseEvent.h>
 #include <LibWeb/HTML/EventNames.h>
+#include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/UIEvents/EventNames.h>
 #include <LibWeb/UIEvents/KeyCode.h>
 #include <LibWeb/UIEvents/MouseButton.h>
@@ -17,7 +18,7 @@ namespace Web::UIEvents {
 
 GC_DEFINE_ALLOCATOR(MouseEvent);
 
-MouseEvent::MouseEvent(JS::Realm& realm, FlyString const& event_name, MouseEventInit const& event_init, double page_x, double page_y, double offset_x, double offset_y)
+MouseEvent::MouseEvent(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::MouseEventInit const& event_init, double page_x, double page_y, double offset_x, double offset_y)
     : UIEvent(realm, event_name, event_init)
     , m_screen_x(event_init.screen_x)
     , m_screen_y(event_init.screen_y)
@@ -45,8 +46,8 @@ MouseEvent::MouseEvent(JS::Realm& realm, FlyString const& event_name, MouseEvent
     , m_movement_y(event_init.movement_y)
     , m_button(event_init.button)
     , m_buttons(event_init.buttons)
-    , m_related_target(event_init.related_target)
 {
+    set_related_target(event_init.related_target.ptr());
 }
 
 MouseEvent::~MouseEvent() = default;
@@ -57,47 +58,41 @@ void MouseEvent::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void MouseEvent::visit_edges(Cell::Visitor& visitor)
+bool MouseEvent::get_modifier_state(Utf16FlyString const& key_arg) const
 {
-    Base::visit_edges(visitor);
-    visitor.visit(m_related_target);
-}
-
-bool MouseEvent::get_modifier_state(String const& key_arg) const
-{
-    if (key_arg == "Control")
+    if (key_arg == "Control"_utf16_fly_string)
         return m_ctrl_key;
-    if (key_arg == "Shift")
+    if (key_arg == "Shift"_utf16_fly_string)
         return m_shift_key;
-    if (key_arg == "Alt")
+    if (key_arg == "Alt"_utf16_fly_string)
         return m_alt_key;
-    if (key_arg == "Meta")
+    if (key_arg == "Meta"_utf16_fly_string)
         return m_meta_key;
-    if (key_arg == "AltGraph")
+    if (key_arg == "AltGraph"_utf16_fly_string)
         return m_modifier_alt_graph;
-    if (key_arg == "CapsLock")
+    if (key_arg == "CapsLock"_utf16_fly_string)
         return m_modifier_caps_lock;
-    if (key_arg == "Fn")
+    if (key_arg == "Fn"_utf16_fly_string)
         return m_modifier_fn;
-    if (key_arg == "FnLock")
+    if (key_arg == "FnLock"_utf16_fly_string)
         return m_modifier_fn_lock;
-    if (key_arg == "Hyper")
+    if (key_arg == "Hyper"_utf16_fly_string)
         return m_modifier_hyper;
-    if (key_arg == "NumLock")
+    if (key_arg == "NumLock"_utf16_fly_string)
         return m_modifier_num_lock;
-    if (key_arg == "ScrollLock")
+    if (key_arg == "ScrollLock"_utf16_fly_string)
         return m_modifier_scroll_lock;
-    if (key_arg == "Super")
+    if (key_arg == "Super"_utf16_fly_string)
         return m_modifier_super;
-    if (key_arg == "Symbol")
+    if (key_arg == "Symbol"_utf16_fly_string)
         return m_modifier_symbol;
-    if (key_arg == "SymbolLock")
+    if (key_arg == "SymbolLock"_utf16_fly_string)
         return m_modifier_symbol_lock;
     return false;
 }
 
 // https://w3c.github.io/uievents/#dom-mouseevent-initmouseevent
-void MouseEvent::init_mouse_event(String const& type, bool bubbles, bool cancelable, GC::Ptr<HTML::WindowProxy> view, WebIDL::Long detail, WebIDL::Long screen_x, WebIDL::Long screen_y, WebIDL::Long client_x, WebIDL::Long client_y, bool ctrl_key, bool alt_key, bool shift_key, bool meta_key, WebIDL::Short button, DOM::EventTarget* related_target)
+void MouseEvent::init_mouse_event(Utf16FlyString const& type, bool bubbles, bool cancelable, GC::Ptr<HTML::WindowProxy> view, WebIDL::Long detail, WebIDL::Long screen_x, WebIDL::Long screen_y, WebIDL::Long client_x, WebIDL::Long client_y, bool ctrl_key, bool alt_key, bool shift_key, bool meta_key, WebIDL::Short button, DOM::EventTarget* related_target)
 {
     // Initializes attributes of a MouseEvent object. This method has the same behavior as UIEvent.initUIEvent().
 
@@ -120,22 +115,58 @@ void MouseEvent::init_mouse_event(String const& type, bool bubbles, bool cancela
     m_alt_key = alt_key;
     m_meta_key = meta_key;
     m_button = button;
-    m_related_target = related_target;
+    set_related_target(related_target);
 }
 
-GC::Ref<MouseEvent> MouseEvent::create(JS::Realm& realm, FlyString const& event_name, MouseEventInit const& event_init, double page_x, double page_y, double offset_x, double offset_y)
+GC::Ref<MouseEvent> MouseEvent::create(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::MouseEventInit const& event_init, double page_x, double page_y, double offset_x, double offset_y)
 {
     return realm.create<MouseEvent>(realm, event_name, event_init, page_x, page_y, offset_x, offset_y);
 }
 
-WebIDL::ExceptionOr<GC::Ref<MouseEvent>> MouseEvent::construct_impl(JS::Realm& realm, FlyString const& event_name, MouseEventInit const& event_init)
+WebIDL::ExceptionOr<GC::Ref<MouseEvent>> MouseEvent::construct_impl(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::MouseEventInit const& event_init)
 {
-    return create(realm, event_name, event_init);
+    // https://drafts.csswg.org/cssom-view/#dom-mouseevent-pagex
+    // For a newly constructed event, pageX/pageY default to clientX/clientY (scrollX/scrollY are 0).
+    // https://drafts.csswg.org/cssom-view/#dom-mouseevent-offsetx
+    // For a newly constructed event with no target, offsetX/offsetY default to clientX/clientY.
+    return create(realm, event_name, event_init, event_init.client_x, event_init.client_y, event_init.client_x, event_init.client_y);
 }
 
-WebIDL::ExceptionOr<GC::Ref<MouseEvent>> MouseEvent::create_from_platform_event(JS::Realm& realm, GC::Ptr<HTML::WindowProxy> window_proxy, FlyString const& event_name, CSSPixelPoint screen, CSSPixelPoint page, CSSPixelPoint client, CSSPixelPoint offset, Optional<CSSPixelPoint> movement, unsigned button, unsigned buttons, unsigned modifiers)
+GC::Ref<MouseEvent> MouseEvent::clone() const
 {
-    MouseEventInit event_init {};
+    Bindings::MouseEventInit init {};
+    init.screen_x = m_screen_x;
+    init.screen_y = m_screen_y;
+    init.client_x = m_client_x;
+    init.client_y = m_client_y;
+    init.movement_x = m_movement_x;
+    init.movement_y = m_movement_y;
+    init.button = m_button;
+    init.buttons = m_buttons;
+    init.related_target = related_target();
+    init.ctrl_key = m_ctrl_key;
+    init.shift_key = m_shift_key;
+    init.alt_key = m_alt_key;
+    init.meta_key = m_meta_key;
+    init.modifier_alt_graph = m_modifier_alt_graph;
+    init.modifier_caps_lock = m_modifier_caps_lock;
+    init.modifier_fn = m_modifier_fn;
+    init.modifier_fn_lock = m_modifier_fn_lock;
+    init.modifier_hyper = m_modifier_hyper;
+    init.modifier_num_lock = m_modifier_num_lock;
+    init.modifier_scroll_lock = m_modifier_scroll_lock;
+    init.modifier_super = m_modifier_super;
+    init.modifier_symbol = m_modifier_symbol;
+    init.modifier_symbol_lock = m_modifier_symbol_lock;
+    init.view = view();
+    init.detail = detail();
+    return create(realm(), type(), init, m_page_x, m_page_y, m_offset_x, m_offset_y);
+}
+
+WebIDL::ExceptionOr<GC::Ref<MouseEvent>> MouseEvent::create_from_platform_event(JS::Realm& realm, GC::Ptr<HTML::WindowProxy> window_proxy, Utf16FlyString const& event_name, CSSPixelPoint screen, CSSPixelPoint page, CSSPixelPoint client, CSSPixelPoint offset, Optional<CSSPixelPoint> movement, unsigned button, unsigned buttons, unsigned modifiers, int detail)
+{
+    Bindings::MouseEventInit event_init {};
+    event_init.detail = detail;
     event_init.ctrl_key = modifiers & Mod_Ctrl;
     event_init.shift_key = modifiers & Mod_Shift;
     event_init.alt_key = modifiers & Mod_Alt;

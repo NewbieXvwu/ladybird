@@ -1,12 +1,11 @@
-#import <CSS/LinkStyle.idl>
-#import <SVG/SVGElement.idl>
-
 // https://svgwg.org/svg2-draft/single-page.html#styling-InterfaceSVGStyleElement
 [Exposed=Window]
 interface SVGStyleElement : SVGElement {
-    [Reflect] attribute DOMString type;
-    [Reflect] attribute DOMString media;
-    [Reflect] attribute DOMString title;
+    [Reflect] attribute Utf16DOMString media;
+    [Reflect] attribute Utf16DOMString title;
+    
+    // obsolete members
+    [Reflect] attribute Utf16DOMString type;
 };
 
 SVGStyleElement includes LinkStyle;

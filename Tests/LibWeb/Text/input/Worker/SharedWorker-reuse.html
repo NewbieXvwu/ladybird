@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<script>
+    asyncTest(async done => {
+        const workerScript = `
+            let connections = 0;
+            onconnect = event => {
+                connections++;
+                const connectionNumber = connections;
+                const port = event.ports[0];
+                port.onmessage = event => {
+                    port.postMessage("echo " + connectionNumber + ": " + event.data);
+                };
+                port.start();
+                port.postMessage("connect " + connectionNumber);
+            };
+        `;
+
+        const workerURL = URL.createObjectURL(new Blob([workerScript], { type: "text/javascript" }));
+
+        // Resolve with the next message from 'worker'. The one-shot listener must be registered before the message can
+        // arrive: a 'message' event dispatched with no listener is dropped, not queued for a listener added later — so
+        // a late listener would miss the message and hang.
+        function nextMessage(worker) {
+            return new Promise(resolve => {
+                worker.port.addEventListener("message", function handler(event) {
+                    worker.port.removeEventListener("message", handler);
+                    resolve(event.data);
+                });
+            });
+        }
+
+        const worker1 = new SharedWorker(workerURL, "shared-worker-reuse");
+        const worker2 = new SharedWorker(workerURL, "shared-worker-reuse");
+
+        // The two connections are independent message ports with no ordering guarantee between them — so worker2's
+        // "connect" can be dispatched before worker1's. Register both listeners before starting either port — so
+        // whichever arrives first still has a listener, and neither message is lost.
+        const connect1 = nextMessage(worker1);
+        const connect2 = nextMessage(worker2);
+        worker1.port.start();
+        worker2.port.start();
+
+        // Await in a fixed order — so the printed output is deterministic, regardless of arrival order.
+        println(`worker1: ${await connect1}`); // "connect 1"
+        println(`worker2: ${await connect2}`); // "connect 2"
+
+        worker1.port.postMessage("one");
+        println(`worker1: ${await nextMessage(worker1)}`); // "echo 1: one"
+
+        worker2.port.postMessage("two");
+        println(`worker2: ${await nextMessage(worker2)}`); // "echo 2: two"
+
+        done();
+    });
+</script>

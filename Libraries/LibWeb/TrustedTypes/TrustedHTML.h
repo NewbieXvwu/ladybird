@@ -8,9 +8,11 @@
 
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/Bindings/TrustedHTMLPrototype.h>
+#include <LibWeb/Bindings/TrustedHTML.h>
 
 namespace Web::TrustedTypes {
+
+using TrustedHTMLOrString = Variant<GC::Ref<TrustedHTML>, Utf16String>;
 
 class TrustedHTML final : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(TrustedHTML, Bindings::PlatformObject);

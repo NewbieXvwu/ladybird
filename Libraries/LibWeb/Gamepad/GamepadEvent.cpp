@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/GamepadEventPrototype.h>
+#include <LibWeb/Bindings/GamepadEvent.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Gamepad/Gamepad.h>
 #include <LibWeb/Gamepad/GamepadEvent.h>
@@ -13,14 +13,14 @@ namespace Web::Gamepad {
 
 GC_DEFINE_ALLOCATOR(GamepadEvent);
 
-WebIDL::ExceptionOr<GC::Ref<GamepadEvent>> GamepadEvent::construct_impl(JS::Realm& realm, FlyString const& event_name, GamepadEventInit const& gamepad_event_init)
+WebIDL::ExceptionOr<GC::Ref<GamepadEvent>> GamepadEvent::construct_impl(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::GamepadEventInit const& gamepad_event_init)
 {
     return realm.create<GamepadEvent>(realm, event_name, gamepad_event_init);
 }
 
-GamepadEvent::GamepadEvent(JS::Realm& realm, FlyString const& event_name, GamepadEventInit const& event_init)
+GamepadEvent::GamepadEvent(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::GamepadEventInit const& event_init)
     : DOM::Event(realm, event_name, event_init)
-    , m_gamepad(*event_init.gamepad)
+    , m_gamepad(event_init.gamepad)
 {
 }
 

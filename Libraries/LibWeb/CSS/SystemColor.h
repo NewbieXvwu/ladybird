@@ -19,12 +19,15 @@ Color active_text(PreferredColorScheme);
 Color button_border(PreferredColorScheme);
 Color button_face(PreferredColorScheme);
 Color button_text(PreferredColorScheme);
-Color canvas(PreferredColorScheme);
+WEB_API Color canvas(PreferredColorScheme);
 Color canvas_text(PreferredColorScheme);
 Color field(PreferredColorScheme);
 Color field_text(PreferredColorScheme);
 Color gray_text(PreferredColorScheme);
+Color transform_selection_background_color(Color);
 WEB_API Color highlight(PreferredColorScheme);
+// A muted highlight for selections in windows that do not have focus.
+WEB_API Color inactive_highlight(PreferredColorScheme);
 WEB_API Color highlight_text(PreferredColorScheme);
 Color link_text(PreferredColorScheme);
 Color mark(PreferredColorScheme);

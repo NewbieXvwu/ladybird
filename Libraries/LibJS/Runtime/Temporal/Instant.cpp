@@ -2,7 +2,7 @@
  * Copyright (c) 2021-2023, Linus Groh <linusg@serenityos.org>
  * Copyright (c) 2021, Idan Horowitz <idan.horowitz@serenityos.org>
  * Copyright (c) 2023, Shannon Booth <shannon@serenityos.org>
- * Copyright (c) 2024, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2024-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -11,6 +11,7 @@
 #include <LibJS/Runtime/BigInt.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibJS/Runtime/Realm.h>
+#include <LibJS/Runtime/Temporal/Calendar.h>
 #include <LibJS/Runtime/Temporal/Duration.h>
 #include <LibJS/Runtime/Temporal/Instant.h>
 #include <LibJS/Runtime/Temporal/InstantConstructor.h>
@@ -39,39 +40,33 @@ void Instant::visit_edges(Cell::Visitor& visitor)
 }
 
 // nsMaxInstant = 10**8 × nsPerDay = 8.64 × 10**21
-Crypto::SignedBigInteger const NANOSECONDS_MAX_INSTANT = "8640000000000000000000"_sbigint;
+Crypto::SignedBigInteger const& NANOSECONDS_MAX_INSTANT = *new Crypto::SignedBigInteger("8640000000000000000000"_sbigint);
 
 // nsMinInstant = -nsMaxInstant = -8.64 × 10**21
-Crypto::SignedBigInteger const NANOSECONDS_MIN_INSTANT = "-8640000000000000000000"_sbigint;
+Crypto::SignedBigInteger const& NANOSECONDS_MIN_INSTANT = *new Crypto::SignedBigInteger("-8640000000000000000000"_sbigint);
 
 // nsPerDay = 10**6 × ℝ(msPerDay) = 8.64 × 10**13
-Crypto::UnsignedBigInteger const NANOSECONDS_PER_DAY = 86400000000000_bigint;
+Crypto::UnsignedBigInteger const& NANOSECONDS_PER_DAY = *new Crypto::UnsignedBigInteger(86400000000000_bigint);
 
 // Non-standard:
-Crypto::UnsignedBigInteger const NANOSECONDS_PER_HOUR = 3600000000000_bigint;
-Crypto::UnsignedBigInteger const NANOSECONDS_PER_MINUTE = 60000000000_bigint;
-Crypto::UnsignedBigInteger const NANOSECONDS_PER_SECOND = 1000000000_bigint;
-Crypto::UnsignedBigInteger const NANOSECONDS_PER_MILLISECOND = 1000000_bigint;
-Crypto::UnsignedBigInteger const NANOSECONDS_PER_MICROSECOND = 1000_bigint;
-Crypto::UnsignedBigInteger const NANOSECONDS_PER_NANOSECOND = 1_bigint;
+Crypto::UnsignedBigInteger const& NANOSECONDS_PER_HOUR = *new Crypto::UnsignedBigInteger(3600000000000_bigint);
+Crypto::UnsignedBigInteger const& NANOSECONDS_PER_MINUTE = *new Crypto::UnsignedBigInteger(60000000000_bigint);
+Crypto::UnsignedBigInteger const& NANOSECONDS_PER_SECOND = *new Crypto::UnsignedBigInteger(1000000000_bigint);
+Crypto::UnsignedBigInteger const& NANOSECONDS_PER_MILLISECOND = *new Crypto::UnsignedBigInteger(1000000_bigint);
+Crypto::UnsignedBigInteger const& NANOSECONDS_PER_MICROSECOND = *new Crypto::UnsignedBigInteger(1000_bigint);
+Crypto::UnsignedBigInteger const& NANOSECONDS_PER_NANOSECOND = *new Crypto::UnsignedBigInteger(1_bigint);
 
-Crypto::UnsignedBigInteger const MICROSECONDS_PER_MILLISECOND = 1000_bigint;
-Crypto::UnsignedBigInteger const MILLISECONDS_PER_SECOND = 1000_bigint;
-Crypto::UnsignedBigInteger const SECONDS_PER_MINUTE = 60_bigint;
-Crypto::UnsignedBigInteger const MINUTES_PER_HOUR = 60_bigint;
-Crypto::UnsignedBigInteger const HOURS_PER_DAY = 24_bigint;
+Crypto::UnsignedBigInteger const& MICROSECONDS_PER_MILLISECOND = *new Crypto::UnsignedBigInteger(1000_bigint);
+Crypto::UnsignedBigInteger const& MILLISECONDS_PER_SECOND = *new Crypto::UnsignedBigInteger(1000_bigint);
+Crypto::UnsignedBigInteger const& SECONDS_PER_MINUTE = *new Crypto::UnsignedBigInteger(60_bigint);
+Crypto::UnsignedBigInteger const& MINUTES_PER_HOUR = *new Crypto::UnsignedBigInteger(60_bigint);
+Crypto::UnsignedBigInteger const& HOURS_PER_DAY = *new Crypto::UnsignedBigInteger(24_bigint);
 
 // 8.5.1 IsValidEpochNanoseconds ( epochNanoseconds ), https://tc39.es/proposal-temporal/#sec-temporal-isvalidepochnanoseconds
 bool is_valid_epoch_nanoseconds(Crypto::SignedBigInteger const& epoch_nanoseconds)
 {
-    // 1. If ℝ(epochNanoseconds) < nsMinInstant or ℝ(epochNanoseconds) > nsMaxInstant, then
-    if (epoch_nanoseconds < NANOSECONDS_MIN_INSTANT || epoch_nanoseconds > NANOSECONDS_MAX_INSTANT) {
-        // a. Return false.
-        return false;
-    }
-
-    // 2. Return true.
-    return true;
+    // 1. If ℝ(epochNanoseconds) < nsMinInstant or ℝ(epochNanoseconds) > nsMaxInstant, return false; else return true.
+    return epoch_nanoseconds >= NANOSECONDS_MIN_INSTANT && epoch_nanoseconds <= NANOSECONDS_MAX_INSTANT;
 }
 
 // 8.5.2 CreateTemporalInstant ( epochNanoseconds [ , newTarget ] ), https://tc39.es/proposal-temporal/#sec-temporal-isvalidepochnanoseconds
@@ -98,15 +93,13 @@ ThrowCompletionOr<GC::Ref<Instant>> create_temporal_instant(VM& vm, BigInt const
 ThrowCompletionOr<GC::Ref<Instant>> to_temporal_instant(VM& vm, Value item)
 {
     // 1. If item is an Object, then
-    if (item.is_object()) {
-        auto const& object = item.as_object();
-
+    if (auto object = item.as_if<Object>()) {
         // a. If item has an [[InitializedTemporalInstant]] or [[InitializedTemporalZonedDateTime]] internal slot, then
         //     i. Return ! CreateTemporalInstant(item.[[EpochNanoseconds]]).
-        if (is<Instant>(object))
-            return MUST(create_temporal_instant(vm, static_cast<Instant const&>(object).epoch_nanoseconds()));
-        if (is<ZonedDateTime>(object))
-            return MUST(create_temporal_instant(vm, static_cast<ZonedDateTime const&>(object).epoch_nanoseconds()));
+        if (auto const* instant = as_if<Instant>(*object))
+            return MUST(create_temporal_instant(vm, instant->epoch_nanoseconds()));
+        if (auto const* zoned_date_time = as_if<ZonedDateTime>(*object))
+            return MUST(create_temporal_instant(vm, zoned_date_time->epoch_nanoseconds()));
 
         // b. NOTE: This use of ToPrimitive allows Instant-like objects to be converted.
         // c. Set item to ? ToPrimitive(item, STRING).
@@ -118,7 +111,7 @@ ThrowCompletionOr<GC::Ref<Instant>> to_temporal_instant(VM& vm, Value item)
         return vm.throw_completion<TypeError>(ErrorType::TemporalInvalidInstantString, item);
 
     // 3. Let parsed be ? ParseISODateTime(item, « TemporalInstantString »).
-    auto parsed = TRY(parse_iso_date_time(vm, item.as_string().utf8_string_view(), { { Production::TemporalInstantString } }));
+    auto parsed = TRY(parse_iso_date_time(vm, item.as_string().utf16_string_view(), { { Production::TemporalInstantString } }));
 
     // 4. Assert: Either parsed.[[TimeZone]].[[OffsetString]] is not empty or parsed.[[TimeZone]].[[Z]] is true, but not both.
     auto const& offset_string = parsed.time_zone.offset_string;
@@ -127,7 +120,7 @@ ThrowCompletionOr<GC::Ref<Instant>> to_temporal_instant(VM& vm, Value item)
     VERIFY(offset_string.has_value() || z_designator);
     VERIFY(!offset_string.has_value() || !z_designator);
 
-    // 5. If parsed.[[TimeZone]].[[Z]] is true, let offsetNanoseconds be 0; otherwise, let offsetNanoseconds be
+    // 5. If parsed.[[TimeZone]].[[Z]] is true, let offsetNanoseconds be 0; else, let offsetNanoseconds be
     //    ! ParseDateTimeUTCOffset(parsed.[[TimeZone]].[[OffsetString]]).
     auto offset_nanoseconds = z_designator ? 0.0 : parse_date_time_utc_offset(*offset_string);
 
@@ -207,11 +200,11 @@ Crypto::SignedBigInteger round_temporal_instant(Crypto::SignedBigInteger const& 
 }
 
 // 8.5.8 TemporalInstantToString ( instant, timeZone, precision ), https://tc39.es/proposal-temporal/#sec-temporal-temporalinstanttostring
-String temporal_instant_to_string(Instant const& instant, Optional<StringView> time_zone, SecondsStringPrecision::Precision precision)
+Utf16String temporal_instant_to_string(Instant const& instant, Optional<Utf16View> time_zone, SecondsStringPrecision::Precision precision)
 {
     // 1. Let outputTimeZone be timeZone.
     // 2. If outputTimeZone is undefined, set outputTimeZone to "UTC".
-    auto output_time_zone = time_zone.value_or("UTC"sv);
+    auto output_time_zone = time_zone.value_or(UTC_TIME_ZONE);
 
     // 3. Let epochNs be instant.[[EpochNanoseconds]].
     auto const& epoch_nanoseconds = instant.epoch_nanoseconds()->big_integer();
@@ -220,14 +213,14 @@ String temporal_instant_to_string(Instant const& instant, Optional<StringView> t
     auto iso_date_time = get_iso_date_time_for(output_time_zone, epoch_nanoseconds);
 
     // 5. Let dateTimeString be ISODateTimeToString(isoDateTime, "iso8601", precision, NEVER).
-    auto date_time_string = iso_date_time_to_string(iso_date_time, "iso8601"sv, precision, ShowCalendar::Never);
+    auto date_time_string = iso_date_time_to_string(iso_date_time, ISO8601_CALENDAR, precision, ShowCalendar::Never);
 
-    String time_zone_string;
+    Utf16String time_zone_string;
 
     // 6. If timeZone is undefined, then
     if (!time_zone.has_value()) {
         // a. Let timeZoneString be "Z".
-        time_zone_string = "Z"_string;
+        time_zone_string = "Z"_utf16_fly_string.to_utf16_string();
     }
     // 7. Else,
     else {
@@ -239,7 +232,7 @@ String temporal_instant_to_string(Instant const& instant, Optional<StringView> t
     }
 
     // 8. Return the string-concatenation of dateTimeString and timeZoneString.
-    return MUST(String::formatted("{}{}", date_time_string, time_zone_string));
+    return Utf16String::formatted("{}{}", date_time_string, time_zone_string);
 }
 
 // 8.5.9 DifferenceTemporalInstant ( operation, instant, other, options ), https://tc39.es/proposal-temporal/#sec-temporal-differencetemporalinstant

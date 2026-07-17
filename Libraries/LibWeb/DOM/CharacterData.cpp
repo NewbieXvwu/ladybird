@@ -5,13 +5,19 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16StringBuilder.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibUnicode/Segmenter.h>
-#include <LibWeb/Bindings/CharacterDataPrototype.h>
+#include <LibWeb/Bindings/CharacterData.h>
+#include <LibWeb/CSS/Invalidation/LanguageInvalidator.h>
 #include <LibWeb/DOM/CharacterData.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/MutationType.h>
 #include <LibWeb/DOM/Range.h>
+#include <LibWeb/DOM/Text.h>
 #include <LibWeb/Layout/TextNode.h>
+#include <LibWeb/Layout/TextOffsetMapping.h>
+#include <LibWeb/Selection/Selection.h>
 
 namespace Web::DOM {
 
@@ -31,8 +37,13 @@ void CharacterData::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
+size_t CharacterData::external_memory_size() const
+{
+    return Node::external_memory_size() + JS::utf16_string_external_memory_size(m_data);
+}
+
 // https://dom.spec.whatwg.org/#dom-characterdata-data
-void CharacterData::set_data(Utf16String const& data)
+void CharacterData::set_data(Utf16View const& data)
 {
     // [The data] setter must replace data with node this, offset 0, count this’s length, and data new value.
     // NOTE: Since the offset is 0, it can never be above data's length, so this can never throw.
@@ -80,21 +91,29 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     auto before_data = m_data.substring_view(0, offset);
     auto after_data = m_data.substring_view(offset + count);
 
-    StringBuilder full_data(StringBuilder::Mode::UTF16, before_data.length_in_code_units() + data.length_in_code_units() + after_data.length_in_code_units());
+    Utf16StringBuilder full_data(before_data.length_in_code_units() + data.length_in_code_units() + after_data.length_in_code_units());
     full_data.append(before_data);
     full_data.append(data);
     full_data.append(after_data);
 
     auto old_data = m_data;
-    m_data = full_data.to_utf16_string();
+    m_data = full_data.to_string();
 
     // 4. Queue a mutation record of "characterData" for node with null, null, node’s data, « », « », null, and null.
     // NOTE: We do this later so that the mutation observer may notify UI clients of this node's new value.
-    queue_mutation_record(MutationType::characterData, {}, {}, old_data.to_utf8_but_should_be_ported_to_utf16(), {}, {}, nullptr, nullptr);
+    queue_mutation_record(MutationType::characterData, {}, {}, old_data, {}, {}, nullptr, nullptr);
+
+    GC::Ptr<Range> selection_range_to_preserve;
+    if (m_data == old_data && document().preserve_selection_offsets_during_identical_character_data_replacement()) {
+        if (auto selection = document().get_selection())
+            selection_range_to_preserve = selection->range();
+    }
 
     // 8. For each live range whose start node is node and start offset is greater than offset but less than or equal to
     //    offset plus count, set its start offset to offset.
     for (auto* range : Range::live_ranges()) {
+        if (range == selection_range_to_preserve)
+            continue;
         if (range->start_container() == this && range->start_offset() > offset && range->start_offset() <= (offset + count))
             range->set_start_offset(offset);
     }
@@ -102,6 +121,8 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     // 9. For each live range whose end node is node and end offset is greater than offset but less than or equal to
     //    offset plus count, set its end offset to offset.
     for (auto* range : Range::live_ranges()) {
+        if (range == selection_range_to_preserve)
+            continue;
         if (range->end_container() == this && range->end_offset() > offset && range->end_offset() <= (offset + count))
             range->set_end_offset(offset);
     }
@@ -109,6 +130,8 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     // 10. For each live range whose start node is node and start offset is greater than offset plus count, increase its
     //     start offset by data’s length and decrease it by count.
     for (auto* range : Range::live_ranges()) {
+        if (range == selection_range_to_preserve)
+            continue;
         if (range->start_container() == this && range->start_offset() > (offset + count))
             range->set_start_offset(range->start_offset() + data.length_in_code_units() - count);
     }
@@ -116,34 +139,51 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     // 11. For each live range whose end node is node and end offset is greater than offset plus count, increase its end
     //     offset by data’s length and decrease it by count.
     for (auto* range : Range::live_ranges()) {
+        if (range == selection_range_to_preserve)
+            continue;
         if (range->end_container() == this && range->end_offset() > (offset + count))
             range->set_end_offset(range->end_offset() + data.length_in_code_units() - count);
     }
 
     // 12. If node’s parent is non-null, then run the children changed steps for node’s parent.
-    if (parent())
-        parent()->children_changed(nullptr);
+    if (auto* parent = this->parent()) {
+        ChildrenChangedMetadata metadata { ChildrenChangedMetadata::Type::Mutation, *this };
+        parent->children_changed(metadata);
+    }
 
     // OPTIMIZATION: If the characters are the same, we can skip the remainder of this function.
     if (m_data == old_data)
         return {};
 
-    if (auto* text_node = as_if<Layout::TextNode>(layout_node())) {
-        // NOTE: Since the text node's data has changed, we need to invalidate the text for rendering.
-        //       This ensures that the new text is reflected in layout, even if we don't end up
-        //       doing a full layout tree rebuild.
-        text_node->invalidate_text_for_rendering();
+    // NB: Called during DOM text mutation, layout is stale.
+    if (is<Text>(*this)) {
+        if (is<Layout::TextSliceNode>(unsafe_layout_node())) {
+            // NB: Slice nodes cache data that is calculated at layout tree construction time.
+            // So for them, we need to invalidate the layout tree, not just layout.
+            if (parent())
+                parent()->set_needs_layout_tree_update(true, SetNeedsLayoutTreeUpdateReason::CharacterDataReplaceData);
+        } else if (auto* text_layout_node = as_if<Layout::TextNode>(unsafe_layout_node())) {
+            // NB: Since the text node's data has changed, we need to invalidate the text for rendering.
+            //     This ensures that the new text is reflected in layout, even if we don't end up doing a full layout
+            //     tree rebuild.
+            text_layout_node->invalidate_text_for_rendering();
 
-        // We also need to relayout.
-        text_node->set_needs_layout_update(SetNeedsLayoutReason::CharacterDataReplaceData);
+            // We also need to relayout.
+            text_layout_node->set_needs_layout_update(SetNeedsLayoutReason::CharacterDataReplaceData);
+        }
     }
 
     document().bump_character_data_version();
 
     if (m_grapheme_segmenter)
         m_grapheme_segmenter->set_segmented_text(m_data);
+    // The line segmenter may be the ASCII fast-path variant, which only accepts a subset of inputs; let the
+    // lazy getter re-pick the implementation against the new data.
+    m_line_segmenter = nullptr;
     if (m_word_segmenter)
         m_word_segmenter->set_segmented_text(m_data);
+
+    CSS::Invalidation::invalidate_style_after_text_directionality_change(*this);
 
     return {};
 }
@@ -177,6 +217,20 @@ Unicode::Segmenter& CharacterData::grapheme_segmenter() const
     }
 
     return *m_grapheme_segmenter;
+}
+
+Unicode::Segmenter& CharacterData::line_segmenter() const
+{
+    if (!m_line_segmenter) {
+        if (auto ascii = Unicode::Segmenter::try_create_for_ascii_line(m_data.utf16_view())) {
+            m_line_segmenter = ascii.release_nonnull();
+        } else {
+            m_line_segmenter = document().line_segmenter().clone();
+            m_line_segmenter->set_segmented_text(m_data);
+        }
+    }
+
+    return *m_line_segmenter;
 }
 
 Unicode::Segmenter& CharacterData::word_segmenter() const

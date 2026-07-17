@@ -8,6 +8,8 @@
 #include <AK/Debug.h>
 #include <AK/SourceLocation.h>
 #include <AK/StringConversions.h>
+#include <AK/Utf16StringBuilder.h>
+#include <AK/Utf8View.h>
 #include <AK/Vector.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibWeb/CSS/CharacterTypes.h>
@@ -17,7 +19,7 @@
 namespace Web::CSS::Parser {
 
 // U+FFFD REPLACEMENT CHARACTER (�)
-#define REPLACEMENT_CHARACTER 0xFFFD
+static constexpr u32 REPLACEMENT_CHARACTER = 0xFFFD;
 static constexpr u32 TOKENIZER_EOF = 0xFFFFFFFF;
 
 static inline void log_parse_error(SourceLocation const& location = SourceLocation::current())
@@ -155,14 +157,27 @@ static inline bool is_E(u32 code_point)
     return code_point == 0x45;
 }
 
-Vector<Token> Tokenizer::tokenize(StringView input, StringView encoding)
+Vector<Token> Tokenizer::tokenize(StringView input, StringView encoding, TokenizerInput tokenizer_input)
 {
     // https://www.w3.org/TR/css-syntax-3/#css-filter-code-points
-    auto filter_code_points = [](StringView input, auto encoding) -> String {
+    auto filter_code_points = [](StringView input, auto encoding, TokenizerInput tokenizer_input) -> String {
+        auto standardized_encoding = TextCodec::get_standardized_encoding(encoding);
+        VERIFY(standardized_encoding.has_value());
         auto decoder = TextCodec::decoder_for(encoding);
         VERIFY(decoder.has_value());
 
-        auto decoded_input = MUST(decoder->to_utf8(input));
+        auto decoded_input = [&] {
+            if (tokenizer_input == TokenizerInput::DecodedText) {
+                VERIFY(Utf8View { input }.validate());
+                return String::from_utf8_without_validation(input.bytes());
+            }
+            if (standardized_encoding->equals_ignoring_ascii_case("utf-8"sv) && Utf8View { input }.validate(AllowLonelySurrogates::No)) {
+                if (input.bytes().starts_with({ { 0xef, 0xbb, 0xbf } }))
+                    input = input.substring_view(3);
+                return String::from_utf8_without_validation(input.bytes());
+            }
+            return MUST(decoder->to_utf8(input, TextCodec::IgnoreBOM::No, TextCodec::ErrorMode::Replacement));
+        }();
 
         // OPTIMIZATION: If the input doesn't contain any filterable characters, we can skip the filtering
         bool const contains_filterable = [&] {
@@ -214,7 +229,45 @@ Vector<Token> Tokenizer::tokenize(StringView input, StringView encoding)
         return builder.to_string_without_validation();
     };
 
-    Tokenizer tokenizer { filter_code_points(input, encoding) };
+    Tokenizer tokenizer { filter_code_points(input, encoding, tokenizer_input) };
+    return tokenizer.tokenize();
+}
+
+Vector<Token> Tokenizer::tokenize(Utf16View input)
+{
+    StringBuilder builder { input.length_in_code_units() };
+    bool last_was_carriage_return = false;
+
+    for (auto code_point : input) {
+        if (code_point == '\r') {
+            if (last_was_carriage_return)
+                builder.append('\n');
+            else
+                last_was_carriage_return = true;
+            continue;
+        }
+
+        if (last_was_carriage_return)
+            builder.append('\n');
+
+        if (code_point == '\n') {
+            if (!last_was_carriage_return)
+                builder.append('\n');
+        } else if (code_point == '\f') {
+            builder.append('\n');
+        } else if (code_point == 0x00 || is_unicode_surrogate(code_point)) {
+            builder.append_code_point(REPLACEMENT_CHARACTER);
+        } else {
+            builder.append_code_point(code_point);
+        }
+
+        last_was_carriage_return = false;
+    }
+
+    if (last_was_carriage_return)
+        builder.append('\n');
+
+    Tokenizer tokenizer { builder.to_string_without_validation() };
     return tokenizer.tokenize();
 }
 
@@ -231,7 +284,7 @@ Vector<Token> Tokenizer::tokenize()
     for (;;) {
         auto token_start = m_position;
         auto token = consume_a_token();
-        token.set_position_range({}, token_start, m_position);
+        token.set_position_range(Badge<Tokenizer> {}, token_start, m_position);
         tokens.append(token);
 
         if (token.is(Token::Type::EndOfFile)) {
@@ -250,9 +303,11 @@ u32 Tokenizer::next_code_point()
 
     m_prev_position = m_position;
     if (is_newline(code_point)) {
+        VERIFY(m_position.line < NumericLimits<u32>::max());
         m_position.line++;
         m_position.column = 0;
     } else {
+        VERIFY(m_position.column < NumericLimits<u32>::max());
         m_position.column++;
     }
 
@@ -410,7 +465,7 @@ Token Tokenizer::consume_an_ident_like_token()
         }
 
         // Otherwise, consume a url token, and return it.
-        return consume_a_url_token();
+        return consume_a_url_token(start_byte_offset);
     }
 
     // Otherwise, if the next input code point is U+0028 LEFT PARENTHESIS ((), consume it.
@@ -531,7 +586,7 @@ double Tokenizer::convert_a_string_to_a_number(StringView string)
 }
 
 // https://www.w3.org/TR/css-syntax-3/#consume-name
-FlyString Tokenizer::consume_an_ident_sequence()
+Utf16FlyString Tokenizer::consume_an_ident_sequence()
 {
     // This section describes how to consume an ident sequence from a stream of code points.
     // It returns a string containing the largest name that can be formed from adjacent
@@ -543,7 +598,7 @@ FlyString Tokenizer::consume_an_ident_sequence()
     // calling this algorithm.
 
     // Let result initially be an empty string.
-    StringBuilder result;
+    Utf16StringBuilder result;
 
     // Repeatedly consume the next input code point from the stream:
     for (;;) {
@@ -572,11 +627,11 @@ FlyString Tokenizer::consume_an_ident_sequence()
         break;
     }
 
-    return result.to_fly_string_without_validation();
+    return Utf16FlyString::from_utf16(result.view());
 }
 
 // https://www.w3.org/TR/css-syntax-3/#consume-url-token
-Token Tokenizer::consume_a_url_token()
+Token Tokenizer::consume_a_url_token(size_t start_byte_offset)
 {
     // This section describes how to consume a url token from a stream of code points.
     // It returns either a <url-token> or a <bad-url-token>.
@@ -588,8 +643,7 @@ Token Tokenizer::consume_a_url_token()
     // shouldn’t be called directly otherwise.
 
     // 1. Initially create a <url-token> with its value set to the empty string.
-    auto start_byte_offset = current_byte_offset();
-    StringBuilder builder;
+    Utf16StringBuilder builder;
 
     // 2. Consume as much whitespace as possible.
     consume_as_much_whitespace_as_possible();
@@ -601,14 +655,14 @@ Token Tokenizer::consume_a_url_token()
         // U+0029 RIGHT PARENTHESIS ())
         if (is_right_paren(input)) {
             // Return the <url-token>.
-            return Token::create_url(builder.to_fly_string_without_validation(), input_since(start_byte_offset));
+            return Token::create_url(Utf16FlyString::from_utf16(builder.view()), input_since(start_byte_offset));
         }
 
         // EOF
         if (is_eof(input)) {
             // This is a parse error. Return the <url-token>.
             log_parse_error();
-            return Token::create_url(builder.to_fly_string_without_validation(), input_since(start_byte_offset));
+            return Token::create_url(Utf16FlyString::from_utf16(builder.view()), input_since(start_byte_offset));
         }
 
         // whitespace
@@ -622,13 +676,13 @@ Token Tokenizer::consume_a_url_token()
 
             if (is_right_paren(input)) {
                 (void)next_code_point();
-                return Token::create_url(builder.to_fly_string_without_validation(), input_since(start_byte_offset));
+                return Token::create_url(Utf16FlyString::from_utf16(builder.view()), input_since(start_byte_offset));
             }
 
             if (is_eof(input)) {
                 (void)next_code_point();
                 log_parse_error();
-                return Token::create_url(builder.to_fly_string_without_validation(), input_since(start_byte_offset));
+                return Token::create_url(Utf16FlyString::from_utf16(builder.view()), input_since(start_byte_offset));
             }
 
             // otherwise, consume the remnants of a bad url, create a <bad-url-token>, and return it.
@@ -736,7 +790,7 @@ Token Tokenizer::consume_a_numeric_token()
         // NOTE: We intentionally store this in the `value`, to save space.
 
         // 3. Return the <dimension-token>.
-        return Token::create_dimension(number, move(unit), input_since(start_byte_offset));
+        return Token::create_dimension(number, unit, input_since(start_byte_offset));
     }
 
     // Otherwise, if the next input code point is U+0025 PERCENTAGE SIGN (%), consume it.
@@ -873,21 +927,23 @@ Token Tokenizer::consume_string_token(u32 ending_code_point)
 
     // Initially create a <string-token> with its value set to the empty string.
     auto original_source_text_start_byte_offset_including_quotation_mark = current_byte_offset() - 1;
-    StringBuilder builder;
+    Utf16StringBuilder builder;
 
     // Repeatedly consume the next input code point from the stream:
     for (;;) {
         auto input = next_code_point();
 
         // ending code point
-        if (input == ending_code_point)
-            return Token::create_string(builder.to_fly_string_without_validation(), input_since(original_source_text_start_byte_offset_including_quotation_mark));
+        if (input == ending_code_point) {
+            // Return the <string-token>.
+            return Token::create_string(Utf16FlyString::from_utf16(builder.view()), input_since(original_source_text_start_byte_offset_including_quotation_mark));
+        }
 
         // EOF
         if (is_eof(input)) {
             // This is a parse error. Return the <string-token>.
             log_parse_error();
-            return Token::create_string(builder.to_fly_string_without_validation(), input_since(original_source_text_start_byte_offset_including_quotation_mark));
+            return Token::create_string(Utf16FlyString::from_utf16(builder.view()), input_since(original_source_text_start_byte_offset_including_quotation_mark));
         }
 
         // newline
@@ -1149,8 +1205,10 @@ Token Tokenizer::consume_a_token()
         dbgln_if(CSS_TOKENIZER_DEBUG, "is at");
         // If the next 3 input code points would start an ident sequence, consume an ident sequence, create
         // an <at-keyword-token> with its value set to the returned value, and return it.
-        if (would_start_an_ident_sequence(peek_triplet()))
-            return Token::create_at_keyword(consume_an_ident_sequence(), input_since(start_byte_offset));
+        if (would_start_an_ident_sequence(peek_triplet())) {
+            auto name = consume_an_ident_sequence();
+            return Token::create_at_keyword(move(name), input_since(start_byte_offset));
+        }
 
         // Otherwise, return a <delim-token> with its value set to the current input code point.
         return Token::create_delim(input, input_since(start_byte_offset));

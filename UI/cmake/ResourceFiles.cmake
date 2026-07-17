@@ -5,41 +5,9 @@ set(FONTS
 list(TRANSFORM FONTS PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/fonts/")
 
 set(16x16_ICONS
-    app-system-monitor.png
-    box.png
-    audio-volume-high.png
-    audio-volume-muted.png
-    close-tab.png
-    download.png
-    edit-copy.png
-    error.png
-    filetype-css.png
-    filetype-folder-open.png
-    filetype-html.png
-    filetype-image.png
-    filetype-sound.png
-    filetype-video.png
-    find.png
-    go-forward.png
-    history.png
-    layers.png
-    layout.png
-    network.png
-    new-tab.png
     open-parent-directory.png
-    paste.png
-    pause.png
-    play.png
-    select-all.png
-    settings.png
-    spoof.png
-    trash-can.png
-    zoom-in.png
-    zoom-out.png
-    zoom-reset.png
 )
 set(32x32_ICONS
-    app-system-monitor.png
     filetype-folder.png
     filetype-unknown.png
 )
@@ -50,46 +18,48 @@ set(128x128_ICONS
     app-browser.png
     app-browser-dark.png
 )
-set(BROWSER_ICONS
-    clear-cache.png
-    cookie.png
-    dom-tree.png
-    local-storage.png
-)
 list(TRANSFORM 16x16_ICONS PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/icons/16x16/")
 list(TRANSFORM 32x32_ICONS PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/icons/32x32/")
 list(TRANSFORM 48x48_ICONS PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/icons/48x48/")
 list(TRANSFORM 128x128_ICONS PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/icons/128x128/")
-list(TRANSFORM BROWSER_ICONS PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/icons/browser/")
 
 set(INTERNAL_RESOURCES
     ladybird.css
+    utils.js
 )
 list(TRANSFORM INTERNAL_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/")
 
 set(ABOUT_PAGES
     about.html
+    bookmarks.html
+    downloads.html
+    history.html
     newtab.html
     processes.html
     settings.html
+    version.html
+    webui.css
 )
 list(TRANSFORM ABOUT_PAGES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/about-pages/")
 
 set(ABOUT_SETTINGS_RESOURCES
+    advanced.js
+    browsing-behavior.js
     default-zoom-level.js
+    dialog-deep-link.js
     languages.js
     network.js
     new-tab-page.js
     permissions.js
     privacy.js
     search.js
+    tabs.js
 )
 list(TRANSFORM ABOUT_SETTINGS_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/about-pages/settings/")
 
 set(WEB_TEMPLATES
     directory.html
     error.html
-    version.html
 )
 list(TRANSFORM WEB_TEMPLATES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/templates/")
 
@@ -99,10 +69,30 @@ set(THEMES
 )
 list(TRANSFORM THEMES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/themes/")
 
-set(CONFIG_RESOURCES
-    BrowserContentFilters.txt
-)
-list(TRANSFORM CONFIG_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/default-config/")
+# pdf.js viewer assets installed by the pdfjs vcpkg port.
+# Only populated when building with vcpkg and pdfjs is installed.
+set(PDFJS_BUILD_FILES "")
+set(PDFJS_WEB_BASE_FILES "")
+set(PDFJS_WEB_IMAGE_FILES "")
+set(PDFJS_WEB_LOCALE_JSON "")
+set(PDFJS_WEB_LOCALE_EN_US "")
+set(PDFJS_VIEWER_HTML "")
+if (NOT "${VCPKG_INSTALLED_DIR}" STREQUAL "" AND NOT "${VCPKG_TARGET_TRIPLET}" STREQUAL "")
+    set(_pdfjs_vcpkg_dir "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/pdfjs")
+    if (EXISTS "${_pdfjs_vcpkg_dir}/build/pdf.mjs")
+        file(GLOB PDFJS_BUILD_FILES "${_pdfjs_vcpkg_dir}/build/*.mjs")
+        set(_pdfjs_ladybird_dir "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/pdfjs")
+        set(PDFJS_WEB_BASE_FILES
+            "${_pdfjs_ladybird_dir}/pdfjs-ladybird-transport.mjs"
+            "${_pdfjs_vcpkg_dir}/web/viewer.mjs"
+            "${_pdfjs_vcpkg_dir}/web/viewer.css"
+        )
+        file(GLOB PDFJS_WEB_IMAGE_FILES "${_pdfjs_vcpkg_dir}/web/images/*")
+        set(PDFJS_WEB_LOCALE_JSON "${_pdfjs_vcpkg_dir}/web/locale/locale.json")
+        set(PDFJS_WEB_LOCALE_EN_US "${_pdfjs_vcpkg_dir}/web/locale/en-US/viewer.ftl")
+        set(PDFJS_VIEWER_HTML "${_pdfjs_vcpkg_dir}/web/viewer.html")
+    endif()
+endif()
 
 function(copy_resource_set subdir)
     cmake_parse_arguments(PARSE_ARGV 1 "COPY" "" "TARGET;DESTINATION" "RESOURCES")
@@ -160,10 +150,6 @@ function(copy_resources_to_build base_directory bundle_target)
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
 
-    copy_resource_set(icons/browser RESOURCES ${BROWSER_ICONS}
-        DESTINATION ${base_directory} TARGET ${bundle_target}
-    )
-
     copy_resource_set(themes RESOURCES ${THEMES}
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
@@ -184,9 +170,23 @@ function(copy_resources_to_build base_directory bundle_target)
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
 
-    copy_resource_set(ladybird/default-config RESOURCES ${CONFIG_RESOURCES}
-        DESTINATION ${base_directory} TARGET ${bundle_target}
-    )
+    if (PDFJS_BUILD_FILES)
+        copy_resource_set(ladybird/pdfjs/build RESOURCES ${PDFJS_BUILD_FILES}
+            DESTINATION ${base_directory} TARGET ${bundle_target}
+        )
+        copy_resource_set(ladybird/pdfjs/web RESOURCES ${PDFJS_WEB_BASE_FILES} ${PDFJS_VIEWER_HTML}
+            DESTINATION ${base_directory} TARGET ${bundle_target}
+        )
+        copy_resource_set(ladybird/pdfjs/web/images RESOURCES ${PDFJS_WEB_IMAGE_FILES}
+            DESTINATION ${base_directory} TARGET ${bundle_target}
+        )
+        copy_resource_set(ladybird/pdfjs/web/locale RESOURCES ${PDFJS_WEB_LOCALE_JSON}
+            DESTINATION ${base_directory} TARGET ${bundle_target}
+        )
+        copy_resource_set(ladybird/pdfjs/web/locale/en-US RESOURCES ${PDFJS_WEB_LOCALE_EN_US}
+            DESTINATION ${base_directory} TARGET ${bundle_target}
+        )
+    endif()
 
     add_dependencies(${bundle_target} "${bundle_target}_build_resource_files")
 endfunction()
@@ -197,11 +197,16 @@ function(install_ladybird_resources destination component)
     install(FILES ${32x32_ICONS} DESTINATION "${destination}/icons/32x32" COMPONENT ${component})
     install(FILES ${48x48_ICONS} DESTINATION "${destination}/icons/48x48" COMPONENT ${component})
     install(FILES ${128x128_ICONS} DESTINATION "${destination}/icons/128x128" COMPONENT ${component})
-    install(FILES ${BROWSER_ICONS} DESTINATION "${destination}/icons/browser" COMPONENT ${component})
     install(FILES ${THEMES} DESTINATION "${destination}/themes" COMPONENT ${component})
     install(FILES ${INTERNAL_RESOURCES} DESTINATION "${destination}/ladybird" COMPONENT ${component})
     install(FILES ${ABOUT_PAGES} DESTINATION "${destination}/ladybird/about-pages" COMPONENT ${component})
     install(FILES ${ABOUT_SETTINGS_RESOURCES} DESTINATION "${destination}/ladybird/about-pages/settings" COMPONENT ${component})
     install(FILES ${WEB_TEMPLATES} DESTINATION "${destination}/ladybird/templates" COMPONENT ${component})
-    install(FILES ${CONFIG_RESOURCES} DESTINATION "${destination}/ladybird/default-config" COMPONENT ${component})
+    if (PDFJS_BUILD_FILES)
+        install(FILES ${PDFJS_BUILD_FILES} DESTINATION "${destination}/ladybird/pdfjs/build" COMPONENT ${component})
+        install(FILES ${PDFJS_WEB_BASE_FILES} ${PDFJS_VIEWER_HTML} DESTINATION "${destination}/ladybird/pdfjs/web" COMPONENT ${component})
+        install(FILES ${PDFJS_WEB_IMAGE_FILES} DESTINATION "${destination}/ladybird/pdfjs/web/images" COMPONENT ${component})
+        install(FILES ${PDFJS_WEB_LOCALE_JSON} DESTINATION "${destination}/ladybird/pdfjs/web/locale" COMPONENT ${component})
+        install(FILES ${PDFJS_WEB_LOCALE_EN_US} DESTINATION "${destination}/ladybird/pdfjs/web/locale/en-US" COMPONENT ${component})
+    endif()
 endfunction()

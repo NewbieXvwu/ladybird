@@ -1,13 +1,14 @@
 /*
- * Copyright (c) 2024, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2024-2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <AK/FlyString.h>
 #include <AK/Function.h>
+#include <AK/OwnPtr.h>
+#include <AK/Utf16FlyString.h>
 #include <AK/Variant.h>
 #include <AK/Vector.h>
 #include <LibWeb/CSS/Parser/Token.h>
@@ -28,7 +29,7 @@ using DeclarationVisitor = AK::Function<void(Declaration const&)>;
 
 // https://drafts.csswg.org/css-syntax/#ref-for-at-rule%E2%91%A0%E2%91%A1
 struct AtRule {
-    FlyString name;
+    Utf16FlyString name;
     Vector<ComponentValue> prelude;
     Vector<RuleOrListOfDeclarations> child_rules_and_lists_of_declarations;
     bool is_block_rule { false };
@@ -46,56 +47,82 @@ struct QualifiedRule {
     Vector<ComponentValue> prelude;
     Vector<Declaration> declarations;
     Vector<RuleOrListOfDeclarations> child_rules;
+    Optional<SourcePosition> source_position = {};
 
-    void for_each_as_declaration_list(FlyString const& rule_name, DeclarationVisitor&& visit) const;
+    void for_each_as_declaration_list(Utf16FlyString const& rule_name, DeclarationVisitor&& visit) const;
 };
 
 // https://drafts.csswg.org/css-syntax/#declaration
 struct Declaration {
-    FlyString name;
+    Utf16FlyString name;
     Vector<ComponentValue> value;
     Important important = Important::No;
-    Optional<String> original_text = {};
-
-    // FIXME: Only needed by our janky @supports re-serialization-re-parse code.
-    String to_string() const;
+    Optional<String> original_value_text = {};
+    Optional<Utf16String> original_full_text = {};
+    Optional<SourcePosition> source_position = {};
 };
 
 struct SubstitutionFunctionsPresence {
     bool attr { false };
     bool env { false };
+    bool if_ { false };
+    bool inherit { false };
     bool var { false };
 
-    bool has_any() const { return attr || env || var; }
+    bool has_any() const { return attr || env || if_ || inherit || var; }
+};
+
+class ComponentValueToken {
+public:
+    ComponentValueToken() = default;
+    ComponentValueToken(Token const&);
+
+    bool is(Token::Type type) const { return m_type == type; }
+    Token::Type type() const { return m_type; }
+    Token::Type mirror_variant() const;
+    StringView bracket_string() const;
+    StringView bracket_mirror_string() const;
+
+    String const& original_source_text() const { return m_original_source_text; }
+    SourcePosition const& start_position() const { return m_start_position; }
+    SourcePosition const& end_position() const { return m_end_position; }
+
+    bool operator==(ComponentValueToken const& other) const { return m_type == other.m_type; }
+
+private:
+    Token::Type m_type { Token::Type::Invalid };
+    String m_original_source_text;
+    SourcePosition m_start_position;
+    SourcePosition m_end_position;
 };
 
 // https://drafts.csswg.org/css-syntax/#simple-block
 struct SimpleBlock {
-    Token token;
+    ComponentValueToken token;
     Vector<ComponentValue> value;
-    Token end_token = {};
+    ComponentValueToken end_token = {};
 
     bool is_curly() const { return token.is(Token::Type::OpenCurly); }
     bool is_paren() const { return token.is(Token::Type::OpenParen); }
     bool is_square() const { return token.is(Token::Type::OpenSquare); }
 
-    String to_string() const;
+    Utf16String to_string() const;
+    void serialize_to(Utf16StringBuilder&) const;
     String original_source_text() const;
-    void contains_arbitrary_substitution_function(SubstitutionFunctionsPresence&) const;
 
     bool operator==(SimpleBlock const& other) const { return token == other.token && value == other.value; }
 };
 
 // https://drafts.csswg.org/css-syntax/#function
 struct Function {
-    FlyString name;
+    Utf16FlyString name;
     Vector<ComponentValue> value;
-    Token name_token = {};
-    Token end_token = {};
+    ComponentValueToken name_token = {};
+    ComponentValueToken end_token = {};
 
-    String to_string() const;
+    Utf16String to_string() const;
+    void serialize_to(Utf16StringBuilder&) const;
     String original_source_text() const;
-    void contains_arbitrary_substitution_function(SubstitutionFunctionsPresence&) const;
 
     bool operator==(Function const& other) const { return name == other.name && value == other.value; }
 };
@@ -103,7 +130,8 @@ struct Function {
 // https://drafts.csswg.org/css-variables/#guaranteed-invalid-value
 struct GuaranteedInvalidValue {
     GuaranteedInvalidValue() = default;
-    String to_string() const { return {}; }
+    Utf16String to_string() const { return {}; }
+    void serialize_to(Utf16StringBuilder&) const { }
     String original_source_text() const { return {}; }
 
     bool operator==(GuaranteedInvalidValue const&) const = default;

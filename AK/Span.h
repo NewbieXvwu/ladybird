@@ -125,6 +125,8 @@ class Span : public Detail::Span<T> {
 public:
     using Detail::Span<T>::Span;
 
+    using ElementType = T;
+
     constexpr Span() = default;
 
     [[nodiscard]] ALWAYS_INLINE constexpr T const* data() const { return this->m_values; }
@@ -354,6 +356,24 @@ public:
         }
         return {};
     }
+
+    template<typename TargetType>
+    ALWAYS_INLINE constexpr Span<TargetType> reinterpret()
+    {
+        if constexpr (sizeof(T) % sizeof(TargetType) != 0)
+            VERIFY((size() * sizeof(T)) % sizeof(TargetType) == 0);
+
+        return Span<TargetType> { reinterpret_cast<TargetType*>(data()), (size() * sizeof(T)) / sizeof(TargetType) };
+    }
+
+    template<typename TargetType>
+    ALWAYS_INLINE constexpr Span<TargetType const> reinterpret() const
+    {
+        if constexpr (sizeof(T) % sizeof(TargetType) != 0)
+            VERIFY((size() * sizeof(T)) % sizeof(TargetType) == 0);
+
+        return Span<TargetType const> { reinterpret_cast<TargetType const*>(data()), (size() * sizeof(T)) / sizeof(TargetType) };
+    }
 };
 
 template<typename T>
@@ -381,14 +401,14 @@ template<typename T>
 requires(IsTrivial<T>)
 ReadonlyBytes to_readonly_bytes(Span<T> span)
 {
-    return ReadonlyBytes { static_cast<void const*>(span.data()), span.size() * sizeof(T) };
+    return span.template reinterpret<u8 const>();
 }
 
 template<typename T>
 requires(IsTrivial<T> && !IsConst<T>)
 Bytes to_bytes(Span<T> span)
 {
-    return Bytes { static_cast<void*>(span.data()), span.size() * sizeof(T) };
+    return span.template reinterpret<u8>();
 }
 
 }

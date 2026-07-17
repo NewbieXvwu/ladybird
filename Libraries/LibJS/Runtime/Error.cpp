@@ -1,38 +1,17 @@
 /*
- * Copyright (c) 2020, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2020-2025, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021-2023, Linus Groh <linusg@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/StringBuilder.h>
-#include <LibJS/AST.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/Error.h>
-#include <LibJS/Runtime/ExecutionContext.h>
 #include <LibJS/Runtime/GlobalObject.h>
-#include <LibJS/SourceRange.h>
 
 namespace JS {
 
 GC_DEFINE_ALLOCATOR(Error);
-
-static SourceRange dummy_source_range { SourceCode::create({}, {}), {}, {} };
-
-SourceRange const& TracebackFrame::source_range() const
-{
-    if (!cached_source_range)
-        return dummy_source_range;
-    if (auto* unrealized = cached_source_range->source_range.get_pointer<UnrealizedSourceRange>()) {
-        auto source_range = [&] {
-            if (!unrealized->source_code)
-                return dummy_source_range;
-            return unrealized->realize();
-        }();
-        cached_source_range->source_range = move(source_range);
-    }
-    return cached_source_range->source_range.get<SourceRange>();
-}
 
 GC::Ref<Error> Error::create(Realm& realm)
 {
@@ -46,15 +25,33 @@ GC::Ref<Error> Error::create(Realm& realm, Utf16String message)
     return error;
 }
 
-GC::Ref<Error> Error::create(Realm& realm, StringView message)
+GC::Ref<Error> Error::create(Realm& realm, Utf16View message)
 {
-    return create(realm, Utf16String::from_utf8(message));
+    auto error = Error::create(realm);
+    error->set_message(message);
+    return error;
+}
+
+Utf16String Error::stack_string(CompactTraceback compact) const
+{
+    return ErrorData::stack_string(compact);
 }
 
 Error::Error(Object& prototype)
     : Object(ConstructWithPrototypeTag::Tag, prototype)
+    , ErrorData(prototype.vm())
 {
-    populate_stack();
+}
+
+void Error::visit_edges(Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    ErrorData::visit_edges(visitor);
+}
+
+size_t Error::external_memory_size() const
+{
+    return Object::external_memory_size() + ErrorData::external_memory_size();
 }
 
 // 20.5.8.1 InstallErrorCause ( O, options ), https://tc39.es/ecma262/#sec-installerrorcause
@@ -83,83 +80,12 @@ void Error::set_message(Utf16String message)
     define_direct_property(vm.names.message, PrimitiveString::create(vm, move(message)), attr);
 }
 
-void Error::populate_stack()
+void Error::set_message(Utf16View message)
 {
-    auto stack_trace = vm().stack_trace();
-    m_traceback.ensure_capacity(stack_trace.size());
-    for (auto& element : stack_trace) {
-        auto* context = element.execution_context;
-        TracebackFrame frame {
-            .function_name = context->function_name ? context->function_name->utf8_string() : ""_string,
-            .cached_source_range = element.source_range,
-        };
+    auto& vm = this->vm();
 
-        m_traceback.append(move(frame));
-    }
-}
-
-String Error::stack_string(CompactTraceback compact) const
-{
-    if (m_traceback.is_empty())
-        return {};
-
-    StringBuilder stack_string_builder;
-
-    // Note: We roughly follow V8's formatting
-    auto append_frame = [&](TracebackFrame const& frame) {
-        auto function_name = frame.function_name;
-        auto source_range = frame.source_range();
-        // Note: Since we don't know whether we have a valid SourceRange here we just check for some default values.
-        if (!source_range.filename().is_empty() || source_range.start.offset != 0 || source_range.end.offset != 0) {
-
-            if (function_name.is_empty())
-                stack_string_builder.appendff("    at {}:{}:{}\n", source_range.filename(), source_range.start.line, source_range.start.column);
-            else
-                stack_string_builder.appendff("    at {} ({}:{}:{})\n", function_name, source_range.filename(), source_range.start.line, source_range.start.column);
-        } else {
-            stack_string_builder.appendff("    at {}\n", function_name.is_empty() ? "<unknown>"sv : function_name);
-        }
-    };
-
-    auto is_same_frame = [](TracebackFrame const& a, TracebackFrame const& b) {
-        if (a.function_name.is_empty() && b.function_name.is_empty()) {
-            auto source_range_a = a.source_range();
-            auto source_range_b = b.source_range();
-            return source_range_a.filename() == source_range_b.filename() && source_range_a.start.line == source_range_b.start.line;
-        }
-        return a.function_name == b.function_name;
-    };
-
-    // Note: We don't want to capture the global execution context, so we omit the last frame
-    // Note: The error's name and message get prepended by ErrorPrototype::stack
-    // FIXME: We generate a stack-frame for the Errors constructor, other engines do not
-    unsigned repetitions = 0;
-    size_t used_frames = m_traceback.size() - 1;
-    for (size_t i = 0; i < used_frames; ++i) {
-        auto const& frame = m_traceback[i];
-        if (compact == CompactTraceback::Yes && i + 1 < used_frames) {
-            auto const& next_traceback_frame = m_traceback[i + 1];
-            if (is_same_frame(frame, next_traceback_frame)) {
-                repetitions++;
-                continue;
-            }
-        }
-        if (repetitions > 4) {
-            // If more than 5 (1 + >4) consecutive function calls with the same name, print
-            // the name only once and show the number of repetitions instead. This prevents
-            // printing ridiculously large call stacks of recursive functions.
-            append_frame(frame);
-            stack_string_builder.appendff("    {} more calls\n", repetitions);
-        } else {
-            for (size_t j = 0; j < repetitions + 1; j++)
-                append_frame(frame);
-        }
-        repetitions = 0;
-    }
-    for (size_t j = 0; j < repetitions; j++)
-        append_frame(m_traceback[used_frames - 1]);
-
-    return MUST(stack_string_builder.to_string());
+    u8 attr = Attribute::Writable | Attribute::Configurable;
+    define_direct_property(vm.names.message, PrimitiveString::create(vm, message), attr);
 }
 
 #define __JS_ENUMERATE(ClassName, snake_name, PrototypeName, ConstructorName, ArrayType) \
@@ -176,9 +102,11 @@ String Error::stack_string(CompactTraceback compact) const
         return error;                                                                    \
     }                                                                                    \
                                                                                          \
-    GC::Ref<ClassName> ClassName::create(Realm& realm, StringView message)               \
+    GC::Ref<ClassName> ClassName::create(Realm& realm, Utf16View message)                \
     {                                                                                    \
-        return create(realm, Utf16String::from_utf8(message));                           \
+        auto error = ClassName::create(realm);                                           \
+        error->set_message(message);                                                     \
+        return error;                                                                    \
     }                                                                                    \
                                                                                          \
     ClassName::ClassName(Object& prototype)                                              \

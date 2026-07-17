@@ -8,18 +8,19 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16String.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
+#include <LibWeb/Bindings/MessagePort.h>
+#include <LibWeb/Bindings/QueuingStrategy.h>
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/MessageEvent.h>
 #include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
-#include <LibWeb/HTML/StructuredSerializeOptions.h>
 #include <LibWeb/Streams/AbstractOperations.h>
-#include <LibWeb/Streams/QueuingStrategy.h>
 #include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/Streams/ReadableStreamDefaultController.h>
 #include <LibWeb/Streams/ReadableStreamOperations.h>
@@ -34,7 +35,7 @@
 namespace Web::Streams {
 
 // https://streams.spec.whatwg.org/#validate-and-normalize-high-water-mark
-WebIDL::ExceptionOr<double> extract_high_water_mark(QueuingStrategy const& strategy, double default_hwm)
+WebIDL::ExceptionOr<double> extract_high_water_mark(Bindings::QueuingStrategy const& strategy, double default_hwm)
 {
     // 1. If strategy["highWaterMark"] does not exist, return defaultHWM.
     if (!strategy.high_water_mark.has_value())
@@ -45,14 +46,14 @@ WebIDL::ExceptionOr<double> extract_high_water_mark(QueuingStrategy const& strat
 
     // 3. If highWaterMark is NaN or highWaterMark < 0, throw a RangeError exception.
     if (isnan(high_water_mark) || high_water_mark < 0)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "Invalid value for high water mark"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "Invalid value for high water mark"_utf16 };
 
     // 4. Return highWaterMark.
     return high_water_mark;
 }
 
 // https://streams.spec.whatwg.org/#make-size-algorithm-from-size-function
-GC::Ref<SizeAlgorithm> extract_size_algorithm(JS::VM& vm, QueuingStrategy const& strategy)
+GC::Ref<SizeAlgorithm> extract_size_algorithm(JS::VM& vm, Bindings::QueuingStrategy const& strategy)
 {
     // 1. If strategy["size"] does not exist, return an algorithm that returns 1.
     if (!strategy.size)
@@ -85,13 +86,10 @@ struct PromiseHolder : public JS::Cell {
 
 GC_DEFINE_ALLOCATOR(PromiseHolder);
 
-static void add_message_event_listener(JS::Realm& realm, HTML::MessagePort& port, FlyString const& name, Function<void(JS::VM&, HTML::MessageEvent const&)> handler)
+static void add_message_event_listener(JS::Realm& realm, HTML::MessagePort& port, Utf16FlyString const& name, Function<void(JS::VM&, HTML::MessageEvent const&)> handler)
 {
     auto behavior = [handler = GC::create_function(realm.heap(), move(handler))](JS::VM& vm) {
-        auto event = vm.argument(0);
-        VERIFY(event.is_object());
-
-        auto& message_event = as<HTML::MessageEvent>(event.as_object());
+        auto& message_event = vm.argument(0).as<HTML::MessageEvent>();
         handler->function()(vm, message_event);
 
         return JS::js_undefined();
@@ -120,7 +118,7 @@ WebIDL::ExceptionOr<void> pack_and_post_message(JS::Realm& realm, HTML::MessageP
     auto message = JS::Object::create(realm, nullptr);
 
     // 2. Perform ! CreateDataProperty(message, "type", type).
-    MUST(message->create_data_property(vm.names.type, JS::PrimitiveString::create(vm, type)));
+    MUST(message->create_data_property(vm.names.type, JS::PrimitiveString::create(vm, Utf16String::from_ascii_without_validation(type.bytes()))));
 
     // 3. Perform ! CreateDataProperty(message, "value", value).
     MUST(message->create_data_property(vm.names.value, value));
@@ -129,7 +127,7 @@ WebIDL::ExceptionOr<void> pack_and_post_message(JS::Realm& realm, HTML::MessageP
     auto target_port = port.entangled_port();
 
     // 5. Let options be «[ "transfer" → « » ]».
-    HTML::StructuredSerializeOptions options { .transfer = {} };
+    Bindings::StructuredSerializeOptions options;
 
     // 6. Run the message port post message steps providing targetPort, message, and options.
     return port.message_port_post_message_steps(target_port, message, options);
@@ -178,7 +176,7 @@ void set_up_cross_realm_transform_readable(JS::Realm& realm, ReadableStream& str
             auto value = MUST(data.get(vm, vm.names.value));
 
             // 5. Assert: type is a String.
-            auto type_string = type.as_string().utf8_string_view();
+            auto type_string = type.as_string().utf16_string_view();
 
             // 6. If type is "chunk",
             if (type_string == "chunk"sv) {
@@ -289,7 +287,7 @@ void set_up_cross_realm_transform_writable(JS::Realm& realm, WritableStream& str
             auto value = MUST(data.get(vm, vm.names.value));
 
             // 5. Assert: type is a String.
-            auto type_string = type.as_string().utf8_string_view();
+            auto type_string = type.as_string().utf16_string_view();
 
             // 6. If type is "pull",
             if (type_string == "pull"sv) {
@@ -383,7 +381,7 @@ void set_up_cross_realm_transform_writable(JS::Realm& realm, WritableStream& str
         return *reaction_promise->promise;
     });
 
-    // 9. Let closeAlgorithm be the folowing steps:
+    // 9. Let closeAlgorithm be the following steps:
     auto close_algorithm = GC::create_function(realm.heap(), [&realm, &port]() -> GC::Ref<WebIDL::Promise> {
         // 1. Perform ! PackAndPostMessage(port, "close", undefined).
         MUST(pack_and_post_message(realm, port, "close"sv, JS::js_undefined()));
@@ -467,17 +465,16 @@ WebIDL::ExceptionOr<GC::Ref<JS::ArrayBuffer>> transfer_array_buffer(JS::Realm& r
 
     // 2. Let arrayBufferData be O.[[ArrayBufferData]].
     // 3. Let arrayBufferByteLength be O.[[ArrayBufferByteLength]].
-    auto array_buffer = buffer.buffer();
-
     // 4. Perform ? DetachArrayBuffer(O).
-    TRY(JS::detach_array_buffer(vm, buffer));
+    // NB: We steal the underlying data block and detach atomically so the transfer is zero-copy.
+    auto block = TRY(buffer.detach_and_take_data_block(vm));
 
     // 5. Return a new ArrayBuffer object, created in the current Realm, whose [[ArrayBufferData]] internal slot value is arrayBufferData and whose [[ArrayBufferByteLength]] internal slot value is arrayBufferByteLength.
-    return JS::ArrayBuffer::create(realm, move(array_buffer));
+    return JS::ArrayBuffer::create(realm, move(block));
 }
 
 // https://streams.spec.whatwg.org/#abstract-opdef-cloneasuint8array
-WebIDL::ExceptionOr<JS::Value> clone_as_uint8_array(JS::Realm& realm, WebIDL::ArrayBufferView& view)
+WebIDL::ExceptionOr<JS::Value> clone_as_uint8_array(JS::Realm& realm, WebIDL::ArrayBufferView view)
 {
     auto& vm = realm.vm();
 

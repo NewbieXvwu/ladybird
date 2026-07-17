@@ -23,6 +23,8 @@ public:
     static Utf16FlyString from_utf8(StringView);
     static Utf16FlyString from_utf8(String const& string) { return from_utf8_without_validation(string); }
     static Utf16FlyString from_utf8(FlyString const& string) { return from_utf8_without_validation(string); }
+    static Utf16FlyString from_fly_string(FlyString const& string) { return from_utf8_without_validation(string); }
+    static Utf16FlyString from_ascii_without_validation(StringView);
     static Utf16FlyString from_utf8_without_validation(StringView);
     static Utf16FlyString from_utf8_but_should_be_ported_to_utf16(StringView string) { return from_utf8_without_validation(string); }
 
@@ -110,6 +112,10 @@ public:
     }
 
     [[nodiscard]] ALWAYS_INLINE bool equals_ignoring_ascii_case(Utf16View const& other) const { return m_data.equals_ignoring_ascii_case(other); }
+    [[nodiscard]] ALWAYS_INLINE bool equals_ignoring_ascii_case(StringView other) const { return view().equals_ignoring_ascii_case(other); }
+
+    [[nodiscard]] ALWAYS_INLINE bool starts_with(StringView string) const { return view().starts_with(string); }
+    [[nodiscard]] ALWAYS_INLINE bool starts_with_ignoring_ascii_case(StringView string) const { return view().starts_with_ignoring_ascii_case(string); }
 
     template<typename... Ts>
     [[nodiscard]] ALWAYS_INLINE bool is_one_of(Ts&&... strings) const
@@ -124,6 +130,7 @@ public:
     }
 
     [[nodiscard]] ALWAYS_INLINE u32 hash() const { return m_data.hash(); }
+    [[nodiscard]] ALWAYS_INLINE u32 ascii_case_insensitive_hash() const { return view().ascii_case_insensitive_hash(); }
     [[nodiscard]] ALWAYS_INLINE bool is_empty() const { return m_data.is_empty(); }
     [[nodiscard]] ALWAYS_INLINE bool is_ascii() const { return m_data.is_ascii(); }
 
@@ -136,18 +143,36 @@ public:
     [[nodiscard]] ALWAYS_INLINE size_t code_unit_offset_of(size_t code_point_offset) const { return m_data.code_unit_offset_of(code_point_offset); }
     [[nodiscard]] ALWAYS_INLINE size_t code_point_offset_of(size_t code_unit_offset) const { return m_data.code_point_offset_of(code_unit_offset); }
 
-    constexpr Utf16FlyString(Badge<Optional<Utf16FlyString>>, nullptr_t)
+    constexpr Utf16FlyString(Badge<SentinelOptionalTraits<Utf16FlyString>>, nullptr_t)
         : m_data(Badge<Utf16FlyString> {}, nullptr)
     {
     }
 
-    [[nodiscard]] constexpr bool is_invalid(Badge<Optional<Utf16FlyString>>) const { return m_data.raw({}) == 0; }
+    [[nodiscard]] constexpr bool is_invalid(Badge<SentinelOptionalTraits<Utf16FlyString>>) const { return m_data.raw({}) == 0; }
 
     // This is primarily interesting to unit tests.
     [[nodiscard]] static size_t number_of_utf16_fly_strings();
 
+    [[nodiscard]] static constexpr Utf16FlyString from_ascii_short_string_without_validation(char const* data, size_t length)
+    {
+        VERIFY(length <= Detail::MAX_SHORT_STRING_BYTE_COUNT);
+        auto short_string = Detail::ShortString::create_with_byte_count(length);
+        for (size_t i = 0; i < length; ++i)
+            short_string.storage[i] = static_cast<u8>(data[i]);
+        return Utf16FlyString { Detail::Utf16StringBase { short_string } };
+    }
+
+    [[nodiscard]] static constexpr Utf16FlyString from_ascii_short_string_without_validation(char16_t const* data, size_t length)
+    {
+        VERIFY(length <= Detail::MAX_SHORT_STRING_BYTE_COUNT);
+        auto short_string = Detail::ShortString::create_with_byte_count(length);
+        for (size_t i = 0; i < length; ++i)
+            short_string.storage[i] = static_cast<u8>(data[i]);
+        return Utf16FlyString { Detail::Utf16StringBase { short_string } };
+    }
+
 private:
-    ALWAYS_INLINE explicit Utf16FlyString(Detail::Utf16StringBase data)
+    ALWAYS_INLINE constexpr explicit Utf16FlyString(Detail::Utf16StringBase data)
         : m_data(move(data))
     {
     }
@@ -159,105 +184,28 @@ private:
 };
 
 template<>
-class Optional<Utf16FlyString> : public OptionalBase<Utf16FlyString> {
-    template<typename U>
-    friend class Optional;
+struct SentinelOptionalTraits<Utf16FlyString> {
+    static constexpr Utf16FlyString sentinel_value() { return Utf16FlyString({}, nullptr); }
+    static constexpr bool is_sentinel(Utf16FlyString const& value) { return value.is_invalid({}); }
+};
 
+template<>
+class Optional<Utf16FlyString> : public SentinelOptional<Utf16FlyString> {
 public:
-    using ValueType = Utf16FlyString;
-
-    constexpr Optional() = default;
-
-    template<SameAs<OptionalNone> V>
-    constexpr Optional(V) { }
-
-    constexpr Optional(Optional<Utf16FlyString> const& other)
-        : m_value(other.m_value)
-    {
-    }
-
-    constexpr Optional(Optional&& other)
-        : m_value(move(other.m_value))
-    {
-    }
-
-    template<typename U = Utf16FlyString>
-    requires(!IsSame<OptionalNone, RemoveCVReference<U>>)
-    explicit(!IsConvertible<U&&, Utf16FlyString>) constexpr Optional(U&& value)
-    requires(!IsSame<RemoveCVReference<U>, Optional<Utf16FlyString>> && IsConstructible<Utf16FlyString, U &&>)
-        : m_value(forward<U>(value))
-    {
-    }
-
-    template<SameAs<OptionalNone> V>
-    constexpr Optional& operator=(V)
-    {
-        clear();
-        return *this;
-    }
-
-    constexpr Optional& operator=(Optional const& other)
-    {
-        if (this != &other)
-            m_value = other.m_value;
-        return *this;
-    }
-
-    constexpr Optional& operator=(Optional&& other)
-    {
-        if (this != &other)
-            m_value = other.m_value;
-        return *this;
-    }
-
-    constexpr void clear()
-    {
-        m_value = empty_value;
-    }
-
-    [[nodiscard]] constexpr bool has_value() const
-    {
-        return !m_value.is_invalid({});
-    }
-
-    [[nodiscard]] constexpr Utf16FlyString& value() &
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] constexpr Utf16FlyString const& value() const&
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] constexpr Utf16FlyString value() &&
-    {
-        return release_value();
-    }
-
-    [[nodiscard]] constexpr Utf16FlyString release_value()
-    {
-        VERIFY(has_value());
-        return exchange(m_value, empty_value);
-    }
-
-private:
-    static constexpr Utf16FlyString empty_value { {}, nullptr };
-    Utf16FlyString m_value { empty_value };
+    using SentinelOptional::SentinelOptional;
 };
 
 template<>
 struct Traits<Utf16FlyString> : public DefaultTraits<Utf16FlyString> {
     static unsigned hash(Utf16FlyString const& string) { return string.hash(); }
+    static constexpr bool may_have_slow_equality_check() { return false; }
 };
 
 template<>
 struct Formatter<Utf16FlyString> : Formatter<Utf16String> {
     ErrorOr<void> format(FormatBuilder& builder, Utf16FlyString const& string)
     {
-        return Formatter<Utf16String>::format(builder, string.to_utf16_string());
+        return Formatter<Utf16String> {}.format(builder, string.to_utf16_string());
     }
 };
 
@@ -279,15 +227,26 @@ inline constexpr bool IsHashCompatible<Utf16FlyString, Utf16String> = true;
 
 }
 
-[[nodiscard]] ALWAYS_INLINE AK::Utf16FlyString operator""_utf16_fly_string(char const* string, size_t length)
+[[nodiscard]] ALWAYS_INLINE constexpr AK::Utf16FlyString operator""_utf16_fly_string(char const* string, size_t length)
 {
+    // OPTIMIZATION: Short ASCII strings become compile-time constants with no runtime validation or table lookup.
+    if (length <= AK::Detail::MAX_SHORT_STRING_BYTE_COUNT
+        && AK::all_of(string, string + length, AK::is_ascii)) {
+        return AK::Utf16FlyString::from_ascii_short_string_without_validation(string, length);
+    }
+
     AK::StringView view { string, length };
 
     ASSERT(AK::Utf8View { view }.validate());
     return AK::Utf16FlyString::from_utf8_without_validation(view);
 }
 
-[[nodiscard]] ALWAYS_INLINE AK::Utf16FlyString operator""_utf16_fly_string(char16_t const* string, size_t length)
+[[nodiscard]] ALWAYS_INLINE constexpr AK::Utf16FlyString operator""_utf16_fly_string(char16_t const* string, size_t length)
 {
+    // OPTIMIZATION: Short ASCII strings become compile-time constants with no runtime work.
+    if (length <= AK::Detail::MAX_SHORT_STRING_BYTE_COUNT
+        && AK::all_of(string, string + length, AK::is_ascii))
+        return AK::Utf16FlyString::from_ascii_short_string_without_validation(string, length);
+
     return AK::Utf16FlyString::from_utf16({ string, length });
 }

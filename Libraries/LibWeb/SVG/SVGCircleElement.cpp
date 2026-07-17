@@ -6,8 +6,9 @@
 
 #include <LibGfx/Path.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGCircleElementPrototype.h>
+#include <LibWeb/Bindings/SVGCircleElement.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/AttributeParser.h>
@@ -28,7 +29,7 @@ void SVGCircleElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-bool SVGCircleElement::is_presentational_hint(FlyString const& name) const
+bool SVGCircleElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -39,44 +40,45 @@ bool SVGCircleElement::is_presentational_hint(FlyString const& name) const
         SVG::AttributeNames::r);
 }
 
-void SVGCircleElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void SVGCircleElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
-    Base::apply_presentational_hints(cascaded_properties);
+    Base::apply_presentational_hints(properties);
     auto parsing_context = CSS::Parser::ParsingParams { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
 
     auto cx_attribute = attribute(SVG::AttributeNames::cx);
-    if (auto cx_value = parse_css_value(parsing_context, cx_attribute.value_or(String {}), CSS::PropertyID::Cx))
-        cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Cx, cx_value.release_nonnull());
+    if (auto cx_value = parse_css_value(parsing_context, cx_attribute.value_or({}), CSS::PropertyID::Cx))
+        properties.append({ .property_id = CSS::PropertyID::Cx, .value = cx_value.release_nonnull() });
 
     auto cy_attribute = attribute(SVG::AttributeNames::cy);
-    if (auto cy_value = parse_css_value(parsing_context, cy_attribute.value_or(String {}), CSS::PropertyID::Cy))
-        cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Cy, cy_value.release_nonnull());
+    if (auto cy_value = parse_css_value(parsing_context, cy_attribute.value_or({}), CSS::PropertyID::Cy))
+        properties.append({ .property_id = CSS::PropertyID::Cy, .value = cy_value.release_nonnull() });
 
     auto r_attribute = attribute(SVG::AttributeNames::r);
-    if (auto r_value = parse_css_value(parsing_context, r_attribute.value_or(String {}), CSS::PropertyID::R))
-        cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::R, r_value.release_nonnull());
+    if (auto r_value = parse_css_value(parsing_context, r_attribute.value_or({}), CSS::PropertyID::R))
+        properties.append({ .property_id = CSS::PropertyID::R, .value = r_value.release_nonnull() });
 }
 
 static CSSPixels normalized_diagonal_length(CSSPixelSize viewport_size)
 {
     if (viewport_size.width() == viewport_size.height())
         return viewport_size.width();
-    return sqrt((viewport_size.width() * viewport_size.width()) + (viewport_size.height() * viewport_size.height())) / CSSPixels::nearest_value_for(AK::Sqrt2<float>);
+    return sqrt(((viewport_size.width() * viewport_size.width()) + (viewport_size.height() * viewport_size.height())) / 2);
 }
 
 Gfx::Path SVGCircleElement::get_path(CSSPixelSize viewport_size)
 {
-    auto node = layout_node();
+    // NB: Called during SVG layout.
+    auto node = unsafe_layout_node();
     if (!node) {
         dbgln("FIXME: Null layout node in SVGCircleElement::get_path");
         return {};
     }
 
-    auto cx = float(node->computed_values().cx().to_px(*node, viewport_size.width()));
-    auto cy = float(node->computed_values().cy().to_px(*node, viewport_size.height()));
+    auto cx = float(node->computed_values().cx().to_px(viewport_size.width()));
+    auto cy = float(node->computed_values().cy().to_px(viewport_size.height()));
     // Percentages refer to the normalized diagonal of the current SVG viewport
     // (see Units: https://svgwg.org/svg2-draft/coords.html#Units)
-    auto r = float(node->computed_values().r().to_px(*node, normalized_diagonal_length(viewport_size)));
+    auto r = float(node->computed_values().r().to_px(normalized_diagonal_length(viewport_size)));
 
     // A zero radius disables rendering.
     if (r == 0)

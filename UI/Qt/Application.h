@@ -7,15 +7,33 @@
 #pragma once
 
 #include <AK/Function.h>
+#include <AK/Platform.h>
 #include <LibURL/URL.h>
 #include <LibWebView/Application.h>
+#include <LibWebView/PrivateBrowsing.h>
 #include <UI/Qt/BrowserWindow.h>
 
 #include <QApplication>
 
+class QMenu;
+class QWidget;
+
 namespace Ladybird {
 
-class Application : public WebView::Application {
+struct WindowConfiguration {
+    Optional<Web::DevicePixels> x {};
+    Optional<Web::DevicePixels> y {};
+    Optional<Web::DevicePixels> width {};
+    Optional<Web::DevicePixels> height {};
+    Optional<bool> maximized {};
+};
+
+enum class ShowWindow {
+    No,
+    Yes,
+};
+
+class Application final : public WebView::Application {
     WEB_VIEW_APPLICATION(Application)
 
 public:
@@ -23,24 +41,83 @@ public:
 
     Function<void(URL::URL)> on_open_file;
 
-    BrowserWindow& new_window(Vector<URL::URL> const& initial_urls, BrowserWindow::IsPopupWindow is_popup_window = BrowserWindow::IsPopupWindow::No, Tab* parent_tab = nullptr, Optional<u64> page_index = {});
+    BrowserWindow& new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& = {}, BrowserWindow::IsPopupWindow is_popup_window = BrowserWindow::IsPopupWindow::No, WebView::IsPrivate = WebView::IsPrivate::No, Tab* parent_tab = nullptr, Optional<u64> page_index = {}, ShowWindow = ShowWindow::Yes);
+    WindowConfiguration configuration_for_new_window() const;
+    void open_new_tab();
+    void open_new_window(WebView::IsPrivate);
+    void restart_private_browsing_session();
+    void focus_location_editor();
+    void reopen_recently_closed_tab();
+    void open_file();
+    void quit();
+    bool confirm_cancel_active_downloads(QWidget* parent = nullptr);
+    void initialize_macos_application_menu();
+    QMenu* qt_bookmarks_menu() const;
 
     BrowserWindow& active_window() const { return *m_active_window; }
-    void set_active_window(BrowserWindow& w) { m_active_window = &w; }
+    void set_active_window(BrowserWindow&);
+    BrowserWindow* active_window_if_any() const { return m_active_window; }
+    BrowserWindow* non_private_window_if_any() const;
 
     Tab* active_tab() const { return m_active_window ? m_active_window->current_tab() : nullptr; }
+    void update_reopen_recently_closed_actions() const;
+    void update_macos_application_menu() const;
 
 private:
     explicit Application();
 
-    virtual void create_platform_options(WebView::BrowserOptions&, WebView::WebContentOptions&) override;
-    virtual NonnullOwnPtr<Core::EventLoop> create_platform_event_loop() override;
+    virtual void create_platform_options(WebView::BrowserOptions&, WebView::RequestServerOptions&, WebView::WebContentOptions&) override;
+    virtual Core::EventLoop& create_platform_event_loop() override;
+#if !defined(AK_OS_MACOS)
+    virtual Optional<String> system_font_family() const override;
+#endif
 
     virtual Optional<WebView::ViewImplementation&> active_web_view() const override;
+    virtual Vector<WebView::ViewImplementation&> active_window_web_views() const override;
+    virtual bool activate_tab_with_url(URL::URL const&) const override;
 
-    virtual Optional<ByteString> ask_user_for_download_folder() const override;
+    virtual Optional<WebView::ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const override;
+    virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const override;
+    virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const override;
+    virtual void open_url_in_new_window(URL::URL const&, WebView::IsPrivate) override;
+
+    virtual Optional<ByteString> ask_user_for_download_path(ByteString const& file) const override;
     virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const override;
     virtual void display_error_dialog(StringView error_message) const override;
+    virtual void open_download(WebView::FileDownloader::Download const&) const override;
+    virtual void show_download_in_folder(WebView::FileDownloader::Download const&) const override;
+
+    virtual bool supports_clipboard_type(ClipboardType) const override;
+    virtual Utf16String clipboard_text(ClipboardType) const override;
+    virtual void set_clipboard_text(String, ClipboardType = ClipboardType::Text) override;
+
+    virtual Vector<Web::Clipboard::SystemClipboardRepresentation> clipboard_entries() const override;
+    virtual void insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation) override;
+
+    virtual bool supports_vertical_tabs() const override { return true; }
+    virtual bool supports_private_browsing_windows() const override { return true; }
+    virtual bool supports_client_side_window_decorations() const override
+    {
+#if defined(AK_OS_MACOS)
+        return false;
+#else
+        return true;
+#endif
+    }
+
+    virtual void update_tabs_display() const override;
+
+    virtual void rebuild_bookmarks_menu() const override;
+    virtual void show_bookmark_context_menu(Gfx::IntPoint, Optional<WebView::BookmarkItem const&>, Optional<String const&> target_folder_id) override;
+    virtual Optional<BookmarkID> bookmark_item_id_for_context_menu() const override;
+    virtual NonnullRefPtr<AddBookmarkPromise> display_add_bookmark_dialog(Optional<String const&> target_folder_id = {}) const override;
+    virtual NonnullRefPtr<BookmarkPromise> display_edit_bookmark_dialog(WebView::BookmarkItem::Bookmark const& current_bookmark) const override;
+    virtual NonnullRefPtr<BookmarkFolderPromise> display_add_bookmark_folder_dialog(Optional<String const&> default_title = {}) const override;
+    virtual NonnullRefPtr<BookmarkFolderPromise> display_edit_bookmark_folder_dialog(WebView::BookmarkItem::Folder const& current_folder) const override;
+
+    virtual void on_devtools_enabled() const override;
+    virtual void on_devtools_disabled() const override;
+    virtual void on_recently_closed_entries_changed() const override;
 
     OwnPtr<QApplication> m_application;
     BrowserWindow* m_active_window { nullptr };

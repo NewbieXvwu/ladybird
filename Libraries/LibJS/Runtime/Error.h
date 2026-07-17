@@ -12,50 +12,41 @@
 #include <AK/Utf16String.h>
 #include <LibJS/Export.h>
 #include <LibJS/Runtime/Completion.h>
+#include <LibJS/Runtime/ErrorData.h>
 #include <LibJS/Runtime/Object.h>
-#include <LibJS/SourceRange.h>
 
 namespace JS {
 
-struct JS_API TracebackFrame {
-    FlyString function_name;
-    [[nodiscard]] SourceRange const& source_range() const;
-
-    RefPtr<CachedSourceRange> cached_source_range;
-};
-
-enum CompactTraceback {
-    No,
-    Yes,
-};
-
-class JS_API Error : public Object {
+class JS_API Error
+    : public Object
+    , public ErrorData {
     JS_OBJECT(Error, Object);
     GC_DECLARE_ALLOCATOR(Error);
 
 public:
     static GC::Ref<Error> create(Realm&);
     static GC::Ref<Error> create(Realm&, Utf16String message);
-    static GC::Ref<Error> create(Realm&, StringView message);
+    static GC::Ref<Error> create(Realm&, Utf16View message);
 
     virtual ~Error() override = default;
 
-    [[nodiscard]] String stack_string(CompactTraceback compact = CompactTraceback::No) const;
+    [[nodiscard]] Utf16String stack_string(CompactTraceback compact = CompactTraceback::No) const;
 
     ThrowCompletionOr<void> install_error_cause(Value options);
 
     void set_message(Utf16String);
-
-    Vector<TracebackFrame, 32> const& traceback() const { return m_traceback; }
+    void set_message(Utf16View);
 
 protected:
     explicit Error(Object& prototype);
 
-private:
-    virtual bool is_error_object() const final { return true; }
+    virtual void visit_edges(Visitor&) override;
 
-    void populate_stack();
-    Vector<TracebackFrame, 32> m_traceback;
+private:
+    virtual size_t external_memory_size() const override;
+    virtual bool is_error_object() const final { return true; }
+    virtual ErrorData* error_data() final { return this; }
+    virtual ErrorData const* error_data() const final { return this; }
 };
 
 template<>
@@ -72,7 +63,7 @@ inline bool Object::fast_is<Error>() const { return is_error_object(); }
     public:                                                                         \
         static GC::Ref<ClassName> create(Realm&);                                   \
         static GC::Ref<ClassName> create(Realm&, Utf16String message);              \
-        static GC::Ref<ClassName> create(Realm&, StringView message);               \
+        static GC::Ref<ClassName> create(Realm&, Utf16View message);                \
                                                                                     \
         explicit ClassName(Object& prototype);                                      \
         virtual ~ClassName() override = default;                                    \

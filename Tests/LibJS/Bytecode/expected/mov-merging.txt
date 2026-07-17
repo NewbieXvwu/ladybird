@@ -1,0 +1,52 @@
+$37aa5f7d mov-merging.js:14:1
+  Registers: 11
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] GetGlobal dst:reg6, `console`
+  [  10] GetById dst:reg7, base:reg6, `log` (console.log)
+  [  28] GetGlobal dst:reg9, `twoLocals`
+  [  38] Call dst:reg8, callee:reg9, this_value:Undefined, twoLocals
+  [  58] Call dst:reg5, callee:reg7, this_value:reg6, console.log, arguments:[reg8]
+  [  80] GetGlobal dst:reg6, `console`
+  [  90] GetById dst:reg8, base:reg6, `log` (console.log)
+  [  a8] GetGlobal dst:reg10, `threeLocals`
+  [  b8] Call dst:reg9, callee:reg10, this_value:Undefined, threeLocals
+  [  d8] Call dst:reg7, callee:reg8, this_value:reg6, console.log, arguments:[reg9]
+  [ 100] End value:reg7
+
+
+twoLocals$848f6408 mov-merging.js:2:5
+  Registers: 6
+  Blocks:    1
+  Locals:    a~0, b~1
+  Constants:
+    [0] = Int32(1)
+    [1] = Int32(2)
+
+block0:
+  [   0] Mov2 dst1:a~0, src1:Int32(1), dst2:b~1, src2:Int32(2)
+  [  18] Add dst:reg5, lhs:a~0, rhs:b~1
+  [  28] Return value:reg5
+
+
+threeLocals$f4c3fc48 mov-merging.js:8:5
+  Registers: 7
+  Blocks:    1
+  Locals:    a~0, b~1, c~2
+  Constants:
+    [0] = Int32(1)
+    [1] = Int32(2)
+    [2] = Int32(3)
+
+block0:
+  [   0] Mov3 dst1:a~0, src1:Int32(1), dst2:b~1, src2:Int32(2), dst3:c~2, src3:Int32(3)
+  [  20] Add dst:reg5, lhs:a~0, rhs:b~1
+  [  30] Add dst:reg6, lhs:reg5, rhs:c~2
+  [  40] Return value:reg6
+
+
+3
+6

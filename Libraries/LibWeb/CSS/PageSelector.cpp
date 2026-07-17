@@ -6,9 +6,11 @@
 
 #include <LibWeb/CSS/PageSelector.h>
 
+#include <AK/Utf16StringBuilder.h>
+
 namespace Web::CSS {
 
-Optional<PagePseudoClass> page_pseudo_class_from_string(StringView input)
+Optional<PagePseudoClass> page_pseudo_class_from_string(Utf16View input)
 {
     if (input.equals_ignoring_ascii_case("blank"sv))
         return PagePseudoClass::Blank;
@@ -36,7 +38,7 @@ StringView to_string(PagePseudoClass pseudo_class)
     VERIFY_NOT_REACHED();
 }
 
-PageSelector::PageSelector(Optional<FlyString> name, Vector<PagePseudoClass> pseudo_classes)
+PageSelector::PageSelector(Optional<Utf16FlyString> name, Vector<PagePseudoClass> pseudo_classes)
     : m_name(move(name))
     , m_pseudo_classes(move(pseudo_classes))
 {
@@ -50,6 +52,16 @@ String PageSelector::serialize() const
     for (auto pseudo_class : m_pseudo_classes)
         builder.appendff(":{}", to_string(pseudo_class));
     return builder.to_string_without_validation();
+}
+
+void PageSelector::serialize_to(AK::Utf16StringBuilder& builder) const
+{
+    if (m_name.has_value())
+        builder.append(m_name->view());
+    for (auto pseudo_class : m_pseudo_classes) {
+        builder.append_ascii(':');
+        builder.append_ascii(to_string(pseudo_class));
+    }
 }
 
 }

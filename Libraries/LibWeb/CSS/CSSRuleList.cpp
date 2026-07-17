@@ -1,12 +1,17 @@
 /*
- * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/TypeCasts.h>
-#include <LibWeb/Bindings/CSSRuleListPrototype.h>
+#include <LibJS/Runtime/ExternalMemory.h>
+#include <LibWeb/Bindings/CSSRuleList.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/CSSContainerRule.h>
+#include <LibWeb/CSS/CSSFontFaceRule.h>
+#include <LibWeb/CSS/CSSFontFeatureValuesRule.h>
+#include <LibWeb/CSS/CSSFunctionRule.h>
 #include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
 #include <LibWeb/CSS/CSSLayerBlockRule.h>
@@ -14,6 +19,7 @@
 #include <LibWeb/CSS/CSSNestedDeclarations.h>
 #include <LibWeb/CSS/CSSRule.h>
 #include <LibWeb/CSS/CSSRuleList.h>
+#include <LibWeb/CSS/CSSScopeRule.h>
 #include <LibWeb/CSS/CSSSupportsRule.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/HTML/Window.h>
@@ -49,9 +55,14 @@ void CSSRuleList::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_owner_rule);
 }
 
+size_t CSSRuleList::external_memory_size() const
+{
+    return JS::saturating_add_external_memory_size(Base::external_memory_size(), JS::vector_external_memory_size(m_rules));
+}
+
 // AD-HOC: The spec doesn't include a declared_namespaces parameter, but we need it to handle parsing of namespaced selectors.
 // https://drafts.csswg.org/cssom/#insert-a-css-rule
-WebIDL::ExceptionOr<unsigned> CSSRuleList::insert_a_css_rule(Variant<StringView, CSSRule*> rule, u32 index, Nested nested, HashTable<FlyString> const& declared_namespaces)
+WebIDL::ExceptionOr<unsigned> CSSRuleList::insert_a_css_rule(Variant<Utf16View, CSSRule*> rule, u32 index, Nested nested, HashTable<Utf16FlyString> const& declared_namespaces)
 {
     // 1. Set length to the number of items in list.
     auto length = m_rules.size();
@@ -66,11 +77,28 @@ WebIDL::ExceptionOr<unsigned> CSSRuleList::insert_a_css_rule(Variant<StringView,
     //       if that variant holds a CSSRule already.
 
     CSSRule* new_rule = nullptr;
-    if (rule.has<StringView>()) {
+    if (!rule.has<CSSRule*>()) {
         Parser::ParsingParams parsing_params { realm() };
+        parsing_params.rule_context = rule_context();
         parsing_params.declared_namespaces = declared_namespaces;
 
-        new_rule = parse_css_rule(parsing_params, rule.get<StringView>());
+        new_rule = rule.visit(
+            [&](Utf16View rule_text) { return parse_css_rule(parsing_params, rule_text, nested == Nested::Yes); },
+            [](CSSRule*) -> CSSRule* { VERIFY_NOT_REACHED(); });
+        if (!new_rule && nested == Nested::Yes) {
+            auto starts_with_import_or_namespace = rule.visit(
+                [](Utf16View rule_text) {
+                    auto trimmed_rule = rule_text.trim(" \t\n\f\r"sv, TrimMode::Left);
+                    return trimmed_rule.starts_with("@import"sv) || trimmed_rule.starts_with("@namespace"sv);
+                },
+                [](CSSRule*) -> bool { VERIFY_NOT_REACHED(); });
+            if (starts_with_import_or_namespace) {
+                parsing_params.rule_context.clear();
+                new_rule = rule.visit(
+                    [&](Utf16View rule_text) { return parse_css_rule(parsing_params, rule_text); },
+                    [](CSSRule*) -> CSSRule* { VERIFY_NOT_REACHED(); });
+            }
+        }
     } else {
         new_rule = rule.get<CSSRule*>();
     }
@@ -82,7 +110,9 @@ WebIDL::ExceptionOr<unsigned> CSSRuleList::insert_a_css_rule(Variant<StringView,
         parsing_params.declared_namespaces = declared_namespaces;
 
         // - Set declarations to the results of performing parse a CSS declaration block, on argument rule.
-        auto declarations = parse_css_property_declaration_block(parsing_params, rule.get<StringView>());
+        auto declarations = rule.visit(
+            [&](Utf16View rule_text) { return parse_css_property_declaration_block(parsing_params, rule_text); },
+            [](CSSRule*) -> Parser::Parser::PropertiesAndCustomProperties { VERIFY_NOT_REACHED(); });
 
         // - If declarations is empty, throw a SyntaxError exception.
         if (declarations.custom_properties.is_empty() && declarations.properties.is_empty())
@@ -147,6 +177,8 @@ WebIDL::ExceptionOr<unsigned> CSSRuleList::insert_a_css_rule(Variant<StringView,
     // 8. Insert new rule into list at the zero-indexed position index.
     m_rules.insert(index, *new_rule);
 
+    // FIXME: Load font faces for inserted @font-face rules
+
     // 9. Return index.
     if (on_change)
         on_change();
@@ -174,6 +206,11 @@ WebIDL::ExceptionOr<void> CSSRuleList::remove_a_css_rule(u32 index)
         }
     }
 
+    // https://drafts.csswg.org/css-font-loading/#font-face-css-connection
+    // If a @font-face rule is removed from the document, its connected FontFace object is no longer CSS-connected.
+    if (auto* font_face_rule = as_if<CSSFontFaceRule>(old_rule))
+        font_face_rule->disconnect_font_face();
+
     // 5. Remove rule old rule from list at the zero-indexed position index.
     m_rules.remove(index);
 
@@ -200,15 +237,21 @@ void CSSRuleList::for_each_effective_rule(TraversalOrder order, Function<void(We
             break;
         }
 
+        case CSSRule::Type::Container:
         case CSSRule::Type::LayerBlock:
         case CSSRule::Type::Media:
         case CSSRule::Type::Page:
+        case CSSRule::Type::Scope:
         case CSSRule::Type::Style:
         case CSSRule::Type::Supports:
             static_cast<CSSGroupingRule const&>(*rule).for_each_effective_rule(order, callback);
             break;
 
+        case CSSRule::Type::CounterStyle:
         case CSSRule::Type::FontFace:
+        case CSSRule::Type::FontFeatureValues:
+        case CSSRule::Type::Function:
+        case CSSRule::Type::FunctionDeclarations:
         case CSSRule::Type::Keyframe:
         case CSSRule::Type::Keyframes:
         case CSSRule::Type::LayerStatement:
@@ -224,47 +267,77 @@ void CSSRuleList::for_each_effective_rule(TraversalOrder order, Function<void(We
     }
 }
 
-bool CSSRuleList::evaluate_media_queries(HTML::Window const& window)
+bool CSSRuleList::evaluate_media_queries(DOM::Document const& document)
+{
+    return evaluate_media_queries(document, [](CSSRule const&) { });
+}
+
+bool CSSRuleList::evaluate_media_queries(DOM::Document const& document, Function<void(CSSRule const&)> const& changed_rule_callback)
 {
     bool any_media_queries_changed_match_state = false;
 
     for (auto& rule : m_rules) {
         switch (rule->type()) {
+        case CSSRule::Type::Container: {
+            auto& container_rule = as<CSSContainerRule>(*rule);
+            if (container_rule.css_rules().evaluate_media_queries(document, changed_rule_callback))
+                any_media_queries_changed_match_state = true;
+            break;
+        }
+        case CSSRule::Type::Function: {
+            any_media_queries_changed_match_state |= as<CSSFunctionRule>(*rule).css_rules().evaluate_media_queries(document, changed_rule_callback);
+            break;
+        }
         case CSSRule::Type::Import: {
             auto& import_rule = as<CSSImportRule>(*rule);
-            if (import_rule.loaded_style_sheet() && import_rule.loaded_style_sheet()->evaluate_media_queries(window))
+            if (import_rule.loaded_style_sheet() && import_rule.loaded_style_sheet()->evaluate_media_queries(document, changed_rule_callback))
                 any_media_queries_changed_match_state = true;
             break;
         }
         case CSSRule::Type::LayerBlock: {
             auto& layer_rule = as<CSSLayerBlockRule>(*rule);
-            if (layer_rule.css_rules().evaluate_media_queries(window))
+            if (layer_rule.css_rules().evaluate_media_queries(document, changed_rule_callback))
                 any_media_queries_changed_match_state = true;
             break;
         }
         case CSSRule::Type::Media: {
             auto& media_rule = as<CSSMediaRule>(*rule);
+            bool was_first_evaluation = !media_rule.did_evaluate();
             bool did_match = media_rule.condition_matches();
-            bool now_matches = media_rule.evaluate(window);
-            if (did_match != now_matches)
+            bool now_matches = media_rule.evaluate(document);
+            // The first evaluation establishes the baseline. did_match defaults to false because each MediaQuery
+            // starts with m_matches=false, so a brand-new rule would otherwise look like a false->true flip the
+            // first time it gets evaluated against a matching state.
+            if (!was_first_evaluation && did_match != now_matches)
                 any_media_queries_changed_match_state = true;
-            if (now_matches && media_rule.css_rules().evaluate_media_queries(window))
+            if (now_matches && media_rule.css_rules().evaluate_media_queries(document, changed_rule_callback))
+                any_media_queries_changed_match_state = true;
+            if (!was_first_evaluation && did_match != now_matches)
+                media_rule.css_rules().for_each_effective_rule(TraversalOrder::Preorder, changed_rule_callback);
+            break;
+        }
+        case CSSRule::Type::Scope: {
+            auto& scope_rule = as<CSSScopeRule>(*rule);
+            if (scope_rule.css_rules().evaluate_media_queries(document, changed_rule_callback))
                 any_media_queries_changed_match_state = true;
             break;
         }
         case CSSRule::Type::Supports: {
             auto& supports_rule = as<CSSSupportsRule>(*rule);
-            if (supports_rule.condition_matches() && supports_rule.css_rules().evaluate_media_queries(window))
+            if (supports_rule.condition_matches() && supports_rule.css_rules().evaluate_media_queries(document, changed_rule_callback))
                 any_media_queries_changed_match_state = true;
             break;
         }
         case CSSRule::Type::Style: {
             auto& style_rule = as<CSSStyleRule>(*rule);
-            if (style_rule.css_rules().evaluate_media_queries(window))
+            if (style_rule.css_rules().evaluate_media_queries(document, changed_rule_callback))
                 any_media_queries_changed_match_state = true;
             break;
         }
+        case CSSRule::Type::CounterStyle:
         case CSSRule::Type::FontFace:
+        case CSSRule::Type::FontFeatureValues:
+        case CSSRule::Type::FunctionDeclarations:
         case CSSRule::Type::Keyframe:
         case CSSRule::Type::Keyframes:
         case CSSRule::Type::LayerStatement:

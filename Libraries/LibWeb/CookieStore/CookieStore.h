@@ -7,44 +7,14 @@
 #pragma once
 
 #include <AK/Optional.h>
-#include <AK/String.h>
-#include <LibWeb/Bindings/CookieStorePrototype.h>
+#include <AK/Utf16String.h>
+#include <LibHTTP/Forward.h>
+#include <LibWeb/Bindings/CookieStore.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HighResolutionTime/DOMHighResTimeStamp.h>
 
 namespace Web::CookieStore {
-
-// https://cookiestore.spec.whatwg.org/#dictdef-cookielistitem
-struct CookieListItem {
-    Optional<String> name;
-    Optional<String> value;
-};
-
-// https://cookiestore.spec.whatwg.org/#dictdef-cookiestoregetoptions
-struct CookieStoreGetOptions {
-    Optional<String> name;
-    Optional<String> url;
-};
-
-// https://cookiestore.spec.whatwg.org/#dictdef-cookieinit
-struct CookieInit {
-    String name;
-    String value;
-    Optional<HighResolutionTime::DOMHighResTimeStamp> expires;
-    Optional<String> domain;
-    String path;
-    Bindings::CookieSameSite same_site;
-    bool partitioned { false };
-};
-
-// https://cookiestore.spec.whatwg.org/#dictdef-cookiestoredeleteoptions
-struct CookieStoreDeleteOptions {
-    String name;
-    Optional<String> domain;
-    String path;
-    bool partitioned { false };
-};
 
 // https://cookiestore.spec.whatwg.org/#cookiestore
 class WEB_API CookieStore final : public DOM::EventTarget {
@@ -52,22 +22,22 @@ class WEB_API CookieStore final : public DOM::EventTarget {
     GC_DECLARE_ALLOCATOR(CookieStore);
 
 public:
-    GC::Ref<WebIDL::Promise> get(String name);
-    GC::Ref<WebIDL::Promise> get(CookieStoreGetOptions const&);
+    GC::Ref<WebIDL::Promise> get(Utf16String name);
+    GC::Ref<WebIDL::Promise> get(Bindings::CookieStoreGetOptions const&);
 
-    GC::Ref<WebIDL::Promise> get_all(String name);
-    GC::Ref<WebIDL::Promise> get_all(CookieStoreGetOptions const&);
+    GC::Ref<WebIDL::Promise> get_all(Utf16String name);
+    GC::Ref<WebIDL::Promise> get_all(Bindings::CookieStoreGetOptions const&);
 
-    GC::Ref<WebIDL::Promise> set(String name, String value);
-    GC::Ref<WebIDL::Promise> set(CookieInit const&);
+    GC::Ref<WebIDL::Promise> set(Utf16String name, Utf16String value);
+    GC::Ref<WebIDL::Promise> set(Bindings::CookieInit const&);
 
-    GC::Ref<WebIDL::Promise> delete_(String name);
-    GC::Ref<WebIDL::Promise> delete_(CookieStoreDeleteOptions const&);
+    GC::Ref<WebIDL::Promise> delete_(Utf16String name);
+    GC::Ref<WebIDL::Promise> delete_(Bindings::CookieStoreDeleteOptions const&);
 
     void set_onchange(WebIDL::CallbackType*);
     WebIDL::CallbackType* onchange();
 
-    void process_cookie_changes(Vector<Cookie::Cookie> const&);
+    void process_cookie_changes(Vector<HTTP::Cookie::Cookie>);
 
 private:
     CookieStore(JS::Realm&, PageClient&);
@@ -82,6 +52,6 @@ private:
 
 namespace Web::Bindings {
 
-JS::Value cookie_list_item_to_value(JS::Realm&, CookieStore::CookieListItem const&);
+JS::Value cookie_list_item_to_value(JS::Realm&, CookieListItem const&);
 
 }

@@ -22,7 +22,15 @@ enum class ShadowPlacement {
 
 class ShadowStyleValue final : public StyleValueWithDefaultOperators<ShadowStyleValue> {
 public:
+    enum class ShadowType : u8 {
+        // none | <shadow>#
+        Normal,
+        // none | [ <color>? && <length>{2,3} ]#
+        Text
+    };
+
     static ValueComparingNonnullRefPtr<ShadowStyleValue const> create(
+        ShadowType shadow_type,
         ValueComparingRefPtr<StyleValue const> color,
         ValueComparingNonnullRefPtr<StyleValue const> offset_x,
         ValueComparingNonnullRefPtr<StyleValue const> offset_y,
@@ -30,23 +38,37 @@ public:
         ValueComparingRefPtr<StyleValue const> spread_distance,
         ShadowPlacement placement)
     {
-        return adopt_ref(*new (nothrow) ShadowStyleValue(move(color), move(offset_x), move(offset_y), move(blur_radius), move(spread_distance), placement));
+        return adopt_ref(*new (nothrow) ShadowStyleValue(shadow_type, move(color), move(offset_x), move(offset_y), move(blur_radius), move(spread_distance), placement));
     }
     virtual ~ShadowStyleValue() override = default;
 
+    ShadowType shadow_type() const { return m_properties.shadow_type; }
     ValueComparingNonnullRefPtr<StyleValue const> color() const;
+    ValueComparingRefPtr<StyleValue const> const& color_or_null() const { return m_properties.color; }
     ValueComparingNonnullRefPtr<StyleValue const> offset_x() const { return m_properties.offset_x; }
     ValueComparingNonnullRefPtr<StyleValue const> offset_y() const { return m_properties.offset_y; }
     ValueComparingNonnullRefPtr<StyleValue const> blur_radius() const;
+    ValueComparingRefPtr<StyleValue const> const& blur_radius_or_null() const { return m_properties.blur_radius; }
     ValueComparingNonnullRefPtr<StyleValue const> spread_distance() const;
+    ValueComparingRefPtr<StyleValue const> const& spread_distance_or_null() const { return m_properties.spread_distance; }
     ShadowPlacement placement() const { return m_properties.placement; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(ShadowStyleValue const& other) const { return m_properties == other.m_properties; }
 
+    virtual bool is_computationally_independent() const override
+    {
+        return (!m_properties.color || m_properties.color->is_computationally_independent())
+            && m_properties.offset_x->is_computationally_independent()
+            && m_properties.offset_y->is_computationally_independent()
+            && (!m_properties.blur_radius || m_properties.blur_radius->is_computationally_independent())
+            && (!m_properties.spread_distance || m_properties.spread_distance->is_computationally_independent());
+    }
+
 private:
     ShadowStyleValue(
+        ShadowType shadow_type,
         ValueComparingRefPtr<StyleValue const> color,
         ValueComparingNonnullRefPtr<StyleValue const> offset_x,
         ValueComparingNonnullRefPtr<StyleValue const> offset_y,
@@ -55,6 +77,7 @@ private:
         ShadowPlacement placement)
         : StyleValueWithDefaultOperators(Type::Shadow)
         , m_properties {
+            .shadow_type = shadow_type,
             .color = move(color),
             .offset_x = move(offset_x),
             .offset_y = move(offset_y),
@@ -65,9 +88,9 @@ private:
     {
     }
 
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const override;
-
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
     struct Properties {
+        ShadowType shadow_type;
         ValueComparingRefPtr<StyleValue const> color;
         ValueComparingNonnullRefPtr<StyleValue const> offset_x;
         ValueComparingNonnullRefPtr<StyleValue const> offset_y;

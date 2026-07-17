@@ -1,16 +1,3 @@
-#import <HTML/HTMLCanvasElement.idl>
-#import <WebGL/Types.idl>
-#import <WebGL/WebGLActiveInfo.idl>
-#import <WebGL/WebGLBuffer.idl>
-#import <WebGL/WebGLFramebuffer.idl>
-#import <WebGL/WebGLObject.idl>
-#import <WebGL/WebGLProgram.idl>
-#import <WebGL/WebGLRenderbuffer.idl>
-#import <WebGL/WebGLShader.idl>
-#import <WebGL/WebGLShaderPrecisionFormat.idl>
-#import <WebGL/WebGLTexture.idl>
-#import <WebGL/WebGLUniformLocation.idl>
-
 dictionary WebGLContextAttributes {
     boolean alpha = true;
     boolean depth = true;
@@ -21,6 +8,9 @@ dictionary WebGLContextAttributes {
     WebGLPowerPreference powerPreference = "default";
     boolean failIfMajorPerformanceCaveat = false;
     boolean desynchronized = false;
+
+    // https://immersive-web.github.io/webxr/#dom-webglcontextattributes-xrcompatible
+    boolean xrCompatible = false;
 };
 
 // https://registry.khronos.org/webgl/specs/latest/1.0/#5.14
@@ -42,12 +32,12 @@ interface mixin WebGLRenderingContextBase {
     WebGLContextAttributes? getContextAttributes();
     boolean isContextLost();
 
-    sequence<DOMString>? getSupportedExtensions();
-    object? getExtension(DOMString name);
+    sequence<Utf16DOMString>? getSupportedExtensions();
+    object? getExtension(Utf16DOMString name);
 
     undefined activeTexture(GLenum texture);
     undefined attachShader(WebGLProgram program, WebGLShader shader);
-    undefined bindAttribLocation(WebGLProgram program, GLuint index, DOMString name);
+    undefined bindAttribLocation(WebGLProgram program, GLuint index, Utf16DOMString name);
     undefined bindBuffer(GLenum target, WebGLBuffer? buffer);
     undefined bindFramebuffer(GLenum target, WebGLFramebuffer? framebuffer);
     undefined bindRenderbuffer(GLenum target, WebGLRenderbuffer? renderbuffer);
@@ -108,32 +98,32 @@ interface mixin WebGLRenderingContextBase {
     WebGLActiveInfo? getActiveUniform(WebGLProgram program, GLuint index);
     sequence<WebGLShader>? getAttachedShaders(WebGLProgram program);
 
-    GLint getAttribLocation(WebGLProgram program, DOMString name);
+    GLint getAttribLocation(WebGLProgram program, Utf16DOMString name);
 
     any getBufferParameter(GLenum target, GLenum pname);
     any getParameter(GLenum pname);
 
     GLenum getError();
 
-    [FIXME] any getFramebufferAttachmentParameter(GLenum target, GLenum attachment, GLenum pname);
+    any getFramebufferAttachmentParameter(GLenum target, GLenum attachment, GLenum pname);
     any getProgramParameter(WebGLProgram program, GLenum pname);
-    DOMString? getProgramInfoLog(WebGLProgram program);
-    [FIXME] any getRenderbufferParameter(GLenum target, GLenum pname);
+    Utf16DOMString? getProgramInfoLog(WebGLProgram program);
+    any getRenderbufferParameter(GLenum target, GLenum pname);
     any getShaderParameter(WebGLShader shader, GLenum pname);
     WebGLShaderPrecisionFormat? getShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype);
-    DOMString? getShaderInfoLog(WebGLShader shader);
+    Utf16DOMString? getShaderInfoLog(WebGLShader shader);
 
-    [FIXME] DOMString? getShaderSource(WebGLShader shader);
+    Utf16DOMString? getShaderSource(WebGLShader shader);
 
-    [FIXME] any getTexParameter(GLenum target, GLenum pname);
+    any getTexParameter(GLenum target, GLenum pname);
 
-    [FIXME] any getUniform(WebGLProgram program, WebGLUniformLocation location);
+    any getUniform(WebGLProgram program, WebGLUniformLocation location);
 
-    WebGLUniformLocation? getUniformLocation(WebGLProgram program, DOMString name);
+    WebGLUniformLocation? getUniformLocation(WebGLProgram program, Utf16DOMString name);
 
-    [FIXME] any getVertexAttrib(GLuint index, GLenum pname);
+    any getVertexAttrib(GLuint index, GLenum pname);
 
-    [FIXME] GLintptr getVertexAttribOffset(GLuint index, GLenum pname);
+    GLintptr getVertexAttribOffset(GLuint index, GLenum pname);
 
     undefined hint(GLenum target, GLenum mode);
     GLboolean isBuffer(WebGLBuffer? buffer);
@@ -152,7 +142,7 @@ interface mixin WebGLRenderingContextBase {
     undefined sampleCoverage(GLclampf value, GLboolean invert);
     undefined scissor(GLint x, GLint y, GLsizei width, GLsizei height);
 
-    undefined shaderSource(WebGLShader shader, DOMString source);
+    undefined shaderSource(WebGLShader shader, Utf16DOMString source);
 
     undefined stencilFunc(GLenum func, GLint ref, GLuint mask);
     undefined stencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask);
@@ -573,4 +563,7 @@ interface mixin WebGLRenderingContextBase {
     const GLenum CONTEXT_LOST_WEBGL = 0x9242;
     const GLenum UNPACK_COLORSPACE_CONVERSION_WEBGL = 0x9243;
     const GLenum BROWSER_DEFAULT_WEBGL = 0x9244;
+
+    // https://immersive-web.github.io/webxr/#dom-webglrenderingcontextbase-makexrcompatible
+    [NewObject] Promise<undefined> makeXRCompatible();
 };

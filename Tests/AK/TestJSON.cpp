@@ -319,6 +319,32 @@ TEST_CASE(json_parse_fails_on_invalid_number)
 #undef EXPECT_JSON_PARSE_TO_FAIL
 }
 
+TEST_CASE(json_parse_rejects_excessive_nesting_depth)
+{
+    StringBuilder input;
+    constexpr size_t nesting_depth = 4096;
+
+    input.append_repeated('[', nesting_depth);
+    input.append('0');
+    input.append_repeated(']', nesting_depth);
+
+    auto parsed = JsonValue::from_string(input.string_view());
+    EXPECT(parsed.is_error());
+}
+
+TEST_CASE(json_parse_accepts_reasonable_nesting_depth)
+{
+    StringBuilder input;
+    constexpr size_t nesting_depth = 64;
+
+    input.append_repeated('[', nesting_depth);
+    input.append('0');
+    input.append_repeated(']', nesting_depth);
+
+    auto parsed = JsonValue::from_string(input.string_view());
+    EXPECT(!parsed.is_error());
+}
+
 struct CustomError {
 };
 
@@ -510,8 +536,12 @@ TEST_CASE(json_array_ensure_capacity)
 {
     auto array = setup_json_array();
     size_t new_capacity { 16 };
+    EXPECT(array.values().capacity() < new_capacity);
     array.ensure_capacity(new_capacity);
-    EXPECT_EQ(array.values().capacity(), new_capacity);
+    // The allocator may round up the capacity to a larger value that is
+    // efficient for its internal bookkeeping (e.g. mimalloc's mi_good_size),
+    // so we only require that the resulting capacity is at least new_capacity.
+    EXPECT(array.values().capacity() >= new_capacity);
 }
 
 TEST_CASE(json_array_for_each)
@@ -638,4 +668,27 @@ TEST_CASE(json_object_move_from_value)
     auto array2 = object.get_array("baz"sv);
     EXPECT_EQ(array2->at(0).as_bool(), false);
     EXPECT_EQ(array2->at(1).as_string(), "string"sv);
+}
+
+TEST_CASE(invalid_utf8)
+{
+    // Incomplete 2-byte sequence
+    EXPECT(JsonValue::from_string("{\"key\": \"value\xcf\"}"sv).is_error());
+    EXPECT(JsonValue::from_string("{\"key\xcf\": \"value\"}"sv).is_error());
+
+    // Incomplete 3-byte sequence
+    EXPECT(JsonValue::from_string("{\"key\": \"value\xef\xbf\"}"sv).is_error());
+    EXPECT(JsonValue::from_string("{\"key\xef\xbf\": \"value\"}"sv).is_error());
+
+    // Invalid start byte
+    EXPECT(JsonValue::from_string("{\"key\": \"value\xf8\"}"sv).is_error());
+    EXPECT(JsonValue::from_string("{\"key\xf8\": \"value\"}"sv).is_error());
+
+    // Invalid continuation byte
+    EXPECT(JsonValue::from_string("{\"key\": \"value\xc3\x28\"}"sv).is_error());
+    EXPECT(JsonValue::from_string("{\"key\xc3\x28\": \"value\"}"sv).is_error());
+
+    // Multiple invalid bytes
+    EXPECT(JsonValue::from_string("{\"key\": \"value\xff\xff\"}"sv).is_error());
+    EXPECT(JsonValue::from_string("{\"key\xff\xff\": \"value\"}"sv).is_error());
 }

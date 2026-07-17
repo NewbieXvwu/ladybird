@@ -5,6 +5,7 @@
  */
 
 #include <AK/IDAllocator.h>
+#include <AK/NeverDestroyed.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/EventLoop/Task.h>
 
@@ -12,7 +13,11 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(Task);
 
-static IDAllocator s_unique_task_source_allocator { static_cast<int>(Task::Source::UniqueTaskSourceStart) };
+static IDAllocator& unique_task_source_allocator()
+{
+    static NeverDestroyed<IDAllocator> allocator { static_cast<int>(Task::Source::UniqueTaskSourceStart) };
+    return *allocator;
+}
 
 [[nodiscard]] static TaskID allocate_task_id()
 {
@@ -51,15 +56,12 @@ void Task::execute()
 bool Task::is_runnable() const
 {
     // A task is runnable if its document is either null or fully active.
-    if (!m_document)
-        return true;
+    return !m_document || m_document->is_fully_active();
+}
 
-    // AD-HOC: If the document has been destroyed, we'll consider the task runnable.
-    //         Otherwise it would get stuck here forever, since a destroyed document never becomes fully active again.
-    if (m_document->has_been_destroyed())
-        return true;
-
-    return m_document->is_fully_active();
+bool Task::is_permanently_unrunnable() const
+{
+    return m_document && m_document->has_been_destroyed();
 }
 
 DOM::Document const* Task::document() const
@@ -68,13 +70,13 @@ DOM::Document const* Task::document() const
 }
 
 UniqueTaskSource::UniqueTaskSource()
-    : source(static_cast<Task::Source>(s_unique_task_source_allocator.allocate()))
+    : source(static_cast<Task::Source>(unique_task_source_allocator().allocate()))
 {
 }
 
 UniqueTaskSource::~UniqueTaskSource()
 {
-    s_unique_task_source_allocator.deallocate(static_cast<int>(source));
+    unique_task_source_allocator().deallocate(static_cast<int>(source));
 }
 
 NonnullRefPtr<ParallelQueue> ParallelQueue::create()

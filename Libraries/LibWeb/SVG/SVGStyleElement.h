@@ -6,24 +6,25 @@
 
 #pragma once
 
-#include <LibWeb/DOM/StyleElementUtils.h>
+#include <LibWeb/DOM/StyleElementBase.h>
 #include <LibWeb/SVG/SVGElement.h>
 
 namespace Web::SVG {
 
-class SVGStyleElement final : public SVGElement {
+class SVGStyleElement final
+    : public SVGElement
+    , public DOM::StyleElementBase {
     WEB_PLATFORM_OBJECT(SVGStyleElement, SVGElement);
     GC_DECLARE_ALLOCATOR(SVGStyleElement);
 
 public:
     virtual ~SVGStyleElement() override;
 
-    virtual void children_changed(ChildrenChangedMetadata const*) override;
+    virtual void children_changed(ChildrenChangedMetadata const&) override;
     virtual void inserted() override;
-    virtual void removed_from(Node* old_parent, Node& old_root) override;
-
-    CSS::CSSStyleSheet* sheet();
-    CSS::CSSStyleSheet const* sheet() const;
+    virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
+    virtual bool contributes_a_script_blocking_style_sheet() const final;
 
 private:
     SVGStyleElement(DOM::Document&, DOM::QualifiedName);
@@ -31,11 +32,13 @@ private:
     // ^DOM::Node
     virtual bool is_svg_style_element() const override { return true; }
 
+    // ^DOM::StyleElementBase
+    virtual Element& as_element() override { return *this; }
+    virtual Element const& as_element() const override { return *this; }
+
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
-
-    // The semantics and processing of a ‘style’ and its attributes must be the same as is defined for the HTML ‘style’ element.
-    DOM::StyleElementUtils m_style_element_utils;
+    virtual void adopted_from(DOM::Document&) override;
 };
 
 }

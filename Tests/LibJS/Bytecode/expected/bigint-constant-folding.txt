@@ -1,0 +1,42 @@
+$00cee19d bigint-constant-folding.js:1:1
+  Registers: 5
+  Blocks:    1
+  Constants:
+    [0] = BigInt(1n)
+    [1] = BigInt(2n)
+    [2] = BigInt(3n)
+    [3] = BigInt(10n)
+    [4] = BigInt(3n)
+    [5] = BigInt(7n)
+    [6] = BigInt(2n)
+    [7] = BigInt(3n)
+    [8] = BigInt(6n)
+    [9] = BigInt(10n)
+    [10] = BigInt(3n)
+    [11] = BigInt(3n)
+    [12] = BigInt(10n)
+    [13] = BigInt(3n)
+    [14] = BigInt(1n)
+    [15] = BigInt(2n)
+    [16] = BigInt(3n)
+    [17] = BigInt(8n)
+    [18] = BigInt(1n)
+    [19] = BigInt(1n)
+    [20] = Bool(true)
+    [21] = BigInt(1n)
+    [22] = Int32(1)
+    [23] = BigInt(1n)
+    [24] = BigInt(-2n)
+    [25] = Undefined
+
+block0:
+  [   0] SetGlobal `a`, src:BigInt(3n)
+  [  10] SetGlobal `b`, src:BigInt(7n)
+  [  20] SetGlobal `c`, src:BigInt(6n)
+  [  30] SetGlobal `d`, src:BigInt(3n)
+  [  40] SetGlobal `e`, src:BigInt(1n)
+  [  50] SetGlobal `f`, src:BigInt(8n)
+  [  60] SetGlobal `g`, src:Bool(true)
+  [  70] SetGlobal `h`, src:Bool(true)
+  [  80] SetGlobal `i`, src:BigInt(-2n)
+  [  90] End value:Undefined

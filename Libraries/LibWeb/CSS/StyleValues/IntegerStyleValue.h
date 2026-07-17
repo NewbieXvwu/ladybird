@@ -12,16 +12,17 @@ namespace Web::CSS {
 
 class IntegerStyleValue final : public StyleValue {
 public:
-    static ValueComparingNonnullRefPtr<IntegerStyleValue const> create(i64 value)
+    static ValueComparingNonnullRefPtr<IntegerStyleValue const> create(i32 value)
     {
         return adopt_ref(*new (nothrow) IntegerStyleValue(value));
     }
 
-    i64 integer() const { return m_value; }
+    i32 integer() const { return m_value; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    virtual void serialize(Utf16StringBuilder&, SerializationMode) const override;
     virtual Vector<Parser::ComponentValue> tokenize() const override;
-    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, String const& associated_property) const override;
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, Utf16FlyString const& associated_property) const override;
 
     bool equals(StyleValue const& other) const override
     {
@@ -31,14 +32,16 @@ public:
         return m_value == other_integer.m_value;
     }
 
+    virtual bool is_computationally_independent() const override { return true; }
+
 private:
-    explicit IntegerStyleValue(i64 value)
+    explicit IntegerStyleValue(i32 value)
         : StyleValue(Type::Integer)
         , m_value(value)
     {
     }
 
-    i64 m_value { 0 };
+    i32 m_value { 0 };
 };
 
 }

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 
 namespace Web::HTML {
@@ -18,25 +19,25 @@ class Plugin : public Bindings::PlatformObject {
 public:
     virtual ~Plugin() override;
 
-    String const& name() const;
-    String description() const;
-    String filename() const;
+    Utf16FlyString const& name() const;
+    Utf16FlyString description() const;
+    Utf16FlyString filename() const;
     size_t length() const;
     GC::Ptr<MimeType> item(u32 index) const;
-    GC::Ptr<MimeType> named_item(FlyString const& name) const;
+    GC::Ptr<MimeType> named_item(Utf16FlyString const& name) const;
 
 private:
-    Plugin(JS::Realm&, String name);
+    Plugin(JS::Realm&, Utf16FlyString name);
 
     // https://html.spec.whatwg.org/multipage/system-state.html#concept-plugin-name
-    String m_name;
+    Utf16FlyString m_name;
 
     virtual void initialize(JS::Realm&) override;
 
     // ^Bindings::PlatformObject
-    virtual Vector<FlyString> supported_property_names() const override;
+    virtual Vector<Utf16FlyString> supported_property_names() const override;
     virtual Optional<JS::Value> item_value(size_t index) const override;
-    virtual JS::Value named_item_value(FlyString const& name) const override;
+    virtual JS::Value named_item_value(Utf16FlyString const& name) const override;
 };
 
 }

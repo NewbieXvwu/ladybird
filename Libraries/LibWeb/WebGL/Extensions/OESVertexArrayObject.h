@@ -10,28 +10,28 @@
 #include <LibWeb/Forward.h>
 #include <LibWeb/WebGL/Types.h>
 
-namespace Web::WebGL::Extensions {
+namespace Web::WebGL {
 
 class OESVertexArrayObject : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(OESVertexArrayObject, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(OESVertexArrayObject);
 
 public:
-    static JS::ThrowCompletionOr<GC::Ptr<OESVertexArrayObject>> create(JS::Realm&, GC::Ref<WebGLRenderingContext>);
+    static JS::ThrowCompletionOr<GC::Ref<JS::Object>> create(JS::Realm&, GC::Ref<WebGLRenderingContextBase>);
 
     GC::Ref<WebGLVertexArrayObjectOES> create_vertex_array_oes();
-    void delete_vertex_array_oes(GC::Root<WebGLVertexArrayObjectOES> array_object);
-    bool is_vertex_array_oes(GC::Root<WebGLVertexArrayObjectOES> array_object);
-    void bind_vertex_array_oes(GC::Root<WebGLVertexArrayObjectOES> array_object);
+    void delete_vertex_array_oes(GC::Ptr<WebGLVertexArrayObjectOES> array_object);
+    bool is_vertex_array_oes(GC::Ptr<WebGLVertexArrayObjectOES> array_object);
+    void bind_vertex_array_oes(GC::Ptr<WebGLVertexArrayObjectOES> array_object);
 
 protected:
     void initialize(JS::Realm&) override;
     void visit_edges(Visitor&) override;
 
 private:
-    OESVertexArrayObject(JS::Realm&, GC::Ref<WebGLRenderingContext>);
+    OESVertexArrayObject(JS::Realm&, GC::Ref<WebGLRenderingContextBase>);
 
-    GC::Ref<WebGLRenderingContext> m_context;
+    GC::Ref<WebGLRenderingContextBase> m_context;
 };
 
 }

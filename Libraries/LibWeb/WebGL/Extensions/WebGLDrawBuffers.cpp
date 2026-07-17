@@ -6,35 +6,33 @@
 
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/WebGLDrawBuffersPrototype.h>
+#include <LibWeb/Bindings/WebGLDrawBuffers.h>
 #include <LibWeb/WebGL/Extensions/WebGLDrawBuffers.h>
-#include <LibWeb/WebGL/OpenGLContext.h>
-#include <LibWeb/WebGL/WebGLRenderingContext.h>
+#include <LibWeb/WebGL/WebGLContextProxy.h>
+#include <LibWeb/WebGL/WebGLRenderingContextBase.h>
 
-#define GL_GLEXT_PROTOTYPES 1
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 
-namespace Web::WebGL::Extensions {
+namespace Web::WebGL {
 
 GC_DEFINE_ALLOCATOR(WebGLDrawBuffers);
 
-JS::ThrowCompletionOr<GC::Ptr<WebGLDrawBuffers>> WebGLDrawBuffers::create(JS::Realm& realm, GC::Ref<WebGLRenderingContext> context)
+JS::ThrowCompletionOr<GC::Ref<JS::Object>> WebGLDrawBuffers::create(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase> context)
 {
     return realm.create<WebGLDrawBuffers>(realm, context);
 }
 
-WebGLDrawBuffers::WebGLDrawBuffers(JS::Realm& realm, GC::Ref<WebGLRenderingContext> context)
+WebGLDrawBuffers::WebGLDrawBuffers(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase> context)
     : PlatformObject(realm)
     , m_context(context)
 {
-    m_context->context().request_extension("GL_EXT_draw_buffers");
 }
 
 void WebGLDrawBuffers::draw_buffers_webgl(Vector<GLenum> buffers)
 {
     m_context->context().make_current();
-    glDrawBuffersEXT(buffers.size(), buffers.data());
+    m_context->context().draw_buffers_ext(buffers.size(), buffers.data());
 }
 
 void WebGLDrawBuffers::initialize(JS::Realm& realm)

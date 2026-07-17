@@ -38,7 +38,7 @@ public:
     template<typename T>
     static GC::Ref<Array> create_from(Realm& realm, ReadonlySpan<T> elements, Function<Value(T const&)> map_fn)
     {
-        auto values = GC::RootVector<Value> { realm.heap() };
+        GC::RootVector<Value> values;
         values.ensure_capacity(elements.size());
         for (auto const& element : elements)
             values.append(map_fn(element));
@@ -49,8 +49,8 @@ public:
     virtual ~Array() override = default;
 
     virtual ThrowCompletionOr<Optional<PropertyDescriptor>> internal_get_own_property(PropertyKey const&) const override final;
-    virtual ThrowCompletionOr<bool> internal_set(PropertyKey const&, Value value, Value receiver, CacheablePropertyMetadata*, PropertyLookupPhase) override;
-    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const&, PropertyDescriptor const&, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr) override final;
+    virtual ThrowCompletionOr<bool> internal_set(PropertyKey const&, Value value, Value receiver, CacheableSetPropertyMetadata*, PropertyLookupPhase) override;
+    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const&, PropertyDescriptor&, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr) override final;
     virtual ThrowCompletionOr<bool> internal_has_property(PropertyKey const&) const override final;
     virtual ThrowCompletionOr<bool> internal_delete(PropertyKey const&) override;
     virtual ThrowCompletionOr<GC::RootVector<Value>> internal_own_property_keys() const override final;
@@ -61,6 +61,15 @@ public:
     void set_is_proxy_target(bool is_proxy_target) { m_is_proxy_target = is_proxy_target; }
 
     bool default_prototype_chain_intact() const;
+
+    // Packed arrays have no holes, so the prototype chain is irrelevant:
+    // every index [0, size) is an own data property.
+    bool is_simple_packed_array() const
+    {
+        return !m_is_proxy_target
+            && !may_interfere_with_indexed_property_access()
+            && indexed_storage_kind() == IndexedStorageKind::Packed;
+    }
 
     virtual void visit_edges(Cell::Visitor& visitor) override;
 

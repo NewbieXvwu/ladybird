@@ -13,8 +13,9 @@
 
 namespace Web::HTML {
 
-using HTMLOptionOrOptGroupElement = Variant<GC::Root<HTMLOptionElement>, GC::Root<HTMLOptGroupElement>>;
-using HTMLElementOrElementIndex = Variant<GC::Root<HTMLElement>, i32>;
+using HTMLOptionOrOptGroupElement = Variant<GC::Ref<HTMLOptionElement>, GC::Ref<HTMLOptGroupElement>>;
+using HTMLElementOrElementIndex = Variant<GC::Ref<HTMLElement>, i32>;
+using NullableHTMLElementOrElementIndex = Variant<GC::Ref<HTMLElement>, i32, Empty>;
 
 class HTMLOptionsCollection final : public DOM::HTMLCollection {
     WEB_PLATFORM_OBJECT(HTMLOptionsCollection, DOM::HTMLCollection);
@@ -28,12 +29,12 @@ public:
 
     WebIDL::ExceptionOr<void> set_length(WebIDL::UnsignedLong);
 
-    WebIDL::ExceptionOr<void> add(HTMLOptionOrOptGroupElement element, Optional<HTMLElementOrElementIndex> before = {});
+    WebIDL::ExceptionOr<void> add(HTMLOptionOrOptGroupElement element, NullableHTMLElementOrElementIndex before = { Empty {} });
 
     void remove(WebIDL::Long);
 
     WebIDL::Long selected_index() const;
-    void set_selected_index(WebIDL::Long);
+    WebIDL::ExceptionOr<void> set_selected_index(WebIDL::Long);
 
 private:
     HTMLOptionsCollection(DOM::ParentNode& root, ESCAPING Function<bool(DOM::Element const&)> filter);

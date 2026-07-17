@@ -30,15 +30,23 @@ public:
     Value bound_this() const { return m_bound_this; }
     Vector<Value> const& bound_arguments() const { return m_bound_arguments; }
 
+    virtual Utf16String name_for_call_stack() const override;
+
 private:
     BoundFunction(Realm&, FunctionObject& target_function, Value bound_this, Vector<Value> bound_arguments, Object* prototype);
 
-    ThrowCompletionOr<void> get_stack_frame_size(size_t& registers_and_constants_and_locals_count, size_t& argument_count) override;
+    void get_stack_frame_info(size_t& registers_and_locals_count, ReadonlySpan<Value>& constants, size_t& argument_count) override;
     virtual void visit_edges(Visitor&) override;
+    virtual size_t external_memory_size() const override;
+
+    virtual bool is_bound_function() const final { return true; }
 
     GC::Ptr<FunctionObject> m_bound_target_function; // [[BoundTargetFunction]]
     Value m_bound_this;                              // [[BoundThis]]
     Vector<Value> m_bound_arguments;                 // [[BoundArguments]]
 };
+
+template<>
+inline bool Object::fast_is<BoundFunction>() const { return is_bound_function(); }
 
 }

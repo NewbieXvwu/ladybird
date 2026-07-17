@@ -19,9 +19,13 @@ public:
         Space,
         Comma,
     };
-    static ValueComparingNonnullRefPtr<StyleValueList> create(StyleValueVector&& values, Separator separator)
+    enum class Collapsible {
+        Yes,
+        No,
+    };
+    static ValueComparingNonnullRefPtr<StyleValueList> create(StyleValueVector&& values, Separator separator, Collapsible collapsible = Collapsible::Yes)
     {
-        return adopt_ref(*new (nothrow) StyleValueList(move(values), separator));
+        return adopt_ref(*new (nothrow) StyleValueList(move(values), separator, collapsible));
     }
 
     size_t size() const { return m_properties.values.size(); }
@@ -33,26 +37,38 @@ public:
         return m_properties.values[i];
     }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
     virtual Vector<Parser::ComponentValue> tokenize() const override;
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, Utf16FlyString const& associated_property) const override;
+    virtual StyleValueVector subdivide_into_iterations(PropertyNameAndID const&) const override;
 
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const override;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(StyleValueList const& other) const { return m_properties == other.m_properties; }
+
+    virtual bool is_computationally_independent() const override
+    {
+        return all_of(m_properties.values, [](auto& value) { return value->is_computationally_independent(); });
+    }
 
     Separator separator() const { return m_properties.separator; }
 
     virtual void set_style_sheet(GC::Ptr<CSSStyleSheet>) override;
 
 private:
-    StyleValueList(StyleValueVector&& values, Separator separator)
+    StyleValueList(StyleValueVector&& values, Separator separator, Collapsible collapsible = Collapsible::Yes)
         : StyleValueWithDefaultOperators(Type::ValueList)
-        , m_properties { .separator = separator, .values = move(values) }
+        , m_properties {
+            .separator = separator,
+            .collapsible = collapsible,
+            .values = move(values),
+        }
     {
     }
 
     struct Properties {
         Separator separator;
+        Collapsible collapsible;
         StyleValueVector values;
         bool operator==(Properties const&) const;
     } m_properties;

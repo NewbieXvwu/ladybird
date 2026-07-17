@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2018-2022, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021, the SerenityOS developers.
+ * Copyright (c) 2025-2026, Shannon Booth <shannon@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -373,6 +374,23 @@ TEST_CASE(unicode)
     EXPECT(!url->fragment().has_value());
 }
 
+TEST_CASE(wtf8_surrogates_are_replaced_before_url_parsing)
+{
+    {
+        auto url = URL::Parser::basic_parse("http://example.com/\xED\xA0\x80-\xED\xB0\x80?\xED\xBF\xBF"sv);
+        EXPECT(url.has_value());
+        EXPECT_EQ(url->serialize_path(), "/%EF%BF%BD-%EF%BF%BD");
+        EXPECT_EQ(url->query(), "%EF%BF%BD");
+        EXPECT_EQ(url->serialize(), "http://example.com/%EF%BF%BD-%EF%BF%BD?%EF%BF%BD");
+    }
+
+    {
+        auto host = URL::Parser::parse_host("\xED\xA0\x80host\xED\xBF\xBF"sv, true);
+        EXPECT(host.has_value());
+        EXPECT_EQ(host->serialize(), "%EF%BF%BDhost%EF%BF%BD");
+    }
+}
+
 TEST_CASE(query_with_non_ascii)
 {
     {
@@ -557,6 +575,25 @@ TEST_CASE(username_and_password)
     }
 }
 
+TEST_CASE(non_ascii_userinfo)
+{
+    {
+        auto url = URL::Parser::basic_parse("http://é@é"sv);
+        EXPECT(url.has_value());
+        EXPECT_EQ(url->username(), "%C3%A9"sv);
+        EXPECT(url->password().is_empty());
+        EXPECT_EQ(url->serialized_host(), "xn--9ca"sv);
+    }
+
+    {
+        auto url = URL::Parser::basic_parse("http://é@example.com"sv);
+        EXPECT(url.has_value());
+        EXPECT_EQ(url->username(), "%C3%A9"sv);
+        EXPECT(url->password().is_empty());
+        EXPECT_EQ(url->serialized_host(), "example.com"sv);
+    }
+}
+
 TEST_CASE(ascii_only_url)
 {
     {
@@ -593,103 +630,6 @@ TEST_CASE(invalid_domain_code_points)
     }
 }
 
-TEST_CASE(get_registrable_domain)
-{
-    {
-        auto domain = URL::get_registrable_domain({});
-        EXPECT(!domain.has_value());
-    }
-    {
-        auto domain = URL::get_registrable_domain("foobar"sv);
-        EXPECT(!domain.has_value());
-    }
-    {
-        auto domain = URL::get_registrable_domain("com"sv);
-        EXPECT(!domain.has_value());
-    }
-    {
-        auto domain = URL::get_registrable_domain(".com"sv);
-        EXPECT(!domain.has_value());
-    }
-    {
-        auto domain = URL::get_registrable_domain("example.com"sv);
-        VERIFY(domain.has_value());
-        EXPECT_EQ(*domain, "example.com"sv);
-    }
-    {
-        auto domain = URL::get_registrable_domain(".example.com"sv);
-        VERIFY(domain.has_value());
-        EXPECT_EQ(*domain, "example.com"sv);
-    }
-    {
-        auto domain = URL::get_registrable_domain("www.example.com"sv);
-        VERIFY(domain.has_value());
-        EXPECT_EQ(*domain, "example.com"sv);
-    }
-    {
-        auto domain = URL::get_registrable_domain("sub.www.example.com"sv);
-        VERIFY(domain.has_value());
-        EXPECT_EQ(*domain, "example.com"sv);
-    }
-    {
-        auto domain = URL::get_registrable_domain("github.io"sv);
-        EXPECT(!domain.has_value());
-    }
-    {
-        auto domain = URL::get_registrable_domain("ladybird.github.io"sv);
-        VERIFY(domain.has_value());
-        EXPECT_EQ(*domain, "ladybird.github.io"sv);
-    }
-}
-
-TEST_CASE(public_suffix)
-{
-    {
-        auto domain = URL::Parser::parse_host("com"sv);
-        EXPECT_EQ(domain->public_suffix(), "com"sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("example.com"sv);
-        EXPECT_EQ(domain->public_suffix(), "com"sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("www.example.com"sv);
-        EXPECT_EQ(domain->public_suffix(), "com"sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("EXAMPLE.COM"sv);
-        EXPECT_EQ(domain->public_suffix(), "com"sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("www.example.com."sv);
-        EXPECT_EQ(domain->public_suffix(), "com."sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("github.io"sv);
-        EXPECT_EQ(domain->public_suffix(), "github.io"sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("whatwg.github.io"sv);
-        EXPECT_EQ(domain->public_suffix(), "github.io"sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("إختبار"sv);
-        EXPECT_EQ(domain->public_suffix(), "xn--kgbechtv"sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("example.إختبار"sv);
-        EXPECT_EQ(domain->public_suffix(), "xn--kgbechtv"sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("sub.example.إختبار"sv);
-        EXPECT_EQ(domain->public_suffix(), "xn--kgbechtv"sv);
-    }
-    {
-        auto domain = URL::Parser::parse_host("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]"sv);
-        EXPECT_EQ(domain->public_suffix(), OptionalNone {});
-    }
-}
-
 TEST_CASE(same_site)
 {
     auto opaque_origin = URL::Origin::create_opaque();
@@ -708,4 +648,99 @@ TEST_CASE(same_site)
     EXPECT(site1_https_url.origin().is_same_site(site1_https_second_url.origin()));
     EXPECT(!site1_https_url.origin().is_same_site(site1_http_url.origin()));
     EXPECT(!site1_https_url.origin().is_same_site(site2_https_url.origin()));
+}
+
+TEST_CASE(same_origin_domain)
+{
+    auto opaque1 = URL::Origin::create_opaque();
+    auto opaque2 = URL::Origin::create_opaque();
+
+    // Opaque origins
+    EXPECT(opaque1.is_same_origin_domain(opaque1));
+    EXPECT(!opaque1.is_same_origin_domain(opaque2));
+
+    auto https_origin = URL::Parser::basic_parse("https://www.ladybird.org"sv).value().origin();
+
+    // Opaque and tuple origin
+    EXPECT(!opaque1.is_same_origin_domain(https_origin));
+
+    auto https_default = URL::Parser::basic_parse("https://www.ladybird.org"sv).value().origin();
+    auto https_path = URL::Parser::basic_parse("https://www.ladybird.org/some/path"sv).value().origin();
+    auto https_443 = URL::Parser::basic_parse("https://www.ladybird.org:443"sv).value().origin();
+    auto https_444 = URL::Parser::basic_parse("https://www.ladybird.org:444"sv).value().origin();
+
+    // Same scheme + host + effective port
+    EXPECT(https_default.is_same_origin_domain(https_path));
+    EXPECT(https_default.is_same_origin_domain(https_443));
+    EXPECT(!https_default.is_same_origin_domain(https_444));
+
+    auto http_origin = URL::Parser::basic_parse("http://www.ladybird.org"sv).value().origin();
+
+    // Scheme mismatch
+
+    EXPECT(!https_default.is_same_origin_domain(http_origin));
+
+    auto other_host = URL::Parser::basic_parse("https://www.serenityos.org"sv).value().origin();
+    auto subdomain = URL::Parser::basic_parse("https://sub.ladybird.org"sv).value().origin();
+
+    // Host mismatch (no domain relaxation)
+    EXPECT(!https_default.is_same_origin_domain(other_host));
+    EXPECT(!https_default.is_same_origin_domain(subdomain));
+
+    auto ip1 = URL::Parser::basic_parse("https://127.0.0.1"sv).value().origin();
+    auto ip2 = URL::Parser::basic_parse("https://127.0.0.1:443"sv).value().origin();
+    auto ip3 = URL::Parser::basic_parse("https://127.0.0.2"sv).value().origin();
+
+    // IP literals
+    EXPECT(ip1.is_same_origin_domain(ip2));
+    EXPECT(!ip1.is_same_origin_domain(ip3));
+
+    auto file1 = URL::Parser::basic_parse("file:///tmp/a.txt"sv).value().origin();
+    auto file2 = URL::Parser::basic_parse("file:///tmp/b.txt"sv).value().origin();
+
+    // File scheme
+    EXPECT(!file1.is_same_origin_domain(file2));
+
+    auto a_relaxed = URL::Origin { "https"_string, "a.ladybird.org"_string, 443, "ladybird.org"_string };
+    auto b_relaxed = URL::Origin { "https"_string, "b.ladybird.org"_string, 443, "ladybird.org"_string };
+    auto b_unrelaxed = URL::Parser::basic_parse("https://b.ladybird.org"sv).value().origin();
+    auto c_relaxed = URL::Origin { "https"_string, "c.serenityos.org"_string, 443, "serenityos.org"_string };
+    auto http_relaxed = URL::Origin { "http"_string, "a.ladybird.org"_string, 80, "ladybird.org"_string };
+
+    // Origin domain
+    EXPECT(a_relaxed.is_same_origin_domain(b_relaxed));
+    EXPECT(!a_relaxed.is_same_origin_domain(b_unrelaxed));
+    EXPECT(!a_relaxed.is_same_origin_domain(c_relaxed));
+    EXPECT(!a_relaxed.is_same_origin_domain(http_relaxed));
+    EXPECT(!opaque1.is_same_origin_domain(a_relaxed));
+}
+
+// resource:// URLs are internal browser resources. They share a single tuple origin regardless
+// of host, so that same-origin checks pass between any resource:// documents or worker scripts.
+TEST_CASE(resource_url_origin)
+{
+    auto url_a = URL::Parser::basic_parse("resource://ladybird/pdfjs/web/viewer.html"sv).value();
+    auto url_b = URL::Parser::basic_parse("resource://ladybird/pdfjs/build/pdf.worker.mjs"sv).value();
+    auto url_c = URL::Parser::basic_parse("resource://icons/something.png"sv).value();
+
+    // resource:// origins must be tuple origins, not opaque.
+    EXPECT(!url_a.origin().is_opaque());
+
+    // All resource:// URLs share the same origin regardless of host or path.
+    EXPECT(url_a.origin().is_same_origin(url_b.origin()));
+    EXPECT(url_a.origin().is_same_origin(url_c.origin()));
+
+    // resource:// and https:// are never same-origin.
+    auto https_origin = URL::Parser::basic_parse("https://ladybird.org"sv).value().origin();
+    EXPECT(!url_a.origin().is_same_origin(https_origin));
+
+    // resource:// and an opaque origin are never same-origin.
+    EXPECT(!url_a.origin().is_same_origin(URL::Origin::create_opaque()));
+}
+
+TEST_CASE(authority_state_lots_of_at_symbols)
+{
+    auto many_at_symbols = MUST(String::repeated('@', 500'000));
+    auto horror_url = MUST(String::formatted("ws::{}", many_at_symbols));
+    EXPECT(!URL::Parser::basic_parse(horror_url).has_value());
 }

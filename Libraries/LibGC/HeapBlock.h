@@ -25,11 +25,11 @@ class GC_API HeapBlock : public HeapBlockBase {
     AK_MAKE_NONMOVABLE(HeapBlock);
 
 public:
-    using HeapBlockBase::block_size;
-    static NonnullOwnPtr<HeapBlock> create_with_cell_size(Heap&, CellAllocator&, size_t cell_size, char const* class_name);
+    using HeapBlockBase::BLOCK_SIZE;
+    static NonnullOwnPtr<HeapBlock> create_with_cell_size(Heap&, CellAllocator&, size_t cell_size, bool overrides_must_survive_garbage_collection, bool overrides_finalize);
 
     size_t cell_size() const { return m_cell_size; }
-    size_t cell_count() const { return (block_size - sizeof(HeapBlock)) / m_cell_size; }
+    size_t cell_count() const { return (HeapBlock::BLOCK_SIZE - sizeof(HeapBlock)) / m_cell_size; }
     bool is_full() const { return !has_lazy_freelist() && !m_freelist; }
 
     ALWAYS_INLINE Cell* allocate()
@@ -89,11 +89,15 @@ public:
     }
 
     IntrusiveListNode<HeapBlock> m_list_node;
+    IntrusiveListNode<HeapBlock> m_sweep_list_node;
 
     CellAllocator& cell_allocator() { return m_cell_allocator; }
 
+    bool overrides_must_survive_garbage_collection() const { return m_overrides_must_survive_garbage_collection; }
+    bool overrides_finalize() const { return m_overrides_finalize; }
+
 private:
-    HeapBlock(Heap&, CellAllocator&, size_t cell_size);
+    HeapBlock(Heap&, CellAllocator&, size_t cell_size, bool overrides_must_survive_garbage_collection, bool overrides_finalize);
 
     bool has_lazy_freelist() const { return m_next_lazy_freelist_index < cell_count(); }
 
@@ -109,8 +113,12 @@ private:
     }
 
     CellAllocator& m_cell_allocator;
-    size_t m_cell_size { 0 };
-    size_t m_next_lazy_freelist_index { 0 };
+    u32 m_cell_size { 0 };
+    u32 m_next_lazy_freelist_index { 0 };
+
+    bool m_overrides_must_survive_garbage_collection { false };
+    bool m_overrides_finalize { false };
+
     Ptr<FreelistEntry> m_freelist;
     alignas(__BIGGEST_ALIGNMENT__) u8 m_storage[];
 

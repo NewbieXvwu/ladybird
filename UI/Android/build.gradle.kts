@@ -1,5 +1,3 @@
-import com.android.build.gradle.internal.tasks.factory.dependsOn
-
 plugins {
     id("com.android.application") version "8.11.0"
     id("org.jetbrains.kotlin.android") version "2.1.20"
@@ -8,17 +6,6 @@ plugins {
 var buildDir = layout.buildDirectory.get()
 var cacheDir = System.getenv("LADYBIRD_CACHE_DIR") ?: "$buildDir/caches"
 var sourceDir = layout.projectDirectory.dir("../../").toString()
-
-task<Exec>("buildLagomTools") {
-    commandLine = listOf("./BuildLagomTools.sh")
-    environment = mapOf(
-        "BUILD_DIR" to buildDir,
-        "CACHE_DIR" to cacheDir,
-        "PATH" to System.getenv("PATH")!!
-    )
-}
-tasks.named("preBuild").dependsOn("buildLagomTools")
-tasks.named("prepareKotlinBuildScriptModel").dependsOn("buildLagomTools")
 
 android {
     namespace = "org.serenityos.ladybird"
@@ -38,7 +25,6 @@ android {
             cmake {
                 cppFlags += "-std=c++23"
                 arguments += listOf(
-                    "-DLagomTools_DIR=$buildDir/lagom-tools-install/share/LagomTools",
                     "-DANDROID_STL=c++_shared",
                     "-DLADYBIRD_CACHE_DIR=$cacheDir",
                     "-DVCPKG_ROOT=$sourceDir/Build/vcpkg",
@@ -92,5 +78,4 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.ext:junit-ktx:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-    implementation("com.google.oboe:oboe:1.9.3")
 }

@@ -71,6 +71,9 @@ public:
 
     operator T&() const { return *m_ptr; }
 
+    operator bool() const = delete;
+    bool operator!() const = delete;
+
 private:
     T* m_ptr { nullptr };
 };
@@ -183,7 +186,7 @@ public:
 
     operator T*() const { return m_ptr; }
 
-    Ref<T> as_nonnull()
+    Ref<T> as_nonnull() const
     {
         VERIFY(m_ptr);
         return *m_ptr;
@@ -235,6 +238,7 @@ struct Traits<GC::Ptr<T>> : public DefaultTraits<GC::Ptr<T>> {
     {
         return Traits<T*>::hash(value.ptr());
     }
+    static constexpr bool may_have_slow_equality_check() { return false; }
 };
 
 template<typename T>

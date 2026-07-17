@@ -24,13 +24,13 @@ class CallbackType final : public JS::Cell {
     GC_DECLARE_ALLOCATOR(CallbackType);
 
 public:
+    CallbackType(JS::Object& callback, HTML::EnvironmentSettingsObject& callback_context, OperationReturnsPromise = OperationReturnsPromise::No);
     CallbackType(JS::Object& callback, JS::Realm& callback_context, OperationReturnsPromise = OperationReturnsPromise::No);
 
     GC::Ref<JS::Object> callback;
 
     // https://webidl.spec.whatwg.org/#dfn-callback-context
-    // NOTE: This is a Realm per ShadowRealm proposal https://github.com/whatwg/webidl/pull/1437
-    GC::Ref<JS::Realm> callback_context;
+    GC::Ref<HTML::EnvironmentSettingsObject> callback_context;
 
     // Non-standard property used to distinguish Promise-returning callbacks in callback-related AOs
     OperationReturnsPromise operation_returns_promise;
@@ -39,6 +39,6 @@ private:
     virtual void visit_edges(Cell::Visitor&) override;
 };
 
-JS::ThrowCompletionOr<GC::Root<WebIDL::CallbackType>> property_to_callback(JS::VM& vm, JS::Value value, JS::PropertyKey const& property_key, WebIDL::OperationReturnsPromise);
+JS::ThrowCompletionOr<GC::Ptr<WebIDL::CallbackType>> property_to_callback(JS::VM& vm, JS::Value value, JS::PropertyKey const& property_key, WebIDL::OperationReturnsPromise);
 
 }

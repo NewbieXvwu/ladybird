@@ -8,30 +8,26 @@
 
 #include <AK/Error.h>
 #include <AK/Optional.h>
+#include <LibIPC/TransportHandle.h>
 #include <LibImageDecoderClient/Client.h>
 #include <LibRequests/RequestClient.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
-#include <LibWeb/Worker/WebWorkerClient.h>
+#include <LibWeb/HTML/CrossProcessId.h>
 #include <LibWebView/Forward.h>
-#include <LibWebView/ViewImplementation.h>
+#include <LibWebView/PrivateBrowsing.h>
 #include <LibWebView/WebContentClient.h>
+#include <LibWebView/WebWorkerClient.h>
 
 namespace WebView {
 
-WEBVIEW_API ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process(
-    WebView::ViewImplementation& view,
-    IPC::File image_decoder_socket,
-    Optional<IPC::File> request_server_socket = {});
-
-WEBVIEW_API ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_spare_web_content_process(
-    IPC::File image_decoder_socket,
-    Optional<IPC::File> request_server_socket = {});
+WEBVIEW_API ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process(IsPrivate, u64 initial_page_id, Web::HTML::CrossProcessId root_navigable_id);
 
 WEBVIEW_API ErrorOr<NonnullRefPtr<ImageDecoderClient::Client>> launch_image_decoder_process();
-WEBVIEW_API ErrorOr<NonnullRefPtr<Web::HTML::WebWorkerClient>> launch_web_worker_process(Web::Bindings::AgentType);
+WEBVIEW_API ErrorOr<NonnullRefPtr<WebView::CompositorClient>> launch_compositor_process();
+WEBVIEW_API ErrorOr<NonnullRefPtr<WebView::WebWorkerClient>> launch_web_worker_process(Web::Bindings::AgentType, IsPrivate, Web::HTML::WorkerAgentId);
 WEBVIEW_API ErrorOr<NonnullRefPtr<Requests::RequestClient>> launch_request_server_process();
 
-WEBVIEW_API ErrorOr<IPC::File> connect_new_request_server_client();
-WEBVIEW_API ErrorOr<IPC::File> connect_new_image_decoder_client();
+WEBVIEW_API ErrorOr<IPC::TransportHandle> connect_new_request_server_client(IsPrivate);
+WEBVIEW_API ErrorOr<IPC::TransportHandle> connect_new_image_decoder_client();
 
 }

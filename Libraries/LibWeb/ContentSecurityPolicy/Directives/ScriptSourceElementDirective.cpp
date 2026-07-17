@@ -13,7 +13,7 @@ namespace Web::ContentSecurityPolicy::Directives {
 
 GC_DEFINE_ALLOCATOR(ScriptSourceElementDirective);
 
-ScriptSourceElementDirective::ScriptSourceElementDirective(String name, Vector<String> value)
+ScriptSourceElementDirective::ScriptSourceElementDirective(Utf16FlyString name, Vector<Utf16String> value)
     : Directive(move(name), move(value))
 {
 }
@@ -51,7 +51,7 @@ Directive::Result ScriptSourceElementDirective::post_request_check(GC::Heap&, GC
 }
 
 // https://w3c.github.io/webappsec-csp/#script-src-elem-inline
-Directive::Result ScriptSourceElementDirective::inline_check(GC::Heap&, GC::Ptr<DOM::Element const> element, InlineType type, GC::Ref<Policy const> policy, String const& source) const
+Directive::Result ScriptSourceElementDirective::inline_check(GC::Heap&, GC::Ptr<DOM::Element const> element, InlineType type, GC::Ref<Policy const> policy, Utf16View source) const
 {
     // 1. Assert: element is not null or type is "navigation".
     VERIFY(element || type == InlineType::Navigation);

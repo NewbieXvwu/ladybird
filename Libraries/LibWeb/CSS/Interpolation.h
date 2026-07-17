@@ -6,14 +6,13 @@
 
 #pragma once
 
-#include <LibWeb/CSS/Enums.h>
+#include <LibWeb/Bindings/KeyframeEffect.h>
+#include <LibWeb/CSS/StyleValues/ColorInterpolationMethodStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::CSS {
-
-struct CalculationContext;
 
 enum class AllowDiscrete {
     Yes,
@@ -27,8 +26,10 @@ bool property_values_are_transitionable(PropertyID, StyleValue const& old_value,
 RefPtr<StyleValue const> interpolate_value(DOM::Element&, CalculationContext const&, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete);
 RefPtr<StyleValue const> interpolate_repeatable_list(DOM::Element&, CalculationContext const&, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete);
 RefPtr<StyleValue const> interpolate_box_shadow(DOM::Element&, CalculationContext const&, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete);
-RefPtr<StyleValue const> interpolate_transform(DOM::Element&, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete);
+RefPtr<StyleValue const> interpolate_transform(DOM::Element&, CalculationContext const&, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete);
 
-Color interpolate_color(Color from, Color to, float delta, ColorSyntax syntax);
+RefPtr<StyleValue const> interpolate_color(StyleValue const& from, StyleValue const& to, float delta, Optional<ColorInterpolationMethodStyleValue::ColorInterpolationMethod>, ColorResolutionContext const&);
+
+RefPtr<StyleValue const> composite_value(PropertyID, StyleValue const& a_underlying_value, StyleValue const& a_animated_value, Bindings::CompositeOperation);
 
 }

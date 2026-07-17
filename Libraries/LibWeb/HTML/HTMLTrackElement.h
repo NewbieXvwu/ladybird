@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <AK/Utf16View.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/HTMLElement.h>
 
@@ -29,8 +30,8 @@ private:
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
-    String track_url() const { return m_track_url; }
-    void set_track_url(String);
+    Utf16String track_url() const { return m_track_url; }
+    void set_track_url(Utf16View);
 
     void start_the_track_processing_model();
     void start_the_track_processing_model_parallel_steps();
@@ -39,14 +40,14 @@ private:
     void track_failed_to_load();
 
     // ^DOM::Element
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
     virtual void inserted() override;
 
     GC::Ptr<TextTrack> m_track;
     GC::Ptr<TextTrackObserver> m_track_observer;
 
     // https://html.spec.whatwg.org/multipage/media.html#track-url
-    String m_track_url {};
+    Utf16String m_track_url {};
 
     GC::Ptr<Fetch::Infrastructure::FetchAlgorithms> m_fetch_algorithms;
     GC::Ptr<Fetch::Infrastructure::FetchController> m_fetch_controller;

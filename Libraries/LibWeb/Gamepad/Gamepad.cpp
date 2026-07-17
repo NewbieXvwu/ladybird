@@ -6,6 +6,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Gamepad/EventNames.h>
 #include <LibWeb/Gamepad/Gamepad.h>
 #include <LibWeb/Gamepad/GamepadButton.h>
@@ -160,6 +161,7 @@ void Gamepad::visit_edges(Cell::Visitor& visitor)
 
 void Gamepad::finalize()
 {
+    Base::finalize();
     SDL_CloseGamepad(m_sdl_gamepad);
 }
 
@@ -577,7 +579,7 @@ void Gamepad::update_gamepad_state(Badge<NavigatorGamepadPartial>)
                 //    to fire an event named gamepadconnected at gamepad's relevant global object using GamepadEvent
                 //    with its gamepad attribute initialized to connectedGamepad.
                 if (document.is_fully_active()) {
-                    auto gamepad_connected_event_init = GamepadEventInit {
+                    auto gamepad_connected_event_init = Bindings::GamepadEventInit {
                         {
                             .bubbles = false,
                             .cancelable = false,

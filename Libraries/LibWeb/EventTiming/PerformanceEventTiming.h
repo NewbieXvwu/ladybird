@@ -7,7 +7,7 @@
 #pragma once
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/DOM/Node.h>
+#include <LibWeb/Forward.h>
 #include <LibWeb/PerformanceTimeline/PerformanceEntry.h>
 
 namespace Web::EventTiming {
@@ -32,18 +32,24 @@ public:
     // https://w3c.github.io/timing-entrytypes-registry/#dfn-maxbuffersize
     static Optional<u64> max_buffer_size();
     // https://w3c.github.io/timing-entrytypes-registry/#dfn-should-add-entry
-    virtual PerformanceTimeline::ShouldAddEntry should_add_entry(Optional<PerformanceTimeline::PerformanceObserverInit const&> = {}) const override;
+    virtual PerformanceTimeline::ShouldAddEntry should_add_entry(Optional<Bindings::PerformanceObserverInit const&> = {}) const override;
 
-    virtual FlyString const& entry_type() const override;
+    virtual Utf16FlyString const& entry_type() const override;
 
 private:
-    PerformanceEventTiming(JS::Realm& realm, String const& name, HighResolutionTime::DOMHighResTimeStamp start_time, HighResolutionTime::DOMHighResTimeStamp duration,
-        DOM::Event const& event, HighResolutionTime::DOMHighResTimeStamp processing_start, unsigned long long interaction_id);
+    PerformanceEventTiming(
+        JS::Realm&,
+        Utf16String const& name,
+        HighResolutionTime::DOMHighResTimeStamp start_time,
+        HighResolutionTime::DOMHighResTimeStamp duration,
+        DOM::Event const& event,
+        HighResolutionTime::DOMHighResTimeStamp processing_start,
+        unsigned long long interaction_id);
 
     // m_entry_type defined here for both "event"s and "first-input"s
     // this is the only PerformanceEntry that has two event types it could represent
     // That complicates implementing the registry functions if they remain static
-    FlyString m_entry_type;
+    Utf16FlyString m_entry_type;
     GC::Ptr<DOM::EventTarget> m_event_target;
     HighResolutionTime::DOMHighResTimeStamp m_start_time;
     HighResolutionTime::DOMHighResTimeStamp m_processing_start;

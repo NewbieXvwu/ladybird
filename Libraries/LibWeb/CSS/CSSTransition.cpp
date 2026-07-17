@@ -6,11 +6,12 @@
  */
 
 #include <LibWeb/Animations/DocumentTimeline.h>
-#include <LibWeb/Bindings/CSSTransitionPrototype.h>
+#include <LibWeb/Bindings/CSSTransition.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
 #include <LibWeb/CSS/CSSTransition.h>
 #include <LibWeb/CSS/Interpolation.h>
+#include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
@@ -19,12 +20,25 @@ namespace Web::CSS {
 
 GC_DEFINE_ALLOCATOR(CSSTransition);
 
-GC::Ref<CSSTransition> CSSTransition::start_a_transition(DOM::AbstractElement abstract_element, PropertyID property_id,
-    size_t transition_generation, double delay, double start_time, double end_time, NonnullRefPtr<StyleValue const> start_value,
-    NonnullRefPtr<StyleValue const> end_value, NonnullRefPtr<StyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor)
+GC::Ref<CSSTransition> CSSTransition::start_a_transition(
+    DOM::AbstractElement abstract_element,
+    PropertyID property_id,
+    size_t transition_generation,
+    double delay,
+    double start_time,
+    double end_time,
+    NonnullRefPtr<StyleValue const> start_value,
+    NonnullRefPtr<StyleValue const> end_value,
+    NonnullRefPtr<StyleValue const> reversing_adjusted_start_value,
+    double reversing_shortening_factor)
 {
     auto& realm = abstract_element.element().realm();
     return realm.create<CSSTransition>(realm, abstract_element, property_id, transition_generation, delay, start_time, end_time, start_value, end_value, reversing_adjusted_start_value, reversing_shortening_factor);
+}
+
+Utf16FlyString const& CSSTransition::transition_property() const
+{
+    return string_from_property_id(m_transition_property);
 }
 
 Animations::AnimationClass CSSTransition::animation_class() const
@@ -32,7 +46,7 @@ Animations::AnimationClass CSSTransition::animation_class() const
     return Animations::AnimationClass::CSSTransition;
 }
 
-Optional<int> CSSTransition::class_specific_composite_order(GC::Ref<Animations::Animation> other_animation) const
+int CSSTransition::class_specific_composite_order(GC::Ref<Animations::Animation> other_animation) const
 {
     auto other = GC::Ref { as<CSSTransition>(*other_animation) };
 
@@ -40,13 +54,13 @@ Optional<int> CSSTransition::class_specific_composite_order(GC::Ref<Animations::
     // follows:
 
     // 1. If neither A nor B has an owning element, sort based on their relative position in the global animation list.
-    if (!owning_element() && !other->owning_element())
+    if (!owning_element().has_value() && !other->owning_element().has_value())
         return global_animation_list_order() - other->global_animation_list_order();
 
     // 2. Otherwise, if only one of A or B has an owning element, let the animation with an owning element sort first.
-    if (owning_element() && !other->owning_element())
+    if (owning_element().has_value() && !other->owning_element().has_value())
         return -1;
-    if (!owning_element() && other->owning_element())
+    if (!owning_element().has_value() && other->owning_element().has_value())
         return 1;
 
     // 3. Otherwise, if the owning element of A and B differs, sort A and B by tree order of their corresponding owning
@@ -58,9 +72,9 @@ Optional<int> CSSTransition::class_specific_composite_order(GC::Ref<Animations::
     //      codepoints that make up each selector
     //    - ::after
     //    - element children
-    if (owning_element().ptr() != other->owning_element().ptr()) {
+    if (owning_element() != other->owning_element()) {
         // FIXME: Actually sort by tree order
-        return {};
+        return 0;
     }
 
     // 4. Otherwise, if A and B have different transition generation values, sort by their corresponding transition
@@ -68,16 +82,24 @@ Optional<int> CSSTransition::class_specific_composite_order(GC::Ref<Animations::
     if (m_transition_generation != other->m_transition_generation)
         return m_transition_generation - other->m_transition_generation;
 
-    // FIXME:
     // 5. Otherwise, sort A and B in ascending order by the Unicode codepoints that make up the expanded transition
     //    property name of each transition (i.e. without attempting case conversion and such that ‘-moz-column-width’
     //    sorts before ‘column-width’).
-    return {};
+    return transition_property() <=> other->transition_property();
 }
 
-CSSTransition::CSSTransition(JS::Realm& realm, DOM::AbstractElement abstract_element, PropertyID property_id, size_t transition_generation,
-    double delay, double start_time, double end_time, NonnullRefPtr<StyleValue const> start_value, NonnullRefPtr<StyleValue const> end_value,
-    NonnullRefPtr<StyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor)
+CSSTransition::CSSTransition(
+    JS::Realm& realm,
+    DOM::AbstractElement abstract_element,
+    PropertyID property_id,
+    size_t transition_generation,
+    double delay,
+    double start_time,
+    double end_time,
+    NonnullRefPtr<StyleValue const> start_value,
+    NonnullRefPtr<StyleValue const> end_value,
+    NonnullRefPtr<StyleValue const> reversing_adjusted_start_value,
+    double reversing_shortening_factor)
     : Animations::Animation(realm)
     , m_transition_property(property_id)
     , m_transition_generation(transition_generation)
@@ -96,11 +118,17 @@ CSSTransition::CSSTransition(JS::Realm& realm, DOM::AbstractElement abstract_ele
     // that have been disassociated from their owning element but are still idle do not have a defined composite order.
 
     // Construct a KeyframesEffect for our animation
-    m_keyframe_effect->set_target(&abstract_element.element());
-    if (abstract_element.pseudo_element().has_value())
-        m_keyframe_effect->set_pseudo_element(Selector::PseudoElementSelector { abstract_element.pseudo_element().value() });
-    m_keyframe_effect->set_start_delay(delay);
-    m_keyframe_effect->set_iteration_duration(end_time - start_time);
+    m_keyframe_effect->set_target(abstract_element);
+    m_keyframe_effect->set_specified_start_delay(delay);
+    m_keyframe_effect->set_specified_iteration_duration(end_time - start_time);
+    // AD-HOC: CSS Transitions require the start value to apply during transition-delay. A default KeyframeEffect does
+    //         not fill in the before phase, so use backwards fill to keep the transition value in the cascade until
+    //         the active interval starts.
+    m_keyframe_effect->set_fill_mode(Bindings::FillMode::Backwards);
+    // https://drafts.csswg.org/web-animations-2/#updating-animationeffect-timing
+    // Timing properties may also be updated due to a style change. Any change to a CSS animation property that affects
+    // timing requires rerunning the procedure to normalize specified timing.
+    m_keyframe_effect->normalize_specified_timing();
     m_keyframe_effect->set_timing_function(abstract_element.element().property_transition_attributes(abstract_element.pseudo_element(), property_id)->timing_function);
 
     auto key_frame_set = adopt_ref(*new Animations::KeyframeEffect::KeyFrameSet);
@@ -115,7 +143,7 @@ CSSTransition::CSSTransition(JS::Realm& realm, DOM::AbstractElement abstract_ele
 
     m_keyframe_effect->set_key_frame_set(key_frame_set);
     set_timeline(abstract_element.document().timeline());
-    set_owning_element(abstract_element.element());
+    set_owning_element(abstract_element);
     set_effect(m_keyframe_effect);
     abstract_element.element().set_transition(abstract_element.pseudo_element(), m_transition_property, *this);
 
@@ -138,11 +166,11 @@ void CSSTransition::visit_edges(Cell::Visitor& visitor)
 
 double CSSTransition::timing_function_output_at_time(double t) const
 {
-    auto progress = (t - transition_start_time()) / (transition_end_time() - transition_start_time());
     // AD-HOC: If the transition has an empty duration then we get NaN here,
     // setting progress to 1 because an instant transition may be considered "finished".
+    double progress = 1;
     if (transition_start_time() < transition_end_time())
-        progress = 1;
+        progress = (t - transition_start_time()) / (transition_end_time() - transition_start_time());
 
     // FIXME: Is this before_flag value correct?
     bool before_flag = t < transition_start_time();

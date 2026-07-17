@@ -6,12 +6,14 @@
  */
 
 #include <AK/CharacterTypes.h>
+#include <AK/Checked.h>
 #include <AK/Function.h>
+#include <AK/NumericLimits.h>
 #include <AK/Optional.h>
+#include <AK/Utf16StringBuilder.h>
 #include <AK/Utf16View.h>
-#include <LibJS/Bytecode/Interpreter.h>
+#include <LibJS/Bytecode/Debug.h>
 #include <LibJS/ModuleLoading.h>
-#include <LibJS/Parser.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Accessor.h>
 #include <LibJS/Runtime/ArgumentsObject.h>
@@ -25,6 +27,7 @@
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/GlobalObject.h>
+#include <LibJS/Runtime/NativeJavaScriptBackedFunction.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibJS/Runtime/ObjectEnvironment.h>
 #include <LibJS/Runtime/PromiseCapability.h>
@@ -33,18 +36,45 @@
 #include <LibJS/Runtime/PropertyKey.h>
 #include <LibJS/Runtime/ProxyObject.h>
 #include <LibJS/Runtime/Reference.h>
+#include <LibJS/Runtime/SharedFunctionInstanceData.h>
 #include <LibJS/Runtime/StringPrototype.h>
 #include <LibJS/Runtime/SuppressedError.h>
 #include <LibJS/Runtime/Temporal/AbstractOperations.h>
+#include <LibJS/Runtime/VM.h>
 #include <LibJS/Runtime/ValueInlines.h>
+#include <LibJS/RustIntegration.h>
+#include <LibJS/SourceCode.h>
 
 namespace JS {
+
+size_t max_js_string_length()
+{
+    return NumericLimits<u32>::max();
+}
+
+ThrowCompletionOr<size_t> checked_js_string_length_sum(VM& vm, size_t addend_a, size_t addend_b, ErrorType const& error_type)
+{
+    Checked<size_t> sum = addend_a;
+    sum += addend_b;
+    if (sum.has_overflow() || sum.value() > max_js_string_length())
+        return vm.throw_completion<RangeError>(error_type);
+    return sum.value();
+}
+
+ThrowCompletionOr<size_t> checked_js_string_length_product(VM& vm, size_t factor_a, size_t factor_b, ErrorType const& error_type)
+{
+    Checked<size_t> product = factor_a;
+    product *= factor_b;
+    if (product.has_overflow() || product.value() > max_js_string_length())
+        return vm.throw_completion<RangeError>(error_type);
+    return product.value();
+}
 
 // 7.2.1 RequireObjectCoercible ( argument ), https://tc39.es/ecma262/#sec-requireobjectcoercible
 ThrowCompletionOr<Value> require_object_coercible(VM& vm, Value value)
 {
     if (value.is_nullish())
-        return vm.throw_completion<TypeError>(ErrorType::NotObjectCoercible, value.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotObjectCoercible, value);
     return value;
 }
 
@@ -55,25 +85,33 @@ ThrowCompletionOr<Value> call_impl(VM& vm, Value function, Value this_value, Rea
 
     // 2. If IsCallable(F) is false, throw a TypeError exception.
     if (!function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, function);
 
     // 3. Return ? F.[[Call]](V, argumentsList).
-    ExecutionContext* callee_context = nullptr;
     auto& function_object = function.as_function();
-    size_t registers_and_constants_and_locals_count = 0;
+    size_t registers_and_locals_count = 0;
+    ReadonlySpan<Value> constants;
     size_t argument_count = arguments_list.size();
-    TRY(function_object.get_stack_frame_size(registers_and_constants_and_locals_count, argument_count));
-    ALLOCATE_EXECUTION_CONTEXT_ON_NATIVE_STACK(callee_context, registers_and_constants_and_locals_count, argument_count);
+    function_object.get_stack_frame_info(registers_and_locals_count, constants, argument_count);
 
-    auto* argument_values = callee_context->arguments.data();
+    auto& stack = vm.interpreter_stack();
+    auto* stack_mark = stack.top();
+    auto* callee_context = stack.allocate(registers_and_locals_count, constants, argument_count);
+    if (!callee_context) [[unlikely]]
+        return vm.throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
+    ScopeGuard deallocate_guard = [&stack, stack_mark] { stack.deallocate(stack_mark); };
+
+    auto* argument_values = callee_context->arguments_data();
     for (size_t i = 0; i < arguments_list.size(); ++i)
         argument_values[i] = arguments_list[i];
+    for (size_t i = arguments_list.size(); i < argument_count; ++i)
+        argument_values[i] = js_undefined();
     callee_context->passed_argument_count = arguments_list.size();
 
     return function_object.internal_call(*callee_context, this_value);
 }
 
-ThrowCompletionOr<Value> call_impl(VM&, FunctionObject& function, Value this_value, ReadonlySpan<Value> arguments_list)
+ThrowCompletionOr<Value> call_impl(VM& vm, FunctionObject& function, Value this_value, ReadonlySpan<Value> arguments_list)
 {
     // 1. If argumentsList is not present, set argumentsList to a new empty List.
 
@@ -81,22 +119,30 @@ ThrowCompletionOr<Value> call_impl(VM&, FunctionObject& function, Value this_val
     // Note: Called with a FunctionObject ref
 
     // 3. Return ? F.[[Call]](V, argumentsList).
-    ExecutionContext* callee_context = nullptr;
-    size_t registers_and_constants_and_locals_count = 0;
+    size_t registers_and_locals_count = 0;
+    ReadonlySpan<Value> constants;
     size_t argument_count = arguments_list.size();
-    TRY(function.get_stack_frame_size(registers_and_constants_and_locals_count, argument_count));
-    ALLOCATE_EXECUTION_CONTEXT_ON_NATIVE_STACK(callee_context, registers_and_constants_and_locals_count, argument_count);
+    function.get_stack_frame_info(registers_and_locals_count, constants, argument_count);
 
-    auto* argument_values = callee_context->arguments.data();
+    auto& stack = vm.interpreter_stack();
+    auto* stack_mark = stack.top();
+    auto* callee_context = stack.allocate(registers_and_locals_count, constants, argument_count);
+    if (!callee_context) [[unlikely]]
+        return vm.throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
+    ScopeGuard deallocate_guard = [&stack, stack_mark] { stack.deallocate(stack_mark); };
+
+    auto* argument_values = callee_context->arguments_data();
     for (size_t i = 0; i < arguments_list.size(); ++i)
         argument_values[i] = arguments_list[i];
+    for (size_t i = arguments_list.size(); i < argument_count; ++i)
+        argument_values[i] = js_undefined();
     callee_context->passed_argument_count = arguments_list.size();
 
     return function.internal_call(*callee_context, this_value);
 }
 
 // 7.3.15 Construct ( F [ , argumentsList [ , newTarget ] ] ), https://tc39.es/ecma262/#sec-construct
-ThrowCompletionOr<GC::Ref<Object>> construct_impl(VM&, FunctionObject& function, ReadonlySpan<Value> arguments_list, FunctionObject* new_target)
+ThrowCompletionOr<GC::Ref<Object>> construct_impl(VM& vm, FunctionObject& function, ReadonlySpan<Value> arguments_list, FunctionObject* new_target)
 {
     // 1. If newTarget is not present, set newTarget to F.
     if (!new_target)
@@ -105,15 +151,23 @@ ThrowCompletionOr<GC::Ref<Object>> construct_impl(VM&, FunctionObject& function,
     // 2. If argumentsList is not present, set argumentsList to a new empty List.
 
     // 3. Return ? F.[[Construct]](argumentsList, newTarget).
-    ExecutionContext* callee_context = nullptr;
-    size_t registers_and_constants_and_locals_count = 0;
+    size_t registers_and_locals_count = 0;
+    ReadonlySpan<Value> constants;
     size_t argument_count = arguments_list.size();
-    TRY(function.get_stack_frame_size(registers_and_constants_and_locals_count, argument_count));
-    ALLOCATE_EXECUTION_CONTEXT_ON_NATIVE_STACK(callee_context, registers_and_constants_and_locals_count, argument_count);
+    function.get_stack_frame_info(registers_and_locals_count, constants, argument_count);
 
-    auto* argument_values = callee_context->arguments.data();
+    auto& stack = vm.interpreter_stack();
+    auto* stack_mark = stack.top();
+    auto* callee_context = stack.allocate(registers_and_locals_count, constants, argument_count);
+    if (!callee_context) [[unlikely]]
+        return vm.throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
+    ScopeGuard deallocate_guard = [&stack, stack_mark] { stack.deallocate(stack_mark); };
+
+    auto* argument_values = callee_context->arguments_data();
     for (size_t i = 0; i < arguments_list.size(); ++i)
         argument_values[i] = arguments_list[i];
+    for (size_t i = arguments_list.size(); i < argument_count; ++i)
+        argument_values[i] = js_undefined();
     callee_context->passed_argument_count = arguments_list.size();
 
     return function.internal_construct(*callee_context, *new_target);
@@ -124,10 +178,11 @@ ThrowCompletionOr<size_t> length_of_array_like(VM& vm, Object const& object)
 {
     // OPTIMIZATION: For Array objects with a magical "length" property, it should always reflect the size of indexed property storage.
     if (object.has_magical_length_property())
-        return object.indexed_properties().array_like_size();
+        return object.indexed_array_like_size();
 
     // 1. Return ℝ(? ToLength(? Get(obj, "length"))).
-    return TRY(object.get(vm.names.length)).to_length(vm);
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
+    return TRY(object.get(vm.names.length, cache)).to_length(vm);
 }
 
 // 7.3.20 CreateListFromArrayLike ( obj [ , elementTypes ] ), https://tc39.es/ecma262/#sec-createlistfromarraylike
@@ -137,7 +192,7 @@ ThrowCompletionOr<GC::RootVector<Value>> create_list_from_array_like(VM& vm, Val
 
     // 2. If Type(obj) is not Object, throw a TypeError exception.
     if (!value.is_object())
-        return vm.throw_completion<TypeError>(ErrorType::NotAnObject, value.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAnObject, value);
 
     auto& array_like = value.as_object();
 
@@ -145,7 +200,7 @@ ThrowCompletionOr<GC::RootVector<Value>> create_list_from_array_like(VM& vm, Val
     auto length = TRY(length_of_array_like(vm, array_like));
 
     // 4. Let list be a new empty List.
-    auto list = GC::RootVector<Value> { vm.heap() };
+    GC::RootVector<Value> list;
     list.ensure_capacity(length);
 
     // 5. Let index be 0.
@@ -173,7 +228,8 @@ ThrowCompletionOr<GC::RootVector<Value>> create_list_from_array_like(VM& vm, Val
 ThrowCompletionOr<FunctionObject*> species_constructor(VM& vm, Object const& object, FunctionObject& default_constructor)
 {
     // 1. Let C be ? Get(O, "constructor").
-    auto constructor = TRY(object.get(vm.names.constructor));
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
+    auto constructor = TRY(object.get(vm.names.constructor, cache));
 
     // 2. If C is undefined, return defaultConstructor.
     if (constructor.is_undefined())
@@ -181,10 +237,11 @@ ThrowCompletionOr<FunctionObject*> species_constructor(VM& vm, Object const& obj
 
     // 3. If Type(C) is not Object, throw a TypeError exception.
     if (!constructor.is_object())
-        return vm.throw_completion<TypeError>(ErrorType::NotAConstructor, constructor.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAConstructor, constructor);
 
     // 4. Let S be ? Get(C, @@species).
-    auto species = TRY(constructor.as_object().get(vm.well_known_symbol_species()));
+    static auto& cache2 = *new Bytecode::StaticPropertyLookupCache;
+    auto species = TRY(constructor.as_object().get(vm.well_known_symbol_species(), cache2));
 
     // 5. If S is either undefined or null, return defaultConstructor.
     if (species.is_nullish())
@@ -195,7 +252,7 @@ ThrowCompletionOr<FunctionObject*> species_constructor(VM& vm, Object const& obj
         return &species.as_function();
 
     // 7. Throw a TypeError exception.
-    return vm.throw_completion<TypeError>(ErrorType::NotAConstructor, species.to_string_without_side_effects());
+    return vm.throw_completion<TypeError>(ErrorType::NotAConstructor, species);
 }
 
 // 7.3.25 GetFunctionRealm ( obj ), https://tc39.es/ecma262/#sec-getfunctionrealm
@@ -235,39 +292,15 @@ ThrowCompletionOr<Realm*> get_function_realm(VM& vm, FunctionObject const& funct
     return vm.current_realm();
 }
 
-// 8.5.2.1 InitializeBoundName ( name, value, environment ), https://tc39.es/ecma262/#sec-initializeboundname
-ThrowCompletionOr<void> initialize_bound_name(VM& vm, Utf16FlyString const& name, Value value, Environment* environment)
-{
-    // 1. If environment is not undefined, then
-    if (environment) {
-        // FIXME: The normal is not included in the explicit resource management spec yet, so there is no spec link for it.
-        // a. Perform ! environment.InitializeBinding(name, value, normal).
-        MUST(environment->initialize_binding(vm, name, value, Environment::InitializeBindingHint::Normal));
-
-        // b. Return unused.
-        return {};
-    }
-    // 2. Else,
-    else {
-        // a. Let lhs be ? ResolveBinding(name).
-        auto lhs = TRY(vm.resolve_binding(name));
-
-        // b. Return ? PutValue(lhs, value).
-        return TRY(lhs.put_value(vm, value));
-    }
-
-    VERIFY_NOT_REACHED();
-}
-
 // 10.1.6.2 IsCompatiblePropertyDescriptor ( Extensible, Desc, Current ), https://tc39.es/ecma262/#sec-iscompatiblepropertydescriptor
-bool is_compatible_property_descriptor(bool extensible, PropertyDescriptor const& descriptor, Optional<PropertyDescriptor> const& current)
+bool is_compatible_property_descriptor(bool extensible, PropertyDescriptor& descriptor, Optional<PropertyDescriptor> const& current)
 {
     // 1. Return ValidateAndApplyPropertyDescriptor(undefined, "", Extensible, Desc, Current).
     return validate_and_apply_property_descriptor(nullptr, Utf16FlyString {}, extensible, descriptor, current);
 }
 
 // 10.1.6.3 ValidateAndApplyPropertyDescriptor ( O, P, extensible, Desc, current ), https://tc39.es/ecma262/#sec-validateandapplypropertydescriptor
-bool validate_and_apply_property_descriptor(Object* object, PropertyKey const& property_key, bool extensible, PropertyDescriptor const& descriptor, Optional<PropertyDescriptor> const& current)
+bool validate_and_apply_property_descriptor(Object* object, PropertyKey const& property_key, bool extensible, PropertyDescriptor& descriptor, Optional<PropertyDescriptor> const& current)
 {
     // 1. Assert: IsPropertyKey(P) is true.
 
@@ -285,13 +318,15 @@ bool validate_and_apply_property_descriptor(Object* object, PropertyKey const& p
         if (descriptor.is_accessor_descriptor()) {
             // i. Create an own accessor property named P of object O whose [[Get]], [[Set]], [[Enumerable]], and [[Configurable]] attributes are set to the value of the corresponding field in Desc if Desc has that field, or to the attribute's default value otherwise.
             auto accessor = Accessor::create(object->vm(), descriptor.get.value_or(nullptr), descriptor.set.value_or(nullptr));
-            object->storage_set(property_key, { accessor, descriptor.attributes() });
+            auto offset = object->storage_set(property_key, { accessor, descriptor.attributes() });
+            descriptor.property_offset = offset;
         }
         // d. Else,
         else {
             // i. Create an own data property named P of object O whose [[Value]], [[Writable]], [[Enumerable]], and [[Configurable]] attributes are set to the value of the corresponding field in Desc if Desc has that field, or to the attribute's default value otherwise.
             auto value = descriptor.value.value_or(js_undefined());
-            object->storage_set(property_key, { value, descriptor.attributes() });
+            auto offset = object->storage_set(property_key, { value, descriptor.attributes() });
+            descriptor.property_offset = offset;
         }
 
         // e. Return true.
@@ -355,7 +390,8 @@ bool validate_and_apply_property_descriptor(Object* object, PropertyKey const& p
             PropertyAttributes attributes;
             attributes.set_enumerable(enumerable);
             attributes.set_configurable(configurable);
-            object->storage_set(property_key, { accessor, attributes });
+            auto offset = object->storage_set(property_key, { accessor, attributes });
+            descriptor.property_offset = offset;
         }
         // b. Else if IsAccessorDescriptor(current) is true and IsDataDescriptor(Desc) is true, then
         else if (current->is_accessor_descriptor() && descriptor.is_data_descriptor()) {
@@ -371,7 +407,8 @@ bool validate_and_apply_property_descriptor(Object* object, PropertyKey const& p
             attributes.set_writable(descriptor.writable.value_or(false));
             attributes.set_enumerable(enumerable);
             attributes.set_configurable(configurable);
-            object->storage_set(property_key, { value, attributes });
+            auto offset = object->storage_set(property_key, { value, attributes });
+            descriptor.property_offset = offset;
         }
         // c. Else,
         else {
@@ -388,7 +425,8 @@ bool validate_and_apply_property_descriptor(Object* object, PropertyKey const& p
             attributes.set_writable(descriptor.writable.value_or(current->writable.value_or(false)));
             attributes.set_enumerable(descriptor.enumerable.value_or(current->enumerable.value_or(false)));
             attributes.set_configurable(descriptor.configurable.value_or(current->configurable.value_or(false)));
-            object->storage_set(property_key, { value, attributes });
+            auto offset = object->storage_set(property_key, { value, attributes });
+            descriptor.property_offset = offset;
         }
     }
 
@@ -402,7 +440,8 @@ ThrowCompletionOr<Object*> get_prototype_from_constructor(VM& vm, FunctionObject
     // 1. Assert: intrinsicDefaultProto is this specification's name of an intrinsic object. The corresponding object must be an intrinsic that is intended to be used as the [[Prototype]] value of an object.
 
     // 2. Let proto be ? Get(constructor, "prototype").
-    auto prototype = TRY(constructor.get(vm.names.prototype));
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
+    auto prototype = TRY(constructor.get(vm.names.prototype, cache));
 
     // 3. If Type(proto) is not Object, then
     if (!prototype.is_object()) {
@@ -457,10 +496,40 @@ GC::Ref<FunctionEnvironment> new_function_environment(ECMAScriptFunctionObject& 
 
     // 3. If F.[[ThisMode]] is lexical, set env.[[ThisBindingStatus]] to lexical.
     if (function.this_mode() == ThisMode::Lexical)
-        env->set_this_binding_status(FunctionEnvironment::ThisBindingStatus::Lexical);
+        env->set_this_binding_status(ThisBindingStatus::Lexical);
     // 4. Else, set env.[[ThisBindingStatus]] to uninitialized.
     else
-        env->set_this_binding_status(FunctionEnvironment::ThisBindingStatus::Uninitialized);
+        env->set_this_binding_status(ThisBindingStatus::Uninitialized);
+
+    // 5. Set env.[[NewTarget]] to newTarget.
+    env->set_new_target(new_target ?: js_undefined());
+
+    // 6. Set env.[[OuterEnv]] to F.[[Environment]].
+    // 7. Set env.[[DisposeCapability]] to NewDisposeCapability().
+    // NOTE: Done in step 1 via the FunctionEnvironment constructor.
+
+    // 8. Return env.
+    return env;
+}
+
+// 9.1.2.4 NewFunctionEnvironment ( F, newTarget ), https://tc39.es/ecma262/#sec-newfunctionenvironment
+// 4.1.2.2 NewFunctionEnvironment ( F, newTarget ), https://tc39.es/proposal-explicit-resource-management/#sec-newfunctionenvironment
+GC::Ref<FunctionEnvironment> new_function_environment(NativeJavaScriptBackedFunction& function, Object* new_target)
+{
+    auto& heap = function.heap();
+
+    // 1. Let env be a new function Environment Record containing no bindings.
+    auto env = heap.allocate<FunctionEnvironment>(nullptr);
+
+    // 2. Set env.[[FunctionObject]] to F.
+    env->set_function_object(function);
+
+    // 3. If F.[[ThisMode]] is lexical, set env.[[ThisBindingStatus]] to lexical.
+    if (function.this_mode() == ThisMode::Lexical)
+        env->set_this_binding_status(ThisBindingStatus::Lexical);
+    // 4. Else, set env.[[ThisBindingStatus]] to uninitialized.
+    else
+        env->set_this_binding_status(ThisBindingStatus::Uninitialized);
 
     // 5. Set env.[[NewTarget]] to newTarget.
     env->set_new_target(new_target ?: js_undefined());
@@ -577,7 +646,8 @@ ThrowCompletionOr<Value> perform_eval(VM& vm, Value x, CallerMode strict_caller,
 
     // 6. NOTE: In the case of a direct eval, evalRealm is the realm of both the caller of eval and of the eval function itself.
     // 7. Perform ? HostEnsureCanCompileStrings(evalRealm, « », xStr, xStr, direct, « », x).
-    TRY(vm.host_ensure_can_compile_strings(eval_realm, {}, code_string->utf8_string_view(), code_string->utf8_string_view(), direct == EvalMode::Direct ? CompilationType::DirectEval : CompilationType::IndirectEval, {}, x));
+    auto code_string_view = code_string->utf16_string_view();
+    TRY(vm.host_ensure_can_compile_strings(eval_realm, {}, code_string_view, code_string_view, direct == EvalMode::Direct ? CompilationType::DirectEval : CompilationType::IndirectEval, {}, x));
 
     // 8. Let inFunction be false.
     bool in_function = false;
@@ -597,17 +667,15 @@ ThrowCompletionOr<Value> perform_eval(VM& vm, Value x, CallerMode strict_caller,
         auto this_environment_record = get_this_environment(vm);
 
         // b. If thisEnvRec is a function Environment Record, then
-        if (is<FunctionEnvironment>(*this_environment_record)) {
-            auto& this_function_environment_record = static_cast<FunctionEnvironment&>(*this_environment_record);
-
+        if (auto* this_function_environment_record = as_if<FunctionEnvironment>(*this_environment_record)) {
             // i. Let F be thisEnvRec.[[FunctionObject]].
-            auto& function = this_function_environment_record.function_object();
+            auto& function = as<ECMAScriptFunctionObject>(this_function_environment_record->function_object());
 
             // ii. Set inFunction to true.
             in_function = true;
 
             // iii. Set inMethod to thisEnvRec.HasSuperBinding().
-            in_method = this_function_environment_record.has_super_binding();
+            in_method = this_function_environment_record->has_super_binding();
 
             // iv. If F.[[ConstructorKind]] is derived, set inDerivedConstructor to true.
             if (function.constructor_kind() == ConstructorKind::Derived)
@@ -631,30 +699,16 @@ ThrowCompletionOr<Value> perform_eval(VM& vm, Value x, CallerMode strict_caller,
     //     f. If inMethod is false, and body Contains SuperProperty, throw a SyntaxError exception.
     //     g. If inDerivedConstructor is false, and body Contains SuperCall, throw a SyntaxError exception.
     //     h. If inClassFieldInitializer is true, and ContainsArguments of body is true, throw a SyntaxError exception.
-    Parser::EvalInitialState initial_state {
-        .in_eval_function_context = in_function,
-        .allow_super_property_lookup = in_method,
-        .allow_super_constructor_call = in_derived_constructor,
-        .in_class_field_initializer = in_class_field_initializer,
-    };
 
-    Parser parser { Lexer { code_string->utf8_string_view() }, Program::Type::Script, move(initial_state) };
-    auto program = parser.parse_program(strict_caller == CallerMode::Strict);
-
-    //     b. If script is a List of errors, throw a SyntaxError exception.
-    if (parser.has_errors()) {
-        auto& error = parser.errors()[0];
-        return vm.throw_completion<SyntaxError>(error.to_string());
-    }
-
-    bool strict_eval = false;
-
-    // 14. If strictCaller is true, let strictEval be true.
-    if (strict_caller == CallerMode::Strict)
-        strict_eval = true;
-    // 15. Else, let strictEval be IsStrict of script.
-    else
-        strict_eval = program->is_strict_mode();
+    auto rust_compilation = RustIntegration::compile_eval(*code_string, vm, strict_caller, in_function, in_method, in_derived_constructor, in_class_field_initializer);
+    if (!rust_compilation.has_value())
+        return vm.throw_completion<SyntaxError>("Failed to compile eval code"_utf16);
+    if (rust_compilation->is_error())
+        return vm.throw_completion<SyntaxError>(rust_compilation->release_error());
+    auto& eval_result = rust_compilation->value();
+    auto executable = eval_result.executable;
+    auto strict_eval = eval_result.is_strict_mode;
+    auto eval_declaration_data = move(eval_result.declaration_data);
 
     // 16. Let runningContext be the running execution context.
     // 17. NOTE: If direct is true, runningContext will be the execution context that performed the direct eval. If direct is false, runningContext will be the execution context for the invocation of the eval function.
@@ -704,21 +758,17 @@ ThrowCompletionOr<Value> perform_eval(VM& vm, Value x, CallerMode strict_caller,
     // NOTE: Spec steps are rearranged in order to compute number of registers+constants+locals before construction of the execution context.
 
     // 30. Let result be Completion(EvalDeclarationInstantiation(body, varEnv, lexEnv, privateEnv, strictEval)).
-    TRY(eval_declaration_instantiation(vm, program, variable_environment, lexical_environment, private_environment, strict_eval));
+    TRY(eval_declaration_instantiation(vm, eval_declaration_data, variable_environment, lexical_environment, private_environment, strict_eval));
 
-    // 31. If result.[[Type]] is normal, then
-    //     a. Set result to the result of evaluating body.
-    auto executable_result = Bytecode::Generator::generate_from_ast_node(vm, program, {});
-    if (executable_result.is_error())
-        return vm.throw_completion<InternalError>(ErrorType::NotImplemented, TRY_OR_THROW_OOM(vm, executable_result.error().to_string()));
-    auto executable = executable_result.release_value();
-    executable->name = "eval"_utf16_fly_string;
     if (Bytecode::g_dump_bytecode)
         executable->dump();
 
     // 22. Let evalContext be a new ECMAScript code execution context.
-    ExecutionContext* eval_context = nullptr;
-    ALLOCATE_EXECUTION_CONTEXT_ON_NATIVE_STACK(eval_context, executable->number_of_registers + executable->constants.size() + executable->local_variable_names.size(), 0);
+    auto& stack = vm.interpreter_stack();
+    auto* stack_mark = stack.top();
+    auto* eval_context = stack.allocate(executable->registers_and_locals_count, executable->constants, 0);
+    if (!eval_context) [[unlikely]]
+        return vm.throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
 
     // 23. Set evalContext's Function to null.
     // NOTE: This was done in the construction of eval_context.
@@ -738,9 +788,6 @@ ThrowCompletionOr<Value> perform_eval(VM& vm, Value x, CallerMode strict_caller,
     // 28. Set evalContext's PrivateEnvironment to privateEnv.
     eval_context->private_environment = private_environment;
 
-    // NOTE: This isn't in the spec, but we require it.
-    eval_context->is_strict_mode = strict_eval;
-
     // 29. Push evalContext onto the execution context stack; evalContext is now the running execution context.
     TRY(vm.push_execution_context(*eval_context, {}));
 
@@ -749,27 +796,24 @@ ThrowCompletionOr<Value> perform_eval(VM& vm, Value x, CallerMode strict_caller,
         // 33. Suspend evalContext and remove it from the execution context stack.
         // 34. Resume the context that is now on the top of the execution context stack as the running execution context.
         vm.pop_execution_context();
+        stack.deallocate(stack_mark);
     };
 
-    Optional<Value> eval_result;
+    Optional<Value> result;
 
-    auto result_or_error = vm.bytecode_interpreter().run_executable(*executable, {});
-    if (result_or_error.value.is_error())
-        return result_or_error.value.release_error();
-
-    eval_result = result_or_error.return_register_value;
+    result = TRY(vm.run_executable(*eval_context, *executable, {}));
 
     // 32. If result.[[Type]] is normal and result.[[Value]] is empty, then
     //     a. Set result to NormalCompletion(undefined).
     // NOTE: Step 33 and 34 is handled by `pop_guard` above.
     // 35. Return ? result.
     // NOTE: Step 35 is also performed with each use of `TRY` above.
-    return eval_result.value_or(js_undefined());
+    return result.value_or(js_undefined());
 }
 
 // 19.2.1.3 EvalDeclarationInstantiation ( body, varEnv, lexEnv, privateEnv, strict ), https://tc39.es/ecma262/#sec-evaldeclarationinstantiation
 // 9.1.1.1 EvalDeclarationInstantiation ( body, varEnv, lexEnv, privateEnv, strict ), https://tc39.es/proposal-explicit-resource-management/#sec-evaldeclarationinstantiation
-ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& program, Environment* variable_environment, Environment* lexical_environment, PrivateEnvironment* private_environment, bool strict)
+ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, EvalDeclarationData& data, Environment* variable_environment, Environment* lexical_environment, PrivateEnvironment* private_environment, bool strict)
 {
     auto& realm = *vm.current_realm();
     GlobalEnvironment* global_var_environment = variable_environment->is_global_environment() ? static_cast<GlobalEnvironment*>(variable_environment) : nullptr;
@@ -781,16 +825,13 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
         // a. If varEnv is a global Environment Record, then
         if (global_var_environment) {
             // i. For each element name of varNames, do
-            TRY(program.for_each_var_declared_identifier([&](Identifier const& identifier) -> ThrowCompletionOr<void> {
-                auto const& name = identifier.string();
-
+            for (auto const& name : data.var_names) {
                 // 1. If varEnv.HasLexicalDeclaration(name) is true, throw a SyntaxError exception.
                 if (global_var_environment->has_lexical_declaration(name))
-                    return vm.throw_completion<SyntaxError>(ErrorType::TopLevelVariableAlreadyDeclared, identifier.string());
+                    return vm.throw_completion<SyntaxError>(ErrorType::TopLevelVariableAlreadyDeclared, name);
 
                 // 2. NOTE: eval will not create a global var declaration that would be shadowed by a global lexical declaration.
-                return {};
-            }));
+            }
         }
 
         // b. Let thisEnv be lexEnv.
@@ -803,20 +844,22 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
             if (!is<ObjectEnvironment>(*this_environment)) {
                 // 1. NOTE: The environment of with statements cannot contain any lexical declaration so it doesn't need to be checked for var/let hoisting conflicts.
                 // 2. For each element name of varNames, do
-                TRY(program.for_each_var_declared_identifier([&](Identifier const& identifier) -> ThrowCompletionOr<void> {
-                    auto const& name = identifier.string();
-
+                for (auto const& name : data.var_names) {
                     // a. If ! thisEnv.HasBinding(name) is true, then
                     if (MUST(this_environment->has_binding(name))) {
-                        // i. Throw a SyntaxError exception.
-                        return vm.throw_completion<SyntaxError>(ErrorType::TopLevelVariableAlreadyDeclared, name);
-
-                        // FIXME: ii. NOTE: Annex B.3.4 defines alternate semantics for the above step.
-                        // In particular it only throw the syntax error if it is not an environment from a catchclause.
+                        // B.3.4 Changes to EvalDeclarationInstantiation, https://tc39.es/ecma262/#sec-evaldeclarationinstantiation
+                        // i. Normative Optional
+                        //     If the host is a web browser or otherwise supports VariableStatements in Catch Blocks, then
+                        //         i. If thisEnv is not the Environment Record for a Catch clause, throw a SyntaxError exception.
+                        // ii. Else,
+                        //     i. Throw a SyntaxError exception.
+                        // AD-HOC: We are a web browser, so we only implement the web browser branch.
+                        if (!this_environment->is_catch_environment()) {
+                            return vm.throw_completion<SyntaxError>(ErrorType::EvalVarHoistingConflict, name);
+                        }
                     }
                     // b. NOTE: A direct eval will not hoist var declaration over a like-named lexical declaration.
-                    return {};
-                }));
+                }
             }
 
             // ii. Set thisEnv to thisEnv.[[OuterEnv]].
@@ -832,47 +875,25 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
     //         i. If privateIdentifiers does not contain binding.[[Description]], append binding.[[Description]] to privateIdentifiers.
     //     b. Set pointer to pointer.[[OuterPrivateEnvironment]].
     // 7. If AllPrivateIdentifiersValid of body with argument privateIdentifiers is false, throw a SyntaxError exception.
-    // FIXME: Add Private identifiers check here.
+    for (auto const& name : data.referenced_private_names) {
+        if (!private_environment || !private_environment->contains_private_identifier(name))
+            return vm.throw_completion<SyntaxError>(ErrorType::PrivateFieldNotDeclared, name);
+    }
 
     // 8. Let functionsToInitialize be a new empty List.
-    Vector<FunctionDeclaration const&> functions_to_initialize;
-
     // 9. Let declaredFunctionNames be a new empty List.
-    HashTable<Utf16FlyString> declared_function_names;
-
     // 10. For each element d of varDeclarations, in reverse List order, do
-    TRY(program.for_each_var_function_declaration_in_reverse_order([&](FunctionDeclaration const& function) -> ThrowCompletionOr<void> {
-        auto function_name = function.name();
-
-        // a. If d is neither a VariableDeclaration nor a ForBinding nor a BindingIdentifier, then
-        // i. Assert: d is either a FunctionDeclaration, a GeneratorDeclaration, an AsyncFunctionDeclaration, or an AsyncGeneratorDeclaration.
-        // Note: This is done by for_each_var_function_declaration_in_reverse_order.
-
-        // ii. NOTE: If there are multiple function declarations for the same name, the last declaration is used.
-        // iii. Let fn be the sole element of the BoundNames of d.
-        // iv. If fn is not an element of declaredFunctionNames, then
-        if (declared_function_names.set(function_name) != AK::HashSetResult::InsertedNewEntry)
-            return {};
-
+    for (auto const& function : data.functions_to_initialize) {
         // 1. If varEnv is a global Environment Record, then
         if (global_var_environment) {
             // a. Let fnDefinable be ? varEnv.CanDeclareGlobalFunction(fn).
-            auto function_definable = TRY(global_var_environment->can_declare_global_function(function_name));
+            auto function_definable = TRY(global_var_environment->can_declare_global_function(function.name));
 
             // b. If fnDefinable is false, throw a TypeError exception.
             if (!function_definable)
-                return vm.throw_completion<TypeError>(ErrorType::CannotDeclareGlobalFunction, function_name);
+                return vm.throw_completion<TypeError>(ErrorType::CannotDeclareGlobalFunction, function.name);
         }
-
-        // 2. Append fn to declaredFunctionNames.
-        // Note: Already done in step iv.
-
-        // 3. Insert d as the first element of functionsToInitialize.
-        // NOTE: Since prepending is much slower, we just append
-        //       and iterate in reverse order in step 17 below.
-        functions_to_initialize.append(function);
-        return {};
-    }));
+    }
 
     // 11. NOTE: Annex B.3.2.3 adds additional steps at this point.
     // B.3.2.3 Changes to EvalDeclarationInstantiation, https://tc39.es/ecma262/#sec-web-compat-evaldeclarationinstantiation
@@ -883,9 +904,9 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
         HashTable<Utf16FlyString> hoisted_functions;
 
         // b. For each FunctionDeclaration f that is directly contained in the StatementList of a Block, CaseClause, or DefaultClause Contained within body, do
-        TRY(program.for_each_function_hoistable_with_annexB_extension([&](FunctionDeclaration& function_declaration) -> ThrowCompletionOr<void> {
+        for (size_t i = 0; i < data.annex_b_candidate_names.size(); ++i) {
             // i. Let F be StringValue of the BindingIdentifier of f.
-            auto function_name = function_declaration.name();
+            auto& function_name = data.annex_b_candidate_names[i];
 
             // ii. If replacing the FunctionDeclaration f with a VariableStatement that has F as a BindingIdentifier would not produce any Early Errors for body, then
             // Note: This is checked during parsing and for_each_function_hoistable_with_annexB_extension so it always passes here.
@@ -897,14 +918,15 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
             // 3. Assert: The following loop will terminate.
 
             // 4. Repeat, while thisEnv is not the same as varEnv,
+            bool binding_exists = false;
             while (this_environment != variable_environment) {
                 // a. If thisEnv is not an object Environment Record, then
                 if (!is<ObjectEnvironment>(*this_environment)) {
                     // i. If ! thisEnv.HasBinding(F) is true, then
                     if (MUST(this_environment->has_binding(function_name))) {
                         // i. Let bindingExists be true.
-                        // Note: When bindingExists is true we skip all the other steps.
-                        return {};
+                        binding_exists = true;
+                        break;
                     }
                 }
 
@@ -913,6 +935,9 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
                 VERIFY(this_environment);
             }
 
+            if (binding_exists)
+                continue;
+
             // Note: At this point bindingExists is false.
             // 5. If bindingExists is false and varEnv is a global Environment Record, then
             if (global_var_environment) {
@@ -920,12 +945,12 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
                 if (!global_var_environment->has_lexical_declaration(function_name)) {
                     // i. Let fnDefinable be ? varEnv.CanDeclareGlobalVar(F).
                     if (!TRY(global_var_environment->can_declare_global_var(function_name)))
-                        return {};
+                        continue;
                 }
                 // b. Else,
                 else {
                     // i. Let fnDefinable be false.
-                    return {};
+                    continue;
                 }
             }
             // 6. Else,
@@ -935,7 +960,7 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
             // 7. If bindingExists is false and fnDefinable is true, then
 
             // a. If declaredFunctionOrVarNames does not contain F, then
-            if (!declared_function_names.contains(function_name) && !hoisted_functions.contains(function_name)) {
+            if (!data.declared_function_names.contains(function_name) && !hoisted_functions.contains(function_name)) {
                 // i. If varEnv is a global Environment Record, then
                 if (global_var_environment) {
                     // i. Perform ? varEnv.CreateGlobalVarBinding(F, true).
@@ -943,7 +968,6 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
                 }
                 // ii. Else,
                 else {
-
                     // i. Let bindingExists be ! varEnv.HasBinding(F).
                     // ii. If bindingExists is false, then
                     if (!MUST(variable_environment->has_binding(function_name))) {
@@ -964,108 +988,82 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& pr
             //     iii. Let fobj be ! benv.GetBindingValue(F, false).
             //     iv. Perform ? genv.SetMutableBinding(F, fobj, false).
             //     v. Return unused.
-            function_declaration.set_should_do_additional_annexB_steps();
-
-            return {};
-        }));
+        }
     }
 
     // 12. Let declaredVarNames be a new empty List.
     HashTable<Utf16FlyString> declared_var_names;
 
     // 13. For each element d of varDeclarations, do
-    TRY(program.for_each_var_scoped_variable_declaration([&](VariableDeclaration const& declaration) {
-        // a. If d is a VariableDeclaration, a ForBinding, or a BindingIdentifier, then
-        // Note: This is handled by for_each_var_scoped_variable_declaration.
+    for (auto const& name : data.var_scoped_names) {
+        // 1. If vn is not an element of declaredFunctionNames, then
+        if (!data.declared_function_names.contains(name)) {
+            // a. If varEnv is a global Environment Record, then
+            if (global_var_environment) {
+                // i. Let vnDefinable be ? varEnv.CanDeclareGlobalVar(vn).
+                auto variable_definable = TRY(global_var_environment->can_declare_global_var(name));
 
-        // i. For each String vn of the BoundNames of d, do
-        return declaration.for_each_bound_identifier([&](Identifier const& identifier) -> ThrowCompletionOr<void> {
-            auto const& name = identifier.string();
-
-            // 1. If vn is not an element of declaredFunctionNames, then
-            if (!declared_function_names.contains(name)) {
-                // a. If varEnv is a global Environment Record, then
-                if (global_var_environment) {
-                    // i. Let vnDefinable be ? varEnv.CanDeclareGlobalVar(vn).
-                    auto variable_definable = TRY(global_var_environment->can_declare_global_var(name));
-
-                    // ii. If vnDefinable is false, throw a TypeError exception.
-                    if (!variable_definable)
-                        return vm.throw_completion<TypeError>(ErrorType::CannotDeclareGlobalVariable, name);
-                }
-
-                // b. If vn is not an element of declaredVarNames, then
-                // i. Append vn to declaredVarNames.
-                declared_var_names.set(name);
+                // ii. If vnDefinable is false, throw a TypeError exception.
+                if (!variable_definable)
+                    return vm.throw_completion<TypeError>(ErrorType::CannotDeclareGlobalVariable, name);
             }
-            return {};
-        });
-    }));
+
+            // b. If vn is not an element of declaredVarNames, then
+            // i. Append vn to declaredVarNames.
+            declared_var_names.set(name);
+        }
+    }
 
     // 14. NOTE: No abnormal terminations occur after this algorithm step unless varEnv is a global Environment Record and the global object is a Proxy exotic object.
 
     // 15. Let lexDeclarations be the LexicallyScopedDeclarations of body.
     // 16. For each element d of lexDeclarations, do
-    TRY(program.for_each_lexically_scoped_declaration([&](Declaration const& declaration) {
-        // a. NOTE: Lexically declared names are only instantiated here but not initialized.
-
-        // b. For each element dn of the BoundNames of d, do
-        return declaration.for_each_bound_identifier([&](Identifier const& identifier) -> ThrowCompletionOr<void> {
-            auto const& name = identifier.string();
-
-            // i. If IsConstantDeclaration of d is true, then
-            if (declaration.is_constant_declaration()) {
-                // 1. Perform ? lexEnv.CreateImmutableBinding(dn, true).
-                TRY(lexical_environment->create_immutable_binding(vm, name, true));
-            }
-            // ii. Else,
-            else {
-                // 1. Perform ? lexEnv.CreateMutableBinding(dn, false).
-                TRY(lexical_environment->create_mutable_binding(vm, name, false));
-            }
-            return {};
-        });
-    }));
+    for (auto const& binding : data.lexical_bindings) {
+        // i. If IsConstantDeclaration of d is true, then
+        if (binding.is_constant) {
+            // 1. Perform ? lexEnv.CreateImmutableBinding(dn, true).
+            TRY(lexical_environment->create_immutable_binding(vm, binding.name, true));
+        }
+        // ii. Else,
+        else {
+            // 1. Perform ? lexEnv.CreateMutableBinding(dn, false).
+            TRY(lexical_environment->create_mutable_binding(vm, binding.name, false));
+        }
+    }
 
     // 17. For each Parse Node f of functionsToInitialize, do
-    // NOTE: We iterate in reverse order since we appended the functions
-    //       instead of prepending. We append because prepending is much slower
-    //       and we only use the created vector here.
-    for (auto const& declaration : functions_to_initialize.in_reverse()) {
-        auto declaration_name = declaration.name();
-
+    for (auto const& function_to_initialize : data.functions_to_initialize) {
         // a. Let fn be the sole element of the BoundNames of f.
         // b. Let fo be InstantiateFunctionObject of f with arguments lexEnv and privateEnv.
-        auto function = ECMAScriptFunctionObject::create_from_function_node(
-            declaration,
-            declaration_name,
+        auto function = ECMAScriptFunctionObject::create_from_function_data(
             realm,
+            *function_to_initialize.shared_data,
             lexical_environment,
             private_environment);
 
         // c. If varEnv is a global Environment Record, then
         if (global_var_environment) {
             // i. Perform ? varEnv.CreateGlobalFunctionBinding(fn, fo, true).
-            TRY(global_var_environment->create_global_function_binding(declaration_name, function, true));
+            TRY(global_var_environment->create_global_function_binding(function_to_initialize.name, function, true));
         }
         // d. Else,
         else {
             // i. Let bindingExists be ! varEnv.HasBinding(fn).
-            auto binding_exists = MUST(variable_environment->has_binding(declaration_name));
+            auto binding_exists = MUST(variable_environment->has_binding(function_to_initialize.name));
 
             // ii. If bindingExists is false, then
             if (!binding_exists) {
                 // 1. NOTE: The following invocation cannot return an abrupt completion because of the validation preceding step 14.
                 // 2. Perform ! varEnv.CreateMutableBinding(fn, true).
-                MUST(variable_environment->create_mutable_binding(vm, declaration_name, true));
+                MUST(variable_environment->create_mutable_binding(vm, function_to_initialize.name, true));
 
                 // 3. Perform ! varEnv.InitializeBinding(fn, fo, normal).
-                MUST(variable_environment->initialize_binding(vm, declaration_name, function, Environment::InitializeBindingHint::Normal));
+                MUST(variable_environment->initialize_binding(vm, function_to_initialize.name, function, Environment::InitializeBindingHint::Normal));
             }
             // iii. Else,
             else {
                 // 1. Perform ! varEnv.SetMutableBinding(fn, fo, false).
-                MUST(variable_environment->set_mutable_binding(vm, declaration_name, function, false));
+                MUST(variable_environment->set_mutable_binding(vm, function_to_initialize.name, function, false));
             }
         }
     }
@@ -1109,7 +1107,6 @@ Object* create_unmapped_arguments_object(VM& vm, ReadonlySpan<Value> arguments)
     // 2. Let obj be OrdinaryObjectCreate(%Object.prototype%, « [[ParameterMap]] »).
     // 3. Set obj.[[ParameterMap]] to undefined.
     auto object = Object::create_with_premade_shape(realm.intrinsics().unmapped_arguments_object_shape());
-    object->set_has_parameter_map();
 
     // 4. Perform ! DefinePropertyOrThrow(obj, "length", PropertyDescriptor { [[Value]]: 𝔽(len), [[Writable]]: true, [[Enumerable]]: false, [[Configurable]]: true }).
     object->put_direct(realm.intrinsics().unmapped_arguments_object_length_offset(), Value(length));
@@ -1121,7 +1118,7 @@ Object* create_unmapped_arguments_object(VM& vm, ReadonlySpan<Value> arguments)
         auto value = arguments[index];
 
         // b. Perform ! CreateDataPropertyOrThrow(obj, ! ToString(𝔽(index)), val).
-        object->indexed_properties().put(index, value);
+        object->indexed_put(index, value);
 
         // c. Set index to index + 1.
     }
@@ -1138,7 +1135,7 @@ Object* create_unmapped_arguments_object(VM& vm, ReadonlySpan<Value> arguments)
 }
 
 // 10.4.4.7 CreateMappedArgumentsObject ( func, formals, argumentsList, env ), https://tc39.es/ecma262/#sec-createmappedargumentsobject
-Object* create_mapped_arguments_object(VM& vm, FunctionObject& function, NonnullRefPtr<FunctionParameters const> const& formals, ReadonlySpan<Value> arguments, Environment& environment)
+Object* create_mapped_arguments_object(VM& vm, FunctionObject& function, ReadonlySpan<Utf16FlyString> parameter_names, ReadonlySpan<Value> arguments, Environment& environment)
 {
     auto& realm = *vm.current_realm();
 
@@ -1155,7 +1152,7 @@ Object* create_mapped_arguments_object(VM& vm, FunctionObject& function, Nonnull
     // 7. Set obj.[[Set]] as specified in 10.4.4.4.
     // 8. Set obj.[[Delete]] as specified in 10.4.4.5.
     // 9. Set obj.[[Prototype]] to %Object.prototype%.
-    auto object = realm.create<ArgumentsObject>(realm, environment);
+    auto object = realm.create<ArgumentsObject>(realm, environment, parameter_names.is_empty());
 
     // 14. Let index be 0.
     // 15. Repeat, while index < len,
@@ -1164,7 +1161,7 @@ Object* create_mapped_arguments_object(VM& vm, FunctionObject& function, Nonnull
         auto value = arguments[index];
 
         // b. Perform ! CreateDataPropertyOrThrow(obj, ! ToString(𝔽(index)), val).
-        object->indexed_properties().put(index, value);
+        object->indexed_put(index, value);
 
         // c. Set index to index + 1.
     }
@@ -1186,10 +1183,10 @@ Object* create_mapped_arguments_object(VM& vm, FunctionObject& function, Nonnull
 
     // 18. Set index to numberOfParameters - 1.
     // 19. Repeat, while index ≥ 0,
-    VERIFY(formals->size() <= NumericLimits<i32>::max());
-    for (i32 index = static_cast<i32>(formals->size()) - 1; index >= 0; --index) {
+    VERIFY(parameter_names.size() <= NumericLimits<i32>::max());
+    for (i32 index = static_cast<i32>(parameter_names.size()) - 1; index >= 0; --index) {
         // a. Let name be parameterNames[index].
-        auto const& name = formals->parameters()[index].binding.get<NonnullRefPtr<Identifier const>>()->string();
+        auto const& name = parameter_names[index];
 
         // b. If name is not an element of mappedNames, then
         if (seen_names.contains(name))
@@ -1280,7 +1277,7 @@ CanonicalIndex canonical_numeric_index_string(PropertyKey const& property_key, C
 
     // FIXME: We return 0 instead of n but it might not observable?
     // 3. If SameValue(! ToString(n), argument) is true, return n.
-    if (number_to_string(*maybe_double) == argument)
+    if (number_to_utf16_string(*maybe_double) == argument)
         return CanonicalIndex(CanonicalIndex::Type::Numeric, 0);
 
     // 4. Return undefined.
@@ -1288,7 +1285,7 @@ CanonicalIndex canonical_numeric_index_string(PropertyKey const& property_key, C
 }
 
 // 22.1.3.19.1 GetSubstitution ( matched, str, position, captures, namedCaptures, replacementTemplate ), https://tc39.es/ecma262/#sec-getsubstitution
-ThrowCompletionOr<String> get_substitution(VM& vm, Utf16View const& matched, Utf16View const& str, size_t position, Span<Value> captures, Value named_captures, Value replacement_template)
+ThrowCompletionOr<Utf16String> get_substitution(VM& vm, Utf16View const& matched, Utf16View const& str, size_t position, Span<Value> captures, Value named_captures, Utf16View const& replacement_template)
 {
     // 1. Let stringLength be the length of str.
     auto string_length = str.length_in_code_units();
@@ -1297,11 +1294,10 @@ ThrowCompletionOr<String> get_substitution(VM& vm, Utf16View const& matched, Utf
     VERIFY(position <= string_length);
 
     // 3. Let result be the empty String.
-    StringBuilder result(StringBuilder::Mode::UTF16);
+    Utf16StringBuilder result;
 
     // 4. Let templateRemainder be replacementTemplate.
-    auto replace_template_string = TRY(replacement_template.to_utf16_string(vm));
-    Utf16View template_remainder { replace_template_string };
+    auto template_remainder = replacement_template;
 
     // 5. Repeat, while templateRemainder is not the empty String,
     while (!template_remainder.is_empty()) {
@@ -1363,8 +1359,7 @@ ThrowCompletionOr<String> get_substitution(VM& vm, Utf16View const& matched, Utf
             auto digits = template_remainder.substring_view(1, digit_count);
 
             // iii. Let index be ℝ(StringToNumber(digits)).
-            auto utf8_digits = MUST(digits.to_utf8());
-            auto index = static_cast<size_t>(string_to_number(utf8_digits));
+            auto index = static_cast<size_t>(string_to_number(digits));
 
             // iv. Assert: 0 ≤ index ≤ 99.
             VERIFY(index <= 99);
@@ -1383,8 +1378,7 @@ ThrowCompletionOr<String> get_substitution(VM& vm, Utf16View const& matched, Utf
                 digits = digits.substring_view(0, 1);
 
                 // 4. Set index to ℝ(StringToNumber(digits)).
-                utf8_digits = MUST(digits.to_utf8());
-                index = static_cast<size_t>(string_to_number(utf8_digits));
+                index = static_cast<size_t>(string_to_number(digits));
             }
 
             // vii. Let ref be the substring of templateRemainder from 0 to 1 + digitCount.
@@ -1476,12 +1470,14 @@ ThrowCompletionOr<String> get_substitution(VM& vm, Utf16View const& matched, Utf
     }
 
     // 6. Return result.
-    return MUST(result.utf16_string_view().to_utf8());
+    return result.to_string();
 }
 
 void DisposeCapability::visit_edges(GC::Cell::Visitor& visitor) const
 {
-    for (auto const& disposable_resource : disposable_resource_stack)
+    if (!disposable_resource_stack)
+        return;
+    for (auto const& disposable_resource : *disposable_resource_stack)
         disposable_resource.visit_edges(visitor);
 }
 
@@ -1528,7 +1524,9 @@ ThrowCompletionOr<void> add_disposable_resource(VM& vm, DisposeCapability& dispo
     }
 
     // 3. Append resource to disposeCapability.[[DisposableResourceStack]].
-    dispose_capability.disposable_resource_stack.append(resource.release_value());
+    if (!dispose_capability.disposable_resource_stack)
+        dispose_capability.disposable_resource_stack = make<Vector<DisposableResource>>();
+    dispose_capability.disposable_resource_stack->append(resource.release_value());
 
     // 4. Return unused.
     return {};
@@ -1663,77 +1661,79 @@ Completion dispose_resources(VM& vm, DisposeCapability& dispose_capability, Comp
     bool has_awaited = false;
 
     // 3. For each element resource of disposeCapability.[[DisposableResourceStack]], in reverse list order, do
-    for (auto const& resource : dispose_capability.disposable_resource_stack.in_reverse()) {
-        // a. Let value be resource.[[ResourceValue]].
-        auto value = resource.resource_value;
+    if (dispose_capability.disposable_resource_stack) {
+        for (auto const& resource : dispose_capability.disposable_resource_stack->in_reverse()) {
+            // a. Let value be resource.[[ResourceValue]].
+            auto value = resource.resource_value;
 
-        // b. Let hint be resource.[[Hint]].
-        auto hint = resource.hint;
+            // b. Let hint be resource.[[Hint]].
+            auto hint = resource.hint;
 
-        // c. Let method be resource.[[DisposeMethod]].
-        auto method = resource.dispose_method;
+            // c. Let method be resource.[[DisposeMethod]].
+            auto method = resource.dispose_method;
 
-        // d. If hint is sync-dispose and needsAwait is true and hasAwaited is false, then
-        if (hint == Environment::InitializeBindingHint::SyncDispose && needs_await && !has_awaited) {
-            // i. Perform ! Await(undefined).
-            MUST(await(vm, js_undefined()));
+            // d. If hint is sync-dispose and needsAwait is true and hasAwaited is false, then
+            if (hint == Environment::InitializeBindingHint::SyncDispose && needs_await && !has_awaited) {
+                // i. Perform ! Await(undefined).
+                MUST(await(vm, js_undefined()));
 
-            // ii. Set needsAwait to false.
-            needs_await = false;
-        }
-
-        // e. If method is not undefined, then
-        if (method) {
-            // i. Let result be Completion(Call(method, value)).
-            auto result = call(vm, *method, value);
-
-            // ii. If result is a normal completion and hint is async-dispose, then
-            if (!result.is_throw_completion() && hint == Environment::InitializeBindingHint::AsyncDispose) {
-                // 1. Set result to Completion(Await(result.[[Value]])).
-                result = await(vm, result.value());
-
-                // 2. Set hasAwaited to true.
-                has_awaited = true;
+                // ii. Set needsAwait to false.
+                needs_await = false;
             }
-            // iii. If result is a throw completion, then
-            else if (result.is_throw_completion()) {
-                // 1. If completion is a throw completion, then
-                if (completion.type() == Completion::Type::Throw) {
-                    // a. Set result to result.[[Value]].
-                    auto result_value = result.error().value();
 
-                    // b. Let suppressed be completion.[[Value]].
-                    auto suppressed = completion.value();
+            // e. If method is not undefined, then
+            if (method) {
+                // i. Let result be Completion(Call(method, value)).
+                auto result = call(vm, *method, value);
 
-                    // c. Let error be a newly created SuppressedError object.
-                    auto error = SuppressedError::create(*vm.current_realm());
+                // ii. If result is a normal completion and hint is async-dispose, then
+                if (!result.is_throw_completion() && hint == Environment::InitializeBindingHint::AsyncDispose) {
+                    // 1. Set result to Completion(Await(result.[[Value]])).
+                    result = await(vm, result.value());
 
-                    // d. Perform CreateNonEnumerableDataPropertyOrThrow(error, "error", result).
-                    error->create_non_enumerable_data_property_or_throw(vm.names.error, result_value);
-
-                    // e. Perform CreateNonEnumerableDataPropertyOrThrow(error, "suppressed", suppressed).
-                    error->create_non_enumerable_data_property_or_throw(vm.names.suppressed, suppressed);
-
-                    // f. Set completion to ThrowCompletion(error).
-                    completion = throw_completion(error);
+                    // 2. Set hasAwaited to true.
+                    has_awaited = true;
                 }
-                // 2. Else,
-                else {
-                    // a. Set completion to result.
-                    completion = result.release_error();
+                // iii. If result is a throw completion, then
+                else if (result.is_throw_completion()) {
+                    // 1. If completion is a throw completion, then
+                    if (completion.type() == Completion::Type::Throw) {
+                        // a. Set result to result.[[Value]].
+                        auto result_value = result.error().value();
+
+                        // b. Let suppressed be completion.[[Value]].
+                        auto suppressed = completion.value();
+
+                        // c. Let error be a newly created SuppressedError object.
+                        auto error = SuppressedError::create(*vm.current_realm());
+
+                        // d. Perform CreateNonEnumerableDataPropertyOrThrow(error, "error", result).
+                        error->create_non_enumerable_data_property_or_throw(vm.names.error, result_value);
+
+                        // e. Perform CreateNonEnumerableDataPropertyOrThrow(error, "suppressed", suppressed).
+                        error->create_non_enumerable_data_property_or_throw(vm.names.suppressed, suppressed);
+
+                        // f. Set completion to ThrowCompletion(error).
+                        completion = throw_completion(error);
+                    }
+                    // 2. Else,
+                    else {
+                        // a. Set completion to result.
+                        completion = result.release_error();
+                    }
                 }
             }
-        }
-        // f. Else,
-        else {
-            // i. Assert: hint is async-dispose.
-            VERIFY(hint == Environment::InitializeBindingHint::AsyncDispose);
+            // f. Else,
+            else {
+                // i. Assert: hint is async-dispose.
+                VERIFY(hint == Environment::InitializeBindingHint::AsyncDispose);
 
-            // ii. Set needsAwait to true.
-            needs_await = true;
+                // ii. Set needsAwait to true.
+                needs_await = true;
 
-            // iii. NOTE: This can only indicate a case where either null or undefined was the initialized value of an
-            //      await using declaration.
+                // iii. NOTE: This can only indicate a case where either null or undefined was the initialized value of an
+                //      await using declaration.
+            }
         }
     }
 
@@ -1755,7 +1755,7 @@ Completion dispose_resources(VM& vm, DisposeCapability& dispose_capability, Comp
 }
 
 // 16.2.1.12 AllImportAttributesSupported ( attributes ), https://tc39.es/ecma262/#sec-AllImportAttributesSupported
-static bool all_import_attributes_supported(VM& vm, Vector<ImportAttribute> const& attributes)
+bool all_import_attributes_supported(VM& vm, Vector<ImportAttribute> const& attributes)
 {
     // 1. Let supported be HostGetSupportedImportAttributes().
     auto supported = vm.host_get_supported_import_attributes();
@@ -1892,7 +1892,7 @@ ThrowCompletionOr<Value> perform_import_call(VM& vm, Value specifier, Value opti
     return promise_capability->promise();
 }
 
-// 14.5.2.1 GetOptionsObject ( options ), https://tc39.es/proposal-temporal/#sec-getoptionsobject
+// 7.3.36 GetOptionsObject ( options ), https://tc39.es/ecma262/#sec-getoptionsobject
 ThrowCompletionOr<GC::Ref<Object>> get_options_object(VM& vm, Value options)
 {
     auto& realm = *vm.current_realm();
@@ -1933,7 +1933,7 @@ ThrowCompletionOr<Value> get_option(VM& vm, Object const& options, PropertyKey c
             [](Empty) -> Value { return js_undefined(); },
             [](bool default_) -> Value { return Value { default_ }; },
             [](double default_) -> Value { return Value { default_ }; },
-            [&](StringView default_) -> Value { return PrimitiveString::create(vm, default_); });
+            [&](Utf16View default_) -> Value { return PrimitiveString::create(vm, default_); });
     }
 
     // 3. If type is BOOLEAN, then
@@ -1947,16 +1947,17 @@ ThrowCompletionOr<Value> get_option(VM& vm, Object const& options, PropertyKey c
         VERIFY(type == OptionType::String);
 
         // b. Set value to ? ToString(value).
-        value = TRY(value.to_primitive_string(vm));
-    }
+        auto value_string = TRY(value.to_utf16_string(vm));
 
-    // 5. If values is not EMPTY and values does not contain value, throw a RangeError exception.
-    if (!values.is_empty()) {
-        // NOTE: Every location in the spec that invokes GetOption with type=boolean also has values=undefined.
-        VERIFY(value.is_string());
+        // 5. If values is not EMPTY and values does not contain value, throw a RangeError exception.
+        if (!values.is_empty()) {
+            auto value_string_view = value_string.utf16_view();
+            auto it = find_if(values.begin(), values.end(), [&](auto allowed_value) { return value_string_view == allowed_value; });
+            if (it == values.end())
+                return vm.throw_completion<RangeError>(ErrorType::OptionIsNotValidValue, value_string_view, property.as_string());
+        }
 
-        if (auto value_string = value.as_string().utf8_string(); !values.contains_slow(value_string))
-            return vm.throw_completion<RangeError>(ErrorType::OptionIsNotValidValue, value_string, property.as_string());
+        value = PrimitiveString::create(vm, value_string);
     }
 
     // 6. Return value.
@@ -1970,13 +1971,23 @@ ThrowCompletionOr<RoundingMode> get_rounding_mode_option(VM& vm, Object const& o
     static constexpr auto allowed_strings = to_array({ "ceil"sv, "floor"sv, "expand"sv, "trunc"sv, "halfCeil"sv, "halfFloor"sv, "halfExpand"sv, "halfTrunc"sv, "halfEven"sv });
 
     // 2. Let stringFallback be the value from the "String Identifier" column of the row with fallback in its "Rounding Mode" column.
-    auto string_fallback = allowed_strings[to_underlying(fallback)];
+    static constexpr auto utf16_allowed_strings = to_array({ u"ceil"sv, u"floor"sv, u"expand"sv, u"trunc"sv, u"halfCeil"sv, u"halfFloor"sv, u"halfExpand"sv, u"halfTrunc"sv, u"halfEven"sv });
+    auto string_fallback = utf16_allowed_strings[to_underlying(fallback)];
 
     // 3. Let stringValue be ? GetOption(options, "roundingMode", STRING, allowedStrings, stringFallback).
     auto string_value = TRY(get_option(vm, options, vm.names.roundingMode, OptionType::String, allowed_strings, string_fallback));
 
     // 4. Return the value from the "Rounding Mode" column of the row with stringValue in its "String Identifier" column.
-    return static_cast<RoundingMode>(allowed_strings.first_index_of(string_value.as_string().utf8_string_view()).value());
+    auto string = string_value.as_string().utf16_string_view();
+    Optional<size_t> index;
+    for (size_t i = 0; i < allowed_strings.size(); ++i) {
+        if (string == allowed_strings[i]) {
+            index = i;
+            break;
+        }
+    }
+    VERIFY(index.has_value());
+    return static_cast<RoundingMode>(*index);
 }
 
 // 14.5.2.4 GetRoundingIncrementOption ( options ), https://tc39.es/proposal-temporal/#sec-temporal-getroundingincrementoption
@@ -2000,7 +2011,7 @@ ThrowCompletionOr<u64> get_rounding_increment_option(VM& vm, Object const& optio
     return static_cast<u64>(integer_increment);
 }
 
-// AD-HOC
+// AD-HOC:
 // FIXME: We should add a generic floor() method to our BigInt classes. But for now, since we know we are only dividing
 //        by powers of 10, we can implement a very situationally specific method to compute the floor of a division.
 Crypto::SignedBigInteger big_floor(Crypto::SignedBigInteger const& numerator, Crypto::UnsignedBigInteger const& denominator)

@@ -9,22 +9,26 @@
 
 #include <AK/HashMap.h>
 #include <AK/String.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibGC/Ptr.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/StorageAPI/StorageEndpoint.h>
 #include <LibWeb/StorageAPI/StorageKey.h>
 #include <LibWeb/StorageAPI/StorageType.h>
-#include <LibWebView/StorageOperationError.h>
+#include <LibWebView/StorageSetResult.h>
 
 namespace Web::StorageAPI {
+
+using StorageSetResult = Variant<WebView::StorageOperationError, Optional<Utf16String>>;
 
 // https://storage.spec.whatwg.org/#storage-bottle
 class StorageBottle : public GC::Cell {
     GC_CELL(StorageBottle, GC::Cell);
 
 public:
-    static GC::Ref<StorageBottle> create(GC::Heap& heap, GC::Ref<Page> page, StorageType type, StorageKey key, Optional<u64> quota);
+    static GC::Ref<StorageBottle> create(GC::Heap& heap, GC::Ref<Page> page, StorageType type, StorageEndpointType endpoint_type, StorageKey key, Optional<u64> quota);
 
     virtual ~StorageBottle() = default;
 
@@ -32,11 +36,11 @@ public:
     GC::Ref<StorageBottle> proxy() { return *this; }
 
     virtual size_t size() const = 0;
-    virtual Vector<String> keys() const = 0;
-    virtual Optional<String> get(String const&) const = 0;
-    virtual WebView::StorageOperationError set(String const& key, String const& value) = 0;
+    virtual Vector<Utf16String> keys() const = 0;
+    virtual Optional<Utf16String> get(Utf16View) const = 0;
+    virtual StorageSetResult set(Utf16View key, Utf16View value) = 0;
     virtual void clear() = 0;
-    virtual void remove(String const&) = 0;
+    virtual void remove(Utf16View) = 0;
 
     Optional<u64> quota() const { return m_quota; }
 
@@ -54,29 +58,31 @@ class LocalStorageBottle final : public StorageBottle {
     GC_DECLARE_ALLOCATOR(LocalStorageBottle);
 
 public:
-    static GC::Ref<LocalStorageBottle> create(GC::Heap& heap, GC::Ref<Page> page, StorageKey key, Optional<u64> quota)
+    static GC::Ref<LocalStorageBottle> create(GC::Heap& heap, GC::Ref<Page> page, StorageEndpointType endpoint_type, StorageKey key, Optional<u64> quota)
     {
-        return heap.allocate<LocalStorageBottle>(page, key, quota);
+        return heap.allocate<LocalStorageBottle>(page, endpoint_type, key, quota);
     }
 
     virtual size_t size() const override;
-    virtual Vector<String> keys() const override;
-    virtual Optional<String> get(String const&) const override;
-    virtual WebView::StorageOperationError set(String const& key, String const& value) override;
+    virtual Vector<Utf16String> keys() const override;
+    virtual Optional<Utf16String> get(Utf16View) const override;
+    virtual StorageSetResult set(Utf16View key, Utf16View value) override;
     virtual void clear() override;
-    virtual void remove(String const&) override;
+    virtual void remove(Utf16View) override;
 
     virtual void visit_edges(GC::Cell::Visitor& visitor) override;
 
 private:
-    explicit LocalStorageBottle(GC::Ref<Page> page, StorageKey key, Optional<u64> quota)
+    explicit LocalStorageBottle(GC::Ref<Page> page, StorageEndpointType endpoint_type, StorageKey key, Optional<u64> quota)
         : StorageBottle(quota)
         , m_page(move(page))
+        , m_endpoint_type(endpoint_type)
         , m_storage_key(move(key))
     {
     }
 
     GC::Ref<Page> m_page;
+    StorageEndpointType m_endpoint_type;
     StorageKey m_storage_key;
 };
 
@@ -91,11 +97,13 @@ public:
     }
 
     virtual size_t size() const override;
-    virtual Vector<String> keys() const override;
-    virtual Optional<String> get(String const&) const override;
-    virtual WebView::StorageOperationError set(String const& key, String const& value) override;
+    virtual Vector<Utf16String> keys() const override;
+    virtual Optional<Utf16String> get(Utf16View) const override;
+    virtual StorageSetResult set(Utf16View key, Utf16View value) override;
     virtual void clear() override;
-    virtual void remove(String const&) override;
+    virtual void remove(Utf16View) override;
+
+    void copy_map_from(SessionStorageBottle const&);
 
 private:
     explicit SessionStorageBottle(Optional<u64> quota)
@@ -103,8 +111,14 @@ private:
     {
     }
 
+    struct Entry {
+        Utf16String value;
+        // Bytes this entry contributes toward the bottle's quota: Its key plus its value.
+        size_t quota_size { 0 };
+    };
+
     // A storage bottle has a map, which is initially an empty map
-    OrderedHashMap<String, String> m_map;
+    OrderedHashMap<Utf16String, Entry> m_map;
 };
 
 using BottleMap = Array<GC::Ptr<StorageBottle>, to_underlying(StorageEndpointType::Count)>;

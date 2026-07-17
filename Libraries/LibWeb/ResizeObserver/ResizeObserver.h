@@ -8,14 +8,11 @@
 #pragma once
 
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Bindings/ResizeObserver.h>
 #include <LibWeb/ResizeObserver/ResizeObservation.h>
 #include <LibWeb/ResizeObserver/ResizeObserverEntry.h>
 
 namespace Web::ResizeObserver {
-
-struct ResizeObserverOptions {
-    Bindings::ResizeObserverBoxOptions box;
-};
 
 // https://drafts.csswg.org/resize-observer-1/#resize-observer-interface
 class ResizeObserver : public Bindings::PlatformObject {
@@ -23,11 +20,13 @@ class ResizeObserver : public Bindings::PlatformObject {
     GC_DECLARE_ALLOCATOR(ResizeObserver);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     static WebIDL::ExceptionOr<GC::Ref<ResizeObserver>> construct_impl(JS::Realm&, WebIDL::CallbackType* callback);
 
     virtual ~ResizeObserver() override;
 
-    void observe(DOM::Element& target, ResizeObserverOptions);
+    void observe(DOM::Element& target, Bindings::ResizeObserverOptions);
     void unobserve(DOM::Element& target);
     void disconnect();
 
@@ -36,6 +35,7 @@ public:
     Vector<GC::Ref<ResizeObservation>>& observation_targets() { return m_observation_targets; }
     Vector<GC::Ref<ResizeObservation>>& active_targets() { return m_active_targets; }
     Vector<GC::Ref<ResizeObservation>>& skipped_targets() { return m_skipped_targets; }
+    void remove_dead_observations();
 
 private:
     explicit ResizeObserver(JS::Realm&, WebIDL::CallbackType* callback);
@@ -52,7 +52,7 @@ private:
     Vector<GC::Ref<ResizeObservation>> m_skipped_targets;
 
     // AD-HOC: This is the document where we've registered the observer.
-    WeakPtr<DOM::Document> m_document;
+    GC::Weak<DOM::Document> m_document;
 
     IntrusiveListNode<ResizeObserver> m_list_node;
 

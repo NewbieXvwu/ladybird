@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <AK/Utf16View.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/HTMLElement.h>
 
@@ -25,13 +26,14 @@ public:
     [[nodiscard]] u64 selectedness_update_index() const { return m_selectedness_update_index; }
 
     Utf16String value() const;
-    WebIDL::ExceptionOr<void> set_value(Utf16String const&);
+    virtual Utf16String form_value() const override { return value(); }
+    void set_value(Utf16View);
 
     Utf16String text() const;
-    void set_text(Utf16String const&);
+    void set_text(Utf16View);
 
-    [[nodiscard]] String label() const;
-    void set_label(String const&);
+    [[nodiscard]] Utf16String label() const;
+    void set_label(Utf16View);
 
     int index() const;
 
@@ -41,8 +43,13 @@ public:
 
     virtual Optional<ARIA::Role> default_role() const override;
 
-    GC::Ptr<HTMLSelectElement> owner_select_element();
-    GC::Ptr<HTMLSelectElement const> owner_select_element() const { return const_cast<HTMLOptionElement&>(*this).owner_select_element(); }
+    GC::Ptr<HTMLSelectElement> nearest_select_element() { return m_cached_nearest_select_element; }
+    GC::Ptr<HTMLSelectElement const> nearest_select_element() const { return m_cached_nearest_select_element; }
+
+    // https://html.spec.whatwg.org/multipage/form-elements.html#the-option-element:clone-an-option-into-a-selectedcontent
+    WebIDL::ExceptionOr<void> maybe_clone_into_selectedcontent();
+    // https://html.spec.whatwg.org/multipage/form-elements.html#clone-an-option-into-a-selectedcontent
+    WebIDL::ExceptionOr<void> clone_into_selectedcontent(GC::Ref<HTMLSelectedContentElement>);
 
 private:
     friend class Bindings::OptionConstructor;
@@ -50,16 +57,23 @@ private:
 
     HTMLOptionElement(DOM::Document&, DOM::QualifiedName);
 
-    virtual void initialize(JS::Realm&) override;
+    virtual bool is_html_option_element() const final { return true; }
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void initialize(JS::Realm&) override;
+    virtual void visit_edges(Cell::Visitor&) override;
+
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     virtual void inserted() override;
-    virtual void removed_from(Node* old_parent, Node& old_root) override;
-    virtual void children_changed(ChildrenChangedMetadata const*) override;
+    virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
+    virtual void moved_from(IsSubtreeRoot, GC::Ptr<Node> old_ancestor) override;
+    virtual void children_changed(ChildrenChangedMetadata const&) override;
 
     void ask_for_a_reset();
     void update_selection_label();
+
+    // https://html.spec.whatwg.org/multipage/form-elements.html#update-an-option's-nearest-ancestor-select
+    void update_nearest_select_element();
 
     // https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness
     bool m_selected { false };
@@ -68,6 +82,16 @@ private:
     bool m_dirty { false };
 
     u64 m_selectedness_update_index { 0 };
+
+    // https://html.spec.whatwg.org/multipage/form-elements.html#cached-nearest-ancestor-select-element
+    GC::Ptr<HTMLSelectElement> m_cached_nearest_select_element;
 };
+
+}
+
+namespace Web::DOM {
+
+template<>
+inline bool Node::fast_is<HTML::HTMLOptionElement>() const { return is_html_option_element(); }
 
 }

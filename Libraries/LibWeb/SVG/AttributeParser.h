@@ -115,6 +115,7 @@ public:
     float resolve_relative_to(float length) const;
 
     float value() const { return m_value; }
+    bool is_percentage() const { return m_is_percentage; }
 
 private:
     float m_value;
@@ -138,20 +139,19 @@ class WEB_API AttributeParser final {
 public:
     ~AttributeParser() = default;
 
-    static Optional<float> parse_coordinate(StringView input);
-    static Optional<float> parse_length(StringView input);
-    static Optional<NumberPercentage> parse_number_percentage(StringView input);
-    static Optional<float> parse_positive_length(StringView input);
-    static Vector<Gfx::FloatPoint> parse_points(StringView input);
-    static Path parse_path_data(StringView input);
-    static Optional<Vector<Transform>> parse_transform(StringView input);
-    static Optional<PreserveAspectRatio> parse_preserve_aspect_ratio(StringView input);
-    static Optional<SVGUnits> parse_units(StringView input);
-    static Optional<SpreadMethod> parse_spread_method(StringView input);
-    static Optional<ViewBox> parse_viewbox(StringView input);
+    static Optional<i32> parse_integer(Utf16View input);
+    static Optional<NumberPercentage> parse_number_percentage(Utf16View input);
+    static Vector<Gfx::FloatPoint> parse_points(Utf16View input);
+    static Path parse_path_data(Utf16View input);
+    static Optional<Vector<Transform>> parse_transform(Utf16View input);
+    static Optional<PreserveAspectRatio> parse_preserve_aspect_ratio(Utf16View input);
+    static Optional<SVGUnits> parse_units(Utf16View input);
+    static Vector<float> parse_table_values(Utf16View);
+    static Optional<SpreadMethod> parse_spread_method(Utf16View input);
+    static Optional<ViewBox> parse_viewbox(Utf16View input);
 
 private:
-    AttributeParser(StringView source);
+    AttributeParser(Utf16View source);
 
     ErrorOr<void> parse_drawto();
     ErrorOr<void> parse_moveto();
@@ -169,32 +169,38 @@ private:
 
     ErrorOr<float> parse_length();
     ErrorOr<float> parse_coordinate();
-    ErrorOr<Vector<float>> parse_coordinate_pair();
-    ErrorOr<Vector<float>> parse_coordinate_sequence();
-    ErrorOr<Vector<Vector<float>>> parse_coordinate_pair_sequence();
-    ErrorOr<Vector<float>> parse_coordinate_pair_double();
-    ErrorOr<Vector<float>> parse_coordinate_pair_triplet();
-    ErrorOr<Vector<float>> parse_elliptical_arc_argument();
+    ErrorOr<i32> parse_integer();
+    ErrorOr<Gfx::FloatPoint> parse_coordinate_pair();
+    ErrorOr<void> parse_coordinate_sequence(Function<void(float)> const& callback);
+    ErrorOr<void> parse_coordinate_pair_sequence(Function<void(Gfx::FloatPoint)> const& callback);
+    ErrorOr<Vector<Gfx::FloatPoint, 2>> parse_coordinate_pair_double();
+    ErrorOr<Vector<Gfx::FloatPoint, 3>> parse_coordinate_pair_triplet();
     void parse_whitespace(bool must_match_once = false);
     void parse_comma_whitespace();
     ErrorOr<float> parse_number();
     ErrorOr<float> parse_nonnegative_number();
-    ErrorOr<float> parse_flag();
+    ErrorOr<bool> parse_flag();
     // -1 if negative, +1 otherwise
     int parse_sign();
+
+    enum class AllowDot {
+        No,
+        Yes,
+    };
 
     bool match_whitespace() const;
     bool match_comma_whitespace() const;
     bool match_coordinate() const;
-    bool match_length() const;
+    bool match_length(AllowDot allow_dot) const;
     bool match_number() const;
+    bool match_integer() const;
     bool match(char c) const { return !done() && ch() == c; }
 
     bool done() const { return m_lexer.is_eof(); }
-    char ch(size_t offset = 0) const { return m_lexer.peek(offset); }
-    char consume() { return m_lexer.consume(); }
+    char16_t ch(size_t offset = 0) const { return m_lexer.peek(offset); }
+    char16_t consume() { return m_lexer.consume(); }
 
-    GenericLexer m_lexer;
+    Utf16GenericLexer m_lexer;
     Vector<PathInstruction> m_instructions;
 };
 

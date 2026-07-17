@@ -34,7 +34,7 @@
 
 namespace AK {
 
-template<typename Destination, typename Source, bool destination_is_wider = (sizeof(Destination) >= sizeof(Source)), bool destination_is_signed = NumericLimits<Destination>::is_signed(), bool source_is_signed = NumericLimits<Source>::is_signed()>
+template<typename Destination, typename Source, bool destination_is_wider = (NumericLimits<Destination>::max() >= NumericLimits<Source>::max()), bool destination_is_signed = NumericLimits<Destination>::is_signed(), bool source_is_signed = NumericLimits<Source>::is_signed()>
 struct TypeBoundsChecker;
 
 template<typename Destination, typename Source>
@@ -45,12 +45,41 @@ struct TypeBoundsChecker<Destination, Source, false, false, false> {
     }
 };
 
+// Computes 2^N as a floating-point Source value. The result is exactly representable in any IEEE floating-point type
+// for any N within that type's exponent range — since 2^N has mantissa 1.0.
+template<FloatingPoint Source>
+static constexpr Source two_to_the(size_t n)
+{
+    Source result = 1;
+    for (size_t i = 0; i < n; ++i)
+        result *= 2;
+    return result;
+}
+
 template<typename Destination, typename Source>
 struct TypeBoundsChecker<Destination, Source, false, true, true> {
     static constexpr bool is_within_range(Source value)
     {
-        return value <= NumericLimits<Destination>::max()
-            && NumericLimits<Destination>::min() <= value;
+        if constexpr (IsFloatingPoint<Source>) {
+            // The value must lie in [Destination::min, Destination::max] *and* must be exactly representable as
+            // Destination; that is, the float must be integer-valued — with no fractional part.
+            //
+            // First gate: the value must fit in the safe-cast window — so static_cast<Destination> below is defined.
+            // Comparing directly against NumericLimits<Destination>::max() doesn't work when max isn't exactly
+            // representable in Source (e.g., INT_MAX = 2^31-1 in float rounds up to 2^31). Use 2^digits as a strict
+            // upper bound instead: exactly representable in any IEEE float — covering the range [-2^digits, 2^digits)
+            // for two's-complement signed destinations.
+            auto const boundary = two_to_the<Source>(NumericLimits<Destination>::digits());
+            if (!(value >= -boundary && value < boundary))
+                return false;
+            // Second gate: reject fractional values (round-trip check). Values in (-boundary, boundary) with a
+            // fractional part would truncate to an in-range integer — but aren't themselves within Destination's range.
+            auto const truncated = static_cast<Destination>(value);
+            return static_cast<Source>(truncated) == value;
+        } else {
+            return value <= NumericLimits<Destination>::max()
+                && NumericLimits<Destination>::min() <= value;
+        }
     }
 };
 
@@ -58,7 +87,18 @@ template<typename Destination, typename Source>
 struct TypeBoundsChecker<Destination, Source, false, false, true> {
     static constexpr bool is_within_range(Source value)
     {
-        return value >= 0 && value <= NumericLimits<Destination>::max();
+        if constexpr (IsFloatingPoint<Source>) {
+            // See the signed case above. The first gate is [0, 2^digits). 2^digits is exactly representable in any IEEE
+            // float. The second gate is the round-trip check: rejecting fractional values whose magnitudes exceed
+            // Destination::max.
+            auto const upper_exclusive = two_to_the<Source>(NumericLimits<Destination>::digits());
+            if (!(value >= 0 && value < upper_exclusive))
+                return false;
+            auto const truncated = static_cast<Destination>(value);
+            return static_cast<Source>(truncated) == value;
+        } else {
+            return value >= 0 && value <= NumericLimits<Destination>::max();
+        }
     }
 };
 
@@ -98,7 +138,7 @@ template<typename Destination, typename Source>
 struct TypeBoundsChecker<Destination, Source, true, true, false> {
     static constexpr bool is_within_range(Source value)
     {
-        if (sizeof(Destination) > sizeof(Source))
+        if (NumericLimits<Destination>::max() > NumericLimits<Source>::max())
             return true;
         return value <= static_cast<Source>(NumericLimits<Destination>::max());
     }
@@ -212,46 +252,6 @@ public:
         m_value = initial - m_value;
     }
 
-    constexpr void saturating_sub(T other)
-    {
-        sub(other);
-        // Depending on whether other was positive or negative, we have to saturate to min or max.
-        if (m_overflow && other <= 0)
-            m_value = NumericLimits<T>::max();
-        else if (m_overflow)
-            m_value = NumericLimits<T>::min();
-        m_overflow = false;
-    }
-
-    constexpr void saturating_add(T other)
-    {
-        add(other);
-        // Depending on whether other was positive or negative, we have to saturate to max or min.
-        if (m_overflow && other >= 0)
-            m_value = NumericLimits<T>::max();
-        else if (m_overflow)
-            m_value = NumericLimits<T>::min();
-        m_overflow = false;
-    }
-
-    constexpr void saturating_mul(T other)
-    {
-        // Figure out if the result is positive, negative or zero beforehand.
-        auto either_is_zero = this->m_value == 0 || other == 0;
-        auto result_is_positive = (this->m_value > 0) == (other > 0);
-
-        mul(other);
-        if (m_overflow) {
-            if (either_is_zero)
-                m_value = 0;
-            else if (result_is_positive)
-                m_value = NumericLimits<T>::max();
-            else
-                m_value = NumericLimits<T>::min();
-        }
-        m_overflow = false;
-    }
-
     constexpr Checked& operator+=(Checked const& other)
     {
         m_overflow |= other.m_overflow;
@@ -348,15 +348,19 @@ public:
     {
 #if __has_builtin(__builtin_add_overflow_p)
         return __builtin_add_overflow_p(u, v, (T)0);
-#elif __has_builtin(__builtin_add_overflow)
+#else
         T result;
         return __builtin_add_overflow(u, v, &result);
-#else
-        Checked checked;
-        checked = u;
-        checked += v;
-        return checked.has_overflow();
 #endif
+    }
+
+    template<typename... Ts>
+    [[nodiscard]] static constexpr bool addition_would_overflow(Ts... values)
+    requires(sizeof...(Ts) > 2)
+    {
+        Checked<T> result;
+        ((result += values), ...);
+        return result.has_overflow();
     }
 
     template<typename U, typename V>
@@ -364,39 +368,10 @@ public:
     {
 #if __has_builtin(__builtin_sub_overflow_p)
         return __builtin_sub_overflow_p(u, v, (T)0);
-#elif __has_builtin(__builtin_sub_overflow)
+#else
         T result;
         return __builtin_sub_overflow(u, v, &result);
-#else
-        Checked checked;
-        checked = u;
-        checked -= v;
-        return checked.has_overflow();
 #endif
-    }
-
-    template<typename U, typename V>
-    static constexpr T saturating_add(U a, V b)
-    {
-        Checked checked { a };
-        checked.saturating_add(b);
-        return checked.value();
-    }
-
-    template<typename U, typename V>
-    static constexpr T saturating_sub(U a, V b)
-    {
-        Checked checked { a };
-        checked.saturating_sub(b);
-        return checked.value();
-    }
-
-    template<typename U, typename V>
-    static constexpr T saturating_mul(U a, V b)
-    {
-        Checked checked { a };
-        checked.saturating_mul(b);
-        return checked.value();
     }
 
     template<typename U, typename V>
@@ -404,25 +379,10 @@ public:
     {
 #if __has_builtin(__builtin_mul_overflow_p)
         return __builtin_mul_overflow_p(u, v, (T)0);
-#elif __has_builtin(__builtin_mul_overflow)
+#else
         T result;
         return __builtin_mul_overflow(u, v, &result);
-#else
-        Checked checked;
-        checked = u;
-        checked *= v;
-        return checked.has_overflow();
 #endif
-    }
-
-    template<typename U, typename V, typename X>
-    [[nodiscard]] static constexpr bool multiplication_would_overflow(U u, V v, X x)
-    {
-        Checked checked;
-        checked = u;
-        checked *= v;
-        checked *= x;
-        return checked.has_overflow();
     }
 
 private:

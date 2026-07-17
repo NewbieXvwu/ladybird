@@ -9,8 +9,9 @@
 
 #include <AK/Function.h>
 #include <AK/HashTable.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/ScopeGuard.h>
-#include <AK/StringBuilder.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ArrayConstructor.h>
@@ -29,7 +30,11 @@ namespace JS {
 
 GC_DEFINE_ALLOCATOR(ArrayPrototype);
 
-static HashTable<GC::Ref<Object>> s_array_join_seen_objects;
+static auto& array_join_seen_objects()
+{
+    static NeverDestroyed<HashTable<GC::Ref<Object>>> seen_objects;
+    return *seen_objects;
+}
 
 ArrayPrototype::ArrayPrototype(Realm& realm)
     : Array(realm, realm.intrinsics().object_prototype())
@@ -119,7 +124,8 @@ static ThrowCompletionOr<Object*> array_species_create(VM& vm, Object& original_
     if (!is_array)
         return TRY(Array::create(realm, length)).ptr();
 
-    auto constructor = TRY(original_array.get(vm.names.constructor));
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
+    auto constructor = TRY(original_array.get(vm.names.constructor, cache));
     if (constructor.is_constructor()) {
         auto& constructor_function = constructor.as_function();
         auto* this_realm = vm.current_realm();
@@ -131,7 +137,8 @@ static ThrowCompletionOr<Object*> array_species_create(VM& vm, Object& original_
     }
 
     if (constructor.is_object()) {
-        constructor = TRY(constructor.as_object().get(vm.well_known_symbol_species()));
+        static auto& cache2 = *new Bytecode::StaticPropertyLookupCache;
+        constructor = TRY(constructor.as_object().get(vm.well_known_symbol_species(), cache2));
         if (constructor.is_null())
             constructor = js_undefined();
     }
@@ -140,9 +147,43 @@ static ThrowCompletionOr<Object*> array_species_create(VM& vm, Object& original_
         return TRY(Array::create(realm, length)).ptr();
 
     if (!constructor.is_constructor())
-        return vm.throw_completion<TypeError>(ErrorType::NotAConstructor, constructor.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAConstructor, constructor);
 
     return TRY(construct(vm, constructor.as_function(), Value(length))).ptr();
+}
+
+static bool can_use_packed_array_fast_path(Array const& array)
+{
+    return array.is_simple_packed_array() && array.default_prototype_chain_intact();
+}
+
+static bool can_use_packed_shift_fast_path(Array const& array)
+{
+    // Packed: every index in [0, size) is an own property, so memmove semantics match the spec even if the prototype
+    // chain has indexed properties (HasProperty never escapes to the proto) and even if the array is non-extensible
+    // (no new own properties are created).
+    return array.is_simple_packed_array() && array.length_is_writable();
+}
+
+static bool can_use_holey_shift_fast_path(Array const& array)
+{
+    // Holey: the spec path uses HasProperty + Get on every index, so a poisoned prototype changes the outcome on holes.
+    // A set() on a hole slot also creates a new own property, which a non-extensible array rejects with TypeError.
+    return !array.is_proxy_target()
+        && !array.may_interfere_with_indexed_property_access()
+        && array.indexed_storage_kind() == IndexedStorageKind::Holey
+        && array.default_prototype_chain_intact()
+        && array.extensible()
+        && array.length_is_writable();
+}
+
+static Array* fast_array_species_result(Object& object)
+{
+    auto* array = as_if<Array>(object);
+    if (!array || array->is_proxy_target() || array->indexed_storage_kind() == IndexedStorageKind::Dictionary
+        || !array->default_prototype_chain_intact() || !array->extensible() || !array->length_is_writable())
+        return nullptr;
+    return array;
 }
 
 // 23.1.3.1 Array.prototype.at ( index ), https://tc39.es/ecma262/#sec-array.prototype.at
@@ -171,6 +212,47 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::concat)
     auto this_object = TRY(vm.this_value().to_object(vm));
 
     auto* new_array = TRY(array_species_create(vm, this_object, 0));
+    auto concat_spreadable_key = PropertyKey { vm.well_known_symbol_is_concat_spreadable() };
+
+    // OPTIMIZATION: Fast path for packed arrays when ArraySpeciesCreate produced a
+    // default Array and every object argument is a packed Array without a custom
+    // @@isConcatSpreadable override.
+    if (auto* array = as_if<Array>(*this_object); array && can_use_packed_array_fast_path(*array)
+        && !TRY(this_object->has_own_property(concat_spreadable_key))) {
+        if (auto* result_array = fast_array_species_result(*new_array)) {
+            bool all_fast_path_arguments = true;
+            for (size_t i = 0; i < vm.argument_count(); ++i) {
+                auto arg = vm.argument(i);
+                if (!arg.is_object())
+                    continue;
+
+                auto* argument_array = as_if<Array>(arg.as_object());
+                if (!argument_array || !can_use_packed_array_fast_path(*argument_array)
+                    || TRY(argument_array->has_own_property(concat_spreadable_key))) {
+                    all_fast_path_arguments = false;
+                    break;
+                }
+            }
+
+            if (all_fast_path_arguments) {
+                for (u32 i = 0; i < array->indexed_array_like_size(); ++i)
+                    result_array->indexed_append(array->indexed_get(i)->value);
+
+                for (size_t argument_index = 0; argument_index < vm.argument_count(); ++argument_index) {
+                    auto arg = vm.argument(argument_index);
+                    if (!arg.is_object()) {
+                        result_array->indexed_append(arg);
+                        continue;
+                    }
+
+                    auto& argument_array = static_cast<Array&>(arg.as_object());
+                    for (u32 i = 0; i < argument_array.indexed_array_like_size(); ++i)
+                        result_array->indexed_append(argument_array.indexed_get(i)->value);
+                }
+                return result_array;
+            }
+        }
+    }
 
     size_t n = 0;
 
@@ -313,7 +395,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::every)
 
     // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
     if (!callback_function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function);
 
     // 4. Let k be 0.
     // 5. Repeat, while k < len,
@@ -399,7 +481,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::filter)
 
     // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
     if (!callback_function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function);
 
     // 4. Let A be ? ArraySpeciesCreate(O, 0).
     auto* array = TRY(array_species_create(vm, object, 0));
@@ -457,7 +539,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::find)
 
     // 3. If IsCallable(predicate) is false, throw a TypeError exception.
     if (!predicate.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, predicate.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, predicate);
 
     // 4. Let k be 0.
     // 5. Repeat, while k < len,
@@ -496,7 +578,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::find_index)
 
     // 3. If IsCallable(predicate) is false, throw a TypeError exception.
     if (!predicate.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, predicate.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, predicate);
 
     // 4. Let k be 0.
     // 5. Repeat, while k < len,
@@ -535,7 +617,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::find_last)
 
     // 3. If IsCallable(predicate) is false, throw a TypeError exception.
     if (!predicate.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, predicate.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, predicate);
 
     // 4. Let k be len - 1.
     // 5. Repeat, while k ≥ 0,
@@ -574,7 +656,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::find_last_index)
 
     // 3. If IsCallable(predicate) is false, throw a TypeError exception.
     if (!predicate.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, predicate.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, predicate);
 
     // 4. Let k be len - 1.
     // 5. Repeat, while k ≥ 0,
@@ -666,7 +748,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::flat_map)
 
     // 3. If IsCallable(mapperFunction) is false, throw a TypeError exception.
     if (!mapper_function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, mapper_function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, mapper_function);
 
     // 4. Let A be ? ArraySpeciesCreate(O, 0).
     auto* array = TRY(array_species_create(vm, object, 0));
@@ -692,7 +774,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::for_each)
 
     // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
     if (!callback_function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function);
 
     // 4. Let k be 0.
     // 5. Repeat, while k < len,
@@ -795,6 +877,17 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::index_of)
         k = max(length + n, 0);
     }
 
+    // OPTIMIZATION: Simple packed arrays have an own data property for every index below their length,
+    // so HasProperty and Get cannot produce side effects or observe prototype indexed properties.
+    if (auto* array = as_if<Array>(*object); array && array->is_simple_packed_array() && array->indexed_array_like_size() == length) {
+        auto elements = array->indexed_packed_elements_span();
+        for (; k < elements.size(); ++k) {
+            if (is_strictly_equal(search_element, elements[k]))
+                return Value(k);
+        }
+        return Value(-1);
+    }
+
     // 10. Repeat, while k < len,
     for (; k < length; ++k) {
         auto property_key = PropertyKey { k };
@@ -830,29 +923,29 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::join)
     // This is not part of the spec, but all major engines do some kind of circular reference checks.
     // FWIW: engine262, a "100% spec compliant" ECMA-262 impl, aborts with "too much recursion".
     // Same applies to Array.prototype.toLocaleString().
-    if (s_array_join_seen_objects.contains(this_object))
-        return PrimitiveString::create(vm, String {});
-    s_array_join_seen_objects.set(this_object);
+    if (array_join_seen_objects().contains(this_object))
+        return PrimitiveString::create(vm, Utf16String {});
+    array_join_seen_objects().set(this_object);
     ArmedScopeGuard unsee_object_guard = [&] {
-        s_array_join_seen_objects.remove(this_object);
+        array_join_seen_objects().remove(this_object);
     };
 
     auto length = TRY(length_of_array_like(vm, this_object));
-    String separator = ","_string;
+    Utf16String separator = ","_utf16;
     if (!vm.argument(0).is_undefined())
-        separator = TRY(vm.argument(0).to_string(vm));
-    StringBuilder builder;
+        separator = TRY(vm.argument(0).to_utf16_string(vm));
+    Utf16StringBuilder builder;
     for (size_t i = 0; i < length; ++i) {
         if (i > 0)
-            builder.append(separator);
+            builder.append(separator.utf16_view());
         auto value = TRY(this_object->get(i));
         if (value.is_nullish())
             continue;
-        auto string = TRY(value.to_string(vm));
-        builder.append(string);
+        auto string = TRY(value.to_utf16_string(vm));
+        builder.append(string.utf16_view());
     }
 
-    return PrimitiveString::create(vm, builder.to_string_without_validation());
+    return PrimitiveString::create(vm, builder.to_string());
 }
 
 // 23.1.3.19 Array.prototype.keys ( ), https://tc39.es/ecma262/#sec-array.prototype.keys
@@ -947,7 +1040,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::map)
 
     // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
     if (!callback_function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function);
 
     // 4. Let A be ? ArraySpeciesCreate(O, len).
     auto* array = TRY(array_species_create(vm, object, length));
@@ -984,6 +1077,17 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::map)
 JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::pop)
 {
     auto this_object = TRY(vm.this_value().to_object(vm));
+
+    // OPTIMIZATION: Fast path for packed arrays.
+    if (auto* array = as_if<Array>(*this_object); array && array->is_simple_packed_array() && array->length_is_writable()) {
+        if (array->indexed_array_like_size() == 0)
+            return js_undefined();
+        auto last = array->indexed_take_last();
+        if (last.value.is_special_empty_value())
+            return js_undefined();
+        return last.value;
+    }
+
     auto length = TRY(length_of_array_like(vm, this_object));
     if (length == 0) {
         TRY(this_object->set(vm.names.length, Value(0), Object::ShouldThrowExceptions::Yes));
@@ -1000,6 +1104,18 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::pop)
 JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::push)
 {
     auto this_object = TRY(vm.this_value().to_object(vm));
+
+    // OPTIMIZATION: Fast path for packed arrays.
+    if (auto* array = as_if<Array>(*this_object); array && array->is_simple_packed_array()
+        && array->default_prototype_chain_intact()
+        && array->extensible()
+        && array->length_is_writable()) {
+        auto argument_count = vm.argument_count();
+        for (size_t i = 0; i < argument_count; ++i)
+            array->indexed_append(vm.argument(i));
+        return Value(array->indexed_array_like_size());
+    }
+
     auto length = TRY(length_of_array_like(vm, this_object));
     auto argument_count = vm.argument_count();
     auto new_length = length + argument_count;
@@ -1026,7 +1142,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::reduce)
 
     // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
     if (!callback_function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function);
 
     // 4. If len = 0 and initialValue is not present, throw a TypeError exception.
     if (length == 0 && vm.argument_count() <= 1)
@@ -1108,7 +1224,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::reduce_right)
 
     // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
     if (!callback_function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function);
 
     // 4. If len = 0 and initialValue is not present, throw a TypeError exception.
     if (length == 0 && vm.argument_count() <= 1)
@@ -1226,8 +1342,9 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::shift)
     // - has intact prototype chain, which means we don't have to worry about getters/setters potentially defined for holes.
     // - has simple storage type, which means all values have default attributes (if some elements have configurable=false, we cannot use fast path, because delete operation will fail).
     // then we could take a fast path by directly taking first element from indexed storage.
-    if (auto* array = as_if<Array>(*this_object); array && !array->is_proxy_target() && array->default_prototype_chain_intact() && array->indexed_properties().storage()->is_simple_storage()) {
-        auto first = array->indexed_properties().storage()->take_first().value;
+    if (auto* array = as_if<Array>(*this_object);
+        array && (can_use_packed_shift_fast_path(*array) || can_use_holey_shift_fast_path(*array))) {
+        auto first = array->indexed_take_first().value;
         if (first.is_special_empty_value())
             return js_undefined();
         return first;
@@ -1289,6 +1406,18 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::slice)
 
     auto* new_array = TRY(array_species_create(vm, this_object, count));
 
+    // OPTIMIZATION: Fast path for packed arrays when ArraySpeciesCreate
+    // produced a default Array result.
+    if (auto* array = as_if<Array>(*this_object); array && can_use_packed_array_fast_path(*array)) {
+        if (auto* result_array = fast_array_species_result(*new_array)) {
+            u32 start = static_cast<u32>(actual_start);
+            u32 end = static_cast<u32>(final);
+            for (u32 i = start; i < end; ++i)
+                result_array->indexed_put(i - start, array->indexed_get(i)->value);
+            return result_array;
+        }
+    }
+
     size_t index = 0;
     size_t k = actual_start;
 
@@ -1321,7 +1450,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::some)
 
     // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
     if (!callback_function.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, callback_function);
 
     // 4. Let k be 0.
     // 5. Repeat, while k < len,
@@ -1359,8 +1488,8 @@ ThrowCompletionOr<void> array_merge_sort(VM& vm, Function<ThrowCompletionOr<doub
     if (arr_to_sort.size() <= 1)
         return {};
 
-    GC::RootVector<Value> left(vm.heap());
-    GC::RootVector<Value> right(vm.heap());
+    GC::RootVector<Value> left;
+    GC::RootVector<Value> right;
 
     left.ensure_capacity(arr_to_sort.size() / 2);
     right.ensure_capacity(arr_to_sort.size() / 2 + (arr_to_sort.size() & 1));
@@ -1414,7 +1543,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::sort)
     // 1. If comparefn is not undefined and IsCallable(comparefn) is false, throw a TypeError exception.
     auto comparefn = vm.argument(0);
     if (!comparefn.is_undefined() && !comparefn.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, comparefn.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, comparefn);
 
     // 2. Let obj be ? ToObject(this value).
     auto object = TRY(vm.this_value().to_object(vm));
@@ -1510,6 +1639,56 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::splice)
 
     // 12. Let A be ? ArraySpeciesCreate(O, actualDeleteCount).
     auto* removed_elements = TRY(array_species_create(vm, this_object, actual_delete_count));
+
+    // OPTIMIZATION: Fast path for packed arrays when ArraySpeciesCreate
+    // produced a default Array result and the splice can mutate indexed
+    // storage without going through observable accessors.
+    if (auto* array = as_if<Array>(*this_object); array && can_use_packed_array_fast_path(*array)
+        && array->extensible()
+        && array->length_is_writable()
+        && actual_start <= NumericLimits<u32>::max()
+        && actual_delete_count <= NumericLimits<u32>::max()
+        && item_count <= NumericLimits<u32>::max()) {
+        if (auto* removed_array = fast_array_species_result(*removed_elements)) {
+            u32 start = static_cast<u32>(actual_start);
+            u32 delete_count = static_cast<u32>(actual_delete_count);
+            u32 item_count_u32 = static_cast<u32>(item_count);
+            u32 len = array->indexed_array_like_size();
+
+            for (u32 i = 0; i < delete_count; ++i)
+                removed_array->indexed_put(i, array->indexed_get(start + i)->value);
+
+            if (item_count_u32 == delete_count) {
+                for (u32 i = 0; i < item_count_u32; ++i)
+                    array->indexed_put(start + i, vm.argument(2 + i));
+            } else if (item_count_u32 < delete_count) {
+                for (u32 i = 0; i < item_count_u32; ++i)
+                    array->indexed_put(start + i, vm.argument(2 + i));
+
+                u32 shift = delete_count - item_count_u32;
+                for (u32 i = start + item_count_u32; i < len - shift; ++i)
+                    array->indexed_put(i, array->indexed_get(i + shift)->value);
+                VERIFY(array->set_indexed_array_like_size(len - shift));
+            } else {
+                u32 growth = item_count_u32 - delete_count;
+                u32 new_length = len + growth;
+                VERIFY(array->set_indexed_array_like_size(new_length));
+                for (u32 i = new_length; i > start + item_count_u32; --i)
+                    array->indexed_put(i - 1, array->indexed_get(i - 1 - growth)->value);
+                for (u32 i = 0; i < item_count_u32; ++i)
+                    array->indexed_put(start + i, vm.argument(2 + i));
+
+                if (array->indexed_storage_kind() == IndexedStorageKind::Holey && array->indexed_array_like_size() != 0) {
+                    auto last_index = array->indexed_array_like_size() - 1;
+                    auto last_value = array->indexed_get(last_index);
+                    VERIFY(last_value.has_value());
+                    array->indexed_put(last_index, last_value->value);
+                }
+            }
+
+            return removed_array;
+        }
+    }
 
     // 13. Let k be 0.
     // 14. Repeat, while k < actualDeleteCount,
@@ -1629,11 +1808,11 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::to_locale_string)
     // 1. Let array be ? ToObject(this value).
     auto this_object = TRY(vm.this_value().to_object(vm));
 
-    if (s_array_join_seen_objects.contains(this_object))
-        return PrimitiveString::create(vm, String {});
-    s_array_join_seen_objects.set(this_object);
+    if (array_join_seen_objects().contains(this_object))
+        return PrimitiveString::create(vm, Utf16String {});
+    array_join_seen_objects().set(this_object);
     ArmedScopeGuard unsee_object_guard = [&] {
-        s_array_join_seen_objects.remove(this_object);
+        array_join_seen_objects().remove(this_object);
     };
 
     // 2. Let len be ? ToLength(? Get(array, "length")).
@@ -1643,7 +1822,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::to_locale_string)
     constexpr auto separator = ","sv;
 
     // 4. Let R be the empty String.
-    StringBuilder builder;
+    Utf16StringBuilder builder;
 
     // 5. Let k be 0.
     // 6. Repeat, while k < len,
@@ -1651,7 +1830,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::to_locale_string)
         // a. If k > 0, then
         if (i > 0) {
             // i. Set R to the string-concatenation of R and separator.
-            builder.append(separator);
+            builder.append_ascii(separator);
         }
 
         // b. Let nextElement be ? Get(array, ! ToString(k)).
@@ -1663,15 +1842,15 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayPrototype::to_locale_string)
             auto locale_string_result = TRY(value.invoke(vm, vm.names.toLocaleString, locales, options));
 
             // ii. Set R to the string-concatenation of R and S.
-            auto string = TRY(locale_string_result.to_string(vm));
-            builder.append(string);
+            auto string = TRY(locale_string_result.to_utf16_string(vm));
+            builder.append(string.utf16_view());
         }
 
         // d. Increase k by 1.
     }
 
     // 7. Return R.
-    return PrimitiveString::create(vm, builder.to_string_without_validation());
+    return PrimitiveString::create(vm, builder.to_string());
 }
 
 // 23.1.3.33 Array.prototype.toReversed ( ), https://tc39.es/ecma262/#sec-array.prototype.toreversed

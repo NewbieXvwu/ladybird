@@ -6,10 +6,11 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ResizeObserverPrototype.h>
+#include <LibWeb/Bindings/ResizeObserver.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 
@@ -27,8 +28,7 @@ ResizeObserver::ResizeObserver(JS::Realm& realm, WebIDL::CallbackType* callback)
     : PlatformObject(realm)
     , m_callback(callback)
 {
-    auto navigable = as<HTML::Window>(HTML::relevant_global_object(*this)).navigable();
-    m_document = navigable->active_document().ptr();
+    m_document = as<HTML::Window>(HTML::relevant_global_object(*this)).document().ptr();
 }
 
 ResizeObserver::~ResizeObserver() = default;
@@ -50,12 +50,13 @@ void ResizeObserver::visit_edges(JS::Cell::Visitor& visitor)
 
 void ResizeObserver::finalize()
 {
+    Base::finalize();
     if (m_document && m_list_node.is_in_list())
         m_document->unregister_resize_observer({}, *this);
 }
 
 // https://drafts.csswg.org/resize-observer-1/#dom-resizeobserver-observe
-void ResizeObserver::observe(DOM::Element& target, ResizeObserverOptions options)
+void ResizeObserver::observe(DOM::Element& target, Bindings::ResizeObserverOptions options)
 {
     // 1. If target is in [[observationTargets]] slot, call unobserve() with argument target.
     auto observation = m_observation_targets.find_if([&](auto& observation) { return observation->target().ptr() == &target; });
@@ -74,6 +75,8 @@ void ResizeObserver::observe(DOM::Element& target, ResizeObserverOptions options
     if (!m_list_node.is_in_list()) {
         m_document->register_resize_observer({}, *this);
     }
+
+    m_document->page().client().request_frame();
 }
 
 // https://drafts.csswg.org/resize-observer-1/#dom-resizeobserver-unobserve
@@ -104,12 +107,27 @@ void ResizeObserver::disconnect()
     unregister_observer_if_needed();
 }
 
+void ResizeObserver::remove_dead_observations()
+{
+    m_observation_targets.remove_all_matching([](auto& observation) {
+        return !observation->target();
+    });
+    m_active_targets.remove_all_matching([](auto& observation) {
+        return !observation->target();
+    });
+    m_skipped_targets.remove_all_matching([](auto& observation) {
+        return !observation->target();
+    });
+
+    unregister_observer_if_needed();
+}
+
 void ResizeObserver::invoke_callback(ReadonlySpan<GC::Ref<ResizeObserverEntry>> entries) const
 {
     auto& callback = *m_callback;
-    auto& realm = callback.callback_context;
+    auto& settings_object = callback.callback_context;
 
-    auto wrapped_records = MUST(JS::Array::create(realm, 0));
+    auto wrapped_records = MUST(JS::Array::create(settings_object->realm(), 0));
     for (size_t i = 0; i < entries.size(); ++i) {
         auto& record = entries.at(i);
         auto property_index = JS::PropertyKey { i };

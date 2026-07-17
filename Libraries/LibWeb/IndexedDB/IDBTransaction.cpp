@@ -4,13 +4,18 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/IDBDatabasePrototype.h>
+#include <LibWeb/Bindings/IDBDatabase.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Crypto/Crypto.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/EventNames.h>
+#include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/IndexedDB/IDBDatabase.h>
+#include <LibWeb/IndexedDB/IDBIndex.h>
 #include <LibWeb/IndexedDB/IDBObjectStore.h>
 #include <LibWeb/IndexedDB/IDBTransaction.h>
 #include <LibWeb/IndexedDB/Internal/Algorithms.h>
+#include <LibWeb/Page/Page.h>
 
 namespace Web::IndexedDB {
 
@@ -24,8 +29,8 @@ IDBTransaction::IDBTransaction(JS::Realm& realm, GC::Ref<IDBDatabase> connection
     , m_mode(mode)
     , m_durability(durability)
     , m_scope(move(scopes))
+    , m_uuid(Crypto::generate_random_uuid())
 {
-    m_uuid = MUST(Crypto::generate_random_uuid());
     connection->add_transaction(*this);
 }
 
@@ -48,6 +53,22 @@ void IDBTransaction::visit_edges(Visitor& visitor)
     visitor.visit(m_associated_request);
     visitor.visit(m_scope);
     visitor.visit(m_cleanup_event_loop);
+
+    for (auto& [store, handle] : m_object_store_handles)
+        visitor.visit(handle);
+    visitor.visit(m_index_handles);
+
+    for (auto& entry : m_store_mutation_logs) {
+        visitor.visit(entry.store);
+        visitor.visit(entry.log);
+    }
+}
+
+DOM::EventTarget* IDBTransaction::get_parent(DOM::Event const&)
+{
+    // https://w3c.github.io/IndexedDB/#transaction-construct
+    // A transaction’s get the parent algorithm returns the transaction’s connection.
+    return m_connection.ptr();
 }
 
 void IDBTransaction::set_onabort(WebIDL::CallbackType* event_handler)
@@ -96,12 +117,12 @@ WebIDL::ExceptionOr<void> IDBTransaction::abort()
 GC::Ref<HTML::DOMStringList> IDBTransaction::object_store_names()
 {
     // 1. Let names be a list of the names of the object stores in this's scope.
-    Vector<String> names;
+    Vector<Utf16String> names;
     for (auto const& object_store : this->scope())
         names.append(object_store->name());
 
     // 2. Return the result (a DOMStringList) of creating a sorted name list with names.
-    return create_a_sorted_name_list(realm(), names);
+    return create_a_sorted_name_list(realm(), move(names));
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbtransaction-commit
@@ -119,7 +140,7 @@ WebIDL::ExceptionOr<void> IDBTransaction::commit()
     return {};
 }
 
-GC::Ptr<ObjectStore> IDBTransaction::object_store_named(String const& name) const
+GC::Ptr<ObjectStore> IDBTransaction::object_store_named(Utf16String const& name) const
 {
     for (auto const& store : m_scope) {
         if (store->name() == name)
@@ -130,7 +151,7 @@ GC::Ptr<ObjectStore> IDBTransaction::object_store_named(String const& name) cons
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbtransaction-objectstore
-WebIDL::ExceptionOr<GC::Ref<IDBObjectStore>> IDBTransaction::object_store(String const& name)
+WebIDL::ExceptionOr<GC::Ref<IDBObjectStore>> IDBTransaction::object_store(Utf16String const& name)
 {
     auto& realm = this->realm();
 
@@ -144,7 +165,99 @@ WebIDL::ExceptionOr<GC::Ref<IDBObjectStore>> IDBTransaction::object_store(String
         return WebIDL::NotFoundError::create(realm, "Object store not found in transactions scope"_utf16);
 
     // 3. Return an object store handle associated with store and this.
-    return IDBObjectStore::create(realm, *store, *this);
+
+    // https://w3c.github.io/IndexedDB/#object-store-handle-construct
+    // Multiple handles may be associated with the same object store in different transactions,
+    // but there must be only one object store handle associated with a particular object store
+    // within a transaction.
+    return get_or_create_object_store_handle(*store);
+}
+
+GC::Ref<IDBObjectStore> IDBTransaction::get_or_create_object_store_handle(GC::Ref<ObjectStore> store)
+{
+    // NOTE: We have to do two lookups here. If we use ensure() with a constructor callback, the garbage collector
+    //       may run when we construct the handle, and then we visit the HashMap in an invalid state.
+    if (auto handle = m_object_store_handles.get(store); handle.has_value())
+        return handle.value();
+
+    auto handle = IDBObjectStore::create(realm(), store, *this);
+    m_object_store_handles.set(store, handle);
+    return handle;
+}
+
+GC::Ptr<IDBObjectStore> IDBTransaction::object_store_handle_for(GC::Ref<ObjectStore> store)
+{
+    auto maybe_handle = m_object_store_handles.find(store);
+    if (maybe_handle == m_object_store_handles.end())
+        return nullptr;
+    return maybe_handle->value;
+}
+
+void IDBTransaction::set_state(TransactionState state)
+{
+    m_state = state;
+}
+
+void IDBTransaction::register_index_handle(Badge<IDBIndex>, GC::Ref<IDBIndex> handle)
+{
+    m_index_handles.append(handle);
+}
+
+void IDBTransaction::set_up_mutation_logs()
+{
+    m_original_version = m_connection->associated_database()->version();
+
+    for (auto& store : m_scope) {
+        auto log = MutationLog::create(realm());
+        store->set_mutation_log(log);
+        m_store_mutation_logs.append({ store, log });
+    }
+}
+
+void IDBTransaction::set_up_mutation_log_for_new_store(GC::Ref<ObjectStore> store)
+{
+    auto log = MutationLog::create(realm());
+    store->set_mutation_log(log);
+    m_store_mutation_logs.append({ store, log });
+    log->note_object_store_created();
+}
+
+void IDBTransaction::revert_all_mutations()
+{
+    auto database = m_connection->associated_database();
+    for (size_t i = m_store_mutation_logs.size(); i > 0; --i) {
+        auto& entry = m_store_mutation_logs[i - 1];
+        entry.log->revert(*entry.store, database, m_connection);
+    }
+
+    database->set_version(m_original_version);
+    m_connection->set_version(m_original_version);
+}
+
+void IDBTransaction::discard_mutation_logs()
+{
+    for (auto& entry : m_store_mutation_logs)
+        entry.store->set_mutation_log(nullptr);
+    m_store_mutation_logs.clear();
+}
+
+void IDBTransaction::notify_devtools_of_committed_changes()
+{
+    auto document = HTML::relevant_settings_object(*this).responsible_document();
+    if (!document)
+        return;
+
+    if (!document->page().client().has_active_devtools_client())
+        return;
+
+    TransactionChanges changes;
+    auto database_name = m_connection->associated_database()->name();
+    for (auto const& entry : m_store_mutation_logs)
+        entry.log->append_changes(database_name, entry.store->name(), changes);
+    if (changes.is_empty())
+        return;
+
+    document->page().client().page_did_update_indexed_database(document->url().serialize(), changes);
 }
 
 }

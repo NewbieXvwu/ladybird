@@ -24,10 +24,7 @@ public:
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::list; }
 
     WebIDL::Long start();
-    void set_start(WebIDL::Long start)
-    {
-        MUST(set_attribute(AttributeNames::start, String::number(start)));
-    }
+    void set_start(WebIDL::Long start);
 
     AK::Checked<i32> starting_value() const;
 
@@ -37,10 +34,10 @@ private:
     HTMLOListElement(DOM::Document&, DOM::QualifiedName);
 
     virtual void initialize(JS::Realm&) override;
-    virtual void attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
-    virtual bool is_presentational_hint(FlyString const&) const override;
-    virtual void apply_presentational_hints(GC::Ref<CSS::CascadedProperties>) const override;
+    virtual bool is_presentational_hint(Utf16FlyString const&) const override;
+    virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
 };
 
 }

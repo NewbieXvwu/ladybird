@@ -7,6 +7,8 @@
 
 #include <AK/GenericLexer.h>
 #include <AK/TypeCasts.h>
+#include <LibHTTP/HTTP.h>
+#include <LibHTTP/HeaderList.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/Error.h>
@@ -23,7 +25,6 @@
 #include <LibWeb/FileAPI/File.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/Infra/JSON.h>
-#include <LibWeb/Infra/Strings.h>
 #include <LibWeb/MimeSniff/MimeType.h>
 #include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/WebIDL/Promise.h>
@@ -85,7 +86,7 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> BodyMixin::blob() const
         // NOTE: If extracting the mime type returns failure, other browsers set it to an empty string - not sure if that's spec'd.
         auto mime_type = this->mime_type_impl();
         auto mime_type_string = mime_type.has_value() ? mime_type->serialized() : String {};
-        return FileAPI::Blob::create(realm, move(bytes), move(mime_type_string));
+        return FileAPI::Blob::create(realm, move(bytes), Utf16String::from_utf8(mime_type_string));
     }));
 }
 
@@ -127,7 +128,7 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> BodyMixin::form_data() const
 
                 // 2. If that fails for some reason, then throw a TypeError.
                 if (error_or_entry_list.is_error())
-                    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Failed to parse multipart form data: {}", error_or_entry_list.release_error().message)) };
+                    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Failed to parse multipart form data: {}", error_or_entry_list.release_error().message) };
 
                 // 3. Return a new FormData object, appending each entry, resulting from the parsing operation, to its entry list.
                 return TRY(XHR::FormData::create(realm, error_or_entry_list.release_value()));
@@ -143,7 +144,7 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> BodyMixin::form_data() const
         }
 
         // 3. Throw a TypeError.
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Mime type must be 'multipart/form-data' or 'application/x-www-form-urlencoded'"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Mime type must be 'multipart/form-data' or 'application/x-www-form-urlencoded'"_utf16 };
     }));
 }
 
@@ -172,7 +173,7 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> BodyMixin::text() const
         VERIFY(decoder.has_value());
 
         auto utf8_text = MUST(TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(*decoder, bytes));
-        return JS::PrimitiveString::create(vm, move(utf8_text));
+        return JS::PrimitiveString::create(vm, Utf16String::from_utf8(utf8_text));
     }));
 }
 
@@ -181,7 +182,7 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> consume_body(JS::Realm& realm, Bod
 {
     // 1. If object is unusable, then return a promise rejected with a TypeError.
     if (object.is_unusable()) {
-        WebIDL::SimpleException exception { WebIDL::SimpleExceptionType::TypeError, "Body is unusable"sv };
+        WebIDL::SimpleException exception { WebIDL::SimpleExceptionType::TypeError, "Body is unusable"_utf16 };
         return WebIDL::create_rejected_promise_from_exception(realm, move(exception));
     }
 
@@ -301,10 +302,10 @@ static MultipartParsingErrorOr<MultiPartFormDataHeader> parse_multipart_form_dat
         auto header_name = lexer.consume_until(is_any_of("\n\r:"sv));
 
         // 3. Remove any HTTP tab or space bytes from the start or end of header name.
-        header_name = header_name.trim(Infrastructure::HTTP_TAB_OR_SPACE, TrimMode::Both);
+        header_name = header_name.trim(HTTP::HTTP_TAB_OR_SPACE, TrimMode::Both);
 
         // 4. If header name does not match the field-name token production, return failure.
-        if (!Infrastructure::is_header_name(header_name.bytes()))
+        if (!HTTP::is_header_name(header_name.bytes()))
             return MultipartParsingError { MUST(String::formatted("Invalid header name {}", header_name)) };
 
         // 5. If the byte at position is not 0x3A (:), return failure.
@@ -313,7 +314,7 @@ static MultipartParsingErrorOr<MultiPartFormDataHeader> parse_multipart_form_dat
             return MultipartParsingError { MUST(String::formatted("Expected : at position {}", lexer.tell())) };
 
         // 7. Collect a sequence of bytes that are HTTP tab or space bytes given position. (Do nothing with those bytes.)
-        lexer.ignore_while(Infrastructure::is_http_tab_or_space);
+        lexer.ignore_while(HTTP::is_http_tab_or_space);
 
         // 8. Byte-lowercase header name and switch on the result:
         // -> `content-disposition`
@@ -346,18 +347,18 @@ static MultipartParsingErrorOr<MultiPartFormDataHeader> parse_multipart_form_dat
         // -> `content-type`
         else if (header_name.equals_ignoring_ascii_case("content-type"sv)) {
             // 1. Let header value be the result of collecting a sequence of bytes that are not 0x0A (LF) or 0x0D (CR), given position.
-            auto header_value = lexer.consume_until(Infrastructure::is_http_newline);
+            auto header_value = lexer.consume_until(HTTP::is_http_newline);
 
             // 2. Remove any HTTP tab or space bytes from the end of header value.
-            header_value = header_value.trim(Infrastructure::HTTP_TAB_OR_SPACE, TrimMode::Right);
+            header_value = header_value.trim(HTTP::HTTP_TAB_OR_SPACE, TrimMode::Right);
 
             // 3. Set contentType to the isomorphic decoding of header value.
-            header.content_type = Infra::isomorphic_decode(header_value.bytes());
+            header.content_type = TextCodec::isomorphic_decode(header_value);
         }
         // -> Otherwise
         else {
             // 1. Collect a sequence of bytes that are not 0x0A (LF) or 0x0D (CR), given position. (Do nothing with those bytes.)
-            lexer.ignore_until(Infrastructure::is_http_newline);
+            lexer.ignore_until(HTTP::is_http_newline);
         }
 
         // 9. If position does not point to a sequence of bytes starting with 0x0D 0x0A (CR LF), return failure. Otherwise, advance position by 2 (past the newline).
@@ -368,7 +369,7 @@ static MultipartParsingErrorOr<MultiPartFormDataHeader> parse_multipart_form_dat
 }
 
 // https://andreubotella.github.io/multipart-form-data/#multipart-form-data-parser
-MultipartParsingErrorOr<Vector<XHR::FormDataEntry>> parse_multipart_form_data(JS::Realm& realm, StringView input, MimeSniff::MimeType const& mime_type)
+MultipartParsingErrorOr<GC::ConservativeVector<XHR::FormDataEntry>> parse_multipart_form_data(JS::Realm& realm, StringView input, MimeSniff::MimeType const& mime_type)
 {
     // 1. Assert: mimeType’s essence is "multipart/form-data".
     VERIFY(mime_type.essence() == "multipart/form-data"sv);
@@ -380,7 +381,7 @@ MultipartParsingErrorOr<Vector<XHR::FormDataEntry>> parse_multipart_form_data(JS
     auto boundary = maybe_boundary.release_value();
 
     // 3. Let entry list be an empty entry list.
-    Vector<XHR::FormDataEntry> entry_list;
+    GC::ConservativeVector<XHR::FormDataEntry> entry_list;
 
     // 4. Let position be a pointer to a byte in input, initially pointing at the first byte.
     GenericLexer lexer(input);
@@ -394,7 +395,9 @@ MultipartParsingErrorOr<Vector<XHR::FormDataEntry>> parse_multipart_form_data(JS
             return MultipartParsingError { MUST(String::formatted("Expected `--` followed by boundary at position {}", lexer.tell())) };
 
         // 2. If position points to the sequence of bytes 0x2D 0x2D 0x0D 0x0A (`--` followed by CR LF) followed by the end of input, return entry list.
-        if (lexer.next_is("--\r\n"sv))
+        // NOTE: We do not require the input to end with CRLF to match the behavior of other browsers. According to RFC 2046, we are to discard any
+        //       text after the terminating `--`. See: https://datatracker.ietf.org/doc/html/rfc2046#page-22
+        if (lexer.next_is("--"sv))
             return entry_list;
 
         // 3. If position does not point to a sequence of bytes starting with 0x0D 0x0A (CR LF), return failure.
@@ -429,7 +432,7 @@ MultipartParsingErrorOr<Vector<XHR::FormDataEntry>> parse_multipart_form_data(JS
             return MultipartParsingError { MUST(String::formatted("Expected CRLF at position {}", lexer.tell())) };
 
         // 10. If filename is not null:
-        Optional<XHR::FormDataEntryValue> value;
+        Optional<XHR::FormDataEntry::Value> value;
         if (header.filename.has_value()) {
             // 1. If contentType is null, set contentType to "text/plain".
             if (!header.content_type.has_value())
@@ -441,23 +444,23 @@ MultipartParsingErrorOr<Vector<XHR::FormDataEntry>> parse_multipart_form_data(JS
             }
 
             // 3. Let value be a new File object with name filename, type contentType, and body body.
-            auto blob = FileAPI::Blob::create(realm, MUST(ByteBuffer::copy(body.bytes())), header.content_type.release_value());
-            FileAPI::FilePropertyBag options {};
-            options.type = blob->type();
-            auto file = MUST(FileAPI::File::create(realm, { GC::make_root(blob) }, header.filename.release_value(), move(options)));
-            value = GC::make_root(file);
+            auto content_type = header.content_type.release_value();
+            auto blob = FileAPI::Blob::create(realm, MUST(ByteBuffer::copy(body.bytes())), {});
+            Bindings::FilePropertyBag options {};
+            options.type = Utf16String::from_utf8(content_type);
+            value = MUST(FileAPI::File::create(realm, { { blob } }, Utf16String::from_utf8(header.filename.release_value()), move(options)));
         }
         // 11. Otherwise:
         else {
             // 1. Let value be the UTF-8 decoding without BOM of body.
-            value = String::from_utf8_with_replacement_character(body, String::WithBOMHandling::No);
+            value = Utf16String::from_utf8_with_replacement_character(body, Utf16String::WithBOMHandling::No);
         }
 
         // 12. Assert: name is a scalar value string and value is either a scalar value string or a File object.
         VERIFY(header.name.has_value() && value.has_value());
 
         // 13. Create an entry with name and value, and append it to entry list.
-        entry_list.empend(header.name.release_value(), value.release_value());
+        entry_list.empend(Utf16String::from_utf8(header.name.release_value()), value.release_value());
     }
 }
 

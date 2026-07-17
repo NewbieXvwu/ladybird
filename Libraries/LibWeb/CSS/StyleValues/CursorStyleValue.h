@@ -9,7 +9,6 @@
 #include <AK/Optional.h>
 #include <LibGfx/Color.h>
 #include <LibGfx/Cursor.h>
-#include <LibWeb/CSS/CalculatedOr.h>
 #include <LibWeb/CSS/Length.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/Forward.h>
@@ -18,29 +17,30 @@ namespace Web::CSS {
 
 class CursorStyleValue final : public StyleValueWithDefaultOperators<CursorStyleValue> {
 public:
-    static ValueComparingNonnullRefPtr<CursorStyleValue const> create(ValueComparingNonnullRefPtr<AbstractImageStyleValue const> image, Optional<NumberOrCalculated> x, Optional<NumberOrCalculated> y)
+    static ValueComparingNonnullRefPtr<CursorStyleValue const> create(ValueComparingNonnullRefPtr<AbstractImageStyleValue const> image, RefPtr<StyleValue const> x, RefPtr<StyleValue const> y)
     {
-        VERIFY(x.has_value() == y.has_value());
+        // We require either both or neither the X and Y parameters
+        VERIFY((!x && !y) || (x && y));
         return adopt_ref(*new (nothrow) CursorStyleValue(move(image), move(x), move(y)));
     }
     virtual ~CursorStyleValue() override = default;
 
-    ValueComparingNonnullRefPtr<AbstractImageStyleValue const> image() const { return m_properties.image; }
-    Optional<NumberOrCalculated> const& x() const { return m_properties.x; }
-    Optional<NumberOrCalculated> const& y() const { return m_properties.y; }
+    AbstractImageStyleValue const& image() const { return *m_properties.image; }
 
     Optional<Gfx::ImageCursor> make_image_cursor(Layout::NodeWithStyle const&) const;
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const override;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(CursorStyleValue const& other) const { return m_properties == other.m_properties; }
 
+    virtual bool is_computationally_independent() const override;
+
 private:
     CursorStyleValue(ValueComparingNonnullRefPtr<AbstractImageStyleValue const> image,
-        Optional<NumberOrCalculated> x,
-        Optional<NumberOrCalculated> y)
+        RefPtr<StyleValue const> x,
+        RefPtr<StyleValue const> y)
         : StyleValueWithDefaultOperators(Type::Cursor)
         , m_properties { .image = move(image), .x = move(x), .y = move(y) }
     {
@@ -48,18 +48,12 @@ private:
 
     struct Properties {
         ValueComparingNonnullRefPtr<AbstractImageStyleValue const> image;
-        Optional<NumberOrCalculated> x;
-        Optional<NumberOrCalculated> y;
+        ValueComparingRefPtr<StyleValue const> x;
+        ValueComparingRefPtr<StyleValue const> y;
         bool operator==(Properties const&) const = default;
     } m_properties;
 
-    // Data that can affect the bitmap rendering.
-    struct CacheKey {
-        Length::ResolutionContext length_resolution_context;
-        Gfx::Color current_color;
-        bool operator==(CacheKey const&) const = default;
-    };
-    mutable Optional<CacheKey> m_cache_key;
+    mutable Optional<Color> m_cached_bitmap_color;
     mutable Optional<Gfx::ShareableBitmap> m_cached_bitmap;
 };
 

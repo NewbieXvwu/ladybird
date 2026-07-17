@@ -7,9 +7,9 @@
 #pragma once
 
 #include <AK/Assertions.h>
+#include <AK/Badge.h>
 #include <AK/Checked.h>
 #include <AK/Concepts.h>
-#include <AK/EnumBits.h>
 #include <AK/Forward.h>
 #include <AK/Optional.h>
 #include <AK/Span.h>
@@ -28,19 +28,22 @@ public:
         : m_characters(characters)
         , m_length(length)
     {
-        if (!is_constant_evaluated())
+        if !consteval {
+            VERIFY(characters != nullptr);
             VERIFY(!Checked<uintptr_t>::addition_would_overflow(reinterpret_cast<uintptr_t>(characters), length));
+        }
     }
 
     ALWAYS_INLINE StringView(unsigned char const* characters, size_t length)
         : m_characters(reinterpret_cast<char const*>(characters))
         , m_length(length)
     {
+        VERIFY(characters != nullptr);
         VERIFY(!Checked<uintptr_t>::addition_would_overflow(reinterpret_cast<uintptr_t>(characters), length));
     }
 
     ALWAYS_INLINE StringView(ReadonlyBytes bytes)
-        : m_characters(reinterpret_cast<char const*>(bytes.data()))
+        : m_characters(bytes.is_empty() ? "" : reinterpret_cast<char const*>(bytes.data()))
         , m_length(bytes.size())
     {
     }
@@ -58,7 +61,6 @@ public:
     template<OneOf<String, FlyString, ByteString, ByteBuffer> StringType>
     StringView& operator=(StringType&&) = delete;
 
-    [[nodiscard]] constexpr bool is_null() const { return m_characters == nullptr; }
     [[nodiscard]] constexpr bool is_empty() const { return m_length == 0; }
 
     [[nodiscard]] constexpr char const* characters_without_null_termination() const { return m_characters; }
@@ -68,8 +70,9 @@ public:
 
     constexpr char const& operator[](size_t index) const
     {
-        if (!is_constant_evaluated())
+        if !consteval {
             VERIFY(index < m_length);
+        }
         return m_characters[index];
     }
 
@@ -117,15 +120,17 @@ public:
 
     [[nodiscard]] constexpr StringView substring_view(size_t start, size_t length) const
     {
-        if (!is_constant_evaluated())
+        if !consteval {
             VERIFY(start + length <= m_length);
+        }
         return { m_characters + start, length };
     }
 
     [[nodiscard]] constexpr StringView substring_view(size_t start) const
     {
-        if (!is_constant_evaluated())
+        if !consteval {
             VERIFY(start <= length());
+        }
         return substring_view(start, length() - start);
     }
 
@@ -250,8 +255,6 @@ public:
 
     constexpr bool operator==(char const* cstring) const
     {
-        if (is_null())
-            return cstring == nullptr;
         if (!cstring)
             return false;
         // NOTE: `m_characters` is not guaranteed to be null-terminated, but `cstring` is.
@@ -276,12 +279,6 @@ public:
     {
         if (m_length == 0 && other.m_length == 0)
             return 0;
-
-        if (m_characters == nullptr)
-            return other.m_characters ? -1 : 0;
-
-        if (other.m_characters == nullptr)
-            return 1;
 
         size_t rlen = min(m_length, other.m_length);
         int c = __builtin_memcmp(m_characters, other.m_characters, rlen);
@@ -355,8 +352,28 @@ public:
 
 private:
     friend class ByteString;
-    char const* m_characters { nullptr };
+    friend struct SentinelOptionalTraits<StringView>;
+
+    explicit constexpr StringView(Badge<SentinelOptionalTraits<StringView>>, nullptr_t)
+        : m_characters(nullptr)
+        , m_length(0)
+    {
+    }
+
+    char const* m_characters { "" };
     size_t m_length { 0 };
+};
+
+template<>
+struct SentinelOptionalTraits<StringView> {
+    static constexpr StringView sentinel_value() { return StringView(Badge<SentinelOptionalTraits<StringView>> {}, nullptr); }
+    static constexpr bool is_sentinel(StringView const& value) { return value.m_characters == nullptr; }
+};
+
+template<>
+class Optional<StringView> : public SentinelOptional<StringView> {
+public:
+    using SentinelOptional::SentinelOptional;
 };
 
 template<>
@@ -378,19 +395,7 @@ struct CaseInsensitiveASCIIStringViewTraits : public Traits<StringView> {
 
 }
 
-// FIXME: Remove this when clang on BSD distributions fully support consteval (specifically in the context of default parameter initialization).
-//        Note that this is fixed in clang-15, but is not yet picked up by all downstream distributions.
-//        See: https://github.com/llvm/llvm-project/issues/48230
-//        Additionally, oss-fuzz currently ships an llvm-project commit that is a pre-release of 15.0.0.
-//        See: https://github.com/google/oss-fuzz/issues/9989
-//        Android currently doesn't ship clang-15 in any NDK
-#if defined(AK_OS_BSD_GENERIC) || defined(OSS_FUZZ) || defined(AK_OS_ANDROID)
-#    define AK_STRING_VIEW_LITERAL_CONSTEVAL constexpr
-#else
-#    define AK_STRING_VIEW_LITERAL_CONSTEVAL consteval
-#endif
-
-[[nodiscard]] ALWAYS_INLINE AK_STRING_VIEW_LITERAL_CONSTEVAL AK::StringView operator""sv(char const* cstring, size_t length)
+[[nodiscard]] ALWAYS_INLINE consteval AK::StringView operator""sv(char const* cstring, size_t length)
 {
     return AK::StringView(cstring, length);
 }

@@ -7,9 +7,11 @@
 #pragma once
 
 #include <AK/Error.h>
+#include <AK/Platform.h>
 
 namespace IPC {
 
+class Attachment;
 class AutoCloseFileDescriptor;
 class Decoder;
 class Encoder;
@@ -17,6 +19,19 @@ class Message;
 class MessageBuffer;
 class File;
 class Stub;
+class TransportHandle;
+
+#if defined(AK_OS_MACOS)
+class MachBootstrapListener;
+class TransportMachPort;
+using Transport = TransportMachPort;
+#elif !defined(AK_OS_WINDOWS)
+class TransportSocket;
+using Transport = TransportSocket;
+#else
+class TransportSocketWindows;
+using Transport = TransportSocketWindows;
+#endif
 
 template<typename T>
 ErrorOr<void> encode(Encoder&, T const&);
@@ -25,6 +40,5 @@ template<typename T>
 ErrorOr<T> decode(Decoder&);
 
 using MessageDataType = Vector<u8, 1024>;
-using MessageFileType = Vector<NonnullRefPtr<AutoCloseFileDescriptor>, 1>;
 
 }

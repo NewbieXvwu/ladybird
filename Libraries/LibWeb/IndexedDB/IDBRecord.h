@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/OwnPtr.h>
 #include <LibGC/Ptr.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/PlatformObject.h>
@@ -17,7 +18,23 @@ namespace Web::IndexedDB {
 // https://w3c.github.io/IndexedDB/#object-store-record
 struct ObjectStoreRecord {
     GC::Ref<Key> key;
-    HTML::SerializationRecord value;
+    OwnPtr<HTML::StorageSerializationRecord> value;
+
+    ObjectStoreRecord(GC::Ref<Key> key, NonnullOwnPtr<HTML::StorageSerializationRecord> value)
+        : key(key)
+        , value(move(value))
+    {
+    }
+
+    ObjectStoreRecord(ObjectStoreRecord const& other)
+        : key(other.key)
+        , value(make<HTML::StorageSerializationRecord>(*other.value))
+    {
+    }
+
+    ObjectStoreRecord(ObjectStoreRecord&&) = default;
+    ObjectStoreRecord& operator=(ObjectStoreRecord&&) = default;
+    ObjectStoreRecord& operator=(ObjectStoreRecord const&) = delete;
 };
 
 // https://w3c.github.io/IndexedDB/#index-list-of-records
@@ -36,9 +53,9 @@ public:
     [[nodiscard]] static GC::Ref<IDBRecord> create(JS::Realm& realm, GC::Ref<Key> key, JS::Value value, GC::Ref<Key> primary_key);
     virtual ~IDBRecord();
 
-    GC::Ref<Key> key() const { return m_key; }
-    GC::Ref<Key> primary_key() const { return m_primary_key; }
     JS::Value value() const { return m_value; }
+    WebIDL::ExceptionOr<JS::Value> key() const;
+    WebIDL::ExceptionOr<JS::Value> primary_key() const;
 
 protected:
     explicit IDBRecord(JS::Realm&, GC::Ref<Key> key, JS::Value value, GC::Ref<Key> primary_key);

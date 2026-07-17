@@ -1,4 +1,4 @@
-Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-inline
+Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children: not-inline
   BlockContainer <html> at [0,0] [0+0+0 800 0+0+0] [0+0+0 474 0+0+0] [BFC] children: not-inline
     BlockContainer <body> at [8,8] [8+0+0 784 0+0+8] [8+0+0 458 0+0+8] children: not-inline
       Box <div.container.col> at [10,10] flex-container(column) [0+2+0 50 0+2+730] [0+2+0 400 0+2+0] [FFC] children: not-inline
@@ -34,16 +34,16 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-
 ViewportPaintable (Viewport<#document>) [0,0 800x600]
   PaintableWithLines (BlockContainer<HTML>) [0,0 800x474]
     PaintableWithLines (BlockContainer<BODY>) [8,8 784x458]
-      PaintableBox (Box<DIV>.container.col) [8,8 54x404]
+      Paintable (Box<DIV>.container.col) [8,8 54x404]
         PaintableWithLines (BlockContainer<DIV>.item) [10,160 50x50]
         PaintableWithLines (BlockContainer<DIV>.item) [10,260 50x50]
         PaintableWithLines (BlockContainer<DIV>.item) [10,360 50x50]
       PaintableWithLines (BlockContainer(anonymous)) [8,412 784x0]
-      PaintableBox (Box<DIV>.container.row) [8,412 404x54]
+      Paintable (Box<DIV>.container.row) [8,412 404x54]
         PaintableWithLines (BlockContainer<DIV>.item) [160,414 50x50]
         PaintableWithLines (BlockContainer<DIV>.item) [260,414 50x50]
         PaintableWithLines (BlockContainer<DIV>.item) [360,414 50x50]
       PaintableWithLines (BlockContainer(anonymous)) [8,466 784x0]
 
-SC for Viewport<#document> [0,0 800x600] [children: 1] (z-index: auto)
- SC for BlockContainer<HTML> [0,0 800x474] [children: 0] (z-index: auto)
+SC for Viewport<#document> [0,0 800x600] (z-index: auto)
+ SC for BlockContainer<HTML> [0,0 800x474] (z-index: auto)

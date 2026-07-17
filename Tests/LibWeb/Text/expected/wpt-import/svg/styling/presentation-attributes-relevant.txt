@@ -1,18 +1,20 @@
 Harness status: OK
 
-Found 58 tests
+Found 61 tests
 
-54 Pass
-4 Fail
+60 Pass
+1 Fail
 Pass	clip-path presentation attribute supported on a relevant element
 Pass	clip-rule presentation attribute supported on a relevant element
 Pass	color presentation attribute supported on a relevant element
+Pass	color-interpolation-filters presentation attribute supported on a relevant element
 Pass	color-interpolation presentation attribute supported on a relevant element
 Pass	cursor presentation attribute supported on a relevant element
 Pass	cx presentation attribute supported on a relevant element
 Pass	cy presentation attribute supported on a relevant element
 Pass	direction presentation attribute supported on a relevant element
 Pass	display presentation attribute supported on a relevant element
+Pass	dominant-baseline presentation attribute supported on a relevant element
 Pass	fill presentation attribute supported on a relevant element
 Pass	fill-opacity presentation attribute supported on a relevant element
 Pass	fill-rule presentation attribute supported on a relevant element
@@ -21,9 +23,9 @@ Pass	flood-color presentation attribute supported on a relevant element
 Pass	flood-opacity presentation attribute supported on a relevant element
 Pass	font-family presentation attribute supported on a relevant element
 Pass	font-size presentation attribute supported on a relevant element
-Fail	font-stretch presentation attribute supported on a relevant element
+Pass	font-stretch presentation attribute supported on a relevant element
 Pass	font-style presentation attribute supported on a relevant element
-Fail	font-variant presentation attribute supported on a relevant element
+Pass	font-variant presentation attribute supported on a relevant element
 Pass	font-weight presentation attribute supported on a relevant element
 Pass	height presentation attribute supported on a relevant element
 Pass	image-rendering presentation attribute supported on a relevant element
@@ -49,12 +51,13 @@ Pass	stroke-miterlimit presentation attribute supported on a relevant element
 Pass	stroke-opacity presentation attribute supported on a relevant element
 Pass	stroke-width presentation attribute supported on a relevant element
 Pass	text-anchor presentation attribute supported on a relevant element
-Fail	text-decoration presentation attribute supported on a relevant element
+Pass	text-decoration presentation attribute supported on a relevant element
 Pass	text-overflow presentation attribute supported on a relevant element
 Pass	text-rendering presentation attribute supported on a relevant element
 Pass	transform-origin presentation attribute supported on a relevant element
 Fail	transform presentation attribute supported on a relevant element
 Pass	unicode-bidi presentation attribute supported on a relevant element
+Pass	vector-effect presentation attribute supported on a relevant element
 Pass	visibility presentation attribute supported on a relevant element
 Pass	white-space presentation attribute supported on a relevant element
 Pass	width presentation attribute supported on a relevant element

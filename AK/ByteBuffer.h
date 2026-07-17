@@ -43,7 +43,7 @@ public:
     {
         if (this != &other) {
             if (!m_inline)
-                kfree_sized(m_outline_buffer, m_outline_capacity);
+                kfree(m_outline_buffer);
             move_from(move(other));
         }
         return *this;
@@ -147,11 +147,14 @@ public:
 #    pragma GCC diagnostic pop
 #endif
 
-    [[nodiscard]] Bytes bytes() LIFETIME_BOUND
+    [[nodiscard]] Bytes bytes() && LIFETIME_BOUND = delete;
+    [[nodiscard]] Bytes bytes() & LIFETIME_BOUND
     {
         return { data(), size() };
     }
-    [[nodiscard]] ReadonlyBytes bytes() const LIFETIME_BOUND { return { data(), size() }; }
+
+    [[nodiscard]] ReadonlyBytes bytes() const&& = delete;
+    [[nodiscard]] ReadonlyBytes bytes() const& LIFETIME_BOUND { return { data(), size() }; }
 
     [[nodiscard]] AK::Bytes span() LIFETIME_BOUND { return { data(), size() }; }
     [[nodiscard]] AK::ReadonlyBytes span() const LIFETIME_BOUND { return { data(), size() }; }
@@ -173,7 +176,7 @@ public:
     void clear()
     {
         if (!m_inline) {
-            kfree_sized(m_outline_buffer, m_outline_capacity);
+            kfree(m_outline_buffer);
             m_inline = true;
         }
         m_size = 0;
@@ -306,8 +309,10 @@ public:
         __builtin_memset(data(), 0, m_size);
     }
 
-    operator Bytes() LIFETIME_BOUND { return bytes(); }
-    operator ReadonlyBytes() const LIFETIME_BOUND { return bytes(); }
+    operator Bytes() && = delete;
+    operator Bytes() & LIFETIME_BOUND { return bytes(); }
+    operator ReadonlyBytes() const&& = delete;
+    operator ReadonlyBytes() const& LIFETIME_BOUND { return bytes(); }
 
     ALWAYS_INLINE size_t capacity() const { return m_inline ? inline_capacity : m_outline_capacity; }
     ALWAYS_INLINE bool is_inline() const { return m_inline; }
@@ -348,10 +353,9 @@ private:
     {
         // m_inline_buffer and m_outline_buffer are part of a union, so save the pointer
         auto* outline_buffer = m_outline_buffer;
-        auto outline_capacity = m_outline_capacity;
         if (!may_discard_existing_data)
             __builtin_memcpy(m_inline_buffer, outline_buffer, size);
-        kfree_sized(outline_buffer, outline_capacity);
+        kfree(outline_buffer);
         m_inline = true;
     }
 
@@ -372,7 +376,7 @@ private:
             __builtin_memcpy(new_buffer, data(), m_size);
         } else if (m_outline_buffer) {
             __builtin_memcpy(new_buffer, m_outline_buffer, min(new_capacity, m_outline_capacity));
-            kfree_sized(m_outline_buffer, m_outline_capacity);
+            kfree(m_outline_buffer);
         }
 
         m_outline_buffer = new_buffer;

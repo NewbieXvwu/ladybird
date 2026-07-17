@@ -1,0 +1,39 @@
+Program (script) @1:1
+├─ VariableDeclaration (var) @1:1
+│  └─ VariableDeclarator @1:1
+│     ├─ Identifier "f" [global] (var) @1:5
+│     └─ FunctionExpression "" [arrow] @1:9
+│        ├─ parameters
+│        │  ├─ BindingPattern (object)
+│        │  │  └─ entry
+│        │  │     ├─ name
+│        │  │     │  └─ Identifier "a" [global] @1:12
+│        │  │     └─ alias
+│        │  │        └─ Identifier "b" [variable:0] @1:15
+│        │  ├─ BindingPattern (object)
+│        │  │  ├─ entry
+│        │  │  │  ├─ name
+│        │  │  │  │  └─ Identifier "c" [global] @1:22
+│        │  │  │  └─ alias
+│        │  │  │     └─ Identifier "d" [variable:1] @1:25
+│        │  │  └─ entry
+│        │  │     ├─ name
+│        │  │     │  └─ Identifier "e" [global] @1:28
+│        │  │     └─ alias
+│        │  │        └─ Identifier "g" [variable:2] @1:31
+│        │  └─ Identifier "h" [argument:2] @1:10
+│        └─ body
+│           └─ FunctionBody @1:9
+│              └─ ReturnStatement @1:9
+│                 └─ Identifier "h" [argument:2] @1:42
+└─ VariableDeclaration (var) @2:1
+   └─ VariableDeclarator @2:1
+      ├─ Identifier "g" [global] (var) @2:5
+      └─ FunctionExpression "" [arrow] @2:9
+         ├─ parameters
+         │  ├─ BindingPattern (object)
+         │  └─ Identifier "i" [argument:1] @2:10
+         └─ body
+            └─ FunctionBody @2:9
+               └─ ReturnStatement @2:9
+                  └─ Identifier "i" [argument:1] @2:20

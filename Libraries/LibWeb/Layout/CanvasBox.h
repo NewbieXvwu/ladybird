@@ -12,18 +12,18 @@
 namespace Web::Layout {
 
 class CanvasBox final : public ReplacedBox {
-    GC_CELL(CanvasBox, ReplacedBox);
-    GC_DECLARE_ALLOCATOR(CanvasBox);
+    LAYOUT_NODE(CanvasBox, ReplacedBox);
 
 public:
-    CanvasBox(DOM::Document&, HTML::HTMLCanvasElement&, GC::Ref<CSS::ComputedProperties>);
+    CanvasBox(DOM::Document&, HTML::HTMLCanvasElement&, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~CanvasBox() override;
-
-    virtual void prepare_for_replaced_layout() override;
 
     HTML::HTMLCanvasElement const& dom_node() const { return static_cast<HTML::HTMLCanvasElement const&>(*ReplacedBox::dom_node()); }
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
+
+private:
+    virtual CSS::SizeWithAspectRatio compute_auto_content_box_size() const override;
 };
 
 }

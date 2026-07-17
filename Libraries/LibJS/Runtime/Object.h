@@ -26,6 +26,7 @@
 namespace JS {
 
 #define JS_OBJECT(class_, base_class) GC_CELL(class_, base_class)
+#define JS_OBJECT_WITH_CUSTOM_CLASS_NAME(class_, base_class) GC_CELL_WITH_CUSTOM_CLASS_NAME(class_, base_class)
 
 struct PrivateElement {
     enum class Kind {
@@ -37,23 +38,46 @@ struct PrivateElement {
     PrivateName key;
     Kind kind { Kind::Field };
     Value value;
+
+    void visit_edges(Cell::Visitor& visitor)
+    {
+        visitor.visit(value);
+    }
 };
 
 // Non-standard: This is information optionally returned by object property access functions.
 //               It can be used to implement inline caches for property lookup.
-struct CacheablePropertyMetadata {
+struct CacheableGetPropertyMetadata {
     enum class Type {
         NotCacheable,
-        OwnProperty,
-        InPrototypeChain,
+        GetOwnProperty,
+        GetPropertyInPrototypeChain,
     };
     Type type { Type::NotCacheable };
     Optional<u32> property_offset;
     GC::Ptr<Object const> prototype;
 };
 
-class JS_API Object : public Cell
-    , public Weakable<Object> {
+struct CacheableSetPropertyMetadata {
+    enum class Type {
+        NotCacheable,
+        AddOwnProperty,
+        ChangeOwnProperty,
+        ChangePropertyInPrototypeChain,
+    };
+    Type type { Type::NotCacheable };
+    Optional<u32> property_offset;
+    GC::Ptr<Object const> prototype;
+};
+
+enum class IndexedStorageKind : u8 {
+    None = 0,
+    Packed = 1,
+    Holey = 2,
+    Dictionary = 3,
+};
+
+class JS_API Object : public Cell {
     GC_CELL(Object, Cell);
     GC_DECLARE_ALLOCATOR(Object);
 
@@ -63,7 +87,7 @@ public:
     static GC::Ref<Object> create_with_premade_shape(Shape&);
 
     virtual void initialize(Realm&) override;
-    virtual ~Object();
+    GC_ALLOW_CELL_DESTRUCTOR virtual ~Object();
 
     enum class PropertyKind {
         Key,
@@ -109,12 +133,14 @@ public:
     // 7.3 Operations on Objects, https://tc39.es/ecma262/#sec-operations-on-objects
 
     ThrowCompletionOr<Value> get(PropertyKey const&) const;
+    ThrowCompletionOr<Value> get(PropertyKey const&, Bytecode::PropertyLookupCache&) const;
     ThrowCompletionOr<void> set(PropertyKey const&, Value, ShouldThrowExceptions);
-    ThrowCompletionOr<bool> create_data_property(PropertyKey const&, Value);
+    ThrowCompletionOr<void> set(PropertyKey const&, Value, Bytecode::PropertyLookupCache&);
+    ThrowCompletionOr<bool> create_data_property(PropertyKey const&, Value, Optional<u32>* new_property_offset = nullptr);
     void create_method_property(PropertyKey const&, Value);
     ThrowCompletionOr<bool> create_data_property_or_throw(PropertyKey const&, Value);
     void create_non_enumerable_data_property_or_throw(PropertyKey const&, Value);
-    ThrowCompletionOr<void> define_property_or_throw(PropertyKey const&, PropertyDescriptor const&);
+    ThrowCompletionOr<void> define_property_or_throw(PropertyKey const&, PropertyDescriptor&);
     ThrowCompletionOr<void> delete_property_or_throw(PropertyKey const&);
     ThrowCompletionOr<bool> has_property(PropertyKey const&) const;
     ThrowCompletionOr<bool> has_own_property(PropertyKey const&) const;
@@ -139,14 +165,14 @@ public:
     virtual ThrowCompletionOr<bool> internal_is_extensible() const;
     virtual ThrowCompletionOr<bool> internal_prevent_extensions();
     virtual ThrowCompletionOr<Optional<PropertyDescriptor>> internal_get_own_property(PropertyKey const&) const;
-    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const&, PropertyDescriptor const&, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr);
+    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const&, PropertyDescriptor&, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr);
     virtual ThrowCompletionOr<bool> internal_has_property(PropertyKey const&) const;
     enum class PropertyLookupPhase {
         OwnProperty,
         PrototypeChain,
     };
-    virtual ThrowCompletionOr<Value> internal_get(PropertyKey const&, Value receiver, CacheablePropertyMetadata* = nullptr, PropertyLookupPhase = PropertyLookupPhase::OwnProperty) const;
-    virtual ThrowCompletionOr<bool> internal_set(PropertyKey const&, Value value, Value receiver, CacheablePropertyMetadata* = nullptr, PropertyLookupPhase = PropertyLookupPhase::OwnProperty);
+    virtual ThrowCompletionOr<Value> internal_get(PropertyKey const&, Value receiver, CacheableGetPropertyMetadata* = nullptr, PropertyLookupPhase = PropertyLookupPhase::OwnProperty) const;
+    virtual ThrowCompletionOr<bool> internal_set(PropertyKey const&, Value value, Value receiver, CacheableSetPropertyMetadata* = nullptr, PropertyLookupPhase = PropertyLookupPhase::OwnProperty);
     virtual ThrowCompletionOr<bool> internal_delete(PropertyKey const&);
     virtual ThrowCompletionOr<GC::RootVector<Value>> internal_own_property_keys() const;
 
@@ -154,9 +180,19 @@ public:
     //       to customize access to indexed properties (properties where the name is a positive integer)
     //       must return true for this, to opt out of optimizations that rely on assumptions that
     //       might not hold when property access behaves differently.
-    bool may_interfere_with_indexed_property_access() const { return m_may_interfere_with_indexed_property_access; }
+    [[nodiscard]] bool extensible() const { return m_flags & Flag::IsExtensible; }
+    void set_extensible(bool value)
+    {
+        if (value)
+            m_flags |= Flag::IsExtensible;
+        else
+            m_flags &= ~Flag::IsExtensible;
+    }
 
-    ThrowCompletionOr<bool> ordinary_set_with_own_descriptor(PropertyKey const&, Value, Value, Optional<PropertyDescriptor>, CacheablePropertyMetadata* = nullptr, PropertyLookupPhase = PropertyLookupPhase::OwnProperty);
+    [[nodiscard]] bool may_interfere_with_indexed_property_access() const { return m_flags & Flag::MayInterfereWithIndexedPropertyAccess; }
+    void set_may_interfere_with_indexed_property_access() { m_flags |= Flag::MayInterfereWithIndexedPropertyAccess; }
+
+    ThrowCompletionOr<bool> ordinary_set_with_own_descriptor(PropertyKey const&, Value, Value, Optional<PropertyDescriptor>, CacheableSetPropertyMetadata* = nullptr, PropertyLookupPhase = PropertyLookupPhase::OwnProperty);
 
     // 10.4.7 Immutable Prototype Exotic Objects, https://tc39.es/ecma262/#sec-immutable-prototype-exotic-objects
 
@@ -174,29 +210,40 @@ public:
 
     Optional<ValueAndAttributes> storage_get(PropertyKey const&) const;
     bool storage_has(PropertyKey const&) const;
-    void storage_set(PropertyKey const&, ValueAndAttributes const&);
+    Optional<u32> storage_set(PropertyKey const&, ValueAndAttributes const&);
     void storage_delete(PropertyKey const&);
 
     // Non-standard methods
 
+    ThrowCompletionOr<void> for_each_own_property_with_enumerability(Function<ThrowCompletionOr<void>(PropertyKey const&, bool)>&&) const;
+    size_t own_properties_count() const;
+
     Value get_without_side_effects(PropertyKey const&) const;
 
-    void define_direct_property(PropertyKey const& property_key, Value value, PropertyAttributes attributes) { storage_set(property_key, { value, attributes }); }
+    void define_direct_property(PropertyKey const& property_key, Value value, PropertyAttributes attributes) { (void)storage_set(property_key, { value, attributes }); }
     void define_direct_accessor(PropertyKey const&, FunctionObject* getter, FunctionObject* setter, PropertyAttributes attributes);
 
     using IntrinsicAccessor = Value (*)(Realm&);
     void define_intrinsic_accessor(PropertyKey const&, PropertyAttributes attributes, IntrinsicAccessor accessor);
 
+    void define_native_function(Realm&, PropertyKey const&, NativeFunctionPointer, i32 length, PropertyAttributes attributes, Optional<Bytecode::Builtin> builtin = {});
     void define_native_function(Realm&, PropertyKey const&, ESCAPING Function<ThrowCompletionOr<Value>(VM&)>, i32 length, PropertyAttributes attributes, Optional<Bytecode::Builtin> builtin = {});
+    void define_native_accessor(Realm&, PropertyKey const&, NativeFunctionPointer getter, NativeFunctionPointer setter, PropertyAttributes attributes);
     void define_native_accessor(Realm&, PropertyKey const&, ESCAPING Function<ThrowCompletionOr<Value>(VM&)> getter, ESCAPING Function<ThrowCompletionOr<Value>(VM&)> setter, PropertyAttributes attributes);
+    void define_native_javascript_backed_function(PropertyKey const&, GC::Ref<NativeJavaScriptBackedFunction> function, i32 length, PropertyAttributes attributes);
 
     virtual bool is_dom_node() const { return false; }
+    virtual bool is_dom_document() const { return false; }
+    virtual bool is_dom_element() const { return false; }
+    virtual bool is_dom_event_target() const { return false; }
     virtual bool is_dom_event() const { return false; }
     virtual bool is_html_window() const { return false; }
     virtual bool is_html_window_proxy() const { return false; }
     virtual bool is_html_location() const { return false; }
+    virtual bool is_canvas_rendering_context_2d() const { return false; }
 
-    virtual bool is_function() const { return false; }
+    [[nodiscard]] bool is_function() const { return m_flags & Flag::IsFunction; }
+    virtual bool is_bound_function() const { return false; }
     virtual bool is_promise() const { return false; }
     virtual bool is_error_object() const { return false; }
     virtual bool is_date() const { return false; }
@@ -205,15 +252,35 @@ public:
     virtual bool is_regexp_object() const { return false; }
     virtual bool is_bigint_object() const { return false; }
     virtual bool is_string_object() const { return false; }
+    virtual bool is_array_buffer() const { return false; }
     virtual bool is_array_exotic_object() const { return false; }
     virtual bool is_global_object() const { return false; }
     virtual bool is_proxy_object() const { return false; }
     virtual bool is_native_function() const { return false; }
-    virtual bool is_ecmascript_function_object() const { return false; }
+    [[nodiscard]] bool is_raw_native_function() const { return m_flags & Flag::IsRawNativeFunction; }
+    [[nodiscard]] bool is_ecmascript_function_object() const { return m_flags & Flag::IsECMAScriptFunctionObject; }
+    void set_is_ecmascript_function_object() { m_flags |= Flag::IsECMAScriptFunctionObject; }
+    void set_is_function() { m_flags |= Flag::IsFunction; }
+    void set_is_raw_native_function() { m_flags |= Flag::IsRawNativeFunction; }
+    void clear_is_function() { m_flags &= ~Flag::IsFunction; }
     virtual bool is_array_iterator() const { return false; }
     virtual bool is_raw_json_object() const { return false; }
+    virtual bool is_set_object() const { return false; }
+    virtual bool is_map_object() const { return false; }
+    virtual bool is_weak_map() const { return false; }
+    virtual ErrorData* error_data() { return nullptr; }
+    virtual ErrorData const* error_data() const { return nullptr; }
+    bool has_error_data() const { return error_data(); }
 
-    virtual BuiltinIterator* as_builtin_iterator_if_next_is_not_redefined(IteratorRecord const&) { return nullptr; }
+    virtual bool is_typed_array_base() const { return false; }
+#define __JS_ENUMERATE(ClassName, snake_name, PrototypeName, ConstructorName, Type) \
+    virtual bool is_##snake_name() const { return false; }
+    JS_ENUMERATE_TYPED_ARRAYS
+#undef __JS_ENUMERATE
+
+    virtual bool eligible_for_own_property_enumeration_fast_path() const { return true; }
+
+    virtual BuiltinIterator* as_builtin_iterator_if_next_is_not_redefined([[maybe_unused]] Value next_method) { return nullptr; }
 
     virtual bool is_array_iterator_prototype() const { return false; }
     virtual bool is_map_iterator_prototype() const { return false; }
@@ -223,20 +290,58 @@ public:
     // B.3.7 The [[IsHTMLDDA]] Internal Slot, https://tc39.es/ecma262/#sec-IsHTMLDDA-internal-slot
     virtual bool is_htmldda() const { return false; }
 
-    bool has_parameter_map() const { return m_has_parameter_map; }
-    void set_has_parameter_map() { m_has_parameter_map = true; }
+    bool has_parameter_map() const { return shape().has_parameter_map(); }
 
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
-    Value get_direct(size_t index) const { return m_storage[index]; }
-    void put_direct(size_t index, Value value) { m_storage[index] = value; }
+    Value get_direct(size_t index) const { return m_named_properties[index]; }
+    void put_direct(size_t index, Value value) { m_named_properties[index] = value; }
 
-    IndexedProperties const& indexed_properties() const { return m_indexed_properties; }
-    IndexedProperties& indexed_properties() { return m_indexed_properties; }
-    void set_indexed_property_elements(Vector<Value>&& values) { m_indexed_properties = IndexedProperties(move(values)); }
+    // Indexed property storage
+    Optional<ValueAndAttributes> indexed_get(u32 index) const;
+    void indexed_put(u32 index, Value, PropertyAttributes attributes = default_attributes);
+    bool indexed_has(u32 index) const;
+    void indexed_delete(u32 index);
+    u32 indexed_array_like_size() const { return m_indexed_array_like_size; }
+    bool set_indexed_array_like_size(size_t new_size);
+    void indexed_append(Value value, PropertyAttributes attributes = default_attributes);
+    ValueAndAttributes indexed_take_first();
+    ValueAndAttributes indexed_take_last();
+    size_t indexed_real_size() const;
+    Vector<u32> indexed_indices() const;
+    void set_indexed_property_elements(Vector<Value>&& values);
+    IndexedStorageKind indexed_storage_kind() const { return m_indexed_storage_kind; }
+
+    template<typename Callback>
+    void indexed_for_each_value(Callback callback)
+    {
+        switch (m_indexed_storage_kind) {
+        case IndexedStorageKind::None:
+            break;
+        case IndexedStorageKind::Packed:
+            for (u32 i = 0; i < m_indexed_array_like_size; ++i)
+                callback(m_indexed_elements[i]);
+            break;
+        case IndexedStorageKind::Holey:
+            for (u32 i = 0, available_elements = min(m_indexed_array_like_size, indexed_elements_capacity()); i < available_elements; ++i) {
+                if (!m_indexed_elements[i].is_special_empty_value())
+                    callback(m_indexed_elements[i]);
+            }
+            break;
+        case IndexedStorageKind::Dictionary:
+            for (auto& element : indexed_dictionary()->sparse_elements())
+                callback(element.value.value);
+            break;
+        }
+    }
+
+    // For FunctionPrototype.apply fast path
+    ReadonlySpan<Value> indexed_packed_elements_span() const;
 
     Shape& shape() { return *m_shape; }
     Shape const& shape() const { return *m_shape; }
+    void unsafe_set_shape(Shape&);
 
     void convert_to_prototype_if_needed();
 
@@ -245,10 +350,14 @@ public:
 
     void set_prototype(Object*);
 
-    [[nodiscard]] bool has_magical_length_property() const { return m_has_magical_length_property; }
+    [[nodiscard]] bool has_magical_length_property() const { return m_flags & Flag::HasMagicalLengthProperty; }
+    void set_has_magical_length_property() { m_flags |= Flag::HasMagicalLengthProperty; }
 
-    [[nodiscard]] bool is_typed_array() const { return m_is_typed_array; }
-    void set_is_typed_array() { m_is_typed_array = true; }
+    [[nodiscard]] bool is_typed_array() const { return m_flags & Flag::IsTypedArray; }
+    void set_is_typed_array() { m_flags |= Flag::IsTypedArray; }
+
+    [[nodiscard]] bool has_intrinsic_accessors() const { return m_flags & Flag::HasIntrinsicAccessors; }
+    void set_has_intrinsic_accessors() { m_flags |= Flag::HasIntrinsicAccessors; }
 
     Object const* prototype() const { return shape().prototype(); }
 
@@ -263,32 +372,51 @@ protected:
     Object(ConstructWithPrototypeTag, Object& prototype, MayInterfereWithIndexedPropertyAccess = MayInterfereWithIndexedPropertyAccess::No);
     explicit Object(Shape&, MayInterfereWithIndexedPropertyAccess = MayInterfereWithIndexedPropertyAccess::No);
 
-    void unsafe_set_shape(Shape&);
-
-    // [[Extensible]]
-    bool m_is_extensible { true };
-
-    // [[ParameterMap]]
-    bool m_has_parameter_map { false };
-
-    bool m_has_magical_length_property { false };
-
-    bool m_is_typed_array { false };
-
 private:
+    struct Flag {
+        static constexpr u8 IsExtensible = 1 << 0;
+        static constexpr u8 IsRawNativeFunction = 1 << 1;
+        static constexpr u8 HasMagicalLengthProperty = 1 << 2;
+        static constexpr u8 IsTypedArray = 1 << 3;
+        static constexpr u8 MayInterfereWithIndexedPropertyAccess = 1 << 4;
+        static constexpr u8 HasIntrinsicAccessors = 1 << 5;
+        static constexpr u8 IsECMAScriptFunctionObject = 1 << 6;
+        static constexpr u8 IsFunction = 1 << 7;
+    };
+
+    u8 m_flags { Flag::IsExtensible };
+    IndexedStorageKind m_indexed_storage_kind { IndexedStorageKind::None };
+    // 2 bytes padding
+    u32 m_indexed_array_like_size { 0 };
     void set_shape(Shape& shape) { m_shape = &shape; }
 
     Object* prototype() { return shape().prototype(); }
 
-    bool m_may_interfere_with_indexed_property_access { false };
+    // Indexed storage helpers
+    GenericIndexedPropertyStorage* indexed_dictionary() const;
+    u32 indexed_elements_capacity() const;
+    void ensure_indexed_elements(u32 needed_capacity);
+    void grow_indexed_elements(u32 needed_capacity);
+    void transition_to_dictionary();
+    void free_indexed_elements();
+    void ensure_named_storage_capacity(u32 needed);
+    bool named_storage_is_inline() const { return m_named_properties == const_cast<Object*>(this)->m_inline_named_storage; }
+    size_t named_storage_external_memory_size() const;
+    size_t indexed_storage_external_memory_size() const;
 
-    // True if this object has lazily allocated intrinsic properties.
-    bool m_has_intrinsic_accessors { false };
+public:
+    static constexpr u32 INLINE_NAMED_PROPERTY_CAPACITY = 2;
 
+private:
     GC::Ptr<Shape> m_shape;
-    Vector<Value> m_storage;
-    IndexedProperties m_indexed_properties;
+    Value* m_named_properties { m_inline_named_storage };
+    Value* m_indexed_elements { nullptr };
     OwnPtr<Vector<PrivateElement>> m_private_elements; // [[PrivateElements]]
+    Value m_inline_named_storage[INLINE_NAMED_PROPERTY_CAPACITY] {};
 };
+
+#if !defined(AK_OS_WINDOWS)
+static_assert(sizeof(Object) <= 64, "Keep the size of JS::Object down!");
+#endif
 
 }

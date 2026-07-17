@@ -26,6 +26,7 @@ private:
     };
 
     struct EntryTraits {
+        static constexpr bool may_have_slow_equality_check() { return KeyTraits::may_have_slow_equality_check(); }
         static unsigned hash(Entry const& entry) { return KeyTraits::hash(entry.key); }
         static bool equals(Entry const& a, Entry const& b) { return KeyTraits::equals(a.key, b.key); }
     };
@@ -264,25 +265,15 @@ public:
         return take(begin()->key).release_value();
     }
 
-    V& ensure(K const& key)
+    template<typename Callback>
+    V& ensure(K const& key, Callback initialization_callback, HashSetExistingEntryBehavior existing_entry_behavior = HashSetExistingEntryBehavior::Keep)
     {
-        auto it = find(key);
-        if (it != end())
-            return it->value;
-        auto result = set(key, V());
-        VERIFY(result == HashSetResult::InsertedNewEntry);
-        return find(key)->value;
+        return m_table.ensure(KeyTraits::hash(key), [&](auto& entry) { return KeyTraits::equals(entry.key, key); }, [&] -> Entry { return { key, initialization_callback() }; }, existing_entry_behavior).value;
     }
 
-    template<typename Callback>
-    V& ensure(K const& key, Callback initialization_callback)
+    V& ensure(K const& key)
     {
-        auto it = find(key);
-        if (it != end())
-            return it->value;
-        auto result = set(key, initialization_callback());
-        VERIFY(result == HashSetResult::InsertedNewEntry);
-        return find(key)->value;
+        return ensure(key, [] { return V(); });
     }
 
     template<typename Callback>
@@ -308,16 +299,6 @@ public:
         for (auto const& [key, _] : *this)
             list.unchecked_append(key);
         return list;
-    }
-
-    [[nodiscard]] u32 hash() const
-    {
-        u32 hash = 0;
-        for (auto const& [key, value] : *this) {
-            auto entry_hash = pair_int_hash(key.hash(), value.hash());
-            hash = pair_int_hash(hash, entry_hash);
-        }
-        return hash;
     }
 
     template<typename NewKeyTraits = KeyTraits, typename NewValueTraits = ValueTraits, bool NewIsOrdered = IsOrdered>

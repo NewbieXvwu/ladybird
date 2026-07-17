@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<script>
+    asyncTest(async () => {
+        const server = httpTestServer();
+        const targetURL = await server.createEcho("GET", "/top-level-navigation-not-blocked-by-connect-src-target", {
+            status: 200,
+            headers: {
+                "Content-Type": "text/html",
+            },
+            body: `<script>internals.signalTestIsDone("PASS\\n");</scr` + `ipt>`,
+        });
+
+        const meta = document.createElement("meta");
+        meta.httpEquiv = "Content-Security-Policy";
+        meta.content = "connect-src 'none'";
+        document.head.appendChild(meta);
+
+        // NB: test-web only completes Text tests after the original test page has finished loading.
+        // Navigating before it observes that can leave this test waiting forever, even after the target page reports PASS.
+        if (document.readyState !== "complete")
+            await new Promise(resolve => addEventListener("load", resolve, { once: true }));
+        await timeout(0);
+
+        location.href = targetURL;
+    });
+</script>

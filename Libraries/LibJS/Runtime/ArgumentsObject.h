@@ -21,15 +21,15 @@ public:
     virtual ~ArgumentsObject() override = default;
 
     virtual ThrowCompletionOr<Optional<PropertyDescriptor>> internal_get_own_property(PropertyKey const&) const override;
-    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const&, PropertyDescriptor const&, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr) override;
-    virtual ThrowCompletionOr<Value> internal_get(PropertyKey const&, Value receiver, CacheablePropertyMetadata*, PropertyLookupPhase) const override;
-    virtual ThrowCompletionOr<bool> internal_set(PropertyKey const&, Value value, Value receiver, CacheablePropertyMetadata*, PropertyLookupPhase) override;
+    virtual ThrowCompletionOr<bool> internal_define_own_property(PropertyKey const&, PropertyDescriptor&, Optional<PropertyDescriptor>* precomputed_get_own_property = nullptr) override;
+    virtual ThrowCompletionOr<Value> internal_get(PropertyKey const&, Value receiver, CacheableGetPropertyMetadata*, PropertyLookupPhase) const override;
+    virtual ThrowCompletionOr<bool> internal_set(PropertyKey const&, Value value, Value receiver, CacheableSetPropertyMetadata*, PropertyLookupPhase) override;
     virtual ThrowCompletionOr<bool> internal_delete(PropertyKey const&) override;
 
     void set_mapped_names(Vector<Utf16FlyString> mapped_names) { m_mapped_names = move(mapped_names); }
 
 private:
-    ArgumentsObject(Realm&, Environment&);
+    ArgumentsObject(Realm&, Environment&, bool parameter_list_is_empty);
 
     [[nodiscard]] bool parameter_map_has(PropertyKey const&) const;
     [[nodiscard]] Value get_from_parameter_map(PropertyKey const&) const;
@@ -37,6 +37,7 @@ private:
     void delete_from_parameter_map(PropertyKey const&);
 
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     GC::Ref<Environment> m_environment;
     Vector<Utf16FlyString> m_mapped_names;

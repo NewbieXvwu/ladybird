@@ -7,16 +7,14 @@
 #pragma once
 
 #include <LibWeb/Forward.h>
-#include <LibWeb/Painting/LabelablePaintable.h>
+#include <LibWeb/Painting/Paintable.h>
 
 namespace Web::Painting {
 
-class RadioButtonPaintable final : public LabelablePaintable {
-    GC_CELL(RadioButtonPaintable, LabelablePaintable);
-    GC_DECLARE_ALLOCATOR(RadioButtonPaintable);
-
+class RadioButtonPaintable final : public Paintable {
 public:
-    static GC::Ref<RadioButtonPaintable> create(Layout::RadioButton const&);
+    static NonnullRefPtr<RadioButtonPaintable> create(Layout::RadioButton const&);
+    virtual StringView class_name() const override { return "RadioButtonPaintable"sv; }
 
     virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
 

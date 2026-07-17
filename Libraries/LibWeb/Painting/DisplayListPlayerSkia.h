@@ -1,71 +1,65 @@
 /*
- * Copyright (c) 2024, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2024-2026, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <LibGfx/SkiaBackendContext.h>
+#include <AK/Function.h>
+#include <AK/NonnullRefPtr.h>
+#include <AK/RefPtr.h>
+#include <LibGfx/Forward.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListCommand.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 
 class GrDirectContext;
+class SkPaint;
 
 namespace Web::Painting {
 
-class DisplayListPlayerSkia final : public DisplayListPlayer {
+class WEB_API DisplayListPlayerSkia final : public DisplayListPlayer {
 public:
-    DisplayListPlayerSkia(RefPtr<Gfx::SkiaBackendContext>);
+    using CompositedContextResolver = Function<RefPtr<Gfx::PaintingSurface>(Web::Compositor::CompositorContextId)>;
+
     DisplayListPlayerSkia();
+    explicit DisplayListPlayerSkia(RefPtr<Gfx::SkiaBackendContext>);
     ~DisplayListPlayerSkia();
 
+    using DisplayListPlayer::execute;
+    void execute(
+        DisplayList const&,
+        AccumulatedVisualContextTree const&,
+        DisplayListResourceStorage const&,
+        ScrollStateSnapshot const&,
+        RefPtr<Gfx::PaintingSurface>,
+        CanvasSurfaceRegistry const*,
+        CompositedContextResolver const*);
+
+    void flush(Gfx::PaintingSurface&) override;
+    void flush_async(Gfx::PaintingSurface&, Function<void()>&&);
+    void paint_scrollbar(Gfx::PaintingSurface&, PaintScrollBar const&);
+
 private:
-    void flush() override;
-    void draw_glyph_run(DrawGlyphRun const&) override;
-    void fill_rect(FillRect const&) override;
-    void draw_painting_surface(DrawPaintingSurface const&) override;
-    void draw_scaled_immutable_bitmap(DrawScaledImmutableBitmap const&) override;
-    void draw_repeated_immutable_bitmap(DrawRepeatedImmutableBitmap const&) override;
-    void add_clip_rect(AddClipRect const&) override;
-    void save(Save const&) override;
-    void save_layer(SaveLayer const&) override;
-    void restore(Restore const&) override;
-    void translate(Translate const&) override;
-    void push_stacking_context(PushStackingContext const&) override;
-    void pop_stacking_context(PopStackingContext const&) override;
-    void paint_linear_gradient(PaintLinearGradient const&) override;
-    void paint_outer_box_shadow(PaintOuterBoxShadow const&) override;
-    void paint_inner_box_shadow(PaintInnerBoxShadow const&) override;
-    void paint_text_shadow(PaintTextShadow const&) override;
-    void fill_rect_with_rounded_corners(FillRectWithRoundedCorners const&) override;
-    void fill_path(FillPath const&) override;
-    void stroke_path(StrokePath const&) override;
-    void draw_ellipse(DrawEllipse const&) override;
-    void fill_ellipse(FillEllipse const&) override;
-    void draw_line(DrawLine const&) override;
-    void apply_backdrop_filter(ApplyBackdropFilter const&) override;
-    void draw_rect(DrawRect const&) override;
-    void paint_radial_gradient(PaintRadialGradient const&) override;
-    void paint_conic_gradient(PaintConicGradient const&) override;
-    void add_rounded_rect_clip(AddRoundedRectClip const&) override;
-    void add_mask(AddMask const&) override;
-    void paint_scrollbar(PaintScrollBar const&) override;
-    void paint_nested_display_list(PaintNestedDisplayList const&) override;
-    void apply_opacity(ApplyOpacity const&) override;
-    void apply_composite_and_blending_operator(ApplyCompositeAndBlendingOperator const&) override;
-    void apply_filters(ApplyFilter const&) override;
-    void apply_transform(ApplyTransform const&) override;
-    void apply_mask_bitmap(ApplyMaskBitmap const&) override;
+#define DECLARE_PLAY_COMMAND(command_type, player_method) \
+    void play_command(command_type const&) override;
+    ENUMERATE_DISPLAY_LIST_COMMANDS(DECLARE_PLAY_COMMAND)
+#undef DECLARE_PLAY_COMMAND
+    void play_command(ApplyEffects const&, Gfx::Filter const*) override;
+    void apply_transform(Gfx::FloatPoint origin, Gfx::FloatMatrix4x4 const&) override;
+
+    void add_clip_path(Gfx::Path const&, Gfx::WindingRule) override;
 
     bool would_be_fully_clipped_by_painter(Gfx::IntRect) const override;
 
-    RefPtr<Gfx::SkiaBackendContext> m_context;
+    SkPaint paint_style_to_skia_paint(DisplayListPaintStyle const&, Gfx::FloatRect const& bounding_rect);
+    Gfx::Path path_from_data(DisplayListDataSpan) const;
+    ReadonlySpan<Color> gradient_colors(DisplayListGradientColorStops) const;
+    ReadonlySpan<float> gradient_positions(DisplayListGradientColorStops) const;
 
-    struct CachedRuntimeEffects;
-    OwnPtr<CachedRuntimeEffects> m_cached_runtime_effects;
-    CachedRuntimeEffects& cached_runtime_effects();
+    RefPtr<Gfx::SkiaBackendContext> m_skia_backend_context;
+    CompositedContextResolver const* m_composited_context_resolver { nullptr };
 };
 
 }

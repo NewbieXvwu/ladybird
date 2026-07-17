@@ -6,20 +6,47 @@
 
 #include <AK/CharacterTypes.h>
 #include <AK/Find.h>
-#include <LibJS/Lexer.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibJS/Runtime/Error.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/RegExpConstructor.h>
 #include <LibJS/Runtime/RegExpObject.h>
 #include <LibJS/Runtime/Value.h>
+#include <LibUnicode/CharacterTypes.h>
 
 namespace JS {
+
+static bool is_syntax_character(u32 code_point)
+{
+    static constexpr auto syntax_characters = "^$\\.*+?()[]{}|"sv;
+    return is_ascii(code_point) && syntax_characters.contains(static_cast<char>(code_point));
+}
+
+static bool is_whitespace(u32 code_point)
+{
+    if (is_ascii_space(code_point))
+        return true;
+    if (code_point == 0x00A0 || code_point == 0xFEFF)
+        return true;
+    return Unicode::code_point_has_space_separator_general_category(code_point);
+}
+
+static bool is_line_terminator(u32 code_point)
+{
+    return code_point == '\n' || code_point == '\r' || code_point == 0x2028 || code_point == 0x2029;
+}
 
 GC_DEFINE_ALLOCATOR(RegExpConstructor);
 
 RegExpConstructor::RegExpConstructor(Realm& realm)
     : NativeFunction(realm.vm().names.RegExp.as_string(), realm.intrinsics().function_prototype())
 {
+}
+
+void RegExpConstructor::visit_edges(Cell::Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    m_legacy_static_properties.visit_edges(visitor);
 }
 
 void RegExpConstructor::initialize(Realm& realm)
@@ -83,7 +110,8 @@ ThrowCompletionOr<Value> RegExpConstructor::call()
             return pattern;
     }
 
-    return TRY(construct(new_target));
+    // Reuse the already-computed patternIsRegExp to avoid re-reading @@match.
+    return TRY(construct_impl(new_target, pattern_is_regexp));
 }
 
 // 22.2.4.1 RegExp ( pattern, flags ), https://tc39.es/ecma262/#sec-regexp-pattern-flags
@@ -91,27 +119,31 @@ ThrowCompletionOr<GC::Ref<Object>> RegExpConstructor::construct(FunctionObject& 
 {
     auto& vm = this->vm();
 
+    // 1. Let patternIsRegExp be ? IsRegExp(pattern).
+    bool pattern_is_regexp = TRY(vm.argument(0).is_regexp(vm));
+
+    // 3. Else, let newTarget be NewTarget.
+    return construct_impl(new_target, pattern_is_regexp);
+}
+
+ThrowCompletionOr<GC::Ref<Object>> RegExpConstructor::construct_impl(FunctionObject& new_target, bool pattern_is_regexp)
+{
+    auto& vm = this->vm();
+
     auto pattern = vm.argument(0);
     auto flags = vm.argument(1);
-
-    // 1. Let patternIsRegExp be ? IsRegExp(pattern).
-    bool pattern_is_regexp = TRY(pattern.is_regexp(vm));
-
-    // NOTE: Step 2 is handled in call() above.
-    // 3. Else, let newTarget be NewTarget.
 
     Value pattern_value;
     Value flags_value;
 
     // 4. If pattern is an Object and pattern has a [[RegExpMatcher]] internal slot, then
-    if (pattern.is_object() && is<RegExpObject>(pattern.as_object())) {
+    if (auto regexp_pattern = pattern.as_if<RegExpObject>()) {
         // a. Let P be pattern.[[OriginalSource]].
-        auto& regexp_pattern = static_cast<RegExpObject&>(pattern.as_object());
-        pattern_value = PrimitiveString::create(vm, regexp_pattern.pattern());
+        pattern_value = PrimitiveString::create(vm, regexp_pattern->pattern());
 
         // b. If flags is undefined, let F be pattern.[[OriginalFlags]].
         if (flags.is_undefined())
-            flags_value = PrimitiveString::create(vm, regexp_pattern.flags());
+            flags_value = PrimitiveString::create(vm, regexp_pattern->flags());
         // c. Else, let F be flags.
         else
             flags_value = flags;
@@ -148,7 +180,7 @@ ThrowCompletionOr<GC::Ref<Object>> RegExpConstructor::construct(FunctionObject& 
 }
 
 // 22.2.5.1.1 EncodeForRegExpEscape ( cp ), https://tc39.es/ecma262/#sec-encodeforregexpescape
-static String encode_for_regexp_escape(u32 code_point)
+static Utf16String encode_for_regexp_escape(u32 code_point)
 {
     // https://tc39.es/ecma262/#table-controlescape-code-point-values
     // Table 63: ControlEscape Code Point Values
@@ -165,9 +197,12 @@ static String encode_for_regexp_escape(u32 code_point)
     });
 
     // 1. If c is matched by SyntaxCharacter or c is U+002F (SOLIDUS), then
-    if (JS::is_syntax_character(code_point) || code_point == '/') {
+    if (is_syntax_character(code_point) || code_point == '/') {
         // a. Return the string-concatenation of 0x005C (REVERSE SOLIDUS) and UTF16EncodeCodePoint(c).
-        return MUST(String::formatted("\\{}", String::from_code_point(code_point)));
+        Utf16StringBuilder builder;
+        builder.append_ascii('\\');
+        builder.append_code_point(code_point);
+        return builder.to_string();
     }
 
     // 2. Else if c is the code point listed in some cell of the “Code Point” column of Table 63, then
@@ -178,23 +213,26 @@ static String encode_for_regexp_escape(u32 code_point)
     if (it != control_escapes.end()) {
         // a. Return the string-concatenation of 0x005C (REVERSE SOLIDUS) and the string in the “ControlEscape” column
         //    of the row whose “Code Point” column contains c.
-        return MUST(String::formatted("\\{}", it->control_escape));
+        Utf16StringBuilder builder;
+        builder.append_ascii('\\');
+        builder.append_ascii(it->control_escape);
+        return builder.to_string();
     }
 
     // 3. Let otherPunctuators be the string-concatenation of ",-=<>#&!%:;@~'`" and the code unit 0x0022 (QUOTATION MARK).
     // 4. Let toEscape be StringToCodePoints(otherPunctuators).
-    static constexpr Utf8View to_escape { ",-=<>#&!%:;@~'`\""sv };
+    static constexpr auto to_escape = ",-=<>#&!%:;@~'`\""sv;
 
     // 5. If toEscape contains c, c is matched by either WhiteSpace or LineTerminator, or c has the same numeric value
     //    as a leading surrogate or trailing surrogate, then
-    if (to_escape.contains(code_point) || JS::is_whitespace(code_point) || JS::is_line_terminator(code_point) || is_unicode_surrogate(code_point)) {
+    if ((is_ascii(code_point) && to_escape.contains(static_cast<char>(code_point))) || is_whitespace(code_point) || is_line_terminator(code_point) || is_unicode_surrogate(code_point)) {
         // a. Let cNum be the numeric value of c.
         // b. If cNum ≤ 0xFF, then
         if (code_point <= 0xFF) {
             // i. Let hex be Number::toString(𝔽(cNum), 16).
             // ii. Return the string-concatenation of the code unit 0x005C (REVERSE SOLIDUS), "x", and
             //     StringPad(hex, 2, "0", START).
-            return MUST(String::formatted("\\x{:02x}", code_point));
+            return Utf16String::formatted("\\x{:02x}", code_point);
         }
 
         // c. Let escaped be the empty String.
@@ -202,11 +240,11 @@ static String encode_for_regexp_escape(u32 code_point)
         // e. For each code unit cu of codeUnits, do
         //     i. Set escaped to the string-concatenation of escaped and UnicodeEscape(cu).
         // f. Return escaped.
-        return MUST(String::formatted("\\u{:04x}", code_point));
+        return Utf16String::formatted("\\u{:04x}", code_point);
     }
 
     // 6. Return UTF16EncodeCodePoint(c).
-    return String::from_code_point(code_point);
+    return Utf16String::from_code_point(code_point);
 }
 
 // 22.2.5.1 RegExp.escape ( S ), https://tc39.es/ecma262/#sec-regexp.escape
@@ -219,13 +257,13 @@ JS_DEFINE_NATIVE_FUNCTION(RegExpConstructor::escape)
         return vm.throw_completion<TypeError>(ErrorType::NotAString, string);
 
     // 2. Let escaped be the empty String.
-    StringBuilder escaped(string.as_string().utf8_string().byte_count());
+    auto code_point_list = string.as_string().utf16_string_view();
+    Utf16StringBuilder escaped(string.as_string().utf16_string_view().length_in_code_units());
 
     // 3. Let cpList be StringToCodePoints(S).
-    auto code_point_list = string.as_string().utf8_string();
 
     // 4. For each code point c of cpList, do
-    for (auto code_point : code_point_list.code_points()) {
+    for (auto code_point : code_point_list) {
         // a. If escaped is the empty String and c is matched by either DecimalDigit or AsciiLetter, then
         if (escaped.is_empty() && is_ascii_alphanumeric(code_point)) {
             // i. NOTE: Escaping a leading digit ensures that output corresponds with pattern text which may be used
@@ -247,7 +285,7 @@ JS_DEFINE_NATIVE_FUNCTION(RegExpConstructor::escape)
     }
 
     // 5. Return escaped.
-    return JS::PrimitiveString::create(vm, MUST(escaped.to_string()));
+    return JS::PrimitiveString::create(vm, escaped.to_string());
 }
 
 // 22.2.5.3 get RegExp [ %Symbol.species% ], https://tc39.es/ecma262/#sec-get-regexp-@@species

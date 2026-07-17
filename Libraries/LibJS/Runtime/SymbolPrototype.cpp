@@ -36,7 +36,7 @@ void SymbolPrototype::initialize(Realm& realm)
     define_native_function(realm, vm.well_known_symbol_to_primitive(), symbol_to_primitive, 1, Attribute::Configurable);
 
     // 20.4.3.6 Symbol.prototype [ @@toStringTag ], https://tc39.es/ecma262/#sec-symbol.prototype-@@tostringtag
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Symbol"_string), Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Symbol"_utf16_fly_string), Attribute::Configurable);
 }
 
 // thisSymbolValue ( value ), https://tc39.es/ecma262/#thissymbolvalue
@@ -47,11 +47,11 @@ static ThrowCompletionOr<GC::Ref<Symbol>> this_symbol_value(VM& vm, Value value)
         return value.as_symbol();
 
     // 2. If value is an Object and value has a [[SymbolData]] internal slot, then
-    if (value.is_object() && is<SymbolObject>(value.as_object())) {
+    if (auto symbol = value.as_if<SymbolObject>()) {
         // a. Let s be value.[[SymbolData]].
         // b. Assert: s is a Symbol.
         // c. Return s.
-        return static_cast<SymbolObject&>(value.as_object()).primitive_symbol();
+        return symbol->primitive_symbol();
     }
 
     // 3. Throw a TypeError exception.

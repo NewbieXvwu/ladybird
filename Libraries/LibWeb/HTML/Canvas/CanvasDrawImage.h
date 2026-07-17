@@ -1,23 +1,31 @@
 /*
  * Copyright (c) 2022, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <AK/Optional.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibGfx/Size.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/HTMLCanvasElement.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/HTMLVideoElement.h>
 #include <LibWeb/HTML/OffscreenCanvas.h>
+#include <LibWeb/SVG/SVGImageElement.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/canvas.html#canvasimagesource
 // NOTE: This is the Variant created by the IDL wrapper generator, and needs to be updated accordingly.
-using CanvasImageSource = Variant<GC::Root<HTMLImageElement>, GC::Root<SVG::SVGImageElement>, GC::Root<HTMLCanvasElement>, GC::Root<ImageBitmap>, GC::Root<OffscreenCanvas>, GC::Root<HTMLVideoElement>>;
+using CanvasImageSource = Variant<GC::Ref<HTMLImageElement>, GC::Ref<SVG::SVGImageElement>, GC::Ref<HTMLCanvasElement>, GC::Ref<ImageBitmap>, GC::Ref<OffscreenCanvas>, GC::Ref<HTMLVideoElement>>;
+
+Gfx::IntSize canvas_image_source_dimensions(CanvasImageSource const&);
+Optional<Gfx::DecodedImageFrame> canvas_image_source_frame(CanvasImageSource const&);
 
 // https://html.spec.whatwg.org/multipage/canvas.html#canvasdrawimage
 class CanvasDrawImage {

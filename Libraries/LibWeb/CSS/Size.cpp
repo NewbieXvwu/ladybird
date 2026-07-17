@@ -5,6 +5,8 @@
  */
 
 #include <LibWeb/CSS/Size.h>
+#include <LibWeb/CSS/StyleValues/FunctionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 
 namespace Web::CSS {
 
@@ -14,11 +16,11 @@ Size::Size(Type type, Optional<LengthPercentage> length_percentage)
 {
 }
 
-CSSPixels Size::to_px(Layout::Node const& node, CSSPixels reference_value) const
+CSSPixels Size::to_px(CSSPixels reference_value) const
 {
     if (!m_length_percentage.has_value())
         return 0;
-    return m_length_percentage->resolved(node, reference_value).to_px(node);
+    return m_length_percentage->resolved(reference_value).absolute_length_to_px();
 }
 
 Size Size::make_auto()
@@ -81,6 +83,44 @@ Size Size::make_none()
     return Size { Type::None };
 }
 
+Size Size::from_style_value(NonnullRefPtr<StyleValue const> const& value)
+{
+    if (value->is_keyword()) {
+        switch (value->to_keyword()) {
+        case Keyword::Auto:
+            return Size::make_auto();
+        case Keyword::FitContent:
+            return Size::make_fit_content();
+        case Keyword::MinContent:
+            return Size::make_min_content();
+        case Keyword::MaxContent:
+            return Size::make_max_content();
+        case Keyword::None:
+            return Size::make_none();
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+    if (value->is_function() && value->as_function().name() == "fit-content"_utf16_fly_string)
+        return Size::make_fit_content(LengthPercentage::from_style_value(value->as_function().value()));
+
+    if (value->is_calculated())
+        return Size::make_calculated(value->as_calculated());
+
+    if (value->is_percentage())
+        return Size::make_percentage(value->as_percentage().percentage());
+
+    if (value->is_length())
+        return Size::make_length(value->as_length().length());
+
+    // FIXME: Support `anchor-size(..)`
+    if (value->is_anchor_size())
+        return Size::make_none();
+
+    dbgln("FIXME: Unsupported size value: `{}`, treating as `auto`", value->to_string(SerializationMode::Normal));
+    return Size::make_auto();
+}
+
 bool Size::contains_percentage() const
 {
     switch (m_type) {
@@ -90,35 +130,49 @@ bool Size::contains_percentage() const
     case Type::None:
         return false;
     case Type::FitContent:
-        // FIXME: This should return m_length_percentage.contains_percentage()
-        //        but we have to update a lot of code to handle this.
-        return false;
+        return m_length_percentage.has_value() && m_length_percentage->contains_percentage();
     default:
         return m_length_percentage->contains_percentage();
     }
 }
 
-String Size::to_string(SerializationMode mode) const
+void Size::serialize(StringBuilder& builder, SerializationMode mode) const
 {
     switch (m_type) {
     case Type::Auto:
-        return "auto"_string;
+        builder.append("auto"sv);
+        break;
     case Type::Calculated:
     case Type::Length:
     case Type::Percentage:
-        return m_length_percentage->to_string(mode);
+        m_length_percentage->serialize(builder, mode);
+        break;
     case Type::MinContent:
-        return "min-content"_string;
+        builder.append("min-content"sv);
+        break;
     case Type::MaxContent:
-        return "max-content"_string;
+        builder.append("max-content"sv);
+        break;
     case Type::FitContent:
-        if (!m_length_percentage.has_value())
-            return "fit-content"_string;
-        return MUST(String::formatted("fit-content({})", m_length_percentage->to_string(mode)));
+        if (!m_length_percentage.has_value()) {
+            builder.append("fit-content"sv);
+        } else {
+            builder.append("fit-content("sv);
+            m_length_percentage->serialize(builder, mode);
+            builder.append(")"sv);
+        }
+        break;
     case Type::None:
-        return "none"_string;
+        builder.append("none"sv);
+        break;
     }
-    VERIFY_NOT_REACHED();
+}
+
+String Size::to_string(SerializationMode mode) const
+{
+    StringBuilder builder;
+    serialize(builder, mode);
+    return MUST(builder.to_string());
 }
 
 }

@@ -7,18 +7,39 @@
 
 #pragma once
 
+#include <AK/NonnullOwnPtr.h>
 #include <AK/NonnullRefPtr.h>
+#include <AK/RefCounted.h>
 #include <AK/Vector.h>
-#include <LibJS/Heap/Cell.h>
+#include <AK/WeakPtr.h>
+#include <AK/Weakable.h>
+#include <AK/kmalloc.h>
+#include <LibGC/Cell.h>
+#include <LibGC/Weak.h>
+#include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
-#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/DisplayListRecordingContext.h>
 #include <LibWeb/Painting/Paintable.h>
-#include <LibWeb/TreeNode.h>
+#include <LibWeb/RefCountedTreeNode.h>
 
 namespace Web::Layout {
+
+#define LAYOUT_NODE(class_, base_class)            \
+public:                                            \
+    using Base = base_class;                       \
+    virtual StringView class_name() const override \
+    {                                              \
+        return #class_##sv;                        \
+    }
+
+class InlineNode;
+
+enum class LayoutUpdatePropagation : u8 {
+    ThroughAncestors,
+    BoundarySelfOnly,
+};
 
 enum class LayoutMode {
     // Normal layout. No min-content or max-content constraints applied.
@@ -32,12 +53,17 @@ enum class LayoutMode {
 };
 
 class WEB_API Node
-    : public JS::Cell
-    , public TreeNode<Node> {
-    GC_CELL(Node, JS::Cell);
+    : public RefCounted<Node>
+    , public Weakable<Node>
+    , public RefCountedTreeNode<Node> {
 
 public:
+    AK_ALLOC_WITH_KMALLOC_PARTITION(HeapPartition::Layout);
+
+    using Base = RefCountedTreeNode<Node>;
+
     virtual ~Node();
+    virtual StringView class_name() const { return "Node"sv; }
 
     bool is_anonymous() const;
     DOM::Node const* dom_node() const;
@@ -47,35 +73,44 @@ public:
     DOM::Element* pseudo_element_generator();
 
     bool needs_layout_update() const { return m_needs_layout_update; }
-    void set_needs_layout_update(DOM::SetNeedsLayoutReason);
-    void reset_needs_layout_update() { m_needs_layout_update = false; }
 
-    bool is_generated() const { return m_generated_for.has_value(); }
+    // Set when a style change altered geometry-determining properties of this node itself, so
+    // a partial relayout must re-resolve its own size and position instead of reusing them.
+    bool needs_own_geometry_update() const { return m_needs_own_geometry_update; }
+    void set_needs_own_geometry_update() { m_needs_own_geometry_update = true; }
+    void set_needs_layout_update(DOM::SetNeedsLayoutReason, LayoutUpdatePropagation = LayoutUpdatePropagation::ThroughAncestors);
+    void reset_needs_layout_update()
+    {
+        m_needs_layout_update = false;
+        m_needs_own_geometry_update = false;
+    }
+
+    bool is_generated_for_pseudo_element() const { return m_generated_for.has_value(); }
     Optional<CSS::PseudoElement> generated_for_pseudo_element() const { return m_generated_for; }
     bool is_generated_for_before_pseudo_element() const { return m_generated_for == CSS::PseudoElement::Before; }
     bool is_generated_for_after_pseudo_element() const { return m_generated_for == CSS::PseudoElement::After; }
     bool is_generated_for_backdrop_pseudo_element() const { return m_generated_for == CSS::PseudoElement::Backdrop; }
-    void set_generated_for(CSS::PseudoElement type, DOM::Element& element)
-    {
-        m_generated_for = type;
-        m_pseudo_element_generator = &element;
-    }
+    void set_generated_for(CSS::PseudoElement type, DOM::Element&);
 
-    using PaintableList = IntrusiveList<&Painting::Paintable::m_list_node>;
+    RefPtr<Painting::Paintable> paintable() { return m_paintable; }
+    RefPtr<Painting::Paintable const> paintable() const { return m_paintable; }
+    Painting::Paintable* paintable_ptr() { return m_paintable.ptr(); }
+    Painting::Paintable const* paintable_ptr() const { return m_paintable.ptr(); }
+    void set_paintable(RefPtr<Painting::Paintable>);
+    void clear_paintable();
+    void prepare_for_detach_from_layout_tree();
+    void prepare_subtree_for_detach_from_layout_tree();
 
-    Painting::Paintable* first_paintable() { return m_paintable.first(); }
-    Painting::Paintable const* first_paintable() const { return m_paintable.first(); }
-    PaintableList& paintables() { return m_paintable; }
-    PaintableList const& paintables() const { return m_paintable; }
-    void add_paintable(GC::Ptr<Painting::Paintable>);
-    void clear_paintables();
+    // Returns the direct viewport child above this node (the node itself or its outermost
+    // anonymous table-fixup wrapper), or null when the node is not placed as a top layer box.
+    Node* topmost_layout_node_of_top_layer_placement();
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const;
+    virtual RefPtr<Painting::Paintable> create_paintable() const;
 
     DOM::Document& document();
     DOM::Document const& document() const;
 
-    GC::Ptr<HTML::Navigable> navigable() const;
+    GC::Ptr<HTML::LocalNavigable> navigable() const;
 
     Viewport const& root() const;
     Viewport& root();
@@ -89,30 +124,42 @@ public:
 
     virtual bool can_have_children() const { return true; }
 
-    CSS::Display display() const;
-
     bool is_inline() const;
-    bool is_inline_block() const;
-    bool is_inline_table() const;
 
+    bool is_replaced_element() const;
     bool is_atomic_inline() const;
+    bool is_fragmented_inline() const;
+    NodeWithStyleAndBoxModelMetrics const* nearest_fragmented_inline_ancestor() const;
 
     bool is_out_of_flow(FormattingContext const&) const;
+
+    // An element is called out of flow if it is floated, absolutely positioned, or is the root element.
+    // https://www.w3.org/TR/CSS22/visuren.html#positioning-scheme
+    bool is_out_of_flow() const;
+
+    // An element is called in-flow if it is not out-of-flow.
+    // https://www.w3.org/TR/CSS22/visuren.html#positioning-scheme
+    bool is_in_flow() const { return !is_out_of_flow(); }
 
     // These are used to optimize hot is<T> variants for some classes where dynamic_cast is too slow.
     virtual bool is_box() const { return false; }
     virtual bool is_block_container() const { return false; }
+    virtual bool is_inline_node() const { return false; }
     virtual bool is_break_node() const { return false; }
     virtual bool is_text_node() const { return false; }
+    virtual bool is_text_slice_node() const { return false; }
     virtual bool is_viewport() const { return false; }
     virtual bool is_svg_box() const { return false; }
     virtual bool is_svg_geometry_box() const { return false; }
+    virtual bool is_svg_clip_box() const { return false; }
     virtual bool is_svg_mask_box() const { return false; }
+    virtual bool is_svg_pattern_box() const { return false; }
     virtual bool is_svg_svg_box() const { return false; }
     virtual bool is_svg_graphics_box() const { return false; }
     virtual bool is_svg_foreign_object_box() const { return false; }
     virtual bool is_label() const { return false; }
     virtual bool is_replaced_box() const { return false; }
+    virtual bool is_textarea_box() const { return false; }
     virtual bool is_list_item_box() const { return false; }
     virtual bool is_list_item_marker_box() const { return false; }
     virtual bool is_fieldset_box() const { return false; }
@@ -121,14 +168,10 @@ public:
     virtual bool is_node_with_style() const { return false; }
     virtual bool is_node_with_style_and_box_model_metrics() const { return false; }
 
+    bool is_replaced_box_with_children() const { return is_replaced_box() && can_have_children(); }
+
     template<typename T>
     bool fast_is() const = delete;
-
-    bool is_floating() const;
-    bool is_positioned() const;
-    bool is_absolutely_positioned() const;
-    bool is_fixed_position() const;
-    bool is_sticky_position() const;
 
     bool is_flex_item() const { return m_is_flex_item; }
     void set_flex_item(bool b) { m_is_flex_item = b; }
@@ -136,8 +179,30 @@ public:
     bool is_grid_item() const { return m_is_grid_item; }
     void set_grid_item(bool b) { m_is_grid_item = b; }
 
-    [[nodiscard]] GC::Ptr<Box const> containing_block() const { return m_containing_block; }
-    [[nodiscard]] GC::Ptr<Box> containing_block() { return m_containing_block; }
+    bool vertical_align_applies() const
+    {
+        // https://drafts.csswg.org/css-flexbox/#flex-containers
+        // "vertical-align has no effect on a flex item"
+        if (is_flex_item())
+            return false;
+        // https://drafts.csswg.org/css-grid-1/#grid-container
+        // "vertical-align has no effect on a grid item"
+        if (is_grid_item())
+            return false;
+        // FIXME: Per-spec, vertical-align only applies to inline-level boxes and table cells; this should be narrowed
+        //        to that — rather than only excluding flex and grid items.
+        return true;
+    }
+
+    [[nodiscard]] Box const* containing_block() const { return m_containing_block; }
+    [[nodiscard]] Box* containing_block() { return m_containing_block; }
+
+    // Returns the inline node that actually establishes the containing block for this absolutely
+    // positioned element, if applicable. This is needed because m_containing_block can only hold
+    // a Box*, but CSS allows inline elements (like a <span> with position:relative) to establish
+    // containing blocks for their absolutely positioned descendants.
+    // See the large FIXME comment in FormattingContext.cpp for full context.
+    [[nodiscard]] InlineNode const* inline_containing_block_if_applicable() const { return m_inline_containing_block_if_applicable; }
 
     void recompute_containing_block(Badge<DOM::Document>);
 
@@ -150,15 +215,9 @@ public:
     // https://www.w3.org/TR/CSS22/visuren.html#anonymous-block-level
     Box const* non_anonymous_containing_block() const;
 
-    bool establishes_stacking_context() const;
-
-    bool can_contain_boxes_with_position_absolute() const;
-
     Gfx::Font const& first_available_font() const;
     Gfx::Font const& font(DisplayListRecordingContext&) const;
     Gfx::Font const& font(float scale_factor) const;
-
-    CSS::ImmutableComputedValues const& computed_values() const;
 
     NodeWithStyle* parent();
     NodeWithStyle const* parent() const;
@@ -173,50 +232,36 @@ public:
     u32 initial_quote_nesting_level() const { return m_initial_quote_nesting_level; }
     void set_initial_quote_nesting_level(u32 value) { m_initial_quote_nesting_level = value; }
 
-    // An element is called out of flow if it is floated, absolutely positioned, or is the root element.
-    // https://www.w3.org/TR/CSS22/visuren.html#positioning-scheme
-    bool is_out_of_flow() const { return is_floating() || is_absolutely_positioned(); }
-
-    // An element is called in-flow if it is not out-of-flow.
-    // https://www.w3.org/TR/CSS22/visuren.html#positioning-scheme
-    bool is_in_flow() const { return !is_out_of_flow(); }
-
-    [[nodiscard]] bool has_css_transform() const
-    {
-        auto const& computed_values = this->computed_values();
-        return !computed_values.transformations().is_empty()
-            || computed_values.rotate().has_value()
-            || computed_values.translate().has_value()
-            || computed_values.scale().has_value();
-    }
-
     // https://drafts.csswg.org/css-ui/#propdef-user-select
     CSS::UserSelect user_select_used_value() const;
-
-    // https://drafts.csswg.org/css-contain-2/#containment-types
-    bool has_size_containment() const;
-    bool has_inline_size_containment() const;
-    bool has_layout_containment() const;
-    bool has_style_containment() const;
-    bool has_paint_containment() const;
 
     [[nodiscard]] bool has_been_wrapped_in_table_wrapper() const { return m_has_been_wrapped_in_table_wrapper; }
     void set_has_been_wrapped_in_table_wrapper(bool value) { m_has_been_wrapped_in_table_wrapper = value; }
 
-protected:
-    Node(DOM::Document&, DOM::Node*);
+    enum class AttachToDOMNode {
+        No,
+        Yes,
+    };
 
-    virtual void visit_edges(Cell::Visitor&) override;
+protected:
+    Node(DOM::Document&, DOM::Node*, AttachToDOMNode = AttachToDOMNode::Yes);
 
 private:
     friend class NodeWithStyle;
 
-    GC::Ref<DOM::Node> m_dom_node;
-    PaintableList m_paintable;
+    GC::Weak<DOM::Node> m_dom_node;
+    RefPtr<Painting::Paintable> m_paintable;
 
-    GC::Ptr<Box> m_containing_block;
+    Box* m_containing_block { nullptr };
 
-    GC::Ptr<DOM::Element> m_pseudo_element_generator;
+    // For absolutely positioned elements, if there's an inline element (like a <span> with
+    // position:relative) that should be the containing block but can't be stored in m_containing_block
+    // (because it's not a Box), we store it here. This happens when a block element is inside an
+    // inline element - the layout tree restructures so the block becomes a sibling of the inline,
+    // but the CSS containing block relationship is based on the DOM structure.
+    InlineNode const* m_inline_containing_block_if_applicable { nullptr };
+
+    GC::Weak<DOM::Element> m_pseudo_element_generator;
 
     bool m_anonymous { false };
     bool m_has_style { false };
@@ -226,85 +271,151 @@ private:
     bool m_is_grid_item { false };
 
     bool m_has_been_wrapped_in_table_wrapper { false };
+    bool m_is_body { false };
 
     bool m_needs_layout_update { false };
+    bool m_needs_own_geometry_update { false };
 
-    Optional<CSS::PseudoElement> m_generated_for {};
+    Optional<CSS::PseudoElement> m_generated_for;
 
     u32 m_initial_quote_nesting_level { 0 };
 };
 
 class WEB_API NodeWithStyle : public Node {
-    GC_CELL(NodeWithStyle, Node);
+    LAYOUT_NODE(NodeWithStyle, Node);
 
 public:
-    virtual ~NodeWithStyle() override = default;
+    virtual ~NodeWithStyle() override;
 
-    CSS::ImmutableComputedValues const& computed_values() const { return static_cast<CSS::ImmutableComputedValues const&>(*m_computed_values); }
-    CSS::MutableComputedValues& mutable_computed_values() { return static_cast<CSS::MutableComputedValues&>(*m_computed_values); }
+    class ImageObserver final : public CSS::ImageStyleValue::Client {
+    public:
+        ImageObserver(NodeWithStyle&, NonnullRefPtr<CSS::ImageStyleValue const> image);
+        virtual ~ImageObserver() override;
 
-    void apply_style(CSS::ComputedProperties const&);
+        virtual void image_style_value_did_update(CSS::ImageStyleValue&) override;
+
+    private:
+        WeakPtr<NodeWithStyle> m_owner;
+        NonnullRefPtr<CSS::ImageStyleValue const> m_image;
+    };
+
+    CSS::ComputedValues const& computed_values() const { return *m_computed_values; }
+
+    template<typename Callback>
+    void modify_computed_values(Callback callback)
+    {
+        CSS::ComputedValues::Builder builder(computed_values());
+        callback(*builder.operator->());
+        set_computed_values(move(builder).build());
+    }
+
+    CSS::Display display() const { return computed_values().display(); }
+    CSS::Display display_before_box_type_transformation() const { return computed_values().display_before_box_type_transformation(); }
+    bool is_inline_block() const;
+    bool is_inline_table() const;
+    bool has_replaced_element_table_display_adjustment() const;
+    bool is_transformable() const;
+
+    bool is_floating() const;
+    bool is_positioned() const;
+    bool is_absolutely_positioned() const;
+    bool is_fixed_position() const;
+    bool is_sticky_position() const;
+
+    // https://www.w3.org/TR/css-display-3/#out-of-flow
+    bool is_out_of_flow(FormattingContext const&) const;
+
+    // An element is called out of flow if it is floated, absolutely positioned, or is the root element.
+    // https://www.w3.org/TR/CSS22/visuren.html#positioning-scheme
+    bool is_out_of_flow() const { return is_floating() || is_absolutely_positioned(); }
+
+    // An element is called in-flow if it is not out-of-flow.
+    // https://www.w3.org/TR/CSS22/visuren.html#positioning-scheme
+    bool is_in_flow() const { return !is_out_of_flow(); }
+
+    bool establishes_stacking_context() const;
+    bool computed_values_establish_absolute_positioning_containing_block() const;
+    bool establishes_an_absolute_positioning_containing_block() const;
+    bool establishes_a_fixed_positioning_containing_block() const;
+
+    struct PositioningContainingBlockEstablishment {
+        bool absolute;
+        bool fixed;
+    };
+    PositioningContainingBlockEstablishment establishes_positioning_containing_blocks() const;
+
+    // https://drafts.csswg.org/css-contain-2/#containment-types
+    bool has_size_containment() const;
+    bool has_inline_size_containment() const;
+    bool has_layout_containment() const;
+    bool has_style_containment() const;
+    bool has_paint_containment() const;
+
+    [[nodiscard]] bool has_css_transform() const
+    {
+        auto const& computed_values = this->computed_values();
+        auto has_transform = !computed_values.transformations().is_empty()
+            || computed_values.rotate()
+            || computed_values.translate()
+            || computed_values.scale();
+        return has_transform && is_transformable();
+    }
+
+    void clear_image_observers();
+    void apply_style(NonnullRefPtr<CSS::ComputedValues const>);
+    void attach_style_resources();
 
     Gfx::Font const& first_available_font() const;
     Vector<CSS::BackgroundLayerData> const& background_layers() const { return computed_values().background_layers(); }
-    CSS::AbstractImageStyleValue const* list_style_image() const { return m_list_style_image; }
+    CSS::AbstractImageStyleValue const* list_style_image() const { return computed_values().list_style_image(); }
+    CSS::StyleScope const& style_scope() const;
 
-    GC::Ref<NodeWithStyle> create_anonymous_wrapper() const;
+    NonnullRefPtr<NodeWithStyle> create_anonymous_wrapper() const;
 
-    void transfer_table_box_computed_values_to_wrapper_computed_values(CSS::ComputedValues& wrapper_computed_values);
+    void transfer_table_box_computed_values_to_wrapper_computed_values(CSS::ComputedValues::Builder& wrapper_computed_values);
 
-    bool is_body() const;
+    bool is_body() const { return m_is_body; }
     bool is_scroll_container() const;
 
-    virtual void visit_edges(Cell::Visitor& visitor) override;
+    void set_computed_values(NonnullRefPtr<CSS::ComputedValues const>);
 
-    void set_computed_values(NonnullOwnPtr<CSS::ComputedValues>);
+    u32 layout_index() const { return m_layout_index; }
+    void set_layout_index(u32 index) { m_layout_index = index; }
 
 protected:
-    NodeWithStyle(DOM::Document&, DOM::Node*, GC::Ref<CSS::ComputedProperties>);
-    NodeWithStyle(DOM::Document&, DOM::Node*, NonnullOwnPtr<CSS::ComputedValues>);
+    NodeWithStyle(DOM::Document&, DOM::Node*, NonnullRefPtr<CSS::ComputedValues const>);
 
 private:
     virtual bool is_node_with_style() const final { return true; }
 
     void reset_table_box_computed_values_used_by_wrapper_to_init_values();
+    void propagate_non_inherit_values(CSS::ComputedValues::Builder&) const;
     void propagate_style_to_anonymous_wrappers();
 
-    NonnullOwnPtr<CSS::ComputedValues> m_computed_values;
-    RefPtr<CSS::AbstractImageStyleValue const> m_list_style_image;
+    void rebuild_image_observers();
+
+    NonnullRefPtr<CSS::ComputedValues const> m_computed_values;
+    Vector<NonnullOwnPtr<ImageObserver>> m_image_observers;
+    u32 m_layout_index { 0 };
 };
 
 template<>
 inline bool Node::fast_is<NodeWithStyle>() const { return is_node_with_style(); }
 
 class NodeWithStyleAndBoxModelMetrics : public NodeWithStyle {
-    GC_CELL(NodeWithStyleAndBoxModelMetrics, NodeWithStyle);
+    LAYOUT_NODE(NodeWithStyleAndBoxModelMetrics, NodeWithStyle);
 
 public:
-    GC::Ptr<NodeWithStyleAndBoxModelMetrics> continuation_of_node() const { return m_continuation_of_node; }
-    void set_continuation_of_node(Badge<TreeBuilder>, GC::Ptr<NodeWithStyleAndBoxModelMetrics> node) { m_continuation_of_node = node; }
-
-    bool should_create_inline_continuation() const;
-
-    void propagate_style_along_continuation(CSS::ComputedProperties const&) const;
-
-    virtual void visit_edges(Cell::Visitor& visitor) override;
+    bool is_inline_flow_interrupting_block() const;
 
 protected:
-    NodeWithStyleAndBoxModelMetrics(DOM::Document& document, DOM::Node* node, GC::Ref<CSS::ComputedProperties> style)
-        : NodeWithStyle(document, node, style)
-    {
-    }
-
-    NodeWithStyleAndBoxModelMetrics(DOM::Document& document, DOM::Node* node, NonnullOwnPtr<CSS::ComputedValues> computed_values)
+    NodeWithStyleAndBoxModelMetrics(DOM::Document& document, DOM::Node* node, NonnullRefPtr<CSS::ComputedValues const> computed_values)
         : NodeWithStyle(document, node, move(computed_values))
     {
     }
 
 private:
     virtual bool is_node_with_style_and_box_model_metrics() const final { return true; }
-
-    GC::Ptr<NodeWithStyleAndBoxModelMetrics> m_continuation_of_node;
 };
 
 template<>
@@ -334,23 +445,14 @@ inline Gfx::Font const& Node::font(float scale_factor) const
     return font.with_size(font.point_size() * scale_factor);
 }
 
-inline CSS::ImmutableComputedValues const& Node::computed_values() const
-{
-    VERIFY(has_style_or_parent_with_style());
-
-    if (m_has_style)
-        return static_cast<NodeWithStyle const*>(this)->computed_values();
-    return parent()->computed_values();
-}
-
 inline NodeWithStyle const* Node::parent() const
 {
-    return static_cast<NodeWithStyle const*>(TreeNode<Node>::parent());
+    return static_cast<NodeWithStyle const*>(Base::parent_ptr());
 }
 
 inline NodeWithStyle* Node::parent()
 {
-    return static_cast<NodeWithStyle*>(TreeNode<Node>::parent());
+    return static_cast<NodeWithStyle*>(Base::parent_ptr());
 }
 
 inline Gfx::Font const& NodeWithStyle::first_available_font() const
@@ -359,5 +461,7 @@ inline Gfx::Font const& NodeWithStyle::first_available_font() const
     // First font for which the character U+0020 (space) is not excluded by a unicode-range
     return computed_values().font_list().font_for_code_point(' ');
 }
+
+bool overflow_value_makes_box_a_scroll_container(CSS::Overflow overflow);
 
 }

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<script src="HTMLMediaElement-include.js"></script>
+<video id="video"></video>
+<script>
+    const video = document.getElementById("video");
+
+    function logEvent(name) {
+        let entry = `${name}: ${formatReadyStateExpectation(video, name)}`;
+        if (name === "durationchange")
+            entry += ` duration=${video.duration}`;
+        if (name === "error")
+            entry += ` code=${video.error.code}`;
+        println(entry);
+    }
+
+    for (const name of [
+        "loadstart", "abort", "error", "emptied",
+        "loadedmetadata", "durationchange", "ended",
+    ]) {
+        video.addEventListener(name, () => logEvent(name));
+    }
+
+    asyncTest(async done => {
+        video.src = "../../../Assets/corrupt-video.webm";
+
+        await new Promise(resolve => video.addEventListener("error", resolve, { once: true }));
+        video.src = "../../../Assets/test-webm.webm";
+
+        await new Promise(resolve => video.addEventListener("canplaythrough", resolve, { once: true }));
+        done();
+    });
+</script>

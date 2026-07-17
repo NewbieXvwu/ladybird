@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/AllOf.h>
 #include <AK/Error.h>
 #include <AK/Format.h>
 #include <AK/Optional.h>
@@ -25,6 +26,16 @@ public:
 
     static ErrorOr<FlyString> from_utf8(StringView);
     static FlyString from_utf8_without_validation(ReadonlyBytes);
+
+    [[nodiscard]] static constexpr FlyString from_ascii_short_string_without_validation(char const* data, size_t length)
+    {
+        VERIFY(length <= Detail::MAX_SHORT_STRING_BYTE_COUNT);
+        auto short_string = Detail::ShortString::create_with_byte_count(length);
+        for (size_t i = 0; i < length; ++i)
+            short_string.storage[i] = static_cast<u8>(data[i]);
+        return FlyString { Detail::StringBase { short_string } };
+    }
+
     template<typename T>
     requires(IsOneOf<RemoveCVReference<T>, ByteString, FlyString, String>)
     static ErrorOr<String> from_utf8(T&&) = delete;
@@ -84,7 +95,7 @@ public:
     }
 
 private:
-    friend class Optional<FlyString>;
+    friend struct SentinelOptionalTraits<FlyString>;
 
     explicit constexpr FlyString(nullptr_t)
         : m_data(nullptr)
@@ -102,104 +113,21 @@ private:
 };
 
 template<>
-class Optional<FlyString> : public OptionalBase<FlyString> {
-    template<typename U>
-    friend class Optional;
+struct SentinelOptionalTraits<FlyString> {
+    static constexpr FlyString sentinel_value() { return FlyString(nullptr); }
+    static constexpr bool is_sentinel(FlyString const& value) { return value.is_invalid(); }
+};
 
+template<>
+class Optional<FlyString> : public SentinelOptional<FlyString> {
 public:
-    using ValueType = FlyString;
-
-    constexpr Optional() = default;
-
-    template<SameAs<OptionalNone> V>
-    constexpr Optional(V) { }
-
-    constexpr Optional(Optional<FlyString> const& other)
-    {
-        if (other.has_value())
-            m_value = other.m_value;
-    }
-
-    constexpr Optional(Optional&& other)
-        : m_value(move(other.m_value))
-    {
-    }
-
-    template<typename U = FlyString>
-    requires(!IsSame<OptionalNone, RemoveCVReference<U>>)
-    explicit(!IsConvertible<U&&, FlyString>) constexpr Optional(U&& value)
-    requires(!IsSame<RemoveCVReference<U>, Optional<FlyString>> && IsConstructible<FlyString, U &&>)
-        : m_value(forward<U>(value))
-    {
-    }
-
-    template<SameAs<OptionalNone> V>
-    constexpr Optional& operator=(V)
-    {
-        clear();
-        return *this;
-    }
-
-    constexpr Optional& operator=(Optional const& other)
-    {
-        if (this != &other) {
-            clear();
-            m_value = other.m_value;
-        }
-        return *this;
-    }
-
-    constexpr Optional& operator=(Optional&& other)
-    {
-        if (this != &other) {
-            clear();
-            m_value = other.m_value;
-        }
-        return *this;
-    }
-
-    constexpr void clear()
-    {
-        m_value = FlyString(nullptr);
-    }
-
-    [[nodiscard]] constexpr bool has_value() const
-    {
-        return !m_value.is_invalid();
-    }
-
-    [[nodiscard]] constexpr FlyString& value() &
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] constexpr FlyString const& value() const&
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] constexpr FlyString value() &&
-    {
-        return release_value();
-    }
-
-    [[nodiscard]] constexpr FlyString release_value()
-    {
-        VERIFY(has_value());
-        FlyString released_value = move(m_value);
-        clear();
-        return released_value;
-    }
-
-private:
-    FlyString m_value = FlyString(nullptr);
+    using SentinelOptional::SentinelOptional;
 };
 
 template<>
 struct Traits<FlyString> : public DefaultTraits<FlyString> {
     static unsigned hash(FlyString const&);
+    static constexpr bool may_have_slow_equality_check() { return false; }
 };
 
 template<>
@@ -214,8 +142,14 @@ struct ASCIICaseInsensitiveFlyStringTraits : public Traits<String> {
 
 }
 
-[[nodiscard]] ALWAYS_INLINE AK::FlyString operator""_fly_string(char const* cstring, size_t length)
+[[nodiscard]] ALWAYS_INLINE constexpr AK::FlyString operator""_fly_string(char const* cstring, size_t length)
 {
+    // OPTIMIZATION: Short ASCII strings become compile-time constants with no runtime validation or table lookup.
+    if (length <= AK::Detail::MAX_SHORT_STRING_BYTE_COUNT
+        && AK::all_of(cstring, cstring + length, AK::is_ascii)) {
+        return AK::FlyString::from_ascii_short_string_without_validation(cstring, length);
+    }
+
     ASSERT(Utf8View(AK::StringView(cstring, length)).validate());
     return AK::FlyString::from_utf8_without_validation({ cstring, length });
 }

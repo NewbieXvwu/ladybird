@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/CSSStyleDeclarationPrototype.h>
+#include <LibWeb/Bindings/CSSStyleDeclaration.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
@@ -48,14 +48,14 @@ void CSSStyleDeclaration::update_style_attribute()
     set_is_updating(true);
 
     // 5. Set an attribute value for owner node using "style" and the result of serializing declaration block.
-    MUST(owner_node()->element().set_attribute(HTML::AttributeNames::style, serialized()));
+    owner_node()->element().set_attribute_value(HTML::AttributeNames::style, serialized());
 
     // 6. Unset declaration block’s updating flag.
     set_is_updating(false);
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-csstext
-String CSSStyleDeclaration::css_text() const
+Utf16String CSSStyleDeclaration::css_text() const
 {
     // 1. If the computed flag is set, then return the empty string.
     if (is_computed())

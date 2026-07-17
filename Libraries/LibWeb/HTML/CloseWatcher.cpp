@@ -1,13 +1,14 @@
 /*
- * Copyright (c) 2024, the Ladybird developers.
+ * Copyright (c) 2024-present, the Ladybird developers.
  * Copyright (c) 2024, Felipe Muñoz Mazur <felipe.munoz.mazur@protonmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/TypeCasts.h>
-#include <LibWeb/Bindings/CloseWatcherPrototype.h>
+#include <LibWeb/Bindings/CloseWatcher.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/DOM/AbortSignal.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/DOM/IDLEventListener.h>
@@ -15,6 +16,7 @@
 #include <LibWeb/HTML/CloseWatcherManager.h>
 #include <LibWeb/HTML/EventHandler.h>
 #include <LibWeb/HTML/HTMLIFrameElement.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Window.h>
 
 namespace Web::HTML {
@@ -22,13 +24,19 @@ namespace Web::HTML {
 GC_DEFINE_ALLOCATOR(CloseWatcher);
 
 // https://html.spec.whatwg.org/multipage/interaction.html#establish-a-close-watcher
-GC::Ref<CloseWatcher> CloseWatcher::establish(HTML::Window& window)
+GC::Ref<CloseWatcher> CloseWatcher::establish(HTML::Window& window, GetEnabledState get_enabled_state)
 {
     // 1. Assert: window's associated Document is fully active.
     VERIFY(window.associated_document().is_fully_active());
 
-    // 2. Let closeWatcher be a new close watcher
-    auto close_watcher = window.realm().create<CloseWatcher>(window.realm());
+    // 2. Let closeWatcher be a new close watcher, with
+    //    window: window
+    //    cancel action: cancelAction
+    //    close action: closeAction
+    //    is running cancel action: false
+    //    get enabled state: getEnabledState
+    auto close_watcher = window.realm().create<CloseWatcher>(window.realm(), move(get_enabled_state));
+    // FIXME: cancelAction and closeAction are both set by the caller currently.
 
     // 3. Let manager be window's associated close watcher manager
     auto manager = window.close_watcher_manager();
@@ -41,7 +49,7 @@ GC::Ref<CloseWatcher> CloseWatcher::establish(HTML::Window& window)
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-closewatcher
-WebIDL::ExceptionOr<GC::Ref<CloseWatcher>> CloseWatcher::construct_impl(JS::Realm& realm, CloseWatcherOptions const& options)
+WebIDL::ExceptionOr<GC::Ref<CloseWatcher>> CloseWatcher::construct_impl(JS::Realm& realm, Bindings::CloseWatcherOptions const& options)
 {
     auto& window = as<HTML::Window>(realm.global_object());
 
@@ -54,8 +62,11 @@ WebIDL::ExceptionOr<GC::Ref<CloseWatcher>> CloseWatcher::construct_impl(JS::Real
     if (!window.associated_document().is_fully_active())
         return WebIDL::InvalidStateError::create(realm, "The document is not fully active."_utf16);
 
-    // 2. Let close_watcher be the result of establishing a close watcher
-    auto close_watcher = establish(window);
+    // 2. Let closeWatcher be the result of establishing a close watcher given this's relevant global object, with:
+    //    - cancelAction given canPreventClose being to return the result of firing an event named cancel at this, with the cancelable attribute initialized to canPreventClose.
+    //    - closeAction being to fire an event named close at this.
+    //    - getEnabledState being to return true.
+    auto close_watcher = establish(window, GC::create_function(realm.heap(), [] { return true; }));
 
     // 3. If options["signal"] exists, then:
     if (auto signal = options.signal) {
@@ -74,8 +85,9 @@ WebIDL::ExceptionOr<GC::Ref<CloseWatcher>> CloseWatcher::construct_impl(JS::Real
     return close_watcher;
 }
 
-CloseWatcher::CloseWatcher(JS::Realm& realm)
+CloseWatcher::CloseWatcher(JS::Realm& realm, GetEnabledState get_enabled_state)
     : DOM::EventTarget(realm)
+    , m_get_enabled_state(move(get_enabled_state))
 {
 }
 
@@ -133,6 +145,11 @@ bool CloseWatcher::request_close(bool require_history_action_activation)
 
     // 12. Return true.
     return true;
+}
+
+bool CloseWatcher::get_enabled_state() const
+{
+    return m_get_enabled_state->function().operator()();
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#close-watcher-close
@@ -193,6 +210,12 @@ void CloseWatcher::set_onclose(WebIDL::CallbackType* event_handler)
 WebIDL::CallbackType* CloseWatcher::onclose()
 {
     return event_handler_attribute(HTML::EventNames::close);
+}
+
+void CloseWatcher::visit_edges(Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    visitor.visit(m_get_enabled_state);
 }
 
 }

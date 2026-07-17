@@ -1,0 +1,10 @@
+$ccf7ed9d
+  Registers: 5
+  Blocks:    1
+  Constants:
+    [0] = BigInt(3n)
+    [1] = BigInt(1n)
+    [2] = BigInt(1n)
+
+block0:
+  [   0] End value:BigInt(1n)

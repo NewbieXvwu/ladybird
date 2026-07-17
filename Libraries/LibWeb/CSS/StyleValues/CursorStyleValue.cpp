@@ -5,51 +5,64 @@
  */
 
 #include "CursorStyleValue.h"
+#include <LibGfx/Bitmap.h>
 #include <LibGfx/Painter.h>
+#include <LibGfx/PaintingSurface.h>
 #include <LibWeb/CSS/Sizing.h>
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/DisplayListPlayerSkia.h>
+#include <LibWeb/Painting/DisplayListRecorder.h>
+#include <LibWeb/Painting/DisplayListResourceStorage.h>
 
 namespace Web::CSS {
 
-String CursorStyleValue::to_string(SerializationMode mode) const
+void CursorStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    StringBuilder builder;
+    m_properties.image->serialize(builder, mode);
 
-    builder.append(m_properties.image->to_string(mode));
-
-    if (m_properties.x.has_value()) {
-        VERIFY(m_properties.y.has_value());
-        builder.appendff(" {} {}", m_properties.x->to_string(mode), m_properties.y->to_string(mode));
+    if (m_properties.x) {
+        VERIFY(m_properties.y);
+        builder.append(' ');
+        m_properties.x->serialize(builder, mode);
+        builder.append(' ');
+        m_properties.y->serialize(builder, mode);
     }
-
-    return builder.to_string_without_validation();
 }
 
-ValueComparingNonnullRefPtr<StyleValue const> CursorStyleValue::absolutized(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const
+ValueComparingNonnullRefPtr<StyleValue const> CursorStyleValue::absolutized(ComputationContext const& computation_context) const
 {
-    return CursorStyleValue::create(
-        m_properties.image->absolutized(viewport_rect, font_metrics, root_font_metrics)->as_abstract_image(),
-        m_properties.x.map([&](NumberOrCalculated const& value) { return value.absolutized(viewport_rect, font_metrics, root_font_metrics); }),
-        m_properties.y.map([&](NumberOrCalculated const& value) { return value.absolutized(viewport_rect, font_metrics, root_font_metrics); }));
+    RefPtr<StyleValue const> absolutized_x;
+    RefPtr<StyleValue const> absolutized_y;
+
+    if (m_properties.x)
+        absolutized_x = m_properties.x->absolutized(computation_context);
+
+    if (m_properties.y)
+        absolutized_y = m_properties.y->absolutized(computation_context);
+
+    return CursorStyleValue::create(m_properties.image->absolutized(computation_context)->as_abstract_image(), absolutized_x, absolutized_y);
+}
+
+bool CursorStyleValue::is_computationally_independent() const
+{
+    return m_properties.image->is_computationally_independent()
+        && (!m_properties.x || m_properties.x->is_computationally_independent())
+        && (!m_properties.y || m_properties.y->is_computationally_independent());
 }
 
 Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithStyle const& layout_node) const
 {
-    auto const& image = *this->image();
-    if (!image.is_paintable()) {
-        const_cast<AbstractImageStyleValue&>(image).load_any_resources(const_cast<DOM::Document&>(layout_node.document()));
-        return {};
-    }
-
+    auto const& image = *m_properties.image;
     auto const& document = layout_node.document();
+    if (!image.is_paintable(document))
+        return {};
 
-    CacheKey cache_key {
-        .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node),
-        .current_color = layout_node.computed_values().color(),
-    };
+    auto const& current_color = layout_node.computed_values().color();
 
     // Create a bitmap if needed.
     // The cursor size for a given image never changes. It's based either on the image itself, or our default size,
@@ -66,7 +79,7 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
         // 32x32 is selected arbitrarily.
         // FIXME: Ask the OS for the default size?
         CSSPixelSize const default_cursor_size { 32, 32 };
-        auto cursor_css_size = run_default_sizing_algorithm({}, {}, image.natural_width(), image.natural_height(), image.natural_aspect_ratio(), default_cursor_size);
+        auto cursor_css_size = run_default_sizing_algorithm({}, {}, { image.natural_width(document), image.natural_height(document), image.natural_aspect_ratio(document) }, default_cursor_size);
         // FIXME: How do we determine what cursor sizes the OS allows?
         // We don't multiply by the pixel ratio, because we want to use the image's actual pixel size.
         DevicePixelSize cursor_device_size { cursor_css_size.to_type<double>().to_rounded<int>() };
@@ -81,8 +94,8 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
     }
 
     // Repaint the bitmap if necessary
-    if (m_cache_key != cache_key) {
-        m_cache_key = move(cache_key);
+    if (m_cached_bitmap_color != current_color) {
+        m_cached_bitmap_color = current_color;
 
         // Clear whatever was in the bitmap before.
         auto& bitmap = *m_cached_bitmap->bitmap();
@@ -90,22 +103,19 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
         painter->clear_rect(bitmap.rect().to_type<float>(), Color::Transparent);
 
         // Paint the cursor into a bitmap.
-        auto display_list = Painting::DisplayList::create(document.page().client().device_pixels_per_css_pixel());
-        Painting::DisplayListRecorder display_list_recorder(display_list);
-        DisplayListRecordingContext paint_context { display_list_recorder, document.page().palette(), document.page().client().device_pixels_per_css_pixel() };
+        auto visual_context_tree = Painting::AccumulatedVisualContextTree::create();
+        auto display_list = Painting::DisplayList::create(visual_context_tree);
+        Painting::DisplayListResourceStorage resource_storage;
+        Painting::DisplayListRecorder display_list_recorder(display_list, visual_context_tree, resource_storage);
+        DisplayListRecordingContext paint_context { display_list_recorder, document.page().palette(), document.page().client().device_pixels_per_css_pixel(), document.page().chrome_metrics() };
 
         image.resolve_for_size(layout_node, CSSPixelSize { bitmap.size() });
-        image.paint(paint_context, DevicePixelRect { bitmap.rect() }, ImageRendering::Auto);
+        image.paint(paint_context, document, DevicePixelRect { bitmap.rect() }, ImageRendering::Auto);
 
-        switch (document.page().client().display_list_player_type()) {
-        case DisplayListPlayerType::SkiaGPUIfAvailable:
-        case DisplayListPlayerType::SkiaCPU: {
-            auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(bitmap);
-            Painting::DisplayListPlayerSkia display_list_player;
-            display_list_player.execute(*display_list, {}, painting_surface);
-            break;
-        }
-        }
+        auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(bitmap);
+        Painting::DisplayListPlayerSkia display_list_player;
+        display_list_player.execute(*display_list, visual_context_tree, resource_storage, {}, painting_surface);
+        display_list_player.flush(*painting_surface);
     }
 
     // "If the values are unspecified, then the natural hotspot defined inside the image resource itself is used.
@@ -113,16 +123,10 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
     // value of "0 0" were specified."
     // FIXME: Make use of embedded hotspots.
     Gfx::IntPoint hotspot = { 0, 0 };
-    if (x().has_value() && y().has_value()) {
+    if (m_properties.x && m_properties.y) {
         VERIFY(document.window());
-        CalculationResolutionContext const calculation_resolution_context {
-            .length_resolution_context = m_cache_key->length_resolution_context
-        };
-        auto resolved_x = x()->resolved(calculation_resolution_context);
-        auto resolved_y = y()->resolved(calculation_resolution_context);
-        if (resolved_x.has_value() && resolved_y.has_value()) {
-            hotspot = { resolved_x.release_value(), resolved_y.release_value() };
-        }
+
+        hotspot = { number_from_style_value(*m_properties.x, {}), number_from_style_value(*m_properties.y, {}) };
     }
 
     return Gfx::ImageCursor {

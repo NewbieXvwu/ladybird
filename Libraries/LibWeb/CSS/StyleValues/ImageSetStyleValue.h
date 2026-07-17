@@ -1,0 +1,59 @@
+/*
+ * Copyright (c) 2026-present, the Ladybird developers.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#pragma once
+
+#include <AK/Optional.h>
+#include <AK/Utf16String.h>
+#include <AK/Vector.h>
+#include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
+
+namespace Web::CSS {
+
+class ImageSetStyleValue final : public AbstractImageStyleValue {
+    using Base = AbstractImageStyleValue;
+
+public:
+    struct Option {
+        NonnullRefPtr<AbstractImageStyleValue const> image;
+        NonnullRefPtr<StyleValue const> resolution;
+        Optional<Utf16String> type;
+    };
+
+    static ValueComparingNonnullRefPtr<ImageSetStyleValue const> create(Vector<Option>);
+    virtual ~ImageSetStyleValue() override = default;
+
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    virtual bool equals(StyleValue const& other) const override;
+    virtual bool is_computationally_independent() const override;
+
+    virtual void load_any_resources(DOM::Document&) override;
+
+    virtual Optional<CSSPixels> natural_width(DOM::Document const&) const override;
+    virtual Optional<CSSPixels> natural_height(DOM::Document const&) const override;
+    virtual Optional<CSSPixelFraction> natural_aspect_ratio(DOM::Document const&) const override;
+
+    virtual void resolve_for_size(Layout::NodeWithStyle const&, CSSPixelSize) const override;
+    virtual bool is_paintable(DOM::Document const&) const override;
+    virtual void paint(DisplayListRecordingContext&, DOM::Document const&, DevicePixelRect const&, ImageRendering) const override;
+    virtual Optional<Gfx::Color> color_if_single_pixel_bitmap(DOM::Document const&) const override;
+
+    AbstractImageStyleValue const* selected_image() const { return m_selected_image; }
+
+private:
+    explicit ImageSetStyleValue(Vector<Option>);
+
+    virtual void set_style_sheet(GC::Ptr<CSSStyleSheet>) override;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
+
+    Option const* select_option(double device_pixels_per_css_pixel) const;
+
+    Vector<Option> m_options;
+    mutable AbstractImageStyleValue const* m_selected_image { nullptr };
+    mutable double m_selected_resolution { 1 };
+};
+
+}

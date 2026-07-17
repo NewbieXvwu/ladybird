@@ -9,52 +9,86 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Debug.h>
+#include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/Math.h>
+#include <AK/OwnPtr.h>
 #include <AK/QuickSort.h>
-#include <LibCore/EventLoop.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16String.h>
+#include <LibCore/Process.h>
+#include <LibCore/System.h>
+#include <LibDevTools/IndexedDBSerialization.h>
 #include <LibGC/Heap.h>
 #include <LibGfx/Bitmap.h>
+#include <LibGfx/Color.h>
 #include <LibGfx/Font/FontDatabase.h>
 #include <LibGfx/SystemTheme.h>
 #include <LibJS/Runtime/ConsoleObject.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibUnicode/TimeZone.h>
+#include <LibWasm/Types.h>
 #include <LibWeb/ARIA/RoleType.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/CSS/Parser/ErrorReporter.h>
 #include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/CSS/StyleSheetList.h>
+#include <LibWeb/Compositor/CompositorHost.h>
 #include <LibWeb/CookieStore/CookieStore.h>
+#include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/DOM/Attr.h>
 #include <LibWeb/DOM/CharacterData.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/ElementFactory.h>
+#include <LibWeb/DOM/Node.h>
+#include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/Dump.h>
+#include <LibWeb/Fetch/Fetching/Fetching.h>
+#include <LibWeb/Geometry/DOMRect.h>
+#include <LibWeb/HTML/AutoplaySettings.h>
+#include <LibWeb/HTML/BroadcastChannel.h>
 #include <LibWeb/HTML/BrowsingContext.h>
+#include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
+#include <LibWeb/HTML/HTMLTextAreaElement.h>
+#include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
+#include <LibWeb/HTML/NavigableContainer.h>
+#include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWeb/HTML/Storage.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/HTML/WorkerAgentParent.h>
 #include <LibWeb/Infra/Strings.h>
+#include <LibWeb/Layout/FlexLayoutData.h>
+#include <LibWeb/Layout/GridLayoutData.h>
+#include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/Viewport.h>
-#include <LibWeb/Loader/ContentFilter.h>
+#include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Loader/ProxyMappings.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Loader/UserAgent.h>
 #include <LibWeb/Namespace.h>
+#include <LibWeb/Painting/FlexboxInspectorOverlay.h>
 #include <LibWeb/Painting/StackingContext.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
-#include <LibWeb/PermissionsPolicy/AutoplayAllowlist.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
+#include <LibWeb/Platform/FontPlugin.h>
+#include <LibWeb/Selection/Selection.h>
 #include <LibWebView/Attribute.h>
+#include <LibWebView/CompositorConnection.h>
+#include <LibWebView/DictionaryLookup.h>
+#include <LibWebView/ViewImplementation.h>
 #include <WebContent/ConnectionFromClient.h>
 #include <WebContent/PageClient.h>
 #include <WebContent/PageHost.h>
 #include <WebContent/WebContentClientEndpoint.h>
+#include <WebContent/WebContentCompositorHost.h>
 
 namespace WebContent {
 
@@ -66,9 +100,21 @@ ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transpo
 
 ConnectionFromClient::~ConnectionFromClient() = default;
 
+WebView::CompositorConnection* ConnectionFromClient::compositor_process_connection() const
+{
+    if (!m_compositor_connection || !m_compositor_connection->is_open())
+        return nullptr;
+    return m_compositor_connection.ptr();
+}
+
+void ConnectionFromClient::did_destroy_compositor_context(Web::Compositor::CompositorContextId context_id)
+{
+    async_did_destroy_compositor_context(context_id);
+}
+
 void ConnectionFromClient::die()
 {
-    Web::Platform::EventLoopPlugin::the().quit();
+    Core::Process::terminate_immediately(0);
 }
 
 Messages::WebContentServer::InitTransportResponse ConnectionFromClient::init_transport([[maybe_unused]] int peer_pid)
@@ -78,6 +124,35 @@ Messages::WebContentServer::InitTransportResponse ConnectionFromClient::init_tra
     return Core::System::getpid();
 #endif
     VERIFY_NOT_REACHED();
+}
+
+void ConnectionFromClient::initialize(u64 initial_page_id, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::CrossProcessIdAllocator cross_process_id_allocator)
+{
+    m_page_host->initialize(initial_page_id, root_navigable_id, cross_process_id_allocator);
+}
+
+void ConnectionFromClient::set_page_parent_context(u64 page_id, Optional<Web::Compositor::CompositorContextId> parent_context_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto& compositor_context = page->page().top_level_traversable()->compositor_context();
+    if (parent_context_id.has_value())
+        compositor_context.stop_presenting_to_client();
+    compositor_context.set_parent_context(parent_context_id);
+}
+
+void ConnectionFromClient::set_remote_child_frame_compositor_context(u64 page_id, Web::HTML::CrossProcessId frame_id, Optional<Web::Compositor::CompositorContextId> context_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->set_remote_child_frame_compositor_context(frame_id, context_id);
+}
+
+void ConnectionFromClient::run_iframe_load_event_steps(u64 page_id, Web::HTML::CrossProcessId frame_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->run_iframe_load_event_steps(frame_id);
 }
 
 Optional<PageClient&> ConnectionFromClient::page(u64 index, SourceLocation location)
@@ -106,44 +181,89 @@ void ConnectionFromClient::close_server()
 Messages::WebContentServer::GetWindowHandleResponse ConnectionFromClient::get_window_handle(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        return page->page().top_level_traversable()->window_handle();
+        return page->page().top_level_traversable()->window_handle().to_utf8();
     return String {};
 }
 
 void ConnectionFromClient::set_window_handle(u64 page_id, String handle)
 {
-    if (auto page = this->page(page_id); page.has_value())
-        page->page().top_level_traversable()->set_window_handle(move(handle));
+    if (auto page = this->page(page_id); page.has_value()) {
+        page->set_window_handle(Utf16String::from_utf8(handle));
+        page->send_current_needs_beforeunload_check();
+    }
 }
 
-void ConnectionFromClient::connect_to_webdriver(u64 page_id, ByteString webdriver_ipc_path)
+void ConnectionFromClient::connect_to_webdriver(u64 page_id, ByteString webdriver_endpoint)
 {
     if (auto page = this->page(page_id); page.has_value()) {
         // FIXME: Propagate this error back to the browser.
-        if (auto result = page->connect_to_webdriver(webdriver_ipc_path); result.is_error())
+        if (auto result = page->connect_to_webdriver(webdriver_endpoint); result.is_error())
             dbgln("Unable to connect to the WebDriver process: {}", result.error());
     }
 }
 
-void ConnectionFromClient::connect_to_web_ui(u64 page_id, IPC::File web_ui_socket)
+void ConnectionFromClient::notify_webdriver_of_window_replacement(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->notify_webdriver_of_window_replacement();
+}
+
+void ConnectionFromClient::complete_webdriver_navigation_completion(u64 page_id, u64 request_id, Web::WebDriver::Response response)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->did_complete_webdriver_navigation_completion(request_id, move(response));
+}
+
+void ConnectionFromClient::complete_webdriver_history_traversal(u64 page_id, u64 request_id, bool accepted, bool will_replace_web_content_process, bool will_change_top_level_entry)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->did_complete_webdriver_history_traversal(request_id, accepted, will_replace_web_content_process, will_change_top_level_entry);
+}
+
+void ConnectionFromClient::connect_to_web_ui(u64 page_id, IPC::TransportHandle handle)
 {
     if (auto page = this->page(page_id); page.has_value()) {
         // FIXME: Propagate this error back to the browser.
-        if (auto result = page->connect_to_web_ui(move(web_ui_socket)); result.is_error())
+        if (auto result = page->connect_to_web_ui(move(handle)); result.is_error())
             dbgln("Unable to connect to the WebUI host: {}", result.error());
     }
 }
 
-void ConnectionFromClient::connect_to_image_decoder(IPC::File image_decoder_socket)
+void ConnectionFromClient::connect_to_image_decoder(IPC::TransportHandle handle)
 {
     if (on_image_decoder_connection)
-        on_image_decoder_connection(image_decoder_socket);
+        on_image_decoder_connection(handle);
 }
 
-void ConnectionFromClient::connect_to_request_server(IPC::File request_server_socket)
+void ConnectionFromClient::connect_to_compositor_process(IPC::TransportHandle handle)
+{
+    auto transport = MUST(handle.create_transport());
+    m_compositor_connection = adopt_ref(*new WebView::CompositorConnection(move(transport)));
+    m_compositor_connection->on_mouse_event = [this](u64 page_id, Web::MouseEvent event) {
+        mouse_event(page_id, move(event));
+    };
+    m_compositor_connection->on_compositor_lost = [this] {
+        m_page_host->compositor_process_lost();
+    };
+
+#ifdef AK_OS_WINDOWS
+    // Perform Windows peer PID handshake before any other IPC
+    if constexpr (requires { m_compositor_connection->transport().set_peer_pid(0); }) {
+        auto response = m_compositor_connection->send_sync<Messages::CompositorWebContentServer::InitTransport>(Core::System::getpid());
+        m_compositor_connection->transport().set_peer_pid(response->compositor_pid());
+    }
+#endif
+}
+
+void ConnectionFromClient::compositor_process_reconnected()
+{
+    m_page_host->compositor_process_reconnected();
+}
+
+void ConnectionFromClient::connect_to_request_server(IPC::TransportHandle handle)
 {
     if (on_request_server_connection)
-        on_request_server_connection(request_server_socket);
+        on_request_server_connection(handle);
 }
 
 void ConnectionFromClient::update_system_theme(u64 page_id, Core::AnonymousBuffer theme_buffer)
@@ -163,13 +283,24 @@ void ConnectionFromClient::update_screen_rects(u64 page_id, Vector<Web::DevicePi
         page->set_screen_rects(rects, main_screen);
 }
 
-void ConnectionFromClient::load_url(u64 page_id, URL::URL url)
+void ConnectionFromClient::load_url(u64 page_id, URL::URL url, Web::Bindings::NavigationHistoryBehavior history_handling)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
         return;
 
-    page->page().load(url);
+    page->page().load(url, history_handling);
+}
+
+void ConnectionFromClient::load_url_with_document_resource(u64 page_id, URL::URL url,
+    Web::HTML::DocumentResource document_resource,
+    Web::Bindings::NavigationHistoryBehavior history_handling)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    page->page().load(url, move(document_resource), history_handling);
 }
 
 void ConnectionFromClient::load_html(u64 page_id, ByteString html)
@@ -178,28 +309,95 @@ void ConnectionFromClient::load_html(u64 page_id, ByteString html)
         page->page().load_html(html);
 }
 
+void ConnectionFromClient::load_html_with_url(u64 page_id, ByteString html, URL::URL url)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().load_html(html, url);
+}
+
 void ConnectionFromClient::reload(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().reload();
 }
 
-void ConnectionFromClient::traverse_the_history_by_delta(u64 page_id, i32 delta)
+void ConnectionFromClient::stop_loading(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().traverse_the_history_by_delta(delta);
+        page->page().top_level_traversable()->stop_loading();
 }
 
-void ConnectionFromClient::set_viewport_size(u64 page_id, Web::DevicePixelSize size)
+void ConnectionFromClient::cancel_download(u64 page_id, u64 download_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->set_viewport_size(size);
+        page->cancel_download(download_id);
 }
 
-void ConnectionFromClient::ready_to_paint(u64 page_id)
+void ConnectionFromClient::resolve_session_history_traversal_target(u64 page_id, u64 request_id, Optional<i32> target_step)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->ready_to_paint();
+        page->did_resolve_session_history_traversal_target(request_id, target_step);
+}
+
+void ConnectionFromClient::traverse_the_history_to_step(u64 page_id, i32 step)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value()) {
+        async_did_traverse_the_history_to_step(page_id, step, false, Web::HTML::HistoryStepResult::Applied);
+        return;
+    }
+
+    page->page().top_level_traversable()->traverse_the_history_to_step(step,
+        GC::create_function(Web::HTML::main_thread_event_loop().heap(), [this, page_id, step](bool step_was_available, Web::HTML::HistoryStepResult result) {
+            async_did_traverse_the_history_to_step(page_id, step, step_was_available, result);
+        }));
+}
+
+void ConnectionFromClient::check_if_traverse_history_step_is_canceled(u64 page_id, u64 request_id, i32 step)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value()) {
+        async_did_check_if_traverse_history_step_is_canceled(page_id, request_id, step, Web::HTML::HistoryStepResult::CanceledByMissingPage);
+        return;
+    }
+
+    auto& heap = Web::HTML::main_thread_event_loop().heap();
+    page->page().top_level_traversable()->check_if_traverse_history_step_is_canceled(step,
+        GC::create_function(heap, [this, page_id, request_id, step](Web::HTML::HistoryStepResult result) {
+            async_did_check_if_traverse_history_step_is_canceled(page_id, request_id, step, result);
+        }));
+}
+
+void ConnectionFromClient::set_top_level_session_history(u64 page_id, Vector<Web::HTML::SessionHistoryEntryDescriptor> entries, size_t current_top_level_entry_index, bool allow_reconstructing_current_entry)
+{
+    if (auto page = this->page(page_id); page.has_value()) {
+        auto accepted = page->page().top_level_traversable()->replace_top_level_session_history_entries_from_ui_process(move(entries), current_top_level_entry_index, allow_reconstructing_current_entry);
+        auto session_history_snapshot = page->page().top_level_traversable()->create_session_history_snapshot();
+        async_did_set_top_level_session_history(page_id, accepted, move(session_history_snapshot.top_level_session_history_entries), move(session_history_snapshot.used_session_history_steps), session_history_snapshot.current_used_step_index);
+    } else {
+        async_did_set_top_level_session_history(page_id, false, {}, {}, 0);
+    }
+}
+
+void ConnectionFromClient::reset_session_history_for_testing(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value()) {
+        auto& event_loop = Web::HTML::main_thread_event_loop();
+        page->page().top_level_traversable()->reset_session_history_for_testing(
+            GC::create_function(event_loop.heap(), [this, page_id] {
+                async_did_reset_session_history_for_testing(page_id);
+            }));
+    } else {
+        async_did_reset_session_history_for_testing(page_id);
+    }
+}
+
+void ConnectionFromClient::set_viewport(u64 page_id, Web::DevicePixelSize size, double device_pixel_ratio, Web::ViewportIsFullscreen is_fullscreen)
+{
+    if (auto page = this->page(page_id); page.has_value()) {
+        page->set_viewport(size, device_pixel_ratio);
+        page->page().set_viewport_is_fullscreen(is_fullscreen);
+    }
 }
 
 void ConnectionFromClient::key_event(u64 page_id, Web::KeyEvent event)
@@ -209,6 +407,12 @@ void ConnectionFromClient::key_event(u64 page_id, Web::KeyEvent event)
 
 void ConnectionFromClient::mouse_event(u64 page_id, Web::MouseEvent event)
 {
+    auto page = m_page_host->page(page_id);
+    if (!page.has_value()) {
+        async_did_finish_handling_input_event(page_id, Web::EventResult::Dropped);
+        return;
+    }
+
     // OPTIMIZATION: Coalesce consecutive unprocessed mouse move and wheel events.
     auto event_to_coalesce = [&]() -> Web::MouseEvent const* {
         if (m_input_event_queue.is_empty())
@@ -220,8 +424,12 @@ void ConnectionFromClient::mouse_event(u64 page_id, Web::MouseEvent event)
             return nullptr;
 
         if (auto const* mouse_event = m_input_event_queue.tail().event.get_pointer<Web::MouseEvent>()) {
-            if (mouse_event->type == event.type)
-                return mouse_event;
+            if (mouse_event->type != event.type)
+                return nullptr;
+            if (event.type == Web::MouseEvent::Type::MouseWheel
+                && mouse_event->async_scroll_performed_default_action != event.async_scroll_performed_default_action)
+                return nullptr;
+            return mouse_event;
         }
 
         return nullptr;
@@ -234,6 +442,7 @@ void ConnectionFromClient::mouse_event(u64 page_id, Web::MouseEvent event)
         m_input_event_queue.tail().event = move(event);
         ++m_input_event_queue.tail().coalesced_event_count;
 
+        page->page().client().request_frame();
         return;
     }
 
@@ -245,9 +454,47 @@ void ConnectionFromClient::drag_event(u64 page_id, Web::DragEvent event)
     enqueue_input_event({ page_id, move(event), 0 });
 }
 
+void ConnectionFromClient::pinch_event(u64 page_id, Web::PinchEvent event)
+{
+    auto page = m_page_host->page(page_id);
+    if (!page.has_value()) {
+        async_did_finish_handling_input_event(page_id, Web::EventResult::Dropped);
+        return;
+    }
+
+    // OPTIMIZATION: Coalesce consecutive unprocessed pinch events. Pinch scale
+    //               deltas are multiplicative, so preserve the combined scale change.
+    //               Only coalesce events with the same focal point, as applying
+    //               one combined zoom around a different point is not equivalent
+    //               to applying each zoom in sequence.
+    if (!m_input_event_queue.is_empty() && m_input_event_queue.tail().page_id == page_id) {
+        if (auto const* pinch_event = m_input_event_queue.tail().event.get_pointer<Web::PinchEvent>()) {
+            if (pinch_event->position != event.position || pinch_event->modifiers != event.modifiers)
+                return enqueue_input_event({ page_id, move(event), 0 });
+
+            event.scale_delta = (1.0 + pinch_event->scale_delta) * (1.0 + event.scale_delta) - 1.0;
+            m_input_event_queue.tail().event = move(event);
+            ++m_input_event_queue.tail().coalesced_event_count;
+
+            page->page().client().request_frame();
+            return;
+        }
+    }
+
+    enqueue_input_event({ page_id, move(event), 0 });
+}
+
 void ConnectionFromClient::enqueue_input_event(Web::QueuedInputEvent event)
 {
+    auto page_id = event.page_id;
+    auto page = m_page_host->page(page_id);
+    if (!page.has_value()) {
+        async_did_finish_handling_input_event(page_id, Web::EventResult::Dropped);
+        return;
+    }
+
     m_input_event_queue.enqueue(move(event));
+    page->page().client().request_frame();
 }
 
 void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteString argument)
@@ -265,7 +512,7 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
     if (request == "dump-display-list") {
         if (auto* doc = page->page().top_level_browsing_context().active_document()) {
             auto display_list_dump = doc->dump_display_list();
-            dbgln("{}", display_list_dump);
+            dbgln("{}", display_list_dump.to_utf8());
         }
         return;
     }
@@ -286,7 +533,7 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
 
     if (request == "dump-paint-tree") {
         if (auto* doc = page->page().top_level_browsing_context().active_document()) {
-            if (auto* paintable = doc->paintable())
+            if (auto paintable = doc->paintable())
                 Web::dump_tree(*paintable);
         }
         return;
@@ -297,7 +544,7 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
             if (auto* viewport = doc->layout_node()) {
                 auto& viewport_paintable = static_cast<Web::Painting::ViewportPaintable&>(*viewport->paintable_box());
                 viewport_paintable.build_stacking_context_tree_if_needed();
-                if (auto* stacking_context = viewport_paintable.stacking_context()) {
+                if (auto stacking_context = viewport_paintable.stacking_context()) {
                     StringBuilder builder;
                     stacking_context->dump(builder);
                     dbgln("{}", builder.string_view());
@@ -325,13 +572,16 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
     }
 
     if (request == "dump-all-resolved-styles") {
-        auto dump_style = [](String const& title, Web::CSS::ComputedProperties const& style, HashMap<FlyString, Web::CSS::StyleProperty> const& custom_properties) {
+        auto dump_style = [](String const& title, Web::CSS::ComputedValues const& style, RefPtr<Web::CSS::CustomPropertyData const> custom_property_data) {
             dbgln("+ {}", title);
-            for (size_t i = to_underlying(Web::CSS::first_longhand_property_id); i < to_underlying(Web::CSS::last_longhand_property_id); ++i) {
-                dbgln("|  {} = {}", Web::CSS::string_from_property_id(static_cast<Web::CSS::PropertyID>(i)), style.property(static_cast<Web::CSS::PropertyID>(i)).to_string(Web::CSS::SerializationMode::Normal));
+            for (size_t i = to_underlying(Web::CSS::first_longhand_property_id); i <= to_underlying(Web::CSS::last_longhand_property_id); ++i) {
+                auto property_id = static_cast<Web::CSS::PropertyID>(i);
+                dbgln("|  {} = {}", Web::CSS::string_from_property_id(property_id), style.computed_style_value(property_id)->to_string(Web::CSS::SerializationMode::Normal));
             }
-            for (auto const& [name, property] : custom_properties) {
-                dbgln("|  {} = {}", name, property.value->to_string(Web::CSS::SerializationMode::Normal));
+            if (custom_property_data) {
+                custom_property_data->for_each_property([](Utf16FlyString const& name, Web::CSS::StyleProperty const& property) {
+                    dbgln("|  {} = {}", name, property.value->to_string(Web::CSS::SerializationMode::Normal));
+                });
             }
             dbgln("---");
         };
@@ -345,14 +595,15 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
                     nodes_to_visit.enqueue(child.ptr());
                 if (auto* element = as_if<Web::DOM::Element>(node)) {
                     auto styles = doc->style_computer().compute_style({ *element });
-                    dump_style(MUST(String::formatted("Element {}", node->debug_description())), styles, element->custom_properties({}));
+                    dump_style(MUST(String::formatted("Element {}", node->debug_description())), *styles, element->custom_property_data({}));
 
-                    for (auto pseudo_element_index = 0; pseudo_element_index < to_underlying(Web::CSS::PseudoElement::KnownPseudoElementCount); ++pseudo_element_index) {
-                        auto pseudo_element_type = static_cast<Web::CSS::PseudoElement>(pseudo_element_index);
-                        if (auto pseudo_element = element->get_pseudo_element(pseudo_element_type); pseudo_element.has_value() && pseudo_element->computed_properties()) {
-                            dump_style(MUST(String::formatted("PseudoElement {}::{}", node->debug_description(), Web::CSS::pseudo_element_name(pseudo_element_type))), *pseudo_element->computed_properties(), pseudo_element->custom_properties());
-                        }
-                    }
+                    element->for_each_synthetic_pseudo_element([&](Web::CSS::PseudoElement pseudo_element_type, Web::DOM::PseudoElement const& pseudo_element) {
+                        auto computed_values = pseudo_element.computed_values();
+                        if (!computed_values)
+                            return;
+
+                        dump_style(MUST(String::formatted("PseudoElement {}::{}", node->debug_description(), Web::CSS::pseudo_element_name(pseudo_element_type))), *computed_values, pseudo_element.custom_property_data());
+                    });
                 }
             }
         }
@@ -364,6 +615,11 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
         return;
     }
 
+    if (request == "dump-wasm-stats") {
+        Wasm::dump_module_stats();
+        return;
+    }
+
     if (request == "collect-garbage") {
         // NOTE: We use deferred_invoke here to ensure that GC runs with as little on the stack as possible.
         Core::deferred_invoke([] {
@@ -372,16 +628,29 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
         return;
     }
 
+    if (request == "crash-current-page") {
+        Core::deferred_invoke([] {
+            VERIFY_NOT_REACHED();
+        });
+        return;
+    }
+
     if (request == "set-line-box-borders") {
         bool state = argument == "on";
         auto traversable = page->page().top_level_traversable();
         traversable->set_should_show_line_box_borders(state);
-        traversable->set_needs_repaint();
+        return;
+    }
+
+    if (request == "set-caret-hit-test-debug-overlay") {
+        bool state = argument == "on";
+        auto traversable = page->page().top_level_traversable();
+        traversable->set_should_show_caret_hit_test_debug_overlay(state);
         return;
     }
 
     if (request == "clear-cache") {
-        Web::ResourceLoader::the().clear_cache();
+        Web::Fetch::Fetching::clear_http_memory_cache();
         return;
     }
 
@@ -411,6 +680,17 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
         return;
     }
 
+    if (request == "dump-session-storage") {
+        if (auto* document = page->page().top_level_browsing_context().active_document()) {
+            auto storage_or_error = document->window()->session_storage();
+            if (storage_or_error.is_error())
+                dbgln("Failed to retrieve session storage: {}", storage_or_error.release_error());
+            else
+                storage_or_error.release_value()->dump();
+        }
+        return;
+    }
+
     if (request == "navigator-compatibility-mode") {
         Web::NavigatorCompatibilityMode compatibility_mode;
         if (argument == "chrome") {
@@ -428,8 +708,8 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
         return;
     }
 
-    if (request == "content-filtering") {
-        Web::ContentFilter::the().set_filtering_enabled(argument == "on");
+    if (request == "content-blocking") {
+        page->page().set_content_blocking_enabled(argument == "on");
         return;
     }
 }
@@ -446,11 +726,118 @@ void ConnectionFromClient::inspect_dom_tree(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value()) {
         if (auto* doc = page->page().top_level_browsing_context().active_document())
-            async_did_inspect_dom_tree(page_id, doc->dump_dom_tree_as_json());
+            async_did_inspect_dom_tree(page_id, doc->dump_dom_tree_as_json().to_utf8());
     }
 }
 
-void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodeProperties::Type property_type, Web::UniqueNodeID node_id, Optional<Web::CSS::PseudoElement> pseudo_element)
+void ConnectionFromClient::inspect_storage(u64 page_id, Web::StorageAPI::StorageEndpointType storage_endpoint, u64 request_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value()) {
+        async_did_inspect_storage(page_id, request_id, "[]"_string);
+        return;
+    }
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document || !document->window()) {
+        async_did_inspect_storage(page_id, request_id, "[]"_string);
+        return;
+    }
+
+    Web::WebIDL::ExceptionOr<GC::Ref<Web::HTML::Storage>> storage_or_error = [&]() -> Web::WebIDL::ExceptionOr<GC::Ref<Web::HTML::Storage>> {
+        if (storage_endpoint == Web::StorageAPI::StorageEndpointType::LocalStorage)
+            return document->window()->local_storage();
+        VERIFY(storage_endpoint == Web::StorageAPI::StorageEndpointType::SessionStorage);
+        return document->window()->session_storage();
+    }();
+
+    if (storage_or_error.is_error()) {
+        async_did_inspect_storage(page_id, request_id, "[]"_string);
+        return;
+    }
+
+    auto storage = storage_or_error.release_value();
+    JsonArray storage_items;
+    for (auto i = 0uz; i < storage->length(); ++i) {
+        auto name = storage->key(i);
+        if (!name.has_value())
+            continue;
+
+        auto value = storage->get_item(*name);
+        if (!value.has_value())
+            continue;
+
+        JsonObject item;
+        item.set("name"sv, name.release_value().to_utf8());
+        item.set("value"sv, value.release_value().to_utf8());
+        storage_items.must_append(move(item));
+    }
+
+    async_did_inspect_storage(page_id, request_id, storage_items.serialized());
+}
+
+static Optional<GC::Ref<Web::HTML::Storage>> active_session_storage_for_page(PageClient& page)
+{
+    auto* document = page.page().top_level_browsing_context().active_document();
+    if (!document || !document->window())
+        return {};
+
+    auto storage_or_error = document->window()->session_storage();
+    if (storage_or_error.is_exception())
+        return {};
+
+    return storage_or_error.release_value();
+}
+
+Messages::WebContentServer::SetSessionStorageItemResponse ConnectionFromClient::set_session_storage_item(u64 page_id, Utf16String key, Utf16String value)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return Optional<WebView::StorageSetResult> {};
+
+    auto storage = active_session_storage_for_page(*page);
+    if (!storage.has_value())
+        return Optional<WebView::StorageSetResult> {};
+
+    auto old_value = (*storage)->get_item(key);
+    auto result = (*storage)->set_item(key, value);
+    if (result.is_exception())
+        return WebView::StorageSetResult { WebView::StorageOperationError::QuotaExceededError };
+
+    return WebView::StorageSetResult { move(old_value) };
+}
+
+Messages::WebContentServer::RemoveSessionStorageItemResponse ConnectionFromClient::remove_session_storage_item(u64 page_id, Utf16String key)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return Optional<Utf16String> {};
+
+    auto storage = active_session_storage_for_page(*page);
+    if (!storage.has_value())
+        return Optional<Utf16String> {};
+
+    auto old_value = (*storage)->get_item(key);
+    if (old_value.has_value())
+        (*storage)->remove_item(key);
+    return old_value;
+}
+
+Messages::WebContentServer::ClearSessionStorageResponse ConnectionFromClient::clear_session_storage(u64 page_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return false;
+
+    auto storage = active_session_storage_for_page(*page);
+    if (!storage.has_value() || (*storage)->length() == 0)
+        return false;
+
+    (*storage)->clear();
+    return true;
+}
+
+void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodeProperties::Type property_type, Web::UniqueNodeID node_id, Optional<Web::CSS::PseudoElement> pseudo_element, JsonValue options_value)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
@@ -459,8 +846,7 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     clear_inspected_dom_node(page_id);
 
     auto* node = Web::DOM::Node::from_unique_id(node_id);
-    // Nodes without layout (aka non-visible nodes) don't have style computed.
-    if (!node || !node->layout_node() || !node->is_element()) {
+    if (!node || !node->is_element()) {
         async_did_inspect_dom_node(page_id, { property_type, {} });
         return;
     }
@@ -468,9 +854,21 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     auto& element = as<Web::DOM::Element>(*node);
     node->document().set_inspected_node(node);
 
-    auto properties = element.computed_properties(pseudo_element);
+    Web::DOM::AbstractElement abstract_element { element, pseudo_element };
+    node->document().update_style_for_element(abstract_element);
 
-    if (!properties) {
+    auto computed_values = element.computed_values(pseudo_element);
+
+    if (!computed_values) {
+        async_did_inspect_dom_node(page_id, { property_type, {} });
+        return;
+    }
+
+    node->document().update_layout(Web::DOM::UpdateLayoutReason::Debugging);
+
+    // Nodes without layout (aka non-visible nodes) do not have box metrics, but DevTools can still ask for their style
+    // rules and computed properties.
+    if (property_type == WebView::DOMNodeProperties::Type::Layout && !node->layout_node()) {
         async_did_inspect_dom_node(page_id, { property_type, {} });
         return;
     }
@@ -478,27 +876,36 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     auto serialize_computed_style = [&]() {
         JsonObject serialized;
 
-        properties->for_each_property([&](auto property_id, auto& value) {
+        for (auto i = to_underlying(Web::CSS::first_longhand_property_id); i <= to_underlying(Web::CSS::last_longhand_property_id); ++i) {
+            auto property_id = static_cast<Web::CSS::PropertyID>(i);
+            auto value = computed_values->computed_style_value(property_id);
             serialized.set(
-                Web::CSS::string_from_property_id(property_id),
-                value.to_string(Web::CSS::SerializationMode::Normal));
-        });
+                Web::CSS::string_from_property_id(property_id).to_utf16_string().to_utf8_but_should_be_ported_to_utf16(),
+                value->to_string(Web::CSS::SerializationMode::Normal));
+        }
+
+        // FIXME: Custom properties are not included in ComputedValues, so add them manually.
+        if (auto custom_property_data = element.custom_property_data(pseudo_element)) {
+            custom_property_data->for_each_property([&](Utf16FlyString const& name, Web::CSS::StyleProperty const& value) {
+                serialized.set(name.to_utf16_string().to_utf8_but_should_be_ported_to_utf16(), value.value->to_string(Web::CSS::SerializationMode::Normal));
+            });
+        }
 
         return serialized;
     };
 
     auto serialize_layout = [&](Web::Layout::Node const* layout_node) {
-        if (!layout_node || !layout_node->is_box() || !layout_node->first_paintable() || !layout_node->first_paintable()->is_paintable_box()) {
+        auto paintable = layout_node ? layout_node->paintable() : nullptr;
+        if (!layout_node || !layout_node->is_box() || !paintable) {
             return JsonObject {};
         }
 
-        auto const& paintable_box = as<Web::Painting::PaintableBox>(*layout_node->first_paintable());
-        auto const& box_model = paintable_box.box_model();
+        auto const& box_model = paintable->box_model();
 
         JsonObject serialized;
 
-        serialized.set("width"sv, paintable_box.content_width().to_double());
-        serialized.set("height"sv, paintable_box.content_height().to_double());
+        serialized.set("width"sv, paintable->content_width().to_double());
+        serialized.set("height"sv, paintable->content_height().to_double());
 
         serialized.set("padding-top"sv, box_model.padding.top.to_double());
         serialized.set("padding-right"sv, box_model.padding.right.to_double());
@@ -515,12 +922,15 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
         serialized.set("border-bottom-width"sv, box_model.border.bottom.to_double());
         serialized.set("border-left-width"sv, box_model.border.left.to_double());
 
-        serialized.set("box-sizing"sv, properties->property(Web::CSS::PropertyID::BoxSizing).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("display"sv, properties->property(Web::CSS::PropertyID::Display).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("float"sv, properties->property(Web::CSS::PropertyID::Float).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("line-height"sv, properties->property(Web::CSS::PropertyID::LineHeight).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("position"sv, properties->property(Web::CSS::PropertyID::Position).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("z-index"sv, properties->property(Web::CSS::PropertyID::ZIndex).to_string(Web::CSS::SerializationMode::Normal));
+        auto serialize_property = [&](Web::CSS::PropertyID property_id) {
+            return computed_values->computed_style_value(property_id)->to_string(Web::CSS::SerializationMode::Normal);
+        };
+        serialized.set("box-sizing"sv, serialize_property(Web::CSS::PropertyID::BoxSizing));
+        serialized.set("display"sv, serialize_property(Web::CSS::PropertyID::Display));
+        serialized.set("float"sv, serialize_property(Web::CSS::PropertyID::Float));
+        serialized.set("line-height"sv, serialize_property(Web::CSS::PropertyID::LineHeight));
+        serialized.set("position"sv, serialize_property(Web::CSS::PropertyID::Position));
+        serialized.set("z-index"sv, serialize_property(Web::CSS::PropertyID::ZIndex));
 
         return serialized;
     };
@@ -528,7 +938,7 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     auto serialize_used_fonts = [&]() {
         JsonArray serialized;
 
-        properties->computed_font_list().for_each_font_entry([&](Gfx::FontCascadeList::Entry const& entry) {
+        computed_values->font_list().for_each_font_entry([&](Gfx::FontCascadeList::Entry const& entry) {
             auto const& font = *entry.font;
 
             JsonObject font_object;
@@ -541,9 +951,20 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
         return serialized;
     };
 
+    auto serialize_applied_style_rules = [&]() {
+        JsonObject const empty_options;
+        auto const& options = options_value.is_object() ? options_value.as_object() : empty_options;
+        auto include_inherited = options.get_bool("inherited"sv).value_or(false);
+        auto include_user_agent_styles = options.get_string("filter"sv).map([](auto const& filter) { return filter == "ua"sv; }).value_or(false);
+        return node->document().style_computer().collect_devtools_applied_style_rules(abstract_element, include_inherited, include_user_agent_styles);
+    };
+
     JsonValue serialized;
 
     switch (property_type) {
+    case WebView::DOMNodeProperties::Type::AppliedStyleRules:
+        serialized = serialize_applied_style_rules();
+        break;
     case WebView::DOMNodeProperties::Type::ComputedStyle:
         serialized = serialize_computed_style();
         break;
@@ -558,13 +979,415 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     async_did_inspect_dom_node(page_id, { property_type, move(serialized) });
 }
 
+static StringView grid_track_type_to_string(Web::Layout::GridTrackType type)
+{
+    switch (type) {
+    case Web::Layout::GridTrackType::Explicit:
+        return "explicit"sv;
+    case Web::Layout::GridTrackType::Implicit:
+        return "implicit"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static StringView grid_track_state_to_string(Web::Layout::GridTrackState state)
+{
+    switch (state) {
+    case Web::Layout::GridTrackState::Static:
+        return "static"sv;
+    case Web::Layout::GridTrackState::Repeat:
+        return "repeat"sv;
+    case Web::Layout::GridTrackState::Removed:
+        return "removed"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static JsonArray serialize_grid_line_names(Vector<Utf16FlyString> const& names)
+{
+    JsonArray serialized_names;
+    for (auto const& name : names)
+        serialized_names.must_append(MUST(name.view().to_utf8()));
+    return serialized_names;
+}
+
+static JsonObject serialize_grid_line(Web::Layout::GridLayoutLine const& line)
+{
+    JsonObject serialized_line;
+    serialized_line.set("breadth"sv, line.breadth.to_double());
+    serialized_line.set("names"sv, serialize_grid_line_names(line.names));
+    serialized_line.set("negativeNumber"sv, line.negative_number);
+    serialized_line.set("number"sv, line.number);
+    serialized_line.set("start"sv, line.start.to_double());
+    serialized_line.set("type"sv, grid_track_type_to_string(line.type));
+    return serialized_line;
+}
+
+static JsonObject serialize_grid_track(Web::Layout::GridLayoutTrack const& track)
+{
+    JsonObject serialized_track;
+    serialized_track.set("breadth"sv, track.breadth.to_double());
+    serialized_track.set("start"sv, track.start.to_double());
+    serialized_track.set("state"sv, grid_track_state_to_string(track.state));
+    serialized_track.set("type"sv, grid_track_type_to_string(track.type));
+    return serialized_track;
+}
+
+static JsonObject serialize_grid_area(Web::Layout::GridLayoutArea const& area)
+{
+    JsonObject serialized_area;
+    serialized_area.set("columnEnd"sv, area.column_end);
+    serialized_area.set("columnStart"sv, area.column_start);
+    serialized_area.set("name"sv, MUST(area.name.view().to_utf8()));
+    serialized_area.set("rowEnd"sv, area.row_end);
+    serialized_area.set("rowStart"sv, area.row_start);
+    serialized_area.set("type"sv, grid_track_type_to_string(area.type));
+    return serialized_area;
+}
+
+static JsonObject serialize_grid_dimension(Web::Layout::GridLayoutDimension const& dimension)
+{
+    JsonArray lines;
+    for (auto const& line : dimension.lines)
+        lines.must_append(serialize_grid_line(line));
+
+    JsonArray tracks;
+    for (auto const& track : dimension.tracks)
+        tracks.must_append(serialize_grid_track(track));
+
+    JsonObject serialized_dimension;
+    serialized_dimension.set("lines"sv, move(lines));
+    serialized_dimension.set("tracks"sv, move(tracks));
+    return serialized_dimension;
+}
+
+static JsonObject serialize_grid_fragment(Web::Layout::GridLayoutFragment const& fragment)
+{
+    JsonArray areas;
+    for (auto const& area : fragment.areas)
+        areas.must_append(serialize_grid_area(area));
+
+    JsonObject serialized_fragment;
+    serialized_fragment.set("areas"sv, move(areas));
+    serialized_fragment.set("cols"sv, serialize_grid_dimension(fragment.columns));
+    serialized_fragment.set("rows"sv, serialize_grid_dimension(fragment.rows));
+    return serialized_fragment;
+}
+
+static JsonArray serialize_grid_fragments(Vector<Web::Layout::GridLayoutFragment> const& fragments)
+{
+    JsonArray serialized_fragments;
+    for (auto const& fragment : fragments)
+        serialized_fragments.must_append(serialize_grid_fragment(fragment));
+    return serialized_fragments;
+}
+
+static StringView flex_layout_growth_state_to_string(Web::Layout::FlexLayoutGrowthState state)
+{
+    switch (state) {
+    case Web::Layout::FlexLayoutGrowthState::Growing:
+        return "growing"sv;
+    case Web::Layout::FlexLayoutGrowthState::Shrinking:
+        return "shrinking"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static StringView flex_layout_clamp_state_to_string(Web::Layout::FlexLayoutClampState state)
+{
+    switch (state) {
+    case Web::Layout::FlexLayoutClampState::Unclamped:
+        return "unclamped"sv;
+    case Web::Layout::FlexLayoutClampState::ClampedToMin:
+        return "clamped_to_min"sv;
+    case Web::Layout::FlexLayoutClampState::ClampedToMax:
+        return "clamped_to_max"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static JsonObject serialize_flex_layout_item(Web::Layout::FlexLayoutItem const& item, Web::Layout::FlexLayoutGrowthState line_growth_state)
+{
+    JsonObject sizing;
+    sizing.set("clampState"sv, flex_layout_clamp_state_to_string(item.clamp_state));
+    sizing.set("crossAxisDirection"sv, item.cross_axis_direction);
+    sizing.set("crossMaxSize"sv, item.cross_max_size.to_double());
+    sizing.set("crossMinSize"sv, item.cross_min_size.to_double());
+    sizing.set("lineGrowthState"sv, flex_layout_growth_state_to_string(line_growth_state));
+    sizing.set("mainAxisDirection"sv, item.main_axis_direction);
+    sizing.set("mainBaseSize"sv, item.main_base_size.to_double());
+    sizing.set("mainDeltaSize"sv, item.main_delta_size.to_double());
+    sizing.set("mainMaxSize"sv, item.main_max_size.to_double());
+    sizing.set("mainMinSize"sv, item.main_min_size.to_double());
+
+    auto main_size_property_name = item.main_axis_direction.starts_with_bytes("horizontal"sv) ? "width"sv : "height"sv;
+
+    JsonObject properties;
+    properties.set("flex-basis"sv, item.flex_basis);
+    properties.set("flex-grow"sv, item.flex_grow);
+    properties.set("flex-shrink"sv, item.flex_shrink);
+    properties.set(main_size_property_name, item.main_size_property);
+    properties.set(MUST(String::formatted("min-{}", main_size_property_name)), item.main_min_size_property);
+    properties.set(MUST(String::formatted("max-{}", main_size_property_name)), item.main_max_size_property);
+
+    JsonObject computed_style;
+    computed_style.set("flexGrow"sv, item.flex_grow);
+    computed_style.set("flexShrink"sv, item.flex_shrink);
+
+    JsonObject serialized_item;
+    serialized_item.set("nodeId"sv, item.node_id->value());
+    serialized_item.set("flexItemSizing"sv, move(sizing));
+    serialized_item.set("properties"sv, move(properties));
+    serialized_item.set("computedStyle"sv, move(computed_style));
+    return serialized_item;
+}
+
+static JsonArray serialize_flex_layout_items(Vector<Web::Layout::FlexLayoutLine> const& lines)
+{
+    JsonArray serialized_items;
+    for (auto const& line : lines) {
+        for (auto const& item : line.items) {
+            if (!item.node_id.has_value())
+                continue;
+            serialized_items.must_append(serialize_flex_layout_item(item, line.growth_state));
+        }
+    }
+    return serialized_items;
+}
+
+static Optional<JsonObject> flex_layout_for_node(Web::DOM::Node const& node)
+{
+    auto paintable_box = node.paintable_box();
+    if (!paintable_box)
+        return {};
+
+    auto const* flex_layout_data = paintable_box->flex_layout_data();
+    if (!flex_layout_data)
+        return {};
+
+    JsonObject properties;
+    properties.set("align-content"sv, Web::CSS::to_string(flex_layout_data->align_content));
+    properties.set("align-items"sv, Web::CSS::to_string(flex_layout_data->align_items));
+    properties.set("flex-direction"sv, Web::CSS::to_string(flex_layout_data->flex_direction));
+    properties.set("flex-wrap"sv, Web::CSS::to_string(flex_layout_data->flex_wrap));
+    properties.set("justify-content"sv, Web::CSS::to_string(flex_layout_data->justify_content));
+
+    JsonObject layout;
+    layout.set("containerNodeId"sv, node.unique_id().value());
+    layout.set("properties"sv, move(properties));
+    layout.set("items"sv, serialize_flex_layout_items(flex_layout_data->lines));
+    return layout;
+}
+
+static Optional<JsonObject> grid_layout_for_node(Web::DOM::Node const& node)
+{
+    auto paintable_box = node.paintable_box();
+    if (!paintable_box)
+        return {};
+
+    auto const* grid_layout_data = paintable_box->grid_layout_data();
+    if (!grid_layout_data)
+        return {};
+
+    JsonObject layout;
+    layout.set("containerNodeId"sv, node.unique_id().value());
+    layout.set("direction"sv, Web::CSS::to_string(grid_layout_data->direction));
+    layout.set("gridFragments"sv, serialize_grid_fragments(grid_layout_data->fragments));
+    layout.set("isSubgrid"sv, grid_layout_data->is_subgrid);
+    layout.set("writingMode"sv, Web::CSS::to_string(grid_layout_data->writing_mode));
+
+    return layout;
+}
+
+static void append_grid_layouts_for_node_and_frame_descendants(Web::DOM::Node& root_node, JsonArray& grid_layouts)
+{
+    root_node.for_each_in_inclusive_subtree([&](Web::DOM::Node& node) {
+        if (auto grid_layout = grid_layout_for_node(node); grid_layout.has_value())
+            grid_layouts.must_append(grid_layout.release_value());
+
+        auto* navigable_container = as_if<Web::HTML::NavigableContainer>(node);
+        if (!navigable_container)
+            return Web::TraversalDecision::Continue;
+
+        auto content_navigable = navigable_container->content_navigable();
+        if (!content_navigable)
+            return Web::TraversalDecision::Continue;
+
+        auto content_document = as<Web::HTML::LocalNavigable>(*content_navigable).active_document();
+        if (!content_document)
+            return Web::TraversalDecision::Continue;
+
+        if (!content_document->origin().is_same_origin_domain(navigable_container->document().origin()))
+            return Web::TraversalDecision::Continue;
+
+        content_document->update_layout(Web::DOM::UpdateLayoutReason::Debugging);
+        append_grid_layouts_for_node_and_frame_descendants(*content_document, grid_layouts);
+        return Web::TraversalDecision::Continue;
+    });
+}
+
+void ConnectionFromClient::inspect_grid_layouts(u64 page_id, Web::UniqueNodeID root_node_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* root_node = Web::DOM::Node::from_unique_id(root_node_id);
+    if (!root_node) {
+        async_did_inspect_grid_layouts(page_id, "[]"_string);
+        return;
+    }
+
+    root_node->document().update_layout(Web::DOM::UpdateLayoutReason::Debugging);
+
+    JsonArray grid_layouts;
+    append_grid_layouts_for_node_and_frame_descendants(*root_node, grid_layouts);
+
+    async_did_inspect_grid_layouts(page_id, grid_layouts.serialized());
+}
+
+void ConnectionFromClient::inspect_current_grid(u64 page_id, Web::UniqueNodeID node_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* node = Web::DOM::Node::from_unique_id(node_id);
+    if (!node) {
+        async_did_inspect_current_grid(page_id, "null"_string);
+        return;
+    }
+
+    node->document().update_layout(Web::DOM::UpdateLayoutReason::Debugging);
+
+    for (auto const* current = node; current; current = current->parent_or_shadow_host_node()) {
+        if (auto grid_layout = grid_layout_for_node(*current); grid_layout.has_value()) {
+            async_did_inspect_current_grid(page_id, grid_layout->serialized());
+            return;
+        }
+    }
+
+    async_did_inspect_current_grid(page_id, "null"_string);
+}
+
+void ConnectionFromClient::inspect_current_flexbox(u64 page_id, Web::UniqueNodeID node_id, bool only_look_at_parents)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* node = Web::DOM::Node::from_unique_id(node_id);
+    if (!node) {
+        async_did_inspect_current_flexbox(page_id, "null"_string);
+        return;
+    }
+
+    node->document().update_layout(Web::DOM::UpdateLayoutReason::Debugging);
+
+    for (auto const* current = only_look_at_parents ? node->parent_or_shadow_host_node() : node; current; current = current->parent_or_shadow_host_node()) {
+        if (auto flex_layout = flex_layout_for_node(*current); flex_layout.has_value()) {
+            async_did_inspect_current_flexbox(page_id, flex_layout->serialized());
+            return;
+        }
+    }
+
+    async_did_inspect_current_flexbox(page_id, "null"_string);
+}
+
+void ConnectionFromClient::inspect_indexed_database_storage(u64 page_id, u64 request_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    async_did_inspect_indexed_database(page_id, request_id, DevTools::IndexedDB::serialize_storage(*document).serialized());
+}
+
+void ConnectionFromClient::inspect_indexed_database_objects(u64 page_id, u64 request_id, String host, JsonValue names, JsonValue options)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    async_did_inspect_indexed_database(page_id, request_id, DevTools::IndexedDB::serialize_objects(*document, host, names, options).serialized());
+}
+
+static void send_indexed_database_operation_result(ConnectionFromClient& connection, u64 page_id, u64 request_id, ErrorOr<JsonObject> result)
+{
+    if (result.is_error()) {
+        JsonObject error;
+        error.set("error"sv, result.error().string_literal());
+        connection.async_did_inspect_indexed_database(page_id, request_id, error.serialized());
+        return;
+    }
+
+    connection.async_did_inspect_indexed_database(page_id, request_id, result.release_value().serialized());
+}
+
+void ConnectionFromClient::delete_indexed_database(u64 page_id, u64 request_id, String host, String name)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    send_indexed_database_operation_result(*this, page_id, request_id, DevTools::IndexedDB::delete_database(*document, host, name));
+}
+
+void ConnectionFromClient::clear_indexed_database_object_store(u64 page_id, u64 request_id, String host, String name)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    send_indexed_database_operation_result(*this, page_id, request_id, DevTools::IndexedDB::clear_object_store(*document, host, name));
+}
+
+void ConnectionFromClient::delete_indexed_database_record(u64 page_id, u64 request_id, String host, String name)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    send_indexed_database_operation_result(*this, page_id, request_id, DevTools::IndexedDB::delete_record(*document, host, name));
+}
+
 void ConnectionFromClient::clear_inspected_dom_node(u64 page_id)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
         return;
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document() != nullptr) {
             navigable->active_document()->set_inspected_node(nullptr);
         }
@@ -577,24 +1400,145 @@ void ConnectionFromClient::highlight_dom_node(u64 page_id, Web::UniqueNodeID nod
     if (!page.has_value())
         return;
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document() != nullptr) {
             navigable->active_document()->set_highlighted_node(nullptr, {});
         }
     }
 
     auto* node = Web::DOM::Node::from_unique_id(node_id);
-    if (!node || !node->layout_node())
+    if (!node || !node->is_connected())
         return;
 
-    node->document().set_highlighted_node(node, pseudo_element);
+    auto& document = node->document();
+    auto navigable = document.navigable();
+    if (!navigable || navigable->active_document() != &document)
+        return;
+
+    document.update_layout(Web::DOM::UpdateLayoutReason::Debugging);
+    if (!node->layout_node())
+        return;
+
+    document.set_highlighted_node(node, pseudo_element);
+}
+
+static Web::Painting::FlexboxInspectorOverlayOptions flexbox_inspector_overlay_options_from_json(JsonValue const& options)
+{
+    Web::Painting::FlexboxInspectorOverlayOptions result;
+
+    if (options.is_object()) {
+        auto const& object = options.as_object();
+        if (auto color = object.get_string("color"sv); color.has_value()) {
+            if (auto parsed_color = Gfx::Color::from_string(*color); parsed_color.has_value())
+                result.color = *parsed_color;
+        }
+    }
+
+    return result;
+}
+
+static Web::Painting::GridInspectorOverlayOptions grid_inspector_overlay_options_from_json(JsonValue const& options)
+{
+    Web::Painting::GridInspectorOverlayOptions result;
+
+    if (options.is_object()) {
+        auto const& object = options.as_object();
+        if (auto color = object.get_string("color"sv); color.has_value()) {
+            if (auto parsed_color = Gfx::Color::from_string(*color); parsed_color.has_value())
+                result.color = *parsed_color;
+        }
+
+        result.show_area_names = object.get_bool("showGridAreasOverlay"sv).value_or(result.show_area_names);
+        result.show_line_numbers = object.get_bool("showGridLineNumbers"sv).value_or(result.show_line_numbers);
+        result.show_infinite_lines = object.get_bool("showInfiniteLines"sv).value_or(result.show_infinite_lines);
+        result.show_track_sizes = object.get_bool("showGridTrackSizes"sv)
+                                      .value_or(object.get_bool("showGridTrackSizeLabels"sv)
+                                              .value_or(object.get_bool("showTrackSizes"sv)
+                                                      .value_or(result.show_track_sizes)));
+    }
+
+    return result;
+}
+
+void ConnectionFromClient::highlight_flexbox(u64 page_id, Web::UniqueNodeID node_id, JsonValue options)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* node = Web::DOM::Node::from_unique_id(node_id);
+    if (!node)
+        return;
+
+    auto& document = node->document();
+    document.update_layout(Web::DOM::UpdateLayoutReason::Debugging);
+    if (!node->layout_node())
+        return;
+
+    document.set_flexbox_highlighted_node(node, flexbox_inspector_overlay_options_from_json(options));
+}
+
+void ConnectionFromClient::clear_flexbox_highlight(u64 page_id, Web::UniqueNodeID node_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    if (node_id != 0) {
+        auto* node = Web::DOM::Node::from_unique_id(node_id);
+        if (node)
+            node->document().clear_flexbox_highlighted_node(node);
+        return;
+    }
+
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
+        if (navigable->active_document())
+            navigable->active_document()->clear_flexbox_highlighted_node(nullptr);
+    }
+}
+
+void ConnectionFromClient::highlight_grid(u64 page_id, Web::UniqueNodeID node_id, JsonValue options)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* node = Web::DOM::Node::from_unique_id(node_id);
+    if (!node)
+        return;
+
+    auto& document = node->document();
+    document.update_layout(Web::DOM::UpdateLayoutReason::Debugging);
+    if (!node->layout_node())
+        return;
+
+    document.set_grid_highlighted_node(node, grid_inspector_overlay_options_from_json(options));
+}
+
+void ConnectionFromClient::clear_grid_highlight(u64 page_id, Web::UniqueNodeID node_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    if (node_id != 0) {
+        auto* node = Web::DOM::Node::from_unique_id(node_id);
+        if (node)
+            node->document().clear_grid_highlighted_node(node);
+        return;
+    }
+
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
+        if (navigable->active_document())
+            navigable->active_document()->clear_grid_highlighted_node(nullptr);
+    }
 }
 
 void ConnectionFromClient::inspect_accessibility_tree(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value()) {
         if (auto* doc = page->page().top_level_browsing_context().active_document())
-            async_did_inspect_accessibility_tree(page_id, doc->dump_accessibility_tree_as_json());
+            async_did_inspect_accessibility_tree(page_id, doc->dump_accessibility_tree_as_json().to_utf8());
     }
 }
 
@@ -612,6 +1556,17 @@ void ConnectionFromClient::get_hovered_node_id(u64 page_id)
     }
 
     async_did_get_hovered_node_id(page_id, node_id);
+}
+
+void ConnectionFromClient::get_node_id_at_position(u64 page_id, u64 request_id, Web::DevicePixelPoint position)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value()) {
+        async_did_get_node_id_at_position(page_id, request_id, 0);
+        return;
+    }
+
+    async_did_get_node_id_at_position(page_id, request_id, page->page().node_id_at_position(position));
 }
 
 void ConnectionFromClient::list_style_sheets(u64 page_id)
@@ -635,6 +1590,53 @@ void ConnectionFromClient::request_style_sheet_source(u64 page_id, Web::CSS::Sty
     }
 }
 
+void ConnectionFromClient::list_devtools_sources(u64 page_id, u64 request_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    async_did_list_devtools_sources(page_id, request_id, page->list_devtools_sources());
+}
+
+void ConnectionFromClient::request_devtools_source(u64 page_id, Web::HTML::ScriptRegistry::Identifier source_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    async_did_get_devtools_source(page_id, source_id, page->devtools_source_content(source_id));
+}
+
+void ConnectionFromClient::resolve_dom_node_url(u64 page_id, u64 request_id, Optional<Web::UniqueNodeID> node_id, String url)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value()) {
+        async_did_resolve_dom_node_url(page_id, request_id, move(url));
+        return;
+    }
+
+    auto* document = [&]() -> Web::DOM::Document* {
+        if (node_id.has_value()) {
+            if (auto* node = Web::DOM::Node::from_unique_id(*node_id))
+                return &node->document();
+            return nullptr;
+        }
+
+        return page->page().top_level_browsing_context().active_document();
+    }();
+
+    auto resolved_url = document
+        ? document->encoding_parse_url(Utf16String::from_utf8(url))
+              .map([](auto const& parsed_url) {
+                  return parsed_url.serialize();
+              })
+              .value_or(url)
+        : url;
+
+    async_did_resolve_dom_node_url(page_id, request_id, move(resolved_url));
+}
+
 void ConnectionFromClient::set_listen_for_dom_mutations(u64 page_id, bool listen_for_dom_mutations)
 {
     auto page = this->page(page_id);
@@ -642,6 +1644,23 @@ void ConnectionFromClient::set_listen_for_dom_mutations(u64 page_id, bool listen
         return;
 
     page->page().set_listen_for_dom_mutations(listen_for_dom_mutations);
+    if (!listen_for_dom_mutations)
+        page->clear_pending_dom_mutations();
+}
+
+void ConnectionFromClient::did_connect_devtools_client(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->did_connect_devtools_client();
+}
+
+void ConnectionFromClient::did_disconnect_devtools_client(u64 page_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    page->did_disconnect_devtools_client();
 }
 
 void ConnectionFromClient::get_dom_node_inner_html(u64 page_id, Web::UniqueNodeID node_id)
@@ -650,19 +1669,19 @@ void ConnectionFromClient::get_dom_node_inner_html(u64 page_id, Web::UniqueNodeI
     if (!dom_node)
         return;
 
-    String html;
+    Utf16String html;
 
     if (dom_node->is_element()) {
         auto const& element = static_cast<Web::DOM::Element const&>(*dom_node);
-        html = element.inner_html().release_value_but_fixme_should_propagate_errors();
+        html = element.inner_html().release_value_but_fixme_should_propagate_errors().get<Utf16String>();
     } else if (dom_node->is_text() || dom_node->is_comment()) {
         auto const& character_data = static_cast<Web::DOM::CharacterData const&>(*dom_node);
-        html = character_data.data().to_utf8_but_should_be_ported_to_utf16();
+        html = character_data.data();
     } else {
         return;
     }
 
-    async_did_get_dom_node_html(page_id, html);
+    async_did_get_dom_node_html(page_id, html.to_utf8_but_should_be_ported_to_utf16());
 }
 
 void ConnectionFromClient::get_dom_node_outer_html(u64 page_id, Web::UniqueNodeID node_id)
@@ -671,19 +1690,19 @@ void ConnectionFromClient::get_dom_node_outer_html(u64 page_id, Web::UniqueNodeI
     if (!dom_node)
         return;
 
-    String html;
+    Utf16String html;
 
     if (dom_node->is_element()) {
         auto const& element = static_cast<Web::DOM::Element const&>(*dom_node);
-        html = element.outer_html().release_value_but_fixme_should_propagate_errors();
+        html = element.outer_html().release_value_but_fixme_should_propagate_errors().get<Utf16String>();
     } else if (dom_node->is_text() || dom_node->is_comment()) {
         auto const& character_data = static_cast<Web::DOM::CharacterData const&>(*dom_node);
-        html = character_data.data().to_utf8_but_should_be_ported_to_utf16();
+        html = character_data.data();
     } else {
         return;
     }
 
-    async_did_get_dom_node_html(page_id, html);
+    async_did_get_dom_node_html(page_id, html.to_utf8_but_should_be_ported_to_utf16());
 }
 
 void ConnectionFromClient::set_dom_node_outer_html(u64 page_id, Web::UniqueNodeID node_id, String html)
@@ -696,7 +1715,7 @@ void ConnectionFromClient::set_dom_node_outer_html(u64 page_id, Web::UniqueNodeI
 
     if (dom_node->is_element()) {
         auto& element = static_cast<Web::DOM::Element&>(*dom_node);
-        element.set_outer_html(html).release_value_but_fixme_should_propagate_errors();
+        element.set_outer_html(Utf16String::from_utf8(html)).release_value_but_fixme_should_propagate_errors();
     } else if (dom_node->is_text() || dom_node->is_comment()) {
         auto& character_data = static_cast<Web::DOM::CharacterData&>(*dom_node);
         character_data.set_data(Utf16String::from_utf8(html));
@@ -722,7 +1741,7 @@ void ConnectionFromClient::set_dom_node_text(u64 page_id, Web::UniqueNodeID node
     async_did_finish_editing_dom_node(page_id, character_data.unique_id());
 }
 
-void ConnectionFromClient::set_dom_node_tag(u64 page_id, Web::UniqueNodeID node_id, String name)
+void ConnectionFromClient::set_dom_node_tag(u64 page_id, Web::UniqueNodeID node_id, Utf16FlyString name)
 {
     auto* dom_node = Web::DOM::Node::from_unique_id(node_id);
     if (!dom_node || !dom_node->is_element() || !dom_node->parent()) {
@@ -731,9 +1750,9 @@ void ConnectionFromClient::set_dom_node_tag(u64 page_id, Web::UniqueNodeID node_
     }
 
     auto& element = static_cast<Web::DOM::Element&>(*dom_node);
-    auto new_element = Web::DOM::create_element(element.document(), name, element.namespace_uri(), element.prefix(), element.is_value()).release_value_but_fixme_should_propagate_errors();
+    auto new_element = Web::DOM::create_element(element.document(), move(name), element.namespace_uri(), element.prefix(), element.is_value()).release_value_but_fixme_should_propagate_errors();
 
-    element.for_each_attribute([&](auto const& attribute) {
+    element.for_each_attribute([&](Web::DOM::Attr const& attribute) {
         new_element->set_attribute_value(attribute.local_name(), attribute.value(), attribute.prefix(), attribute.namespace_uri());
     });
 
@@ -758,13 +1777,13 @@ void ConnectionFromClient::add_dom_node_attributes(u64 page_id, Web::UniqueNodeI
 
     for (auto const& attribute : attributes) {
         // NOTE: We ignore invalid attributes for now, but we may want to send feedback to the user that this failed.
-        (void)element.set_attribute(attribute.name, attribute.value);
+        element.set_attribute_value(attribute.name, attribute.value);
     }
 
     async_did_finish_editing_dom_node(page_id, element.unique_id());
 }
 
-void ConnectionFromClient::replace_dom_node_attribute(u64 page_id, Web::UniqueNodeID node_id, String name, Vector<WebView::Attribute> replacement_attributes)
+void ConnectionFromClient::replace_dom_node_attribute(u64 page_id, Web::UniqueNodeID node_id, Utf16FlyString name, Vector<WebView::Attribute> replacement_attributes)
 {
     auto* dom_node = Web::DOM::Node::from_unique_id(node_id);
     if (!dom_node || !dom_node->is_element()) {
@@ -780,7 +1799,7 @@ void ConnectionFromClient::replace_dom_node_attribute(u64 page_id, Web::UniqueNo
             should_remove_attribute = false;
 
         // NOTE: We ignore invalid attributes for now, but we may want to send feedback to the user that this failed.
-        (void)element.set_attribute(attribute.name, attribute.value);
+        element.set_attribute_value(attribute.name, attribute.value);
     }
 
     if (should_remove_attribute)
@@ -951,12 +1970,12 @@ static void append_paint_tree(Web::Page& page, StringBuilder& builder)
         builder.append("(no layout tree)"sv);
         return;
     }
-    if (!layout_root->first_paintable()) {
+    if (!layout_root->paintable()) {
         builder.append("(no paint tree)"sv);
         return;
     }
 
-    Web::dump_tree(builder, *layout_root->first_paintable());
+    Web::dump_tree(builder, *layout_root->paintable());
 }
 
 static void append_stacking_context_tree(Web::Page& page, StringBuilder& builder)
@@ -974,14 +1993,14 @@ static void append_stacking_context_tree(Web::Page& page, StringBuilder& builder
         builder.append("(no layout tree)"sv);
         return;
     }
-    if (!layout_root->first_paintable()) {
+    if (!layout_root->paintable()) {
         builder.append("(no paint tree)"sv);
         return;
     }
 
     auto& viewport_paintable = static_cast<Web::Painting::ViewportPaintable&>(*layout_root->paintable_box());
     viewport_paintable.build_stacking_context_tree_if_needed();
-    if (auto* stacking_context = viewport_paintable.stacking_context()) {
+    if (auto stacking_context = viewport_paintable.stacking_context()) {
         stacking_context->dump(builder);
     }
 }
@@ -996,7 +2015,7 @@ void ConnectionFromClient::request_internal_page_info(u64 page_id, WebView::Page
 {
     auto page = this->page(page_id);
     if (!page.has_value()) {
-        async_did_get_internal_page_info(page_id, type, "(no page)"_string);
+        async_did_get_internal_page_info(page_id, type, {});
         return;
     }
 
@@ -1030,13 +2049,116 @@ void ConnectionFromClient::request_internal_page_info(u64 page_id, WebView::Page
         append_gc_graph(builder);
     }
 
-    async_did_get_internal_page_info(page_id, type, MUST(builder.to_string()));
+    auto buffer = MUST(Core::AnonymousBuffer::create_with_size(builder.length()));
+    if (builder.length() > 0)
+        memcpy(buffer.data<void>(), builder.string_view().characters_without_null_termination(), builder.length());
+    async_did_get_internal_page_info(page_id, type, buffer);
 }
 
 Messages::WebContentServer::GetSelectedTextResponse ConnectionFromClient::get_selected_text(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        return page->page().focused_navigable().selected_text().to_byte_string();
+        return page->page().focused_navigable().selected_text().to_utf8().to_byte_string();
+    return ByteString {};
+}
+
+static WebView::DictionaryLookupTextStyle dictionary_lookup_text_style_from_layout_node(Web::Layout::Node const& layout_node, double zoom_level)
+{
+    auto const& font = layout_node.first_available_font();
+    return {
+        .font_family = font.family().to_string(),
+        .ui_point_size = font.pixel_size() * static_cast<float>(zoom_level),
+        .weight = font.weight(),
+        .slope = font.slope(),
+    };
+}
+
+static Web::Layout::Node const* layout_node_for_dictionary_lookup(Web::DOM::Node const& node)
+{
+    for (auto const* current = &node; current; current = current->parent_or_shadow_host_node()) {
+        auto const* layout_node = current->layout_node();
+        if (layout_node && layout_node->has_style_or_parent_with_style())
+            return layout_node;
+    }
+
+    return nullptr;
+}
+
+static Optional<Gfx::IntPoint> dictionary_lookup_baseline_origin_for_range(Web::DOM::Range& range, Web::Page& page, Web::Layout::Node const& layout_node)
+{
+    auto& document = range.start_container()->document();
+    auto navigable = document.navigable();
+    if (!navigable)
+        return {};
+
+    auto to_top_level_viewport_point = [&](Web::CSSPixelPoint point) {
+        auto scroll_offset = navigable->viewport_scroll_offset();
+        Web::CSSPixelPoint viewport_point { point.x() - scroll_offset.x(), point.y() - scroll_offset.y() };
+        return navigable->to_top_level_position(viewport_point);
+    };
+
+    auto rect = range.get_bounding_client_rect();
+    if (rect->width() <= 0 || rect->height() <= 0)
+        return {};
+
+    auto const& font = layout_node.first_available_font();
+    Web::CSSPixelPoint baseline_origin {
+        Web::CSSPixels::nearest_value_for(rect->x()),
+        Web::CSSPixels::nearest_value_for(rect->y() + font.pixel_metrics().ascent),
+    };
+    return page.css_to_device_point(to_top_level_viewport_point(baseline_origin)).to_type<int>();
+}
+
+Messages::WebContentServer::GetSelectedTextForLookupResponse ConnectionFromClient::get_selected_text_for_lookup(u64 page_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return Optional<WebView::DictionaryLookup> {};
+
+    auto& navigable = page->page().focused_navigable();
+    auto text = navigable.selected_text();
+    if (text.is_empty())
+        return Optional<WebView::DictionaryLookup> {};
+
+    auto document = navigable.active_document();
+    auto range = document ? document->get_selection()->range() : nullptr;
+    auto const* layout_node = range ? layout_node_for_dictionary_lookup(range->start_container()) : nullptr;
+    if (!layout_node && document) {
+        if (auto active_element = document->active_element())
+            layout_node = layout_node_for_dictionary_lookup(*active_element);
+    }
+
+    Optional<WebView::DictionaryLookupTextStyle> style;
+    Optional<Gfx::IntPoint> baseline_origin;
+    if (layout_node) {
+        style = dictionary_lookup_text_style_from_layout_node(*layout_node, navigable.page().client().zoom_level());
+        if (range)
+            baseline_origin = dictionary_lookup_baseline_origin_for_range(*range, page->page(), *layout_node);
+    }
+
+    return WebView::DictionaryLookup {
+        .text = text.to_utf8(),
+        .style = move(style),
+        .baseline_origin = baseline_origin,
+    };
+}
+
+Messages::WebContentServer::SelectWordForDictionaryLookupResponse ConnectionFromClient::select_word_for_dictionary_lookup(u64 page_id, Web::DevicePixelPoint position)
+{
+#if defined(AK_OS_MACOS)
+    if (auto page = this->page(page_id); page.has_value())
+        return page->page().select_word_for_dictionary_lookup(position);
+#else
+    (void)page_id;
+    (void)position;
+#endif
+    return false;
+}
+
+Messages::WebContentServer::CutSelectedTextResponse ConnectionFromClient::cut_selected_text(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        return page->page().focused_navigable().cut_selected_text().to_utf8().to_byte_string();
     return ByteString {};
 }
 
@@ -1046,7 +2168,7 @@ void ConnectionFromClient::select_all(u64 page_id)
         page->page().focused_navigable().select_all();
 }
 
-void ConnectionFromClient::find_in_page(u64 page_id, String query, CaseSensitivity case_sensitivity)
+void ConnectionFromClient::find_in_page(u64 page_id, Utf16String query, CaseSensitivity case_sensitivity)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
@@ -1076,27 +2198,103 @@ void ConnectionFromClient::find_in_page_previous_match(u64 page_id)
     async_did_find_in_page(page_id, result.current_match_index, result.total_match_count);
 }
 
-void ConnectionFromClient::paste(u64 page_id, String text)
+void ConnectionFromClient::paste(u64 page_id, Utf16String text)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().focused_navigable().paste(text);
+    update_input_method_state(page_id);
 }
 
-void ConnectionFromClient::set_content_filters(u64, Vector<String> filters)
+void ConnectionFromClient::set_marked_text_from_input_method(u64 page_id, Utf16String text)
 {
-    Web::ContentFilter::the().set_patterns(filters).release_value_but_fixme_should_propagate_errors();
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().focused_navigable().set_marked_text_from_input_method(text);
+    update_input_method_state(page_id);
 }
 
-void ConnectionFromClient::set_autoplay_allowed_on_all_websites(u64)
+void ConnectionFromClient::commit_text_from_input_method(u64 page_id, Utf16String text, i32 replacement_start, i32 replacement_length)
 {
-    auto& autoplay_allowlist = Web::PermissionsPolicy::AutoplayAllowlist::the();
-    autoplay_allowlist.enable_globally();
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().focused_navigable().commit_text_from_input_method(text, replacement_start, replacement_length);
+    update_input_method_state(page_id);
 }
 
-void ConnectionFromClient::set_autoplay_allowlist(u64, Vector<String> allowlist)
+void ConnectionFromClient::unmark_text_from_input_method(u64 page_id)
 {
-    auto& autoplay_allowlist = Web::PermissionsPolicy::AutoplayAllowlist::the();
-    autoplay_allowlist.enable_for_origins(allowlist);
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().focused_navigable().unmark_text_from_input_method();
+    update_input_method_state(page_id);
+}
+
+static constexpr size_t maximum_input_method_surrounding_text_length = 1024;
+
+void ConnectionFromClient::update_input_method_state(u64 page_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    // Push the updated input state to the UI, so platform input methods can place their overlays. We deliberately
+    // push this asynchronously instead of answering a synchronous request from inside an AppKit text-input callback.
+    // Blocking there re-enters the run loop and can deadlock input-method server <-> UI <-> WebContent message flow.
+    Optional<Web::DevicePixelRect> caret_rect;
+    bool is_enabled = false;
+    i32 cursor_position = 0;
+    i32 anchor_position = 0;
+    Utf16String text_before_cursor;
+    Utf16String text_after_cursor;
+
+    if (auto document = page->page().focused_navigable().active_document()) {
+        if (auto rect = document->current_caret_rect(); rect.has_value())
+            caret_rect = page->page().enclosing_device_rect(*rect);
+
+        if (auto const* text_control = as_if<Web::HTML::FormAssociatedTextControlElement>(document->focused_area().ptr())) {
+            if (text_control->selection_start_binding().has_value()) {
+                auto value = text_control->relevant_value();
+                auto selection_start = text_control->selection_start();
+                auto selection_end = text_control->selection_end();
+                auto cursor = text_control->selection_direction_state() == Web::HTML::SelectionDirection::Backward ? selection_start : selection_end;
+                auto anchor = cursor == selection_start ? selection_end : selection_start;
+                auto value_length = value.length_in_code_units();
+                auto text_before_start = cursor > maximum_input_method_surrounding_text_length ? cursor - maximum_input_method_surrounding_text_length : 0;
+                auto text_after_length = min(value_length - cursor, maximum_input_method_surrounding_text_length);
+
+                auto const& html_element = text_control->text_control_to_html_element();
+                if (auto const* input_element = as_if<Web::HTML::HTMLInputElement>(html_element))
+                    is_enabled = input_element->is_mutable();
+                else if (auto const* text_area_element = as_if<Web::HTML::HTMLTextAreaElement>(html_element))
+                    is_enabled = text_area_element->is_mutable();
+
+                cursor_position = AK::clamp_to<i32>(cursor);
+                anchor_position = AK::clamp_to<i32>(anchor);
+                text_before_cursor = Utf16String::from_utf16(value.substring_view(text_before_start, cursor - text_before_start));
+                text_after_cursor = Utf16String::from_utf16(value.substring_view(cursor, text_after_length));
+            }
+        }
+    }
+
+    async_did_update_input_method_state(page_id, caret_rect, is_enabled, cursor_position, anchor_position, move(text_before_cursor), move(text_after_cursor));
+}
+
+void ConnectionFromClient::set_content_blockers(u64 page_id, Core::AnonymousBuffer patterns_buffer)
+{
+    auto& blocker = Web::ContentBlocker::the();
+    auto had_cosmetic_rules = blocker.has_cosmetic_rules();
+    auto result = blocker.set_rules_from_bytes(patterns_buffer.bytes());
+    if (result.is_error()) {
+        dbgln("Failed to set content blockers: {}", result.error());
+        return;
+    }
+
+    if (had_cosmetic_rules || blocker.has_cosmetic_rules()) {
+        if (auto page = this->page(page_id); page.has_value())
+            page->page().invalidate_user_style();
+    }
+}
+
+void ConnectionFromClient::set_autoplay_settings(u64, Web::HTML::AutoplayPolicy policy, Vector<Utf16String> allowlist)
+{
+    Web::HTML::AutoplaySettings::the().set_policy(policy, allowlist);
 }
 
 void ConnectionFromClient::set_proxy_mappings(u64, Vector<ByteString> proxies, HashMap<ByteString, size_t> mappings)
@@ -1142,9 +2340,17 @@ void ConnectionFromClient::set_preferred_languages(u64, Vector<String> preferred
     Web::ResourceLoader::the().set_preferred_languages(move(preferred_languages));
 }
 
-void ConnectionFromClient::set_enable_do_not_track(u64, bool enable)
+void ConnectionFromClient::set_browsing_behavior(u64 page_id, WebView::BrowsingBehavior browsing_behavior)
 {
-    Web::ResourceLoader::the().set_enable_do_not_track(enable);
+    if (auto page = this->page(page_id); page.has_value()) {
+        page->page().set_enable_autoscroll(browsing_behavior.enable_autoscroll);
+        page->page().set_enable_primary_paste(browsing_behavior.enable_primary_paste);
+    }
+}
+
+void ConnectionFromClient::set_enable_global_privacy_control(u64, bool enable)
+{
+    Web::ResourceLoader::the().set_enable_global_privacy_control(enable);
 }
 
 void ConnectionFromClient::set_has_focus(u64 page_id, bool has_focus)
@@ -1159,10 +2365,10 @@ void ConnectionFromClient::set_is_scripting_enabled(u64 page_id, bool is_scripti
         page->set_is_scripting_enabled(is_scripting_enabled);
 }
 
-void ConnectionFromClient::set_device_pixels_per_css_pixel(u64 page_id, float device_pixels_per_css_pixel)
+void ConnectionFromClient::set_zoom_level(u64 page_id, double zoom_level)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->set_device_pixels_per_css_pixel(device_pixels_per_css_pixel);
+        page->set_zoom_level(zoom_level);
 }
 
 void ConnectionFromClient::set_maximum_frames_per_second(u64 page_id, double maximum_frames_per_second)
@@ -1215,6 +2421,12 @@ void ConnectionFromClient::set_system_visibility_state(u64 page_id, Web::HTML::V
         page->page().top_level_traversable()->set_system_visibility_state(visibility_state);
 }
 
+void ConnectionFromClient::reset_zoom(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().top_level_traversable()->reset_zoom();
+}
+
 void ConnectionFromClient::js_console_input(u64 page_id, String js_source)
 {
     auto page = this->page(page_id);
@@ -1230,12 +2442,6 @@ void ConnectionFromClient::run_javascript(u64 page_id, String js_source)
         page->run_javascript(js_source);
 }
 
-void ConnectionFromClient::js_console_request_messages(u64 page_id, i32 start_index)
-{
-    if (auto page = this->page(page_id); page.has_value())
-        page->js_console_request_messages(start_index);
-}
-
 void ConnectionFromClient::alert_closed(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
@@ -1248,7 +2454,7 @@ void ConnectionFromClient::confirm_closed(u64 page_id, bool accepted)
         page->page().confirm_closed(accepted);
 }
 
-void ConnectionFromClient::prompt_closed(u64 page_id, Optional<String> response)
+void ConnectionFromClient::prompt_closed(u64 page_id, Optional<Utf16String> response)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().prompt_closed(move(response));
@@ -1278,10 +2484,16 @@ void ConnectionFromClient::retrieved_clipboard_entries(u64 page_id, u64 request_
         page->page().retrieved_clipboard_entries(request_id, move(items));
 }
 
+void ConnectionFromClient::did_delete_all_cookies(u64 page_id, u64 request_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->did_delete_all_cookies(request_id);
+}
+
 void ConnectionFromClient::toggle_media_play_state(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().toggle_media_play_state().release_value_but_fixme_should_propagate_errors();
+        page->page().toggle_media_play_state();
 }
 
 void ConnectionFromClient::toggle_media_mute_state(u64 page_id)
@@ -1293,25 +2505,31 @@ void ConnectionFromClient::toggle_media_mute_state(u64 page_id)
 void ConnectionFromClient::toggle_media_loop_state(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().toggle_media_loop_state().release_value_but_fixme_should_propagate_errors();
+        page->page().toggle_media_loop_state();
+}
+
+void ConnectionFromClient::toggle_media_fullscreen_state(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().toggle_media_fullscreen_state();
 }
 
 void ConnectionFromClient::toggle_media_controls_state(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().toggle_media_controls_state().release_value_but_fixme_should_propagate_errors();
+        page->page().toggle_media_controls_state();
 }
 
-void ConnectionFromClient::toggle_page_mute_state(u64 page_id)
+void ConnectionFromClient::set_page_mute_state(u64 page_id, Web::HTML::MuteState mute_state)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().toggle_page_mute_state();
+        page->page().set_page_mute_state(mute_state);
 }
 
 void ConnectionFromClient::set_user_style(u64 page_id, String source)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().set_user_style(move(source));
+        page->page().set_user_style(Utf16String::from_utf8(source));
 }
 
 void ConnectionFromClient::system_time_zone_changed()
@@ -1320,13 +2538,73 @@ void ConnectionFromClient::system_time_zone_changed()
     Unicode::clear_system_time_zone_cache();
 }
 
-void ConnectionFromClient::cookies_changed(Vector<Web::Cookie::Cookie> cookies)
+void ConnectionFromClient::set_system_font_family(String family)
 {
-    for (auto& navigable : Web::HTML::all_navigables()) {
-        auto window = navigable->active_window();
+    Web::Platform::FontPlugin::the().set_system_font_family(FlyString { family });
+}
+
+void ConnectionFromClient::set_document_cookie_version_buffer(u64 page_id, Core::AnonymousBuffer document_cookie_version_buffer)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().client().page_did_receive_document_cookie_version_buffer(move(document_cookie_version_buffer));
+}
+
+void ConnectionFromClient::set_document_cookie_version_index(u64 page_id, i64 document_id, Core::SharedVersionIndex document_index)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().client().page_did_receive_document_cookie_version_index(document_id, document_index);
+}
+
+void ConnectionFromClient::cookies_changed(u64 page_id, Vector<HTTP::Cookie::Cookie> cookies)
+{
+    if (auto page = this->page(page_id); page.has_value()) {
+        auto window = page->page().top_level_traversable()->active_window();
         if (!window)
             return;
-        window->cookie_store()->process_cookie_changes(cookies);
+
+        window->cookie_store()->process_cookie_changes(move(cookies));
+    }
+}
+
+void ConnectionFromClient::broadcast_channel_message(Web::HTML::BroadcastChannelMessage message)
+{
+    Web::HTML::BroadcastChannel::deliver_message_locally(message);
+}
+
+void ConnectionFromClient::did_worker_agent_finish_loading_script(Web::HTML::WorkerAgentOwnerToken owner_token)
+{
+    Web::HTML::WorkerAgentParent::did_finish_loading_worker_script(owner_token);
+}
+
+void ConnectionFromClient::did_worker_agent_fail_loading_script(Web::HTML::WorkerAgentOwnerToken owner_token)
+{
+    Web::HTML::WorkerAgentParent::did_fail_loading_worker_script(owner_token);
+}
+
+void ConnectionFromClient::did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, Utf16String message, Utf16String filename, u32 lineno, u32 colno)
+{
+    Web::HTML::WorkerAgentParent::did_report_worker_exception(owner_token, move(message), move(filename), lineno, colno);
+}
+
+void ConnectionFromClient::did_worker_agent_close(Web::HTML::WorkerAgentOwnerToken owner_token)
+{
+    Web::HTML::WorkerAgentParent::did_close_worker(owner_token);
+}
+
+// https://html.spec.whatwg.org/multipage/speculative-loading.html#nav-traversal-ui:close-a-top-level-traversable
+void ConnectionFromClient::request_close(u64 page_id)
+{
+    // Browser user agents should offer users the ability to arbitrarily close any top-level traversable in their top-level traversable set.
+    // For example, by clicking a "close tab" button.
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().top_level_traversable()->close_top_level_traversable();
+}
+
+void ConnectionFromClient::exit_fullscreen(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value()) {
+        Web::HTML::TemporaryExecutionContext context(page->page().top_level_browsing_context().active_document()->realm(), Web::HTML::TemporaryExecutionContext::CallbacksEnabled::Yes);
+        page->page().top_level_browsing_context().active_document()->fully_exit_fullscreen();
     }
 }
 

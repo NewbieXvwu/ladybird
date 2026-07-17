@@ -23,7 +23,7 @@ public:
 
     virtual ~SetIterator() override = default;
 
-    BuiltinIterator* as_builtin_iterator_if_next_is_not_redefined(IteratorRecord const&) override;
+    BuiltinIterator* as_builtin_iterator_if_next_is_not_redefined(Value next_method) override;
     ThrowCompletionOr<void> next(VM&, bool& done, Value& value) override;
 
 private:
@@ -36,7 +36,7 @@ private:
     GC::Ref<Set> m_set;
     bool m_done { false };
     Object::PropertyKind m_iteration_kind;
-    Map::ConstIterator m_iterator;
+    Set::ConstIterator m_iterator;
 };
 
 }

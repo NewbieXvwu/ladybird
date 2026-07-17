@@ -5,8 +5,9 @@
  */
 
 #include "CSSMathNegate.h"
-#include <LibWeb/Bindings/CSSMathNegatePrototype.h>
+#include <LibWeb/Bindings/CSSMathNegate.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::CSS {
@@ -19,7 +20,7 @@ GC::Ref<CSSMathNegate> CSSMathNegate::create(JS::Realm& realm, NumericType type,
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#dom-cssmathnegate-cssmathnegate
-WebIDL::ExceptionOr<GC::Ref<CSSMathNegate>> CSSMathNegate::construct_impl(JS::Realm& realm, CSSNumberish value)
+GC::Ref<CSSMathNegate> CSSMathNegate::construct_impl(JS::Realm& realm, CSSNumberish value)
 {
     // The CSSMathNegate(arg) constructor must, when called, perform the following steps:
     // 1. Replace arg with the result of rectifying a numberish value for arg.
@@ -50,11 +51,10 @@ void CSSMathNegate::visit_edges(Visitor& visitor)
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#serialize-a-cssmathvalue
-String CSSMathNegate::serialize_math_value(Nested nested, Parens parens) const
+void CSSMathNegate::serialize_math_value(Utf16StringBuilder& s, Nested nested, Parens parens) const
 {
     // NB: Only steps 1 and 4 apply here.
     // 1. Let s initially be the empty string.
-    StringBuilder s;
 
     // 4. Otherwise, if this is a CSSMathNegate:
     {
@@ -62,24 +62,23 @@ String CSSMathNegate::serialize_math_value(Nested nested, Parens parens) const
         //    otherwise, append "calc(" to s.
         if (parens == Parens::With) {
             if (nested == Nested::Yes) {
-                s.append("("sv);
+                s.append_ascii('(');
             } else {
-                s.append("calc("sv);
+                s.append_ascii("calc("sv);
             }
         }
 
         // 2. Append "-" to s.
-        s.append("-"sv);
+        s.append_ascii('-');
 
         // 3. Serialize this’s value internal slot with nested set to true, and append the result to s.
-        s.append(m_value->to_string({ .nested = true }));
+        m_value->serialize(s, { .nested = true });
 
         // 4. If paren-less is false, append ")" to s,
         if (parens == Parens::With)
-            s.append(")"sv);
+            s.append_ascii(')');
 
         // 5. Return s.
-        return s.to_string_without_validation();
     }
 }
 
@@ -119,6 +118,11 @@ Optional<SumValue> CSSMathNegate::create_a_sum_value() const
 
     // 4. Return values.
     return values;
+}
+
+WebIDL::ExceptionOr<NonnullRefPtr<CalculationNode const>> CSSMathNegate::create_calculation_node(CalculationContext const& context) const
+{
+    return NegateCalculationNode::create(TRY(m_value->create_calculation_node(context)));
 }
 
 }

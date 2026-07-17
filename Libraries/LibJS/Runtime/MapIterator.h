@@ -12,7 +12,7 @@
 
 namespace JS {
 
-class MapIterator final : public Object
+class JS_API MapIterator final : public Object
     , public BuiltinIterator {
     JS_OBJECT(MapIterator, Object);
     GC_DECLARE_ALLOCATOR(MapIterator);
@@ -22,7 +22,7 @@ public:
 
     virtual ~MapIterator() override = default;
 
-    BuiltinIterator* as_builtin_iterator_if_next_is_not_redefined(IteratorRecord const&) override;
+    BuiltinIterator* as_builtin_iterator_if_next_is_not_redefined(Value next_method) override;
     ThrowCompletionOr<void> next(VM&, bool& done, Value& value) override;
 
 private:

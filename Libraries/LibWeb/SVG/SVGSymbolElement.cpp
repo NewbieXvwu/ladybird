@@ -5,15 +5,11 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGSymbolElementPrototype.h>
+#include <LibWeb/Bindings/SVGSymbolElement.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
-#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
-#include <LibWeb/CSS/StyleValues/ShorthandStyleValue.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/Layout/SVGGraphicsBox.h>
-#include <LibWeb/SVG/AttributeNames.h>
-#include <LibWeb/SVG/SVGAnimatedRect.h>
 #include <LibWeb/SVG/SVGSymbolElement.h>
 #include <LibWeb/SVG/SVGUseElement.h>
 
@@ -39,31 +35,17 @@ void SVGSymbolElement::visit_edges(Cell::Visitor& visitor)
     SVGFitToViewBox::visit_edges(visitor);
 }
 
-bool SVGSymbolElement::is_presentational_hint(FlyString const& name) const
+void SVGSymbolElement::adjust_computed_style(CSS::ComputedProperties::Builder& computed_properties)
 {
-    if (Base::is_presentational_hint(name))
-        return true;
+    Base::adjust_computed_style(computed_properties);
 
-    // FIXME: This is not a correct use of the presentational hint mechanism.
-    if (is_direct_child_of_use_shadow_tree())
-        return true;
-
-    return false;
-}
-
-// https://svgwg.org/svg2-draft/struct.html#SymbolNotes
-void SVGSymbolElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
-{
-    Base::apply_presentational_hints(cascaded_properties);
-
-    // FIXME: This is not a correct use of the presentational hint mechanism.
     if (is_direct_child_of_use_shadow_tree()) {
         // The generated instance of a ‘symbol’ that is the direct referenced element of a ‘use’ element must always have a computed value of inline for the display property.
-        cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::Inline)));
+        computed_properties.set_property(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::Inline)));
     }
 }
 
-void SVGSymbolElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGSymbolElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
     SVGFitToViewBox::attribute_changed(*this, name, value);
@@ -80,9 +62,14 @@ bool SVGSymbolElement::is_direct_child_of_use_shadow_tree() const
     return is<SVGUseElement>(host);
 }
 
-GC::Ptr<Layout::Node> SVGSymbolElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> SVGSymbolElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
-    return heap().allocate<Layout::SVGGraphicsBox>(document(), *this, move(style));
+    // https://svgwg.org/svg2-draft/render.html#TermNeverRenderedElement
+    // [..] it also includes a ‘symbol’ element that is not the instance root of a use-element shadow tree.
+    if (!is_direct_child_of_use_shadow_tree())
+        return {};
+
+    return make_ref_counted<Layout::SVGGraphicsBox>(document(), *this, style);
 }
 
 }

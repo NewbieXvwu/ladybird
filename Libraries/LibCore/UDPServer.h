@@ -11,12 +11,13 @@
 #include <AK/Forward.h>
 #include <AK/Function.h>
 #include <LibCore/EventReceiver.h>
+#include <LibCore/Export.h>
 #include <LibCore/Forward.h>
 #include <LibCore/SocketAddress.h>
 
 namespace Core {
 
-class UDPServer : public EventReceiver {
+class CORE_API UDPServer : public EventReceiver {
     C_OBJECT(UDPServer)
 public:
     virtual ~UDPServer() override;
@@ -25,11 +26,7 @@ public:
 
     bool bind(IPv4Address const& address, u16 port);
     ErrorOr<ByteBuffer> receive(size_t size, sockaddr_in& from);
-    ErrorOr<ByteBuffer> receive(size_t size)
-    {
-        struct sockaddr_in saddr;
-        return receive(size, saddr);
-    }
+    ErrorOr<ByteBuffer> receive(size_t size);
 
     ErrorOr<size_t> send(ReadonlyBytes, sockaddr_in const& to);
 

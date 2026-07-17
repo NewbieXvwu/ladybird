@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2024, stelar7 <dudedbz@gmail.com>
+ * Copyright (c) 2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -12,11 +13,35 @@ namespace Web::IndexedDB {
 
 GC_DEFINE_ALLOCATOR(Key);
 
+static Key::KeyValueInternal to_key_value_internal(Key::KeyValue const& key_value)
+{
+    return key_value.visit(
+        [](GC::Root<GC::HeapVector<GC::Ref<Key>>> const& keys) -> Key::KeyValueInternal {
+            return GC::Ref { *keys };
+        },
+        [](auto const& other) -> Key::KeyValueInternal { return other; });
+}
+
+Key::Key(KeyType type, KeyValue value)
+    : m_type(type)
+    , m_value(to_key_value_internal(value))
+{
+}
+
 Key::~Key() = default;
 
 GC::Ref<Key> Key::create(JS::Realm& realm, KeyType key, KeyValue value)
 {
     return realm.create<Key>(key, value);
+}
+
+Key::KeyValue Key::value()
+{
+    return m_value.visit(
+        [](GC::Ref<GC::HeapVector<GC::Ref<Key>>> const& keys) -> KeyValue {
+            return GC::make_root(keys);
+        },
+        [](auto const& other) -> KeyValue { return other; });
 }
 
 // https://w3c.github.io/IndexedDB/#compare-two-keys
@@ -66,10 +91,10 @@ i8 Key::compare_two_keys(GC::Ref<Key> a, GC::Ref<Key> b)
     }
 
     // 4. Let va be the value of a.
-    auto va = a->value();
+    auto const& va = a->m_value;
 
     // 5. Let vb be the value of b.
-    auto vb = b->value();
+    auto const& vb = b->m_value;
 
     // 6. Switch on ta:
     switch (ta) {
@@ -95,15 +120,15 @@ i8 Key::compare_two_keys(GC::Ref<Key> a, GC::Ref<Key> b)
     }
     // string
     case KeyType::String: {
-        auto a_value = va.get<AK::String>();
-        auto b_value = vb.get<AK::String>();
+        auto const& a_value = va.get<Utf16String>();
+        auto const& b_value = vb.get<Utf16String>();
 
         // 1. If va is code unit less than vb, then return -1.
-        if (Infra::code_unit_less_than(a_value, b_value))
+        if (Infra::code_unit_less_than(a_value.utf16_view(), b_value.utf16_view()))
             return -1;
 
         // 2. If vb is code unit less than va, then return 1.
-        if (Infra::code_unit_less_than(b_value, a_value))
+        if (Infra::code_unit_less_than(b_value.utf16_view(), a_value.utf16_view()))
             return 1;
 
         // 3. Return 0.
@@ -111,8 +136,8 @@ i8 Key::compare_two_keys(GC::Ref<Key> a, GC::Ref<Key> b)
     }
     // binary
     case KeyType::Binary: {
-        auto a_value = va.get<ByteBuffer>();
-        auto b_value = vb.get<ByteBuffer>();
+        auto const& a_value = va.get<ByteBuffer>();
+        auto const& b_value = vb.get<ByteBuffer>();
 
         // 1. If va is byte less than vb, then return -1.
         if (Infra::is_byte_less_than(a_value, b_value))
@@ -127,8 +152,8 @@ i8 Key::compare_two_keys(GC::Ref<Key> a, GC::Ref<Key> b)
     }
     // array
     case KeyType::Array: {
-        auto a_value = va.get<Vector<GC::Root<Key>>>();
-        auto b_value = vb.get<Vector<GC::Root<Key>>>();
+        auto const& a_value = va.get<GC::Ref<GC::HeapVector<GC::Ref<Key>>>>()->elements();
+        auto const& b_value = vb.get<GC::Ref<GC::HeapVector<GC::Ref<Key>>>>()->elements();
 
         // 1. Let length be the lesser of va’s size and vb’s size.
         auto length = min(a_value.size(), b_value.size());
@@ -168,10 +193,10 @@ i8 Key::compare_two_keys(GC::Ref<Key> a, GC::Ref<Key> b)
 String Key::dump() const
 {
     return m_value.visit(
-        [](Vector<GC::Root<Key>> const& value) {
+        [](GC::Root<GC::HeapVector<GC::Ref<Key>>> const& value) {
             StringBuilder sb;
             sb.append("["sv);
-            for (auto const& key : value) {
+            for (auto const& key : value->elements()) {
                 sb.append(key->dump());
                 sb.append(", "sv);
             }
@@ -181,9 +206,23 @@ String Key::dump() const
         [](ByteBuffer const& value) {
             return MUST(String::formatted("{}", value.span()));
         },
+        [](Utf16String const& value) {
+            return value.to_utf8();
+        },
         [](auto const& value) {
             return MUST(String::formatted("{}", value));
         });
+}
+
+void Key::visit_edges(Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+
+    m_value.visit(
+        [&](GC::Ref<GC::HeapVector<GC::Ref<Key>>> const& keys) {
+            visitor.visit(keys);
+        },
+        [](auto const&) {});
 }
 
 }

@@ -2,6 +2,7 @@
  * Copyright (c) 2018-2020, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021-2022, Sam Atkins <atkinssj@serenityos.org>
  * Copyright (c) 2022, MacDue <macdue@dueutil.tech>
+ * Copyright (c) 2026, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,6 +10,7 @@
 #pragma once
 
 #include <LibGfx/Color.h>
+#include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::Painting {
@@ -18,6 +20,17 @@ enum class ShadowPlacement {
     Inner,
 };
 
+inline ShadowPlacement shadow_placement_from_css(CSS::ShadowPlacement placement)
+{
+    switch (placement) {
+    case CSS::ShadowPlacement::Outer:
+        return ShadowPlacement::Outer;
+    case CSS::ShadowPlacement::Inner:
+        return ShadowPlacement::Inner;
+    }
+    VERIFY_NOT_REACHED();
+}
+
 struct ShadowData {
     Gfx::Color color;
     CSSPixels offset_x;
@@ -25,6 +38,18 @@ struct ShadowData {
     CSSPixels blur_radius;
     CSSPixels spread_distance;
     ShadowPlacement placement;
+
+    static ShadowData from_css(CSS::ShadowData const& shadow)
+    {
+        return {
+            shadow.color,
+            shadow.offset_x,
+            shadow.offset_y,
+            shadow.blur_radius,
+            shadow.spread_distance,
+            shadow_placement_from_css(shadow.placement),
+        };
+    }
 };
 
 }

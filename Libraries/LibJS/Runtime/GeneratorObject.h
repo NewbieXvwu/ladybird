@@ -6,9 +6,9 @@
 
 #pragma once
 
-#include <LibJS/Bytecode/Interpreter.h>
 #include <LibJS/Runtime/ECMAScriptFunctionObject.h>
 #include <LibJS/Runtime/Object.h>
+#include <LibJS/Runtime/VM.h>
 
 namespace JS {
 
@@ -17,20 +17,22 @@ class GeneratorObject : public Object {
     GC_DECLARE_ALLOCATOR(GeneratorObject);
 
 public:
-    static ThrowCompletionOr<GC::Ref<GeneratorObject>> create(Realm&, Value, ECMAScriptFunctionObject*, NonnullOwnPtr<ExecutionContext>);
+    static GC::Ref<GeneratorObject> create(Realm&, Variant<GC::Ref<ECMAScriptFunctionObject>, GC::Ref<NativeJavaScriptBackedFunction>>, NonnullOwnPtr<ExecutionContext>);
     virtual ~GeneratorObject() override = default;
     void visit_edges(Cell::Visitor&) override;
 
     struct IterationResult {
         IterationResult() = delete;
-        explicit IterationResult(Value value, bool done)
+        explicit IterationResult(Value value, bool done, bool value_is_iterator_result = false)
             : done(done)
             , value(value)
+            , value_is_iterator_result(value_is_iterator_result)
         {
         }
 
         bool done { false };
         Value value;
+        bool value_is_iterator_result { false };
     };
 
     ThrowCompletionOr<IterationResult> resume(VM&, Value value, Optional<StringView> const& generator_brand);
@@ -45,18 +47,34 @@ public:
     GeneratorState generator_state() const { return m_generator_state; }
     void set_generator_state(GeneratorState generator_state) { m_generator_state = generator_state; }
 
+    void set_pending_completion(Completion const& completion)
+    {
+        m_pending_completion_value = completion.value();
+        m_pending_completion_type = completion.type();
+    }
+    Value pending_completion_value() const { return m_pending_completion_value; }
+    Completion::Type pending_completion_type() const { return m_pending_completion_type; }
+    void set_pending_completion_type(Completion::Type completion_type) { m_pending_completion_type = completion_type; }
+    void clear_pending_completion()
+    {
+        m_pending_completion_value = js_undefined();
+        m_pending_completion_type = Completion::Type::Normal;
+    }
+
 protected:
-    GeneratorObject(Realm&, Object& prototype, NonnullOwnPtr<ExecutionContext>, Optional<StringView> generator_brand = {});
+    GeneratorObject(Realm&, Object* prototype, NonnullOwnPtr<ExecutionContext>, Optional<StringView> generator_brand = {});
 
     ThrowCompletionOr<GeneratorState> validate(VM&, Optional<StringView> const& generator_brand);
     virtual ThrowCompletionOr<IterationResult> execute(VM&, JS::Completion const& completion);
 
 private:
     NonnullOwnPtr<ExecutionContext> m_execution_context;
-    GC::Ptr<ECMAScriptFunctionObject> m_generating_function;
-    Value m_previous_value;
+    GC::Ptr<Bytecode::Executable> m_generating_executable;
+    u32 m_yield_continuation { ExecutionContext::no_yield_continuation };
     GeneratorState m_generator_state { GeneratorState::SuspendedStart };
     Optional<StringView> m_generator_brand;
+    Value m_pending_completion_value { js_undefined() };
+    Completion::Type m_pending_completion_type { Completion::Type::Normal };
 };
 
 }

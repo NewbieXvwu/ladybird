@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibWeb/DOM/EventTarget.h>
 
 namespace Web::HTML {
@@ -16,11 +17,11 @@ class NavigationHistoryEntry : public DOM::EventTarget {
     GC_DECLARE_ALLOCATOR(NavigationHistoryEntry);
 
 public:
-    [[nodiscard]] static GC::Ref<NavigationHistoryEntry> create(JS::Realm&, GC::Ref<SessionHistoryEntry>);
+    [[nodiscard]] static GC::Ref<NavigationHistoryEntry> create(JS::Realm&, NonnullRefPtr<SessionHistoryEntry>);
 
-    Optional<String> url() const;
-    String key() const;
-    String id() const;
+    Optional<Utf16String> url() const;
+    Utf16String key() const;
+    Utf16String id() const;
     i64 index() const;
     bool same_document() const;
     WebIDL::ExceptionOr<JS::Value> get_state();
@@ -35,12 +36,11 @@ public:
     virtual ~NavigationHistoryEntry() override;
 
 private:
-    NavigationHistoryEntry(JS::Realm&, GC::Ref<SessionHistoryEntry>);
+    NavigationHistoryEntry(JS::Realm&, NonnullRefPtr<SessionHistoryEntry>);
 
     virtual void initialize(JS::Realm&) override;
-    virtual void visit_edges(JS::Cell::Visitor&) override;
 
-    GC::Ref<SessionHistoryEntry> m_session_history_entry;
+    NonnullRefPtr<SessionHistoryEntry> m_session_history_entry;
 };
 
 }

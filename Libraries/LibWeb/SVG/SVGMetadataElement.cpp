@@ -5,8 +5,9 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGMetadataElementPrototype.h>
+#include <LibWeb/Bindings/SVGMetadataElement.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Layout/Node.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/SVG/SVGMetadataElement.h>
 
@@ -25,7 +26,7 @@ void SVGMetadataElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-GC::Ptr<Layout::Node> SVGMetadataElement::create_layout_node(GC::Ref<CSS::ComputedProperties>)
+RefPtr<Layout::Node> SVGMetadataElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const>)
 {
     return nullptr;
 }

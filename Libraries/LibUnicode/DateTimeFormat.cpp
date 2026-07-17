@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2021-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,8 +7,11 @@
 #include <AK/AllOf.h>
 #include <AK/Array.h>
 #include <AK/GenericLexer.h>
+#include <AK/GenericShorthands.h>
 #include <AK/StringBuilder.h>
 #include <AK/TypeCasts.h>
+#include <LibUnicode/Calendars/AdjustedEraCalendar.h>
+#include <LibUnicode/Calendars/ChineseDangiCalendar.h>
 #include <LibUnicode/DateTimeFormat.h>
 #include <LibUnicode/ICU.h>
 #include <LibUnicode/Locale.h>
@@ -27,7 +30,7 @@
 
 namespace Unicode {
 
-DateTimeStyle date_time_style_from_string(StringView style)
+DateTimeStyle date_time_style_from_string(Utf16View style)
 {
     if (style == "full"sv)
         return DateTimeStyle::Full;
@@ -40,17 +43,17 @@ DateTimeStyle date_time_style_from_string(StringView style)
     VERIFY_NOT_REACHED();
 }
 
-StringView date_time_style_to_string(DateTimeStyle style)
+Utf16String date_time_style_to_string(DateTimeStyle style)
 {
     switch (style) {
     case DateTimeStyle::Full:
-        return "full"sv;
+        return "full"_utf16;
     case DateTimeStyle::Long:
-        return "long"sv;
+        return "long"_utf16;
     case DateTimeStyle::Medium:
-        return "medium"sv;
+        return "medium"_utf16;
     case DateTimeStyle::Short:
-        return "short"sv;
+        return "short"_utf16;
     }
     VERIFY_NOT_REACHED();
 }
@@ -70,7 +73,7 @@ static constexpr icu::DateFormat::EStyle icu_date_time_style(DateTimeStyle style
     VERIFY_NOT_REACHED();
 }
 
-HourCycle hour_cycle_from_string(StringView hour_cycle)
+HourCycle hour_cycle_from_string(Utf16View hour_cycle)
 {
     if (hour_cycle == "h11"sv)
         return HourCycle::H11;
@@ -83,26 +86,26 @@ HourCycle hour_cycle_from_string(StringView hour_cycle)
     VERIFY_NOT_REACHED();
 }
 
-StringView hour_cycle_to_string(HourCycle hour_cycle)
+Utf16String hour_cycle_to_string(HourCycle hour_cycle)
 {
     switch (hour_cycle) {
     case HourCycle::H11:
-        return "h11"sv;
+        return "h11"_utf16;
     case HourCycle::H12:
-        return "h12"sv;
+        return "h12"_utf16;
     case HourCycle::H23:
-        return "h23"sv;
+        return "h23"_utf16;
     case HourCycle::H24:
-        return "h24"sv;
+        return "h24"_utf16;
     }
     VERIFY_NOT_REACHED();
 }
 
-Optional<HourCycle> default_hour_cycle(StringView locale)
+Optional<HourCycle> default_hour_cycle(Utf16View locale)
 {
     UErrorCode status = U_ZERO_ERROR;
 
-    auto locale_data = LocaleData::for_locale(locale);
+    auto locale_data = LocaleData::for_locale(locale.bytes());
     if (!locale_data.has_value())
         return {};
 
@@ -143,7 +146,7 @@ static constexpr char icu_hour_cycle(Optional<HourCycle> const& hour_cycle, Opti
     VERIFY_NOT_REACHED();
 }
 
-CalendarPatternStyle calendar_pattern_style_from_string(StringView style)
+CalendarPatternStyle calendar_pattern_style_from_string(Utf16View style)
 {
     if (style == "narrow"sv)
         return CalendarPatternStyle::Narrow;
@@ -166,27 +169,27 @@ CalendarPatternStyle calendar_pattern_style_from_string(StringView style)
     VERIFY_NOT_REACHED();
 }
 
-StringView calendar_pattern_style_to_string(CalendarPatternStyle style)
+Utf16String calendar_pattern_style_to_string(CalendarPatternStyle style)
 {
     switch (style) {
     case CalendarPatternStyle::Narrow:
-        return "narrow"sv;
+        return "narrow"_utf16;
     case CalendarPatternStyle::Short:
-        return "short"sv;
+        return "short"_utf16;
     case CalendarPatternStyle::Long:
-        return "long"sv;
+        return "long"_utf16;
     case CalendarPatternStyle::Numeric:
-        return "numeric"sv;
+        return "numeric"_utf16;
     case CalendarPatternStyle::TwoDigit:
-        return "2-digit"sv;
+        return "2-digit"_utf16;
     case CalendarPatternStyle::ShortOffset:
-        return "shortOffset"sv;
+        return "shortOffset"_utf16;
     case CalendarPatternStyle::LongOffset:
-        return "longOffset"sv;
+        return "longOffset"_utf16;
     case CalendarPatternStyle::ShortGeneric:
-        return "shortGeneric"sv;
+        return "shortGeneric"_utf16;
     case CalendarPatternStyle::LongGeneric:
-        return "longGeneric"sv;
+        return "longGeneric"_utf16;
     }
     VERIFY_NOT_REACHED();
 }
@@ -304,7 +307,7 @@ String CalendarPattern::to_pattern() const
     if (minute.has_value()) {
         switch (*minute) {
         case CalendarPatternStyle::Numeric:
-            builder.append("m"sv);
+            builder.append(time_zone_name.has_value() ? "mm"sv : "m"sv);
             break;
         case CalendarPatternStyle::TwoDigit:
             builder.append("mm"sv);
@@ -316,7 +319,7 @@ String CalendarPattern::to_pattern() const
     if (second.has_value()) {
         switch (*second) {
         case CalendarPatternStyle::Numeric:
-            builder.append("s"sv);
+            builder.append(time_zone_name.has_value() ? "ss"sv : "s"sv);
             break;
         case CalendarPatternStyle::TwoDigit:
             builder.append("ss"sv);
@@ -358,7 +361,7 @@ String CalendarPattern::to_pattern() const
 }
 
 // https://unicode.org/reports/tr35/tr35-dates.html#Date_Field_Symbol_Table
-CalendarPattern CalendarPattern::create_from_pattern(StringView pattern)
+CalendarPattern CalendarPattern::create_from_pattern(String pattern)
 {
     GenericLexer lexer { pattern };
     CalendarPattern format {};
@@ -494,6 +497,7 @@ CalendarPattern CalendarPattern::create_from_pattern(StringView pattern)
         }
     }
 
+    format.pattern = move(pattern);
     return format;
 }
 
@@ -517,8 +521,8 @@ static T find_regional_values_for_locale(StringView locale, GetRegionalValues&& 
         return return_default_values();
 
     if (!language->region.has_value()) {
-        if (auto maximized = add_likely_subtags(language->to_string()); maximized.has_value())
-            language = parse_unicode_language_id(*maximized);
+        if (auto maximized = add_likely_subtags(language->to_utf16_string()); maximized.has_value())
+            language = parse_unicode_language_id(maximized->utf16_view());
     }
 
     if (!language.has_value() || !language->region.has_value())
@@ -534,44 +538,44 @@ static T find_regional_values_for_locale(StringView locale, GetRegionalValues&& 
 // type for those partitions.
 static constexpr i32 LITERAL_FIELD = -1;
 
-static constexpr StringView icu_date_time_format_field_to_string(i32 field)
+static Utf16String icu_date_time_format_field_to_string(i32 field)
 {
     switch (field) {
     case LITERAL_FIELD:
-        return "literal"sv;
+        return "literal"_utf16;
     case UDAT_ERA_FIELD:
-        return "era"sv;
+        return "era"_utf16;
     case UDAT_YEAR_FIELD:
     case UDAT_EXTENDED_YEAR_FIELD:
-        return "year"sv;
+        return "year"_utf16;
     case UDAT_YEAR_NAME_FIELD:
-        return "yearName"sv;
+        return "yearName"_utf16;
     case UDAT_RELATED_YEAR_FIELD:
-        return "relatedYear"sv;
+        return "relatedYear"_utf16;
     case UDAT_MONTH_FIELD:
     case UDAT_STANDALONE_MONTH_FIELD:
-        return "month"sv;
+        return "month"_utf16;
     case UDAT_DAY_OF_WEEK_FIELD:
     case UDAT_DOW_LOCAL_FIELD:
     case UDAT_STANDALONE_DAY_FIELD:
-        return "weekday"sv;
+        return "weekday"_utf16;
     case UDAT_DATE_FIELD:
-        return "day"sv;
+        return "day"_utf16;
     case UDAT_AM_PM_FIELD:
     case UDAT_AM_PM_MIDNIGHT_NOON_FIELD:
     case UDAT_FLEXIBLE_DAY_PERIOD_FIELD:
-        return "dayPeriod"sv;
+        return "dayPeriod"_utf16;
     case UDAT_HOUR_OF_DAY1_FIELD:
     case UDAT_HOUR_OF_DAY0_FIELD:
     case UDAT_HOUR1_FIELD:
     case UDAT_HOUR0_FIELD:
-        return "hour"sv;
+        return "hour"_utf16;
     case UDAT_MINUTE_FIELD:
-        return "minute"sv;
+        return "minute"_utf16;
     case UDAT_SECOND_FIELD:
-        return "second"sv;
+        return "second"_utf16;
     case UDAT_FRACTIONAL_SECOND_FIELD:
-        return "fractionalSecond"sv;
+        return "fractionalSecond"_utf16;
     case UDAT_TIMEZONE_FIELD:
     case UDAT_TIMEZONE_RFC_FIELD:
     case UDAT_TIMEZONE_GENERIC_FIELD:
@@ -579,9 +583,9 @@ static constexpr StringView icu_date_time_format_field_to_string(i32 field)
     case UDAT_TIMEZONE_LOCALIZED_GMT_OFFSET_FIELD:
     case UDAT_TIMEZONE_ISO_FIELD:
     case UDAT_TIMEZONE_ISO_LOCAL_FIELD:
-        return "timeZoneName"sv;
+        return "timeZoneName"_utf16;
     default:
-        return "unknown"sv;
+        return "unknown"_utf16;
     }
 }
 
@@ -618,23 +622,31 @@ static bool apply_hour_cycle_to_skeleton(icu::UnicodeString& skeleton, Optional<
     return changed_hour_cycle;
 }
 
-static void apply_time_zone_to_formatter(icu::SimpleDateFormat& formatter, icu::Locale const& locale, StringView time_zone_identifier)
+static void apply_time_zone_to_formatter(icu::SimpleDateFormat& formatter, icu::Locale const& locale, Utf16View time_zone_identifier)
 {
     UErrorCode status = U_ZERO_ERROR;
 
     auto time_zone_data = TimeZoneData::for_time_zone(time_zone_identifier);
 
     auto* calendar = icu::Calendar::createInstance(time_zone_data->time_zone(), locale, status);
-    VERIFY(icu_success(status));
+    verify_icu_success(status);
 
-    if (calendar->getDynamicClassID() == icu::GregorianCalendar::getStaticClassID()) {
+    if (auto const* calendar_type = calendar->getType(); first_is_one_of(calendar_type, "chinese"sv, "dangi"sv)) {
+        calendar = new ChineseDangiCalendar(adopt_own(*calendar), locale, status);
+        verify_icu_success(status);
+    } else if (calendar_type == "coptic"sv) {
+        calendar = new AdjustedEraCalendar(adopt_own(*calendar), locale, status, AdjustedEraCalendar::EraMode::SingleEra);
+        verify_icu_success(status);
+    } else if (first_is_one_of(calendar_type, "islamic"sv, "islamic-civil"sv, "islamic-tbla"sv, "islamic-umalqura"sv)) {
+        calendar = new AdjustedEraCalendar(adopt_own(*calendar), locale, status, AdjustedEraCalendar::EraMode::DualEra);
+        verify_icu_success(status);
+    } else if (auto* gregorian_calendar = as_if<icu::GregorianCalendar>(*calendar)) {
         // https://tc39.es/ecma262/#sec-time-values-and-time-range
         // A time value supports a slightly smaller range of -8,640,000,000,000,000 to 8,640,000,000,000,000 milliseconds.
         static constexpr double ECMA_262_MINIMUM_TIME = -8.64E15;
 
-        auto* gregorian_calendar = static_cast<icu::GregorianCalendar*>(calendar);
         gregorian_calendar->setGregorianChange(ECMA_262_MINIMUM_TIME, status);
-        VERIFY(icu_success(status));
+        verify_icu_success(status);
     }
 
     formatter.adoptCalendar(calendar);
@@ -660,7 +672,7 @@ static bool is_formatted_range_actually_a_range(icu::FormattedDateInterval const
 
 class DateTimeFormatImpl : public DateTimeFormat {
 public:
-    DateTimeFormatImpl(icu::Locale& locale, icu::UnicodeString const& pattern, StringView time_zone_identifier, NonnullOwnPtr<icu::SimpleDateFormat> formatter)
+    DateTimeFormatImpl(icu::Locale& locale, icu::UnicodeString const& pattern, Utf16View time_zone_identifier, NonnullOwnPtr<icu::SimpleDateFormat> formatter)
         : m_locale(locale)
         , m_pattern(CalendarPattern::create_from_pattern(icu_string_to_string(pattern)))
         , m_formatter(move(formatter))
@@ -695,7 +707,7 @@ public:
             Partition partition;
             partition.type = icu_date_time_format_field_to_string(field);
             partition.value = icu_string_to_utf16_string(formatted_time->tempSubStringBetween(begin, end));
-            partition.source = "shared"sv;
+            partition.source = "shared"_utf16;
             result.append(move(partition));
         };
 
@@ -766,11 +778,11 @@ public:
             partition.value = icu_string_to_utf16_string(formatted_time.tempSubStringBetween(begin, end));
 
             if (start_range.has_value() && start_range->contains(begin))
-                partition.source = "startRange"sv;
+                partition.source = "startRange"_utf16;
             else if (end_range.has_value() && end_range->contains(begin))
-                partition.source = "endRange"sv;
+                partition.source = "endRange"_utf16;
             else
-                partition.source = "shared"sv;
+                partition.source = "shared"_utf16;
 
             result.append(move(partition));
         };
@@ -871,8 +883,8 @@ private:
 };
 
 NonnullOwnPtr<DateTimeFormat> DateTimeFormat::create_for_date_and_time_style(
-    StringView locale,
-    StringView time_zone_identifier,
+    Utf16View locale,
+    Utf16View time_zone_identifier,
     Optional<HourCycle> const& hour_cycle,
     Optional<bool> const& hour12,
     Optional<DateTimeStyle> const& date_style,
@@ -880,7 +892,7 @@ NonnullOwnPtr<DateTimeFormat> DateTimeFormat::create_for_date_and_time_style(
 {
     UErrorCode status = U_ZERO_ERROR;
 
-    auto locale_data = LocaleData::for_locale(locale);
+    auto locale_data = LocaleData::for_locale(locale.bytes());
     VERIFY(locale_data.has_value());
 
     auto formatter = adopt_own(*as<icu::SimpleDateFormat>([&]() {
@@ -903,39 +915,45 @@ NonnullOwnPtr<DateTimeFormat> DateTimeFormat::create_for_date_and_time_style(
     formatter->toPattern(pattern);
 
     auto skeleton = icu::DateTimePatternGenerator::staticGetSkeleton(pattern, status);
-    VERIFY(icu_success(status));
+    verify_icu_success(status);
 
     if (apply_hour_cycle_to_skeleton(skeleton, hour_cycle, hour12)) {
         pattern = locale_data->date_time_pattern_generator().getBestPattern(skeleton, UDATPG_MATCH_ALL_FIELDS_LENGTH, status);
-        VERIFY(icu_success(status));
+        verify_icu_success(status);
 
         apply_hour_cycle_to_skeleton(pattern, hour_cycle, hour12);
 
         formatter = adopt_own(*new icu::SimpleDateFormat(pattern, locale_data->locale(), status));
-        VERIFY(icu_success(status));
+        verify_icu_success(status);
     }
 
     return adopt_own(*new DateTimeFormatImpl(locale_data->locale(), pattern, time_zone_identifier, move(formatter)));
 }
 
 NonnullOwnPtr<DateTimeFormat> DateTimeFormat::create_for_pattern_options(
-    StringView locale,
-    StringView time_zone_identifier,
+    Utf16View locale,
+    Utf16View time_zone_identifier,
     CalendarPattern const& options)
 {
     UErrorCode status = U_ZERO_ERROR;
 
-    auto locale_data = LocaleData::for_locale(locale);
+    auto locale_data = LocaleData::for_locale(locale.bytes());
     VERIFY(locale_data.has_value());
 
-    auto skeleton = icu_string(options.to_pattern());
-    auto pattern = locale_data->date_time_pattern_generator().getBestPattern(skeleton, UDATPG_MATCH_ALL_FIELDS_LENGTH, status);
-    VERIFY(icu_success(status));
+    icu::UnicodeString pattern;
+
+    if (options.pattern.has_value()) {
+        pattern = icu_string(*options.pattern);
+    } else {
+        auto skeleton = icu_string(options.to_pattern());
+        pattern = locale_data->date_time_pattern_generator().getBestPattern(skeleton, UDATPG_MATCH_ALL_FIELDS_LENGTH, status);
+        verify_icu_success(status);
+    }
 
     apply_hour_cycle_to_skeleton(pattern, options.hour_cycle, {});
 
     auto formatter = adopt_own(*new icu::SimpleDateFormat(pattern, locale_data->locale(), status));
-    VERIFY(icu_success(status));
+    verify_icu_success(status);
 
     return adopt_own(*new DateTimeFormatImpl(locale_data->locale(), pattern, time_zone_identifier, move(formatter)));
 }
@@ -961,11 +979,11 @@ static constexpr Weekday icu_calendar_day_to_weekday(UCalendarDaysOfWeek day)
     VERIFY_NOT_REACHED();
 }
 
-WeekInfo week_info_of_locale(StringView locale)
+WeekInfo week_info_of_locale(Utf16View locale)
 {
     UErrorCode status = U_ZERO_ERROR;
 
-    auto locale_data = LocaleData::for_locale(locale);
+    auto locale_data = LocaleData::for_locale(locale.bytes());
     if (!locale_data.has_value())
         return {};
 

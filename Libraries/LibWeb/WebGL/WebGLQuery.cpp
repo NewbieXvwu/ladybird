@@ -6,19 +6,19 @@
 
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/WebGLQueryPrototype.h>
+#include <LibWeb/Bindings/WebGLQuery.h>
 #include <LibWeb/WebGL/WebGLQuery.h>
 
 namespace Web::WebGL {
 
 GC_DEFINE_ALLOCATOR(WebGLQuery);
 
-GC::Ref<WebGLQuery> WebGLQuery::create(JS::Realm& realm, WebGLRenderingContextBase& context, GLuint handle)
+GC::Ref<WebGLQuery> WebGLQuery::create(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase> context, GLuint handle)
 {
     return realm.create<WebGLQuery>(realm, context, handle);
 }
 
-WebGLQuery::WebGLQuery(JS::Realm& realm, WebGLRenderingContextBase& context, GLuint handle)
+WebGLQuery::WebGLQuery(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase> context, GLuint handle)
     : WebGLObject(realm, context, handle)
 {
 }

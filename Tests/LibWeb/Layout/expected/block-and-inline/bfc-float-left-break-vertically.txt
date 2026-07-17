@@ -1,4 +1,4 @@
-Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-inline
+Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children: not-inline
   BlockContainer <html> at [1,1] [0+1+0 798 0+1+0] [0+1+0 106 0+1+0] [BFC] children: not-inline
     BlockContainer <(anonymous)> at [1,1] [0+0+0 798 0+0+0] [0+0+0 0 0+0+0] children: inline
       TextNode <#text> (not painted)
@@ -19,13 +19,13 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-
 ViewportPaintable (Viewport<#document>) [0,0 800x600]
   PaintableWithLines (BlockContainer<HTML>) [0,0 800x108]
     PaintableWithLines (BlockContainer(anonymous)) [1,1 798x0]
-    PaintableWithLines (BlockContainer<BODY>) [1,1 402x4] overflow: [2,2 400x53]
+    PaintableWithLines (BlockContainer<BODY>) [1,1 402x4]
       PaintableWithLines (BlockContainer(anonymous)) [2,2 400x0]
-      PaintableWithLines (BlockContainer<DIV>.ul) [2,2 400x2] overflow: [3,3 314x52]
+      PaintableWithLines (BlockContainer<DIV>.ul) [2,2 400x2]
         PaintableWithLines (BlockContainer<DIV>.yellow) [3,3 62x52]
         PaintableWithLines (BlockContainer<DIV>.orange) [65,3 252x52]
-      PaintableWithLines (BlockContainer(anonymous)) [2,4 400x0] overflow: [2,55 102x52]
+      PaintableWithLines (BlockContainer(anonymous)) [2,4 400x0]
         PaintableWithLines (BlockContainer<DIV>.green) [2,55 102x52]
 
-SC for Viewport<#document> [0,0 800x600] [children: 1] (z-index: auto)
- SC for BlockContainer<HTML> [1,1 798x106] [children: 0] (z-index: auto)
+SC for Viewport<#document> [0,0 800x600] (z-index: auto)
+ SC for BlockContainer<HTML> [1,1 798x106] (z-index: auto)

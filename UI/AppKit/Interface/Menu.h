@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2025-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -16,9 +16,21 @@
 namespace Ladybird {
 
 NSMenu* create_application_menu(WebView::Menu&);
+void repopulate_application_menu(NSMenu*, WebView::Menu&);
+
 NSMenu* create_context_menu(LadybirdWebView*, WebView::Menu&);
 
 NSMenuItem* create_application_menu_item(WebView::Action&);
-NSButton* create_application_button(WebView::Action&, NSImageName);
+NSMenuItem* create_application_menu_item(WebView::Menu&);
+
+NSButton* create_application_button(WebView::Action&);
+NSButton* create_application_button(WebView::Action&, Class button_class);
+NSImageView* create_application_icon(WebView::Action&);
+
+void add_control_properties(id control, WebView::Action const&);
+void add_control_properties(id control, WebView::Menu const&);
+NSString* get_control_property(id control, NSString* key);
+
+void set_control_image(id control, NSString*);
 
 }

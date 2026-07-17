@@ -22,12 +22,13 @@ public:
     virtual ~ContentStyleValue() override = default;
 
     StyleValueList const& content() const { return *m_properties.content; }
-    bool has_alt_text() const { return !m_properties.alt_text.is_null(); }
     StyleValueList const* alt_text() const { return m_properties.alt_text; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(ContentStyleValue const& other) const { return m_properties == other.m_properties; }
+
+    virtual bool is_computationally_independent() const override;
 
     virtual void set_style_sheet(GC::Ptr<CSSStyleSheet>) override;
 

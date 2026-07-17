@@ -5,7 +5,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/AbortSignalPrototype.h>
+#include <LibJS/Runtime/ExternalMemory.h>
+#include <LibWeb/Bindings/AbortSignal.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/DOM/AbortSignal.h>
 #include <LibWeb/DOM/Document.h>
@@ -133,13 +134,23 @@ void AbortSignal::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_dependent_signals);
 }
 
+size_t AbortSignal::external_memory_size() const
+{
+    auto size = Base::external_memory_size();
+    size = JS::saturating_add_external_memory_size(size, JS::hash_map_external_memory_size(m_abort_algorithms));
+    size = JS::saturating_add_external_memory_size(size, JS::vector_external_memory_size(m_source_signals));
+    size = JS::saturating_add_external_memory_size(size, JS::vector_external_memory_size(m_dependent_signals));
+    return size;
+}
+
 // https://dom.spec.whatwg.org/#dom-abortsignal-abort
-WebIDL::ExceptionOr<GC::Ref<AbortSignal>> AbortSignal::abort(JS::VM& vm, JS::Value reason)
+WebIDL::ExceptionOr<GC::Ref<AbortSignal>> AbortSignal::abort(JS::VM& vm, Optional<JS::Value> maybe_reason)
 {
     // 1. Let signal be a new AbortSignal object.
     auto signal = TRY(construct_impl(*vm.current_realm()));
 
     // 2. Set signal’s abort reason to reason if it is given; otherwise to a new "AbortError" DOMException.
+    auto reason = maybe_reason.value_or(JS::js_undefined());
     if (reason.is_undefined())
         reason = WebIDL::AbortError::create(*vm.current_realm(), "Aborted without reason"_utf16).ptr();
 
@@ -175,14 +186,14 @@ WebIDL::ExceptionOr<GC::Ref<AbortSignal>> AbortSignal::timeout(JS::VM& vm, WebID
 }
 
 // https://dom.spec.whatwg.org/#dom-abortsignal-any
-WebIDL::ExceptionOr<GC::Ref<AbortSignal>> AbortSignal::any(JS::VM& vm, Vector<GC::Root<AbortSignal>> const& signals)
+WebIDL::ExceptionOr<GC::Ref<AbortSignal>> AbortSignal::any(JS::VM& vm, ReadonlySpan<GC::Ref<AbortSignal>> signals)
 {
     // The static any(signals) method steps are to return the result of creating a dependent abort signal from signals using AbortSignal and the current realm.
     return create_dependent_abort_signal(*vm.current_realm(), signals);
 }
 
 // https://dom.spec.whatwg.org/#create-a-dependent-abort-signal
-WebIDL::ExceptionOr<GC::Ref<AbortSignal>> AbortSignal::create_dependent_abort_signal(JS::Realm& realm, Vector<GC::Root<AbortSignal>> const& signals)
+WebIDL::ExceptionOr<GC::Ref<AbortSignal>> AbortSignal::create_dependent_abort_signal(JS::Realm& realm, ReadonlySpan<GC::Ref<AbortSignal>> signals)
 {
     // 1. Let resultSignal be a new object implementing signalInterface using realm.
     auto result_signal = TRY(construct_impl(realm));

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2022, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2022, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2023, Luke Wilde <lukew@serenityos.org>
  *
@@ -24,19 +24,21 @@ public:
     [[nodiscard]] static GC::Ref<MediaList> create(JS::Realm&, Vector<NonnullRefPtr<MediaQuery>>&&);
     virtual ~MediaList() override = default;
 
-    String media_text() const;
-    void set_media_text(StringView);
+    Utf16String media_text() const;
+    void set_media_text(Utf16View);
     size_t length() const { return m_media.size(); }
-    Optional<String> item(u32 index) const;
-    void append_medium(StringView);
-    void delete_medium(StringView);
+    Optional<Utf16String> item(u32 index) const;
+    void append_medium(Utf16View);
+    WebIDL::ExceptionOr<void> delete_medium(Utf16View);
 
     virtual Optional<JS::Value> item_value(size_t index) const override;
 
-    bool evaluate(HTML::Window const&);
+    bool evaluate(DOM::Document const&);
     bool matches() const;
 
     void set_associated_style_sheet(GC::Ref<StyleSheet> style_sheet) { m_associated_style_sheet = style_sheet; }
+
+    void dump(StringBuilder&, int indent_levels = 0) const;
 
 private:
     MediaList(JS::Realm&, Vector<NonnullRefPtr<MediaQuery>>&&);

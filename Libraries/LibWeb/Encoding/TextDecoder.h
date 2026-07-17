@@ -11,47 +11,36 @@
 #include <LibJS/Forward.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Bindings/TextDecoder.h>
+#include <LibWeb/Encoding/TextDecoderCommon.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/WebIDL/Buffers.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::Encoding {
 
-// https://encoding.spec.whatwg.org/#textdecoderoptions
-struct TextDecoderOptions {
-    bool fatal = false;
-    bool ignore_bom = false;
-};
-
-// https://encoding.spec.whatwg.org/#textdecodeoptions
-struct TextDecodeOptions {
-    bool stream = false;
-};
-
 // https://encoding.spec.whatwg.org/#textdecoder
-class TextDecoder : public Bindings::PlatformObject {
+class TextDecoder
+    : public Bindings::PlatformObject
+    , public TextDecoderCommonMixin {
     WEB_PLATFORM_OBJECT(TextDecoder, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(TextDecoder);
 
 public:
-    static WebIDL::ExceptionOr<GC::Ref<TextDecoder>> construct_impl(JS::Realm&, FlyString encoding, Optional<TextDecoderOptions> const& options = {});
+    static WebIDL::ExceptionOr<GC::Ref<TextDecoder>> construct_impl(JS::Realm&, Utf16String const& label, Bindings::TextDecoderOptions const&);
 
     virtual ~TextDecoder() override;
 
-    WebIDL::ExceptionOr<String> decode(Optional<GC::Root<WebIDL::BufferSource>> const&, Optional<TextDecodeOptions> const& options = {}) const;
-
-    FlyString const& encoding() const { return m_encoding; }
-    bool fatal() const { return m_fatal; }
-    bool ignore_bom() const { return m_ignore_bom; }
+    WebIDL::ExceptionOr<Utf16String> decode(Optional<WebIDL::BufferSourceVariant>, Bindings::TextDecodeOptions const&);
 
 private:
-    TextDecoder(JS::Realm&, TextCodec::Decoder&, FlyString encoding, bool fatal, bool ignore_bom);
+    TextDecoder(JS::Realm&, FlyString encoding, TextCodec::ErrorMode error_mode, bool ignore_bom);
 
     virtual void initialize(JS::Realm&) override;
 
-    TextCodec::Decoder& m_decoder;
-    FlyString m_encoding;
-    bool m_fatal { false };
-    bool m_ignore_bom { false };
+    // https://encoding.spec.whatwg.org/#textdecoder-do-not-flush-flag
+    // A TextDecoder object has an associated do not flush, which is a boolean, initially false.
+    bool m_do_not_flush { false };
 };
 
 }

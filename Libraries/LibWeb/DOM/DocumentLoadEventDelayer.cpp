@@ -10,7 +10,7 @@
 namespace Web::DOM {
 
 DocumentLoadEventDelayer::DocumentLoadEventDelayer(Document& document)
-    : m_document(GC::make_root(document))
+    : m_document(document)
 {
     m_document->increment_number_of_things_delaying_the_load_event({});
 }
@@ -23,6 +23,12 @@ DocumentLoadEventDelayer::DocumentLoadEventDelayer(DocumentLoadEventDelayer&& de
 
 DocumentLoadEventDelayer& DocumentLoadEventDelayer::operator=(DocumentLoadEventDelayer&& delayer)
 {
+    if (this == &delayer)
+        return *this;
+
+    if (m_document)
+        m_document->decrement_number_of_things_delaying_the_load_event({});
+
     m_document = move(delayer.m_document);
     delayer.m_document = nullptr;
 

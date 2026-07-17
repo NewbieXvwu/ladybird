@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, Tim Flynn <trflynn89@serenityos.org>
+ * Copyright (c) 2024-2025, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -10,6 +10,7 @@
 #include <AK/ByteBuffer.h>
 #include <AK/Optional.h>
 #include <AK/StringView.h>
+#include <AK/Utf16View.h>
 #include <LibGC/Ptr.h>
 #include <LibJS/Forward.h>
 #include <LibJS/Runtime/Completion.h>
@@ -31,10 +32,10 @@ public:
     static void initialize(Realm&, Object& prototype);
 
 private:
-    JS_DECLARE_NATIVE_FUNCTION(to_base64);
-    JS_DECLARE_NATIVE_FUNCTION(to_hex);
     JS_DECLARE_NATIVE_FUNCTION(set_from_base64);
     JS_DECLARE_NATIVE_FUNCTION(set_from_hex);
+    JS_DECLARE_NATIVE_FUNCTION(to_base64);
+    JS_DECLARE_NATIVE_FUNCTION(to_hex);
 };
 
 enum class Alphabet {
@@ -51,7 +52,7 @@ struct DecodeResult {
 ThrowCompletionOr<GC::Ref<TypedArrayBase>> validate_uint8_array(VM&);
 ThrowCompletionOr<ByteBuffer> get_uint8_array_bytes(VM&, TypedArrayBase const&);
 void set_uint8_array_bytes(TypedArrayBase&, ReadonlyBytes);
-DecodeResult from_base64(VM&, StringView string, Alphabet alphabet, AK::LastChunkHandling last_chunk_handling, Optional<size_t> max_length = {});
-DecodeResult from_hex(VM&, StringView string, Optional<size_t> max_length = {});
+DecodeResult from_base64(VM&, Utf16View string, Alphabet alphabet, AK::LastChunkHandling last_chunk_handling, Optional<size_t> max_length = {});
+DecodeResult from_hex(VM&, Utf16View string, Optional<size_t> max_length = {});
 
 }

@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/StorageAPI/StorageBottle.h>
@@ -32,10 +34,10 @@ public:
     ~Storage();
 
     size_t length() const;
-    Optional<String> key(size_t index);
-    Optional<String> get_item(String const& key) const;
-    WebIDL::ExceptionOr<void> set_item(String const& key, String const& value);
-    void remove_item(String const& key);
+    Optional<Utf16String> key(size_t index);
+    Optional<Utf16String> get_item(Utf16View key) const;
+    WebIDL::ExceptionOr<void> set_item(Utf16View key, Utf16View value);
+    void remove_item(Utf16View key);
     void clear();
     Type type() const { return m_type; }
 
@@ -45,19 +47,16 @@ private:
     Storage(JS::Realm&, Type, GC::Ref<StorageAPI::StorageBottle>);
 
     virtual void initialize(JS::Realm&) override;
-    virtual void finalize() override;
     virtual void visit_edges(GC::Cell::Visitor&) override;
 
     // ^PlatformObject
-    virtual Optional<JS::Value> item_value(size_t index) const override;
-    virtual JS::Value named_item_value(FlyString const&) const override;
-    virtual WebIDL::ExceptionOr<DidDeletionFail> delete_value(String const&) override;
-    virtual Vector<FlyString> supported_property_names() const override;
-    virtual WebIDL::ExceptionOr<void> set_value_of_indexed_property(u32, JS::Value) override;
-    virtual WebIDL::ExceptionOr<void> set_value_of_named_property(String const& key, JS::Value value) override;
+    virtual JS::Value named_item_value(Utf16FlyString const&) const override;
+    virtual WebIDL::ExceptionOr<DidDeletionFail> delete_value(Utf16FlyString const&) override;
+    virtual Vector<Utf16FlyString> supported_property_names() const override;
+    virtual WebIDL::ExceptionOr<void> set_value_of_named_property(Utf16FlyString const& key, JS::Value value) override;
 
     void reorder();
-    void broadcast(Optional<String> const& key, Optional<String> const& old_value, Optional<String> const& new_value);
+    void broadcast(Optional<Utf16View> key, Optional<Utf16View> old_value, Optional<Utf16View> new_value);
 
     Type m_type {};
     GC::Ref<StorageAPI::StorageBottle> m_storage_bottle;

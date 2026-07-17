@@ -1,14 +1,12 @@
 set(SOURCES
-    RegexByteCode.cpp
-    RegexLexer.cpp
-    RegexMatcher.cpp
-    RegexOptimizer.cpp
-    RegexParser.cpp
+    ECMAScriptRegex.cpp
+    RustRegex.cpp
 )
 
-if(SERENITYOS)
-    list(APPEND SOURCES C/Regex.cpp)
-endif()
-
 ladybird_lib(LibRegex regex EXPLICIT_SYMBOL_EXPORT)
-target_link_libraries(LibRegex PRIVATE LibUnicode)
+
+import_rust_crate(MANIFEST_PATH Rust/Cargo.toml CRATE_NAME libregex_rust FEATURES allocator FFI_HEADER RustFFI.h)
+target_link_libraries(LibRegex PRIVATE libregex_rust LibUnicode)
+if ((LINUX OR BSD) AND NOT BUILD_SHARED_LIBS)
+    target_link_options(LibRegex INTERFACE LINKER:--allow-multiple-definition)
+endif()

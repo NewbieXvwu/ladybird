@@ -26,7 +26,7 @@ void ErrorPrototype::initialize(Realm& realm)
     auto& vm = this->vm();
     Base::initialize(realm);
     u8 attr = Attribute::Writable | Attribute::Configurable;
-    define_direct_property(vm.names.name, PrimitiveString::create(vm, "Error"_string), attr);
+    define_direct_property(vm.names.name, PrimitiveString::create(vm, "Error"_utf16_fly_string), attr);
     define_direct_property(vm.names.message, PrimitiveString::create(vm, Utf16String {}), attr);
     define_native_function(realm, vm.names.toString, to_string, 0, attr);
     // Non standard property "stack"
@@ -47,8 +47,8 @@ JS_DEFINE_NATIVE_FUNCTION(ErrorPrototype::to_string)
 
     // 4. If name is undefined, set name to "Error"; otherwise set name to ? ToString(name).
     auto name = name_property.is_undefined()
-        ? "Error"_string
-        : TRY(name_property.to_string(vm));
+        ? "Error"_utf16
+        : TRY(name_property.to_utf16_string(vm));
 
     // 5. Let msg be ? Get(O, "message").
     auto message_property = TRY(this_object->get(vm.names.message));
@@ -67,7 +67,7 @@ JS_DEFINE_NATIVE_FUNCTION(ErrorPrototype::to_string)
         return PrimitiveString::create(vm, move(name));
 
     // 9. Return the string-concatenation of name, the code unit 0x003A (COLON), the code unit 0x0020 (SPACE), and msg.
-    return PrimitiveString::create(vm, MUST(String::formatted("{}: {}", name, message)));
+    return PrimitiveString::create(vm, Utf16String::formatted("{}: {}", name, message));
 }
 
 // B.1.1 get Error.prototype.stack ( ), https://tc39.es/proposal-error-stacks/#sec-get-error.prototype-stack
@@ -78,29 +78,36 @@ JS_DEFINE_NATIVE_FUNCTION(ErrorPrototype::stack_getter)
     auto this_object = TRY(PrototypeObject::this_object(vm));
 
     // 3. If E does not have an [[ErrorData]] internal slot, return undefined.
-    if (!is<Error>(*this_object))
+    auto* error_data = this_object->error_data();
+    if (!error_data)
         return js_undefined();
 
-    auto& error = static_cast<Error&>(*this_object);
+    // OPTIMIZATION: Avoid recomputing the stack string if we already have it cached.
+    //               At least one major engine does this as well, so it's not expected that changing
+    //               the name or message properties updates the stack string.
+    if (error_data->cached_string())
+        return error_data->cached_string();
 
     // 4. Return ? GetStackString(error).
     // NOTE: These steps are not implemented based on the proposal, but to roughly follow behavior of other browsers.
 
-    String name {};
-    if (auto name_property = TRY(error.get(vm.names.name)); !name_property.is_undefined())
-        name = TRY(name_property.to_string(vm));
+    Utf16String name {};
+    if (auto name_property = TRY(this_object->get(vm.names.name)); !name_property.is_undefined())
+        name = TRY(name_property.to_utf16_string(vm));
     else
-        name = "Error"_string;
+        name = "Error"_utf16;
 
     Utf16String message {};
-    if (auto message_property = TRY(error.get(vm.names.message)); !message_property.is_undefined())
+    if (auto message_property = TRY(this_object->get(vm.names.message)); !message_property.is_undefined())
         message = TRY(message_property.to_utf16_string(vm));
 
     auto header = message.is_empty()
         ? move(name)
-        : MUST(String::formatted("{}: {}", name, message));
+        : Utf16String::formatted("{}: {}", name, message);
 
-    return PrimitiveString::create(vm, MUST(String::formatted("{}\n{}", header, error.stack_string())));
+    auto string = PrimitiveString::create(vm, Utf16String::formatted("{}\n{}", header, error_data->stack_string()));
+    error_data->set_cached_string(string);
+    return string;
 }
 
 // B.1.2 set Error.prototype.stack ( value ), https://tc39.es/proposal-error-stacks/#sec-set-error.prototype-stack
@@ -111,7 +118,7 @@ JS_DEFINE_NATIVE_FUNCTION(ErrorPrototype::stack_setter)
 
     // 2. If ! Type(E) is not Object, throw a TypeError exception.
     if (!this_value.is_object())
-        return vm.throw_completion<TypeError>(ErrorType::NotAnObject, this_value.to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAnObject, this_value);
 
     auto& this_object = this_value.as_object();
 
@@ -124,21 +131,21 @@ JS_DEFINE_NATIVE_FUNCTION(ErrorPrototype::stack_setter)
     return TRY(this_object.create_data_property_or_throw(vm.names.stack, vm.argument(0)));
 }
 
-#define __JS_ENUMERATE(ClassName, snake_name, PrototypeName, ConstructorName, ArrayType)               \
-    GC_DEFINE_ALLOCATOR(PrototypeName);                                                                \
-                                                                                                       \
-    PrototypeName::PrototypeName(Realm& realm)                                                         \
-        : PrototypeObject(realm.intrinsics().error_prototype())                                        \
-    {                                                                                                  \
-    }                                                                                                  \
-                                                                                                       \
-    void PrototypeName::initialize(Realm& realm)                                                       \
-    {                                                                                                  \
-        auto& vm = this->vm();                                                                         \
-        Base::initialize(realm);                                                                       \
-        u8 attr = Attribute::Writable | Attribute::Configurable;                                       \
-        define_direct_property(vm.names.name, PrimitiveString::create(vm, #ClassName##_string), attr); \
-        define_direct_property(vm.names.message, PrimitiveString::create(vm, Utf16String {}), attr);   \
+#define __JS_ENUMERATE(ClassName, snake_name, PrototypeName, ConstructorName, ArrayType)                         \
+    GC_DEFINE_ALLOCATOR(PrototypeName);                                                                          \
+                                                                                                                 \
+    PrototypeName::PrototypeName(Realm& realm)                                                                   \
+        : PrototypeObject(realm.intrinsics().error_prototype())                                                  \
+    {                                                                                                            \
+    }                                                                                                            \
+                                                                                                                 \
+    void PrototypeName::initialize(Realm& realm)                                                                 \
+    {                                                                                                            \
+        auto& vm = this->vm();                                                                                   \
+        Base::initialize(realm);                                                                                 \
+        u8 attr = Attribute::Writable | Attribute::Configurable;                                                 \
+        define_direct_property(vm.names.name, PrimitiveString::create(vm, #ClassName##_utf16_fly_string), attr); \
+        define_direct_property(vm.names.message, PrimitiveString::create(vm, Utf16String {}), attr);             \
     }
 
 JS_ENUMERATE_NATIVE_ERRORS

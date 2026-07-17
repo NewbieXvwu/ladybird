@@ -1,239 +1,277 @@
 /*
- * Copyright (c) 2022, Gregory Bertilson <zaggy1024@gmail.com>
+ * Copyright (c) 2022-2025, Gregory Bertilson <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <AK/Atomic.h>
-#include <AK/Function.h>
-#include <AK/NonnullOwnPtr.h>
-#include <AK/Queue.h>
+#include <AK/AtomicRefCounted.h>
+#include <AK/Forward.h>
+#include <AK/HashTable.h>
+#include <AK/NonnullRefPtr.h>
+#include <AK/OwnPtr.h>
 #include <AK/Time.h>
-#include <LibCore/SharedCircularQueue.h>
-#include <LibGfx/Bitmap.h>
-#include <LibMedia/Demuxer.h>
+#include <AK/Vector.h>
+#include <LibCore/EventLoop.h>
+#include <LibMedia/DecoderError.h>
 #include <LibMedia/Export.h>
-#include <LibThreading/ConditionVariable.h>
-#include <LibThreading/Mutex.h>
-#include <LibThreading/Thread.h>
-
-#include "VideoDecoder.h"
+#include <LibMedia/Forward.h>
+#include <LibMedia/MediaTimeProvider.h>
+#include <LibMedia/PipelineStatus.h>
+#include <LibMedia/PlaybackStates/Forward.h>
+#include <LibMedia/PlaybackStates/PlaybackState.h>
+#include <LibMedia/TimeRanges.h>
+#include <LibMedia/Track.h>
+#include <LibSync/Mutex.h>
 
 namespace Media {
 
-class FrameQueueItem {
-public:
-    FrameQueueItem()
-        : m_data(Empty())
-        , m_timestamp(AK::Duration::zero())
-    {
-    }
+class WeakPlaybackManagerLink;
+class WeakPlaybackManager;
 
-    static constexpr AK::Duration no_timestamp = AK::Duration::min();
-
-    enum class Type {
-        Frame,
-        Error,
-    };
-
-    static FrameQueueItem frame(RefPtr<Gfx::Bitmap> bitmap, AK::Duration timestamp)
-    {
-        return FrameQueueItem(move(bitmap), timestamp);
-    }
-
-    static FrameQueueItem error_marker(DecoderError&& error, AK::Duration timestamp)
-    {
-        return FrameQueueItem(move(error), timestamp);
-    }
-
-    bool is_frame() const { return m_data.has<RefPtr<Gfx::Bitmap>>(); }
-    RefPtr<Gfx::Bitmap> bitmap() const { return m_data.get<RefPtr<Gfx::Bitmap>>(); }
-    AK::Duration timestamp() const { return m_timestamp; }
-
-    bool is_error() const { return m_data.has<DecoderError>(); }
-    DecoderError const& error() const { return m_data.get<DecoderError>(); }
-    DecoderError release_error()
-    {
-        auto error = move(m_data.get<DecoderError>());
-        m_data.set(Empty());
-        return error;
-    }
-
-    bool is_empty() const { return m_data.has<Empty>(); }
-
-    ByteString debug_string() const
-    {
-        if (is_error())
-            return ByteString::formatted("{} at {}ms", error().string_literal(), timestamp().to_milliseconds());
-        return ByteString::formatted("frame at {}ms", timestamp().to_milliseconds());
-    }
-
-private:
-    FrameQueueItem(RefPtr<Gfx::Bitmap> bitmap, AK::Duration timestamp)
-        : m_data(move(bitmap))
-        , m_timestamp(timestamp)
-    {
-        VERIFY(m_timestamp != no_timestamp);
-    }
-
-    FrameQueueItem(DecoderError&& error, AK::Duration timestamp)
-        : m_data(move(error))
-        , m_timestamp(timestamp)
-    {
-    }
-
-    Variant<Empty, RefPtr<Gfx::Bitmap>, DecoderError> m_data { Empty() };
-    AK::Duration m_timestamp { no_timestamp };
-};
-
-static constexpr size_t frame_buffer_count = 4;
-using VideoFrameQueue = Core::SharedSingleProducerCircularQueue<FrameQueueItem, frame_buffer_count>;
-
-enum class PlaybackState {
-    Playing,
-    Paused,
-    Buffering,
-    Seeking,
-    Stopped,
-};
-
-class MEDIA_API PlaybackManager {
+class MEDIA_API PlaybackManager final {
     AK_MAKE_NONCOPYABLE(PlaybackManager);
     AK_MAKE_NONMOVABLE(PlaybackManager);
 
+#define __MAKE_PLAYBACK_STATE_HANDLER_FRIEND(clazz) \
+    friend class clazz;
+    ENUMERATE_PLAYBACK_STATE_HANDLERS(__MAKE_PLAYBACK_STATE_HANDLER_FRIEND)
+#undef __MAKE_PLAYBACK_STATE_HANDLER_FRIEND
+
 public:
-    enum class SeekMode {
-        Accurate,
-        Fast,
-    };
+    static constexpr size_t EXPECTED_VIDEO_TRACK_COUNT = 1;
 
-    static constexpr SeekMode DEFAULT_SEEK_MODE = SeekMode::Accurate;
+    using VideoTracks = Vector<Track, EXPECTED_VIDEO_TRACK_COUNT>;
 
-    static DecoderErrorOr<NonnullOwnPtr<PlaybackManager>> from_data(ReadonlyBytes data);
-    static DecoderErrorOr<NonnullOwnPtr<PlaybackManager>> from_stream(NonnullOwnPtr<SeekableStream> stream);
+    static constexpr size_t EXPECTED_AUDIO_TRACK_COUNT = 1;
 
-    PlaybackManager(NonnullOwnPtr<Demuxer>& demuxer, Track video_track, NonnullOwnPtr<VideoDecoder>&& decoder, VideoFrameQueue&& frame_queue);
+    using AudioTracks = Vector<Track, EXPECTED_AUDIO_TRACK_COUNT>;
+
+    static NonnullOwnPtr<PlaybackManager> create();
     ~PlaybackManager();
 
-    void resume_playback();
-    void pause_playback();
-    void restart_playback();
-    void terminate_playback();
-    void seek_to_timestamp(AK::Duration, SeekMode = DEFAULT_SEEK_MODE);
-    bool is_playing() const
-    {
-        return m_playback_handler->is_playing();
-    }
-    PlaybackState get_state() const
-    {
-        return m_playback_handler->get_state();
-    }
+    void set_audio_output_disabled(bool disabled) { m_audio_output_disabled = disabled; }
 
-    u64 number_of_skipped_frames() const { return m_skipped_frames; }
+    AK::Duration duration() const { return m_duration; }
+    void set_duration(AK::Duration duration) { m_duration = duration; }
+    AK::Duration current_time() const;
 
-    AK::Duration current_playback_time();
-    AK::Duration duration();
+    Optional<AK::UnixDateTime> start_time_realtime() const { return m_start_time_realtime; }
 
-    Function<void(RefPtr<Gfx::Bitmap>)> on_video_frame;
+    auto const& video_tracks() const { return m_video_tracks; }
+    auto const& audio_tracks() const { return m_audio_tracks; }
+    Optional<Track> preferred_video_track() { return m_preferred_video_track; }
+    Optional<Track> preferred_audio_track() { return m_preferred_audio_track; }
+
+    // Creates a DisplayingVideoSink for the specified track.
+    //
+    // Note that in order for the current frame to change based on the media time, users must call
+    // DisplayingVideoSink::update(). It is recommended to drive this off of vertical sync.
+    NonnullRefPtr<DisplayingVideoSink> get_or_create_the_displaying_video_sink_for_track(Track const&);
+    // Removes the DisplayingVideoSink for the specified track. This will prevent the sink from
+    // retrieving any subsequent frames from the decoder.
+    void remove_the_displaying_video_sink_for_track(Track const&);
+
+    void enable_an_audio_track(Track const&);
+    void disable_an_audio_track(Track const&);
+
+    bool track_is_enabled(Track const&) const;
+
+    void start();
+    void play();
+    void pause();
+    void seek(AK::Duration timestamp, SeekMode);
+
+    bool is_playing();
+    PlaybackState state();
+    AvailableData available_data();
+    TimeRanges buffered_time_ranges() const;
+
+    void set_volume(double);
+    void set_playback_rate(float);
+
+    Function<void()> on_metadata_parsed;
+    Function<void(DecoderError&&)> on_unsupported_format_error;
+    Function<void(Track const&)> on_track_added;
     Function<void()> on_playback_state_change;
-    Function<void(DecoderError)> on_decoder_error;
-    Function<void(Error)> on_fatal_playback_error;
+    Function<void(AK::Duration)> on_duration_change;
+    Function<void(DecoderError&&)> on_error;
 
-    Track const& selected_video_track() const { return m_selected_video_track; }
+    void add_media_source(NonnullRefPtr<MediaStream> const&);
+    void add_media_source(NonnullRefPtr<Demuxer> const&);
 
 private:
-    class PlaybackStateHandler;
-    // Abstract class to allow resuming play/pause after the state is completed.
-    class ResumingStateHandler;
-    class PlayingStateHandler;
-    class PausedStateHandler;
-    class BufferingStateHandler;
-    class SeekingStateHandler;
-    class StoppedStateHandler;
-
-    static DecoderErrorOr<NonnullOwnPtr<PlaybackManager>> create(NonnullOwnPtr<Demuxer> demuxer);
-
-    void timer_callback();
-    // This must be called with m_demuxer_mutex locked!
-    DecoderErrorOr<Optional<AK::Duration>> seek_demuxer_to_most_recent_keyframe(AK::Duration timestamp, Optional<AK::Duration> earliest_available_sample = OptionalNone());
-
-    Optional<FrameQueueItem> dequeue_one_frame();
-    void set_state_update_timer(int delay_ms);
-
-    void decode_and_queue_one_sample();
-
-    void dispatch_decoder_error(DecoderError error);
-    void dispatch_new_frame(RefPtr<Gfx::Bitmap> frame);
-    // Returns whether we changed playback states. If so, any PlaybackStateHandler processing must cease.
-    [[nodiscard]] bool dispatch_frame_queue_item(FrameQueueItem&&);
-    void dispatch_state_change();
-    void dispatch_fatal_error(Error);
-
-    AK::Duration m_last_present_in_media_time = AK::Duration::zero();
-
-    NonnullOwnPtr<Demuxer> m_demuxer;
-    Threading::Mutex m_decoder_mutex;
-    Track m_selected_video_track;
-
-    VideoFrameQueue m_frame_queue;
-
-    RefPtr<Core::Timer> m_state_update_timer;
-
-    RefPtr<Threading::Thread> m_decode_thread;
-    NonnullOwnPtr<VideoDecoder> m_decoder;
-    Atomic<bool> m_stop_decoding { false };
-    Threading::Mutex m_decode_wait_mutex;
-    Threading::ConditionVariable m_decode_wait_condition;
-    Atomic<bool> m_buffer_is_full { false };
-
-    OwnPtr<PlaybackStateHandler> m_playback_handler;
-    Optional<FrameQueueItem> m_next_frame;
-
-    u64 m_skipped_frames { 0 };
-
-    // This is a nested class to allow private access.
-    class PlaybackStateHandler {
-    public:
-        PlaybackStateHandler(PlaybackManager& manager)
-            : m_manager(manager)
-        {
-        }
-        virtual ~PlaybackStateHandler() = default;
-        virtual StringView name() = 0;
-
-        virtual ErrorOr<void> on_enter() { return {}; }
-
-        virtual ErrorOr<void> play() { return {}; }
-        virtual bool is_playing() const = 0;
-        virtual PlaybackState get_state() const = 0;
-        virtual ErrorOr<void> pause() { return {}; }
-        virtual ErrorOr<void> buffer() { return {}; }
-        virtual ErrorOr<void> seek(AK::Duration target_timestamp, SeekMode);
-        virtual ErrorOr<void> stop();
-
-        virtual AK::Duration current_time() const;
-
-        virtual ErrorOr<void> do_timed_state_update() { return {}; }
-
-    protected:
-        template<class T, class... Args>
-        ErrorOr<void> replace_handler_and_delete_this(Args... args);
-
-        PlaybackManager& manager() const;
-
-        PlaybackManager& manager()
-        {
-            return const_cast<PlaybackManager&>(const_cast<PlaybackStateHandler const*>(this)->manager());
-        }
-
-    private:
-        PlaybackManager& m_manager;
-#if PLAYBACK_MANAGER_DEBUG
-        bool m_has_exited { false };
-#endif
+    struct VideoTrackData {
+        Track track;
+        NonnullRefPtr<DecodedVideoProducer> producer;
+        RefPtr<DisplayingVideoSink> display;
+        PipelineStatus sink_status { PipelineStatus::HaveData };
     };
+    using VideoTrackDatas = Vector<VideoTrackData, EXPECTED_VIDEO_TRACK_COUNT>;
+
+    struct AudioTrackData {
+        Track track;
+        NonnullRefPtr<DecodedAudioProducer> producer;
+        bool enabled { false };
+    };
+    using AudioTrackDatas = Vector<AudioTrackData, EXPECTED_AUDIO_TRACK_COUNT>;
+
+    PlaybackManager();
+
+    WeakPlaybackManager weak();
+
+    void set_time_provider(NonnullRefPtr<MediaTimeProvider> const&);
+    void disable_audio();
+
+    void set_up_producers();
+    void on_audio_sink_state_changed(PipelineStatus);
+    void on_video_sink_state_changed(Track const&, PipelineStatus);
+    void update_pipeline_state();
+    void reset_pipeline_state();
+    PipelineStatus combined_pipeline_status() const;
+    void check_for_duration_change(AK::Duration);
+    void dispatch_error(DecoderError&&);
+
+    template<typename Self>
+    decltype(auto) get_video_data_for_track(this Self&& self, Track const& track)
+    {
+        for (auto& track_data : self.m_video_track_datas) {
+            if (track_data.track == track)
+                return track_data;
+        }
+
+        VERIFY_NOT_REACHED();
+    }
+    template<typename Self>
+    decltype(auto) get_audio_data_for_track(this Self&& self, Track const& track)
+    {
+        for (auto& track_data : self.m_audio_track_datas) {
+            if (track_data.track == track)
+                return track_data;
+        }
+
+        VERIFY_NOT_REACHED();
+    }
+
+    static DecoderErrorOr<NonnullRefPtr<Demuxer>> create_demuxer_for_stream(NonnullRefPtr<MediaStream> const&);
+    static DecoderErrorOr<void> prepare_playback_from_demuxer(WeakPlaybackManager const&, NonnullRefPtr<Demuxer> const&, Core::EventLoop&);
+
+    template<typename T, typename... Args>
+    void replace_state_handler(Args&&... args);
+    inline void dispatch_state_change() const;
+
+    OwnPtr<PlaybackStateHandler> m_handler;
+
+    NonnullRefPtr<WeakPlaybackManagerLink> m_weak_link;
+
+    NonnullRefPtr<MediaTimeProvider> m_time_provider;
+    float m_playback_rate { 1.0f };
+
+    bool m_audio_output_disabled { false };
+
+    VideoTracks m_video_tracks;
+    VideoTrackDatas m_video_track_datas;
+
+    RefPtr<AudioMixer> m_audio_mixer;
+    RefPtr<AudioTimeStretchProcessor> m_audio_time_stretch_processor;
+    RefPtr<AudioPlaybackSink> m_audio_sink;
+    AudioTracks m_audio_tracks;
+    AudioTrackDatas m_audio_track_datas;
+
+    Optional<Track> m_preferred_video_track;
+    Optional<Track> m_preferred_audio_track;
+
+    AK::Duration m_duration;
+    Optional<AK::UnixDateTime> m_start_time_realtime;
+
+    PipelineStatus m_audio_sink_status { PipelineStatus::HaveData };
+
+    bool m_is_in_error_state { false };
+};
+
+template<typename T, typename... Args>
+void PlaybackManager::replace_state_handler(Args&&... args)
+{
+    m_handler->on_exit();
+
+    OwnPtr<PlaybackStateHandler> new_handler = make<T>(*this, args...);
+    m_handler.swap(new_handler);
+
+    m_handler->on_enter();
+    dispatch_state_change();
+}
+
+void PlaybackManager::dispatch_state_change() const
+{
+    if (on_playback_state_change)
+        on_playback_state_change();
+}
+
+class WeakPlaybackManagerLink : public AtomicRefCounted<WeakPlaybackManagerLink> {
+public:
+    WeakPlaybackManagerLink(PlaybackManager& manager)
+        : m_manager(&manager)
+        , m_originating_event_loop(Core::EventLoop::current())
+    {
+    }
+
+    bool is_alive() const
+    {
+        verify_thread_is_originating_thread();
+        return m_manager != nullptr;
+    }
+    PlaybackManager& get() const
+    {
+        VERIFY(is_alive());
+        return *m_manager;
+    }
+
+    void revoke(Badge<PlaybackManager>)
+    {
+        Sync::MutexLocker locker { m_mutex };
+        m_manager = nullptr;
+    }
+
+private:
+    void verify_thread_is_originating_thread() const
+    {
+        VERIFY(Core::EventLoop::is_running());
+        VERIFY(&Core::EventLoop::current() == &m_originating_event_loop);
+    }
+
+    mutable Sync::Mutex m_mutex;
+    PlaybackManager* m_manager { nullptr };
+    Core::EventLoop& m_originating_event_loop;
+};
+
+class WeakPlaybackManager {
+    AK_MAKE_DEFAULT_COPYABLE(WeakPlaybackManager);
+    AK_MAKE_DEFAULT_MOVABLE(WeakPlaybackManager);
+
+public:
+    WeakPlaybackManager(WeakPlaybackManagerLink& link)
+        : m_link(link)
+    {
+    }
+
+    operator bool() const
+    {
+        return m_link->is_alive();
+    }
+
+    PlaybackManager& operator*() const
+    {
+        return m_link->get();
+    }
+
+    PlaybackManager* operator->() const
+    {
+        return &m_link->get();
+    }
+
+private:
+    NonnullRefPtr<WeakPlaybackManagerLink> m_link;
 };
 
 }

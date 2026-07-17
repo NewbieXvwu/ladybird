@@ -7,20 +7,20 @@
 #pragma once
 
 #include <LibWeb/Forward.h>
-#include <LibWeb/Layout/FormAssociatedLabelableNode.h>
+#include <LibWeb/Layout/ReplacedBox.h>
 
 namespace Web::Layout {
 
-class RadioButton final : public FormAssociatedLabelableNode {
-    GC_CELL(RadioButton, FormAssociatedLabelableNode);
-    GC_DECLARE_ALLOCATOR(RadioButton);
+class RadioButton final : public ReplacedBox {
+    LAYOUT_NODE(RadioButton, ReplacedBox);
 
 public:
-    RadioButton(DOM::Document&, HTML::HTMLInputElement&, GC::Ref<CSS::ComputedProperties>);
+    RadioButton(DOM::Document&, HTML::HTMLInputElement&, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~RadioButton() override;
 
 private:
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    CSS::SizeWithAspectRatio compute_auto_content_box_size() const override { return { 12, 12, {} }; }
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 };
 
 }

@@ -1,0 +1,35 @@
+$091ab4cd super-computed-string-to-id.js:1:1
+  Registers: 8
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] GetLexicalEnvironment dst:reg4
+  [   8] CreateLexicalEnvironment dst:reg5, parent:reg4, capacity:0, is_catch_environment:false
+  [  20] CreateVariable `C`, is_immutable:true, is_global:false, is_strict:true
+  [  30] GetGlobal dst:reg6, `Object`
+  [  40] SetLexicalEnvironment environment:reg4
+  [  48] NewClass dst:reg7, super_class:reg6, class_environment:reg5, class_blueprint_index:0
+  [  68] DynamicInitializeLexicalBinding `C`, src:reg7
+  [  78] GetGlobal dst:reg5, `C`
+  [  88] CallConstruct dst:reg7, callee:reg5, C
+  [  a0] End value:reg7
+
+
+C$bb96c1c3 super-computed-string-to-id.js:3:14
+  Registers: 8
+  Blocks:    1
+  Constants:
+    [0] = String("foo")
+    [1] = Int32(1)
+    [2] = Undefined
+
+block0:
+  [   0] GetSuperConstructor dst:reg5
+  [   8] NewArray dst:reg6
+  [  18] SuperCallWithArgumentArray dst:reg7, super_constructor:reg5, arguments:reg6, is_synthetic:false
+  [  30] ResolveThisBinding
+  [  38] ResolveSuperBase dst:reg7
+  [  40] PutByIdWithThis base:reg7, this_value:this, `foo`, src:Int32(1), kind:Normal
+  [  60] End value:Undefined

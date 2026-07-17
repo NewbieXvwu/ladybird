@@ -1,0 +1,30 @@
+// https://w3c.github.io/web-locks/#lockmanager
+[SecureContext, Exposed=(Window,Worker)]
+interface LockManager {
+    Promise<any> request(Utf16DOMString name, LockGrantedCallback callback);
+    Promise<any> request(Utf16DOMString name, LockOptions options, LockGrantedCallback callback);
+
+    Promise<LockManagerSnapshot> query();
+};
+
+callback LockGrantedCallback = Promise<any> (Lock? lock);
+
+enum LockMode { "shared", "exclusive" };
+
+dictionary LockOptions {
+    LockMode mode = "exclusive";
+    boolean ifAvailable = false;
+    boolean steal = false;
+    AbortSignal signal;
+};
+
+dictionary LockManagerSnapshot {
+    sequence<LockInfo> held;
+    sequence<LockInfo> pending;
+};
+
+dictionary LockInfo {
+    Utf16DOMString name;
+    LockMode mode;
+    Utf16DOMString clientId;
+};

@@ -6,8 +6,6 @@
 
 #pragma once
 
-#define REFPTR_SCRUB_BYTE 0xe0
-
 #include <AK/Assertions.h>
 #include <AK/Error.h>
 #include <AK/Format.h>
@@ -100,10 +98,7 @@ public:
 
     ALWAYS_INLINE ~RefPtr()
     {
-        clear();
-#ifdef SANITIZE_PTRS
-        m_ptr = reinterpret_cast<T*>(explode_byte(REFPTR_SCRUB_BYTE));
-#endif
+        unref_if_not_null(m_ptr);
     }
 
     template<typename U>
@@ -298,6 +293,7 @@ struct Traits<RefPtr<T>> : public DefaultTraits<RefPtr<T>> {
     using ConstPeekType = T const*;
     static unsigned hash(RefPtr<T> const& p) { return ptr_hash(p.ptr()); }
     static bool equals(RefPtr<T> const& a, RefPtr<T> const& b) { return a.ptr() == b.ptr(); }
+    static constexpr bool may_have_slow_equality_check() { return false; }
 };
 
 template<typename T, typename U>

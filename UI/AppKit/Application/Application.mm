@@ -1,18 +1,24 @@
 /*
- * Copyright (c) 2023-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2023-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <Application/EventLoopImplementationMacOS.h>
+#include <LibCore/ArgsParser.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/ThreadEventQueue.h>
-#include <LibWebView/EventLoop/EventLoopImplementationMacOS.h>
+#include <LibWebView/Application.h>
+#include <LibWebView/URL.h>
+#include <LibWebView/ViewImplementation.h>
 #include <Utilities/Conversions.h>
 
 #import <Application/Application.h>
 #import <Application/ApplicationDelegate.h>
+#import <Interface/BookmarksBar.h>
 #import <Interface/LadybirdWebView.h>
 #import <Interface/Tab.h>
+#import <Interface/TabController.h>
 
 #if !__has_feature(objc_arc)
 #    error "This project requires ARC"
@@ -22,10 +28,10 @@ namespace Ladybird {
 
 Application::Application() = default;
 
-NonnullOwnPtr<Core::EventLoop> Application::create_platform_event_loop()
+Core::EventLoop& Application::create_platform_event_loop()
 {
     if (!browser_options().headless_mode.has_value()) {
-        Core::EventLoopManager::install(*new WebView::EventLoopManagerMacOS);
+        Core::EventLoopManager::install(*new EventLoopManagerMacOS);
         [::Application sharedApplication];
     }
 
@@ -41,13 +47,93 @@ Optional<WebView::ViewImplementation&> Application::active_web_view() const
     return {};
 }
 
-Optional<ByteString> Application::ask_user_for_download_folder() const
+Vector<WebView::ViewImplementation&> Application::active_window_web_views() const
 {
-    auto* panel = [NSOpenPanel openPanel];
-    [panel setAllowsMultipleSelection:NO];
-    [panel setCanChooseDirectories:YES];
-    [panel setCanChooseFiles:NO];
-    [panel setMessage:@"Select download directory"];
+    Vector<WebView::ViewImplementation&> web_views;
+
+    auto add_window = [&](id window) {
+        if ([window isKindOfClass:[Tab class]])
+            web_views.append([[(Tab*)window web_view] view]);
+    };
+
+    auto* active_window = [NSApp keyWindow];
+    if (!active_window)
+        return {};
+
+    auto* tab_group = [active_window tabGroup];
+    if (!tab_group) {
+        add_window(active_window);
+        return web_views;
+    }
+
+    for (id window in [tab_group windows])
+        add_window(window);
+
+    return web_views;
+}
+
+Optional<WebView::ViewImplementation&> Application::open_blank_new_tab(Web::HTML::ActivateTab activate_tab) const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+
+    auto* controller = [delegate createNewTab:activate_tab fromTab:[delegate activeTab]];
+    if (activate_tab == Web::HTML::ActivateTab::Yes)
+        [controller focusWebView];
+    else
+        [controller focusWebViewWhenActivated];
+    auto* tab = (Tab*)[controller window];
+
+    return [[tab web_view] view];
+}
+
+void Application::open_url_in_new_tab(URL::URL const& url, Web::HTML::ActivateTab activate_tab) const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    auto* active_tab = [delegate activeTab];
+
+    auto is_private = active_tab ? [active_tab isPrivate] : WebView::IsPrivate::No;
+
+    (void)[delegate createNewTab:url
+                         fromTab:active_tab
+                       isPrivate:is_private
+                     activateTab:activate_tab
+                     tabLocation:TabLocation::after_tab(active_tab)];
+}
+
+void Application::open_urls_in_new_tabs(ReadonlySpan<URL::URL> urls) const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    auto* active_tab = [delegate activeTab];
+    auto* previous_tab = active_tab;
+
+    auto is_private = active_tab ? [active_tab isPrivate] : WebView::IsPrivate::No;
+
+    for (auto const& url : urls) {
+        auto location = previous_tab ? TabLocation::after_tab(previous_tab) : TabLocation::end();
+        auto* controller = [delegate createNewTab:url
+                                          fromTab:active_tab
+                                        isPrivate:is_private
+                                      activateTab:Web::HTML::ActivateTab::No
+                                      tabLocation:location];
+        previous_tab = (Tab*)[controller window];
+    }
+}
+
+void Application::open_url_in_new_window(URL::URL const& url, WebView::IsPrivate is_private)
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    (void)[delegate createNewTab:url
+                         fromTab:nil
+                       isPrivate:is_private
+                     activateTab:Web::HTML::ActivateTab::Yes
+                     tabLocation:TabLocation::end()];
+}
+
+Optional<ByteString> Application::ask_user_for_download_path(ByteString const& file) const
+{
+    auto* panel = [NSSavePanel savePanel];
+    [panel setNameFieldStringValue:Ladybird::string_to_ns_string(file)];
+    [panel setTitle:@"Select save location"];
 
     if ([panel runModal] != NSModalResponseOK)
         return {};
@@ -87,6 +173,328 @@ void Application::display_error_dialog(StringView error_message) const
                    completionHandler:nil];
 }
 
+void Application::open_download(WebView::FileDownloader::Download const& download) const
+{
+    auto path = download_file_path_for_frontend_action(download);
+    if (path.is_error()) {
+        display_error_dialog("Unable to open downloaded file: path cannot be represented by this frontend"sv);
+        return;
+    }
+
+    auto* ns_path = Ladybird::string_to_ns_string(path.release_value());
+    auto* url = [NSURL fileURLWithPath:ns_path];
+    if (![[NSWorkspace sharedWorkspace] openURL:url])
+        display_error_dialog("Unable to open downloaded file"sv);
+}
+
+void Application::show_download_in_folder(WebView::FileDownloader::Download const& download) const
+{
+    auto path = download_file_path_for_frontend_action(download);
+    if (path.is_error()) {
+        display_error_dialog("Unable to show downloaded file: path cannot be represented by this frontend"sv);
+        return;
+    }
+
+    auto* ns_path = Ladybird::string_to_ns_string(path.release_value());
+    if (![[NSWorkspace sharedWorkspace] selectFile:ns_path inFileViewerRootedAtPath:@""])
+        display_error_dialog("Unable to show downloaded file in folder"sv);
+}
+
+Utf16String Application::clipboard_text(ClipboardType) const
+{
+    auto* paste_board = [NSPasteboard generalPasteboard];
+
+    if (auto* contents = [paste_board stringForType:NSPasteboardTypeString])
+        return Ladybird::ns_string_to_utf16_string(contents);
+    return {};
+}
+
+Vector<Web::Clipboard::SystemClipboardRepresentation> Application::clipboard_entries() const
+{
+    Vector<Web::Clipboard::SystemClipboardRepresentation> representations;
+    auto* paste_board = [NSPasteboard generalPasteboard];
+
+    for (NSPasteboardType type : [paste_board types]) {
+        String mime_type;
+
+        if (type == NSPasteboardTypeString)
+            mime_type = "text/plain"_string;
+        else if (type == NSPasteboardTypeHTML)
+            mime_type = "text/html"_string;
+        else if (type == NSPasteboardTypePNG)
+            mime_type = "image/png"_string;
+        else
+            continue;
+
+        auto data = Ladybird::ns_data_to_string([paste_board dataForType:type]);
+        representations.empend(move(data), move(mime_type));
+    }
+
+    return representations;
+}
+
+void Application::insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation entry)
+{
+    NSPasteboardType pasteboard_type = nil;
+
+    // https://w3c.github.io/clipboard-apis/#os-specific-well-known-format
+    if (entry.mime_type == "text/plain"sv)
+        pasteboard_type = NSPasteboardTypeString;
+    else if (entry.mime_type == "text/html"sv)
+        pasteboard_type = NSPasteboardTypeHTML;
+    else if (entry.mime_type == "image/png"sv)
+        pasteboard_type = NSPasteboardTypePNG;
+    else
+        return;
+
+    auto* paste_board = [NSPasteboard generalPasteboard];
+    [paste_board clearContents];
+
+    [paste_board setData:Ladybird::string_to_ns_data(entry.data)
+                 forType:pasteboard_type];
+}
+
+void Application::rebuild_bookmarks_menu() const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    [delegate rebuildBookmarksMenu];
+}
+
+void Application::show_bookmark_context_menu(Gfx::IntPoint content_position, Optional<WebView::BookmarkItem const&> item, Optional<String const&> target_folder_id)
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+
+    if (auto* tab = [delegate activeTab]) {
+        [[tab bookmarksBar] showContextMenu:content_position
+                                       view:[tab web_view]
+                               bookmarkItem:item
+                             targetFolderID:target_folder_id];
+    }
+}
+
+Optional<Application::BookmarkID> Application::bookmark_item_id_for_context_menu() const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+
+    if (auto* tab = [delegate activeTab]) {
+        auto* bookmarks_bar = [tab bookmarksBar];
+
+        return Application::BookmarkID {
+            .id = Ladybird::ns_string_to_string([bookmarks_bar selected_bookmark_menu_item_id]),
+            .target_folder_id = [bookmarks_bar selected_bookmark_menu_target_folder_id]
+                ? Optional<String> { Ladybird::ns_string_to_string([bookmarks_bar selected_bookmark_menu_target_folder_id]) }
+                : Optional<String> {},
+        };
+    }
+
+    return {};
+}
+
+static constexpr CGFloat BOOKMARK_LABEL_WIDTH = 40;
+static constexpr CGFloat BOOKMARK_TEXT_WIDTH = 300;
+static constexpr CGFloat BOOKMARK_SPACING = 8;
+
+static NSTextField* create_bookmark_dialog_text_field(Optional<String const&> text)
+{
+    auto* text_field = [[NSTextField alloc] init];
+    [[text_field cell] setScrollable:YES];
+    [[text_field cell] setWraps:NO];
+    [[text_field widthAnchor] constraintEqualToConstant:BOOKMARK_TEXT_WIDTH].active = YES;
+
+    if (text.has_value())
+        [text_field setStringValue:Ladybird::string_to_ns_string(*text)];
+
+    return text_field;
+}
+
+static NSView* create_bookmark_dialog_row(NSString* label_text, NSTextField* text_field)
+{
+    auto* row = [[NSStackView alloc] init];
+    [row setAlignment:NSLayoutAttributeCenterY];
+    [row setOrientation:NSUserInterfaceLayoutOrientationHorizontal];
+    [row setSpacing:BOOKMARK_SPACING];
+
+    auto* label = [NSTextField labelWithString:label_text];
+    [label setAlignment:NSTextAlignmentRight];
+    [[label widthAnchor] constraintEqualToConstant:BOOKMARK_LABEL_WIDTH].active = YES;
+
+    [row addArrangedSubview:label];
+    [row addArrangedSubview:text_field];
+
+    auto size = [row fittingSize];
+    [row setFrame:NSMakeRect(0, 0, size.width, size.height)];
+    return row;
+}
+
+static NSAlert* create_bookmark_dialog(NSString* title, NSView* first_responder, NSArray<NSView*>* rows)
+{
+    auto* container = [[NSStackView alloc] init];
+    [container setAlignment:NSLayoutAttributeLeading];
+    [container setOrientation:NSUserInterfaceLayoutOrientationVertical];
+    [container setSpacing:BOOKMARK_SPACING];
+
+    for (NSView* row in rows)
+        [container addArrangedSubview:row];
+
+    auto size = [container fittingSize];
+    [container setFrame:NSMakeRect(0, 0, size.width, size.height)];
+
+    auto* dialog = [[NSAlert alloc] init];
+    [dialog setAccessoryView:container];
+    [dialog setMessageText:title];
+    [[dialog addButtonWithTitle:@"OK"] setTag:NSModalResponseOK];
+    [[dialog addButtonWithTitle:@"Cancel"] setTag:NSModalResponseCancel];
+    [[dialog window] setInitialFirstResponder:first_responder];
+
+    return dialog;
+}
+
+template<typename PromiseType, typename ResolveCallback>
+static NonnullRefPtr<PromiseType> display_add_or_edit_bookmark_dialog(
+    Tab* parent,
+    NSString* title,
+    Optional<URL::URL const&> current_url,
+    Optional<String const&> current_title,
+    Optional<String> current_favicon,
+    ResolveCallback resolve_bookmark)
+{
+    auto promise = PromiseType::construct();
+
+    auto* url_field = create_bookmark_dialog_text_field(current_url.map([](auto const& url) { return url.serialize(); }));
+    auto* title_field = create_bookmark_dialog_text_field(current_title);
+
+    auto* dialog = create_bookmark_dialog(title, url_field, @[
+        create_bookmark_dialog_row(@"URL:", url_field),
+        create_bookmark_dialog_row(@"Title:", title_field),
+    ]);
+
+    [dialog beginSheetModalForWindow:parent
+                   completionHandler:^(NSModalResponse response) {
+                       if (response != NSModalResponseOK) {
+                           promise->reject(Error::from_errno(ECANCELED));
+                           return;
+                       }
+
+                       auto url = WebView::sanitize_url(Ladybird::ns_string_to_string([url_field stringValue]));
+                       if (!url.has_value()) {
+                           promise->reject(Error::from_errno(EINVAL));
+                           return;
+                       }
+
+                       Optional<String> bookmark_title;
+                       if (auto text = Ladybird::ns_string_to_string([title_field stringValue]); !text.is_empty())
+                           bookmark_title = move(text);
+
+                       WebView::BookmarkItem::Bookmark bookmark {
+                           .url = url.release_value(),
+                           .title = move(bookmark_title),
+                           .favicon_base64_png = current_favicon,
+                       };
+                       resolve_bookmark(*promise, move(bookmark));
+                   }];
+
+    return promise;
+}
+
+NonnullRefPtr<Application::AddBookmarkPromise> Application::display_add_bookmark_dialog(Optional<String const&> target_folder_id) const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+
+    Optional<URL::URL> current_url;
+    Optional<String> current_title;
+    Optional<String> current_favicon;
+    Optional<String> copied_target_folder_id;
+
+    if (auto view = active_web_view(); view.has_value()) {
+        current_url = view->url();
+        current_title = view->title().to_utf8();
+        current_favicon = view->favicon_base64_png();
+    }
+    if (target_folder_id.has_value())
+        copied_target_folder_id = *target_folder_id;
+
+    return display_add_or_edit_bookmark_dialog<AddBookmarkPromise>(
+        [delegate activeTab], @"Add Bookmark", current_url, current_title, current_favicon,
+        [target_folder_id = move(copied_target_folder_id)](AddBookmarkPromise& promise, WebView::BookmarkItem::Bookmark bookmark) {
+            promise.resolve(AddBookmarkDialogResult {
+                .bookmark = move(bookmark),
+                .target_folder_id = target_folder_id,
+            });
+        });
+}
+
+NonnullRefPtr<Application::BookmarkPromise> Application::display_edit_bookmark_dialog(WebView::BookmarkItem::Bookmark const& current_bookmark) const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    return display_add_or_edit_bookmark_dialog<BookmarkPromise>(
+        [delegate activeTab], @"Edit Bookmark", current_bookmark.url, current_bookmark.title, current_bookmark.favicon_base64_png,
+        [](BookmarkPromise& promise, WebView::BookmarkItem::Bookmark bookmark) {
+            promise.resolve(move(bookmark));
+        });
+}
+
+template<typename PromiseType>
+static NonnullRefPtr<PromiseType> display_add_or_edit_bookmark_folder_dialog(
+    Tab* parent,
+    NSString* title,
+    Optional<String const&> current_title)
+{
+    auto promise = PromiseType::construct();
+
+    auto* title_field = create_bookmark_dialog_text_field(current_title);
+
+    auto* dialog = create_bookmark_dialog(title, title_field, @[
+        create_bookmark_dialog_row(@"Title:", title_field),
+    ]);
+
+    [dialog beginSheetModalForWindow:parent
+                   completionHandler:^(NSModalResponse response) {
+                       if (response != NSModalResponseOK) {
+                           promise->reject(Error::from_errno(ECANCELED));
+                           return;
+                       }
+
+                       Optional<String> folder_title;
+                       if (auto text = Ladybird::ns_string_to_string([title_field stringValue]); !text.is_empty())
+                           folder_title = move(text);
+
+                       promise->resolve(WebView::BookmarkItem::Folder {
+                           .title = move(folder_title),
+                           .children = {},
+                       });
+                   }];
+
+    return promise;
+}
+
+NonnullRefPtr<Application::BookmarkFolderPromise> Application::display_add_bookmark_folder_dialog(Optional<String const&> default_title) const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    return display_add_or_edit_bookmark_folder_dialog<BookmarkFolderPromise>([delegate activeTab], @"Add Folder", default_title);
+}
+
+NonnullRefPtr<Application::BookmarkFolderPromise> Application::display_edit_bookmark_folder_dialog(WebView::BookmarkItem::Folder const& current_folder) const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    return display_add_or_edit_bookmark_folder_dialog<BookmarkFolderPromise>([delegate activeTab], @"Edit Folder", current_folder.title);
+}
+
+void Application::on_devtools_enabled() const
+{
+    WebView::Application::on_devtools_enabled();
+
+    ApplicationDelegate* delegate = [NSApp delegate];
+    [delegate onDevtoolsEnabled];
+}
+
+void Application::on_devtools_disabled() const
+{
+    WebView::Application::on_devtools_disabled();
+
+    ApplicationDelegate* delegate = [NSApp delegate];
+    [delegate onDevtoolsDisabled];
+}
+
 }
 
 @interface Application ()
@@ -96,8 +504,31 @@ void Application::display_error_dialog(StringView error_message) const
 
 #pragma mark - NSApplication
 
+- (BOOL)confirmCancelActiveDownloads
+{
+    auto& downloader = WebView::Application::the().file_downloader();
+    if (!downloader.has_active_downloads())
+        return YES;
+
+    auto* dialog = [[NSAlert alloc] init];
+    [dialog setMessageText:@"Downloads are still in progress."];
+    [dialog setInformativeText:@"Quitting will cancel active downloads."];
+    [dialog setAlertStyle:NSAlertStyleWarning];
+    [[dialog addButtonWithTitle:@"Quit and Cancel Downloads"] setTag:NSModalResponseOK];
+    [[dialog addButtonWithTitle:@"Cancel"] setTag:NSModalResponseCancel];
+
+    if ([dialog runModal] != NSModalResponseOK)
+        return NO;
+
+    downloader.cancel_active_downloads();
+    return YES;
+}
+
 - (void)terminate:(id)sender
 {
+    if (![self confirmCancelActiveDownloads])
+        return;
+
     Core::EventLoop::current().quit(0);
 }
 

@@ -6,13 +6,16 @@
  */
 
 #include <AK/Base64.h>
+#include <AK/Endian.h>
 #include <AK/Random.h>
+#include <LibCore/Timer.h>
 #include <LibCrypto/Hash/HashManager.h>
-#include <LibCrypto/SecureRandom.h>
 #include <LibWebSocket/Impl/WebSocketImplSerenity.h>
 #include <LibWebSocket/WebSocket.h>
 
 namespace WebSocket {
+
+static constexpr int s_closing_handshake_timeout_ms = 30'000;
 
 // Note : The websocket protocol is defined by RFC 6455, found at https://tools.ietf.org/html/rfc6455
 // In this file, section numbers will refer to the RFC 6455
@@ -36,8 +39,18 @@ void WebSocket::start()
         m_impl = adopt_ref(*new WebSocketImplSerenity);
 
     m_impl->on_connection_error = [this] {
-        dbgln("WebSocket: Connection error (underlying socket)");
-        fatal_error(WebSocket::Error::CouldNotEstablishConnection);
+        if (m_state == InternalState::Closing) {
+            // If the connection drops while we are waiting for the server's close frame, check if we actually received
+            // one in the last read. If we did, we can consider this a clean close.
+            bool was_clean = m_last_close_code != to_underlying(CloseStatusCode::NoStatusReceived);
+            set_state(was_clean ? InternalState::Closed : InternalState::Errored);
+            if (!was_clean)
+                notify_error(Error::ServerClosedSocket);
+            notify_close(m_last_close_code, m_last_close_message, was_clean);
+            discard_connection();
+            return;
+        }
+        fail_connection(to_underlying(CloseStatusCode::AbnormalClosure), WebSocket::Error::CouldNotEstablishConnection, "Connection error (underlying socket)");
     };
     m_impl->on_connected = [this] {
         if (m_state != WebSocket::InternalState::EstablishingProtocolConnection)
@@ -112,15 +125,19 @@ void WebSocket::close(u16 code, ByteString const& message)
     case InternalState::WaitingForServerHandshake:
         // "If the WebSocket connection is not yet established [WSP]
         // Fail the WebSocket connection and set this’s ready state to CLOSING (2)."
-        // FIXME: Fail the connection.
         set_state(InternalState::Closing);
+        fail_connection(to_underlying(CloseStatusCode::AbnormalClosure), WebSocket::Error::CouldNotEstablishConnection, "Closing connection that's not yet established");
         break;
     case InternalState::Open: {
         // "If the WebSocket closing handshake has not yet been started [WSP]
         // Start the WebSocket closing handshake and set this’s ready state to CLOSING (2)."
         auto message_bytes = message.bytes();
         auto close_payload = ByteBuffer::create_uninitialized(message_bytes.size() + 2).release_value_but_fixme_should_propagate_errors(); // FIXME: Handle possible OOM situation.
-        close_payload.overwrite(0, (u8*)&code, 2);
+        // Section 5.5.1:
+        // > If there is a body, the first two bytes of the body MUST be a 2-byte unsigned integer (in network byte order)
+        // > representing a status code with value /code/ defined in Section 7.4.
+        NetworkOrdered<u16> network_ordered_code { code };
+        close_payload.overwrite(0, &network_ordered_code, sizeof(network_ordered_code));
         close_payload.overwrite(2, message_bytes.data(), message_bytes.size());
         send_frame(WebSocket::OpCode::ConnectionClose, close_payload, true);
         set_state(InternalState::Closing);
@@ -159,7 +176,7 @@ void WebSocket::drain_read()
     case InternalState::Closing: {
         auto result = m_impl->read(65536);
         if (result.is_error()) {
-            fatal_error(WebSocket::Error::ServerClosedSocket);
+            fail_connection(to_underlying(CloseStatusCode::AbnormalClosure), WebSocket::Error::ServerClosedSocket, {});
             return;
         }
         auto bytes = result.release_value();
@@ -205,7 +222,7 @@ void WebSocket::send_client_handshake()
 
     // 7. 16-byte nonce encoded as Base64
     u8 nonce_data[16];
-    Crypto::fill_with_secure_random(nonce_data);
+    fill_with_random(nonce_data);
     // FIXME: change to TRY() and make method fallible
     m_websocket_key = MUST(encode_base64({ nonce_data, 16 })).to_byte_string();
     builder.appendff("Sec-WebSocket-Key: {}\r\n", m_websocket_key);
@@ -233,7 +250,7 @@ void WebSocket::send_client_handshake()
     }
 
     // 12. Additional headers
-    for (auto& header : m_connection.headers().headers()) {
+    for (auto const& header : m_connection.headers()) {
         builder.appendff("{}: {}\r\n", header.name, header.value);
     }
 
@@ -246,10 +263,12 @@ void WebSocket::send_client_handshake()
 
 void WebSocket::fail_connection(u16 close_status_code, WebSocket::Error error_code, ByteString const& reason)
 {
-    dbgln("WebSocket: {}", reason);
-    set_state(WebSocket::InternalState::Closed);
-    fatal_error(error_code);
+    if (!reason.is_empty())
+        dbgln("WebSocket: {}", reason);
+    set_state(WebSocket::InternalState::Errored);
+    notify_error(error_code);
     notify_close(close_status_code, reason, false);
+    discard_connection();
 }
 
 // The server handshake message is defined in the third list of section 4.1
@@ -279,7 +298,7 @@ void WebSocket::read_server_handshake()
         }
         if (parts[1] != "101") {
             // 1. If the status code is not 101, handle as per HTTP procedures.
-            // FIXME : This could be a redirect or a 401 authentication request, which we do not handle.
+            // FIXME: This could be a redirect or a 401 authentication request, which we do not handle.
             fail_opening_handshake(ByteString::formatted("Server HTTP Handshake return status {} which isn't supported", parts[1]));
             return;
         }
@@ -621,12 +640,9 @@ void WebSocket::send_frame(WebSocket::OpCode op_code, ReadonlyBytes payload, boo
         // > Clients MUST choose a new masking key for each frame, using an algorithm
         // > that cannot be predicted by end applications that provide data
         u8 masking_key[4];
-        Crypto::fill_with_secure_random(masking_key);
+        fill_with_random(masking_key);
         buf.overwrite(offset, masking_key, 4);
         offset += 4;
-        // don't try to send empty payload
-        if (payload.size() == 0)
-            return;
         // Mask the payload
         auto masked_payload = buf.span().slice(offset, payload.size());
         for (size_t i = 0; i < payload.size(); ++i) {
@@ -638,13 +654,6 @@ void WebSocket::send_frame(WebSocket::OpCode op_code, ReadonlyBytes payload, boo
         offset += payload.size();
     }
     m_impl->send(buf.span().slice(0, offset));
-}
-
-void WebSocket::fatal_error(WebSocket::Error error)
-{
-    set_state(WebSocket::InternalState::Errored);
-    notify_error(error);
-    discard_connection();
 }
 
 void WebSocket::discard_connection()
@@ -697,6 +706,21 @@ void WebSocket::set_state(InternalState state)
         return;
     auto old_ready_state = ready_state();
     m_state = state;
+
+    if (state == InternalState::Closing) {
+        if (!m_closing_handshake_timer) {
+            m_closing_handshake_timer = Core::Timer::create_single_shot(s_closing_handshake_timeout_ms, [this] {
+                if (m_state != InternalState::Closing)
+                    return;
+                fail_connection(to_underlying(CloseStatusCode::AbnormalClosure), WebSocket::Error::ServerClosedSocket, "Timed out waiting for the peer's close frame");
+            });
+        } else {
+            m_closing_handshake_timer->restart(s_closing_handshake_timeout_ms);
+        }
+    } else if (m_closing_handshake_timer) {
+        m_closing_handshake_timer->stop();
+    }
+
     auto new_ready_state = ready_state();
     if (old_ready_state != new_ready_state) {
         if (on_ready_state_change)

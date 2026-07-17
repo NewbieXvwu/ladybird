@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/AudioScheduledSourceNodePrototype.h>
+#include <LibWeb/Bindings/AudioScheduledSourceNode.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/WebAudio/AudioBuffer.h>
 #include <LibWeb/WebAudio/AudioBufferSourceNode.h>
@@ -15,9 +15,9 @@ namespace Web::WebAudio {
 
 GC_DEFINE_ALLOCATOR(AudioBufferSourceNode);
 
-AudioBufferSourceNode::AudioBufferSourceNode(JS::Realm& realm, GC::Ref<BaseAudioContext> context, AudioBufferSourceOptions const& options)
+AudioBufferSourceNode::AudioBufferSourceNode(JS::Realm& realm, GC::Ref<BaseAudioContext> context, Bindings::AudioBufferSourceOptions const& options)
     : AudioScheduledSourceNode(realm, context)
-    , m_buffer(options.buffer)
+    , m_buffer(options.buffer.value_or(nullptr))
     , m_playback_rate(AudioParam::create(realm, context, options.playback_rate, NumericLimits<float>::lowest(), NumericLimits<float>::max(), Bindings::AutomationRate::KRate, AudioParam::FixedAutomationRate::Yes))
     , m_detune(AudioParam::create(realm, context, options.detune, NumericLimits<float>::lowest(), NumericLimits<float>::max(), Bindings::AutomationRate::KRate, AudioParam::FixedAutomationRate::Yes))
     , m_loop(options.loop)
@@ -117,15 +117,15 @@ WebIDL::ExceptionOr<void> AudioBufferSourceNode::start(Optional<double> when, Op
     // 2. Check for any errors that must be thrown due to parameter constraints described below. If any exception is thrown during this step, abort those steps.
     // A RangeError exception MUST be thrown if when is negative.
     if (when.has_value() && when.value() < 0)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "when must not be negative"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "when must not be negative"_utf16 };
 
     // A RangeError exception MUST be thrown if offset is negative
     if (offset.has_value() && offset.value() < 0)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "offset must not be negative"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "offset must not be negative"_utf16 };
 
     // A RangeError exception MUST be thrown if duration is negative.
     if (duration.has_value() && duration.value() < 0)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "duration must not be negative"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "duration must not be negative"_utf16 };
 
     // 3. Set the internal slot [[source started]] on this AudioBufferSourceNode to true.
     set_source_started(true);
@@ -138,13 +138,13 @@ WebIDL::ExceptionOr<void> AudioBufferSourceNode::start(Optional<double> when, Op
     return {};
 }
 
-WebIDL::ExceptionOr<GC::Ref<AudioBufferSourceNode>> AudioBufferSourceNode::create(JS::Realm& realm, GC::Ref<BaseAudioContext> context, AudioBufferSourceOptions const& options)
+WebIDL::ExceptionOr<GC::Ref<AudioBufferSourceNode>> AudioBufferSourceNode::create(JS::Realm& realm, GC::Ref<BaseAudioContext> context, Bindings::AudioBufferSourceOptions const& options)
 {
     return construct_impl(realm, context, options);
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-audiobuffersourcenode-audiobuffersourcenode
-WebIDL::ExceptionOr<GC::Ref<AudioBufferSourceNode>> AudioBufferSourceNode::construct_impl(JS::Realm& realm, GC::Ref<BaseAudioContext> context, AudioBufferSourceOptions const& options)
+WebIDL::ExceptionOr<GC::Ref<AudioBufferSourceNode>> AudioBufferSourceNode::construct_impl(JS::Realm& realm, GC::Ref<BaseAudioContext> context, Bindings::AudioBufferSourceOptions const& options)
 {
     // When the constructor is called with a BaseAudioContext c and an option object option, the user agent
     // MUST initialize the AudioNode this, with context and options as arguments.
@@ -159,7 +159,7 @@ WebIDL::ExceptionOr<GC::Ref<AudioBufferSourceNode>> AudioBufferSourceNode::const
     default_options.channel_interpretation = Bindings::ChannelInterpretation::Speakers;
     // FIXME: Set tail-time to no
 
-    TRY(node->initialize_audio_node_options(options, default_options));
+    TRY(node->initialize_audio_node_options(Bindings::AudioNodeOptions {}, default_options));
 
     return node;
 }

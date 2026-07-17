@@ -6,11 +6,18 @@
 
 #include <AK/Debug.h>
 #include <AK/IDAllocator.h>
+#include <AK/NonnullRefPtr.h>
 #include <ImageDecoder/ConnectionFromClient.h>
 #include <ImageDecoder/ImageDecoderClientEndpoint.h>
+#include <LibCore/EventLoop.h>
+#include <LibCore/Process.h>
+#include <LibCore/System.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/ImageFormats/ImageDecoder.h>
 #include <LibGfx/ImageFormats/TIFFMetadata.h>
+#include <LibIPC/TransportHandle.h>
+#include <LibSync/Mutex.h>
+#include <LibThreading/ThreadPool.h>
 
 namespace ImageDecoder {
 
@@ -25,18 +32,21 @@ ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transpo
 
 void ConnectionFromClient::die()
 {
-    for (auto& [_, job] : m_pending_jobs) {
+    for (auto& [_, job] : m_pending_jobs)
         job->cancel();
-    }
     m_pending_jobs.clear();
+
+    for (auto& [_, job] : m_pending_frame_jobs)
+        job->cancel();
+    m_pending_frame_jobs.clear();
+    m_animation_sessions.clear();
 
     auto client_id = this->client_id();
     s_connections.remove(client_id);
     s_client_ids.deallocate(client_id);
 
     if (s_connections.is_empty()) {
-        Threading::quit_background_thread();
-        Core::EventLoop::current().quit(0);
+        Core::Process::terminate_immediately(0);
     }
 }
 
@@ -49,39 +59,30 @@ Messages::ImageDecoderServer::InitTransportResponse ConnectionFromClient::init_t
     VERIFY_NOT_REACHED();
 }
 
-ErrorOr<IPC::File> ConnectionFromClient::connect_new_client()
+ErrorOr<IPC::TransportHandle> ConnectionFromClient::connect_new_client()
 {
-    int socket_fds[2] {};
-    if (auto err = Core::System::socketpair(AF_LOCAL, SOCK_STREAM, 0, socket_fds); err.is_error())
-        return err.release_error();
+    auto paired = TRY(IPC::Transport::create_paired());
+    auto handle = move(paired.remote_handle);
 
-    auto client_socket_or_error = Core::LocalSocket::adopt_fd(socket_fds[0]);
-    if (client_socket_or_error.is_error()) {
-        (void)Core::System::close(socket_fds[0]);
-        (void)Core::System::close(socket_fds[1]);
-        return client_socket_or_error.release_error();
-    }
-
-    auto client_socket = client_socket_or_error.release_value();
     // Note: A ref is stored in the static s_connections map
-    auto client = adopt_ref(*new ConnectionFromClient(make<IPC::Transport>(move(client_socket))));
+    auto client = adopt_ref(*new ConnectionFromClient(move(paired.local)));
 
-    return IPC::File::adopt_fd(socket_fds[1]);
+    return handle;
 }
 
 Messages::ImageDecoderServer::ConnectNewClientsResponse ConnectionFromClient::connect_new_clients(size_t count)
 {
-    Vector<IPC::File> files;
-    files.ensure_capacity(count);
+    Vector<IPC::TransportHandle> handles;
+    handles.ensure_capacity(count);
     for (size_t i = 0; i < count; ++i) {
-        auto file_or_error = connect_new_client();
-        if (file_or_error.is_error()) {
-            dbgln("Failed to connect new client: {}", file_or_error.error());
-            return Vector<IPC::File> {};
+        auto handle_or_error = connect_new_client();
+        if (handle_or_error.is_error()) {
+            dbgln("Failed to connect new client: {}", handle_or_error.error());
+            return Vector<IPC::TransportHandle> {};
         }
-        files.unchecked_append(file_or_error.release_value());
+        handles.unchecked_append(handle_or_error.release_value());
     }
-    return files;
+    return handles;
 }
 
 static void decode_image_to_bitmaps_and_durations_with_decoder(Gfx::ImageDecoder const& decoder, Optional<Gfx::IntSize> ideal_size, Vector<RefPtr<Gfx::Bitmap>>& bitmaps, Vector<u32>& durations)
@@ -95,13 +96,16 @@ static void decode_image_to_bitmaps_and_durations_with_decoder(Gfx::ImageDecoder
             durations.unchecked_append(0);
         } else {
             auto frame = frame_or_error.release_value();
+            frame.image->set_alpha_type_destructive(Gfx::AlphaType::Premultiplied);
             bitmaps.unchecked_append(frame.image);
             durations.unchecked_append(frame.duration);
         }
     }
 }
 
-static ErrorOr<ConnectionFromClient::DecodeResult> decode_image_to_details(Core::AnonymousBuffer const& encoded_buffer, Optional<Gfx::IntSize> ideal_size, Optional<ByteString> const& known_mime_type)
+static constexpr u32 STREAMING_BATCH_SIZE = 4;
+
+static ErrorOr<ConnectionFromClient::DecodeResult> decode_image_to_details(Core::AnonymousBuffer encoded_buffer, Optional<Gfx::IntSize> ideal_size, Optional<ByteString> const& known_mime_type)
 {
     auto decoder = TRY(Gfx::ImageDecoder::try_create_for_raw_bytes(ReadonlyBytes { encoded_buffer.data<u8>(), encoded_buffer.size() }, known_mime_type));
 
@@ -114,6 +118,7 @@ static ErrorOr<ConnectionFromClient::DecodeResult> decode_image_to_details(Core:
     ConnectionFromClient::DecodeResult result;
     result.is_animated = decoder->is_animated();
     result.loop_count = decoder->loop_count();
+    result.frame_count = decoder->frame_count();
 
     if (auto maybe_icc_data = decoder->color_space(); !maybe_icc_data.is_error())
         result.color_profile = maybe_icc_data.value();
@@ -134,7 +139,35 @@ static ErrorOr<ConnectionFromClient::DecodeResult> decode_image_to_details(Core:
         }
     }
 
-    decode_image_to_bitmaps_and_durations_with_decoder(*decoder, move(ideal_size), bitmaps, result.durations);
+    bool const use_streaming = result.is_animated && result.frame_count > 1;
+
+    if (use_streaming) {
+        // Collect all durations cheaply (via frame_duration(), no pixel decode for GIF).
+        result.durations.ensure_capacity(result.frame_count);
+        for (u32 i = 0; i < result.frame_count; ++i)
+            result.durations.unchecked_append(decoder->frame_duration(i));
+
+        // Decode only the first batch of frames.
+        u32 const batch_size = min(STREAMING_BATCH_SIZE, result.frame_count);
+        bitmaps.ensure_capacity(batch_size);
+        for (u32 i = 0; i < batch_size; ++i) {
+            auto frame_or_error = decoder->frame(i, ideal_size);
+            if (frame_or_error.is_error())
+                break;
+            auto frame = frame_or_error.release_value();
+            frame.image->set_alpha_type_destructive(Gfx::AlphaType::Premultiplied);
+            bitmaps.unchecked_append(frame.image);
+            // If frame_duration() returned 0, use the actual decoded duration.
+            if (result.durations[i] == 0)
+                result.durations[i] = frame.duration;
+        }
+
+        // Keep decoder alive for future frame requests.
+        result.decoder = decoder;
+        result.encoded_data = move(encoded_buffer);
+    } else {
+        decode_image_to_bitmaps_and_durations_with_decoder(*decoder, move(ideal_size), bitmaps, result.durations);
+    }
 
     if (bitmaps.is_empty())
         return Error::from_string_literal("Could not decode image");
@@ -144,44 +177,164 @@ static ErrorOr<ConnectionFromClient::DecodeResult> decode_image_to_details(Core:
     return result;
 }
 
-NonnullRefPtr<ConnectionFromClient::Job> ConnectionFromClient::make_decode_image_job(i64 image_id, Core::AnonymousBuffer encoded_buffer, Optional<Gfx::IntSize> ideal_size, Optional<ByteString> mime_type)
+NonnullRefPtr<ConnectionFromClient::PendingJob> ConnectionFromClient::start_decode_image_job(i64 request_id, Core::AnonymousBuffer encoded_buffer, Optional<Gfx::IntSize> ideal_size, Optional<ByteString> mime_type)
 {
-    return Job::construct(
-        [encoded_buffer = move(encoded_buffer), ideal_size = move(ideal_size), mime_type = move(mime_type)](auto&) -> ErrorOr<DecodeResult> {
-            return TRY(decode_image_to_details(encoded_buffer, ideal_size, mime_type));
-        },
-        [strong_this = NonnullRefPtr(*this), image_id](DecodeResult result) -> ErrorOr<void> {
-            strong_this->async_did_decode_image(image_id, result.is_animated, result.loop_count, move(result.bitmaps), move(result.durations), result.scale, move(result.color_profile));
-            strong_this->m_pending_jobs.remove(image_id);
-            return {};
-        },
-        [strong_this = NonnullRefPtr(*this), image_id](Error error) -> void {
-            if (strong_this->is_open())
-                strong_this->async_did_fail_to_decode_image(image_id, MUST(String::formatted("Decoding failed: {}", error)));
-            strong_this->m_pending_jobs.remove(image_id);
+    auto job = make_ref_counted<PendingJob>();
+    auto& main_thread_event_loop = Core::EventLoop::current();
+    Threading::ThreadPool::the().submit(
+        [strong_this = NonnullRefPtr(*this), job, &main_thread_event_loop, request_id, encoded_buffer = move(encoded_buffer), ideal_size = move(ideal_size), mime_type = move(mime_type)]() mutable {
+            auto result = decode_image_to_details(move(encoded_buffer), ideal_size, mime_type);
+
+            main_thread_event_loop.deferred_invoke([strong_this = move(strong_this), job = move(job), request_id, result = move(result)] mutable {
+                auto current_job = strong_this->m_pending_jobs.get(request_id);
+                if (!current_job.has_value() || current_job.value() != job.ptr())
+                    return;
+
+                if (job->is_canceled()) {
+                    strong_this->m_pending_jobs.remove(request_id);
+                    return;
+                }
+
+                if (result.is_error()) {
+                    if (strong_this->is_open())
+                        strong_this->async_did_fail_to_decode_image(request_id, MUST(String::formatted("Decoding failed: {}", result.release_error())));
+                    strong_this->m_pending_jobs.remove(request_id);
+                    return;
+                }
+
+                auto result_value = result.release_value();
+                i64 session_id = 0;
+
+                if (result_value.decoder) {
+                    // This is a streaming animated decode. Create a session.
+                    session_id = strong_this->m_next_session_id++;
+                    auto session = make_ref_counted<AnimationSession>();
+                    session->encoded_data = move(result_value.encoded_data);
+                    session->decoder = move(result_value.decoder);
+                    session->frame_count = result_value.frame_count;
+                    strong_this->m_animation_sessions.set(session_id, move(session));
+                }
+
+                strong_this->async_did_decode_image(request_id, result_value.is_animated, result_value.loop_count, move(result_value.bitmaps), move(result_value.durations), result_value.scale, move(result_value.color_profile), session_id);
+                strong_this->m_pending_jobs.remove(request_id);
+            });
         });
+
+    return job;
 }
 
-Messages::ImageDecoderServer::DecodeImageResponse ConnectionFromClient::decode_image(Core::AnonymousBuffer encoded_buffer, Optional<Gfx::IntSize> ideal_size, Optional<ByteString> mime_type)
+void ConnectionFromClient::decode_image(Core::AnonymousBuffer encoded_buffer, Optional<Gfx::IntSize> ideal_size, Optional<ByteString> mime_type, i64 request_id)
 {
-    auto image_id = m_next_image_id++;
-
     if (!encoded_buffer.is_valid()) {
         dbgln_if(IMAGE_DECODER_DEBUG, "Encoded data is invalid");
-        async_did_fail_to_decode_image(image_id, "Encoded data is invalid"_string);
-        return image_id;
+        async_did_fail_to_decode_image(request_id, "Encoded data is invalid"_string);
+        return;
     }
 
-    m_pending_jobs.set(image_id, make_decode_image_job(image_id, move(encoded_buffer), ideal_size, move(mime_type)));
+    if (m_pending_jobs.contains(request_id)) {
+        m_pending_jobs.take(request_id).value()->cancel();
+        did_misbehave("Duplicate decode request id");
+        return;
+    }
 
-    return image_id;
+    m_pending_jobs.set(request_id, start_decode_image_job(request_id, move(encoded_buffer), ideal_size, move(mime_type)));
 }
 
-void ConnectionFromClient::cancel_decoding(i64 image_id)
+void ConnectionFromClient::cancel_decoding(i64 request_id)
 {
-    if (auto job = m_pending_jobs.take(image_id); job.has_value()) {
+    if (auto job = m_pending_jobs.take(request_id); job.has_value()) {
         job.value()->cancel();
     }
+}
+
+void ConnectionFromClient::request_animation_frames(i64 session_id, u32 start_frame_index, u32 count)
+{
+    auto it = m_animation_sessions.find(session_id);
+    if (it == m_animation_sessions.end())
+        return;
+
+    auto session = it->value;
+    u32 const frame_count = session->frame_count;
+
+    if (start_frame_index >= frame_count)
+        return;
+
+    u32 const end_index = min(frame_count, start_frame_index + min(count, frame_count - start_frame_index));
+
+    if (auto previous_job = m_pending_frame_jobs.take(session_id); previous_job.has_value())
+        previous_job.value()->cancel();
+
+    m_pending_frame_jobs.set(session_id, start_frame_decode_job(session_id, move(session), start_frame_index, end_index));
+}
+
+NonnullRefPtr<ConnectionFromClient::PendingJob> ConnectionFromClient::start_frame_decode_job(i64 session_id, NonnullRefPtr<AnimationSession> session, u32 start_frame_index, u32 end_index)
+{
+    auto job = make_ref_counted<PendingJob>();
+    auto& main_thread_event_loop = Core::EventLoop::current();
+    Threading::ThreadPool::the().submit(
+        [strong_this = NonnullRefPtr(*this), job, session = move(session), &main_thread_event_loop, session_id, start_frame_index, end_index]() mutable {
+            auto result = [&]() -> ErrorOr<FrameDecodeResult> {
+                if (job->is_canceled())
+                    return FrameDecodeResult {};
+
+                Sync::MutexLocker locker { session->decoder_mutex };
+                if (!session->decoder)
+                    return Error::from_string_literal("Animation session has no decoder");
+
+                Vector<Gfx::ImageFrameDescriptor> frames;
+                frames.ensure_capacity(end_index - start_frame_index);
+                for (u32 i = start_frame_index; i < end_index; ++i) {
+                    if (job->is_canceled())
+                        return FrameDecodeResult {};
+
+                    auto frame_or_error = session->decoder->frame(i);
+                    if (frame_or_error.is_error()) {
+                        if (frames.is_empty())
+                            return frame_or_error.release_error();
+                        break;
+                    }
+                    auto frame = frame_or_error.release_value();
+                    frame.image->set_alpha_type_destructive(Gfx::AlphaType::Premultiplied);
+                    frames.unchecked_append(move(frame));
+                }
+                return frames;
+            }();
+
+            main_thread_event_loop.deferred_invoke([strong_this = move(strong_this), job = move(job), session_id, result = move(result)] mutable {
+                auto current_job = strong_this->m_pending_frame_jobs.get(session_id);
+                if (!current_job.has_value() || current_job.value() != job.ptr())
+                    return;
+
+                if (job->is_canceled()) {
+                    strong_this->m_pending_frame_jobs.remove(session_id);
+                    return;
+                }
+
+                if (result.is_error()) {
+                    if (strong_this->is_open())
+                        strong_this->async_did_fail_animation_decode(session_id, MUST(String::formatted("Frame decode failed: {}", result.release_error())));
+                    strong_this->m_pending_frame_jobs.remove(session_id);
+                    return;
+                }
+
+                auto frames = result.release_value();
+                Vector<RefPtr<Gfx::Bitmap>> bitmaps;
+                bitmaps.ensure_capacity(frames.size());
+                for (auto& frame : frames)
+                    bitmaps.unchecked_append(move(frame.image));
+                strong_this->async_did_decode_animation_frames(session_id, Gfx::BitmapSequence { move(bitmaps) });
+                strong_this->m_pending_frame_jobs.remove(session_id);
+            });
+        });
+
+    return job;
+}
+
+void ConnectionFromClient::stop_animation_decode(i64 session_id)
+{
+    if (auto job = m_pending_frame_jobs.take(session_id); job.has_value())
+        job.value()->cancel();
+    m_animation_sessions.remove(session_id);
 }
 
 }

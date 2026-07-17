@@ -25,9 +25,10 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include <LibCore/SocketAddressWindows.h>
+#include <LibCore/SocketAddress.h>
 
 #include <AK/Windows.h>
+#include <ws2tcpip.h>
 
 namespace Core::System {
 
@@ -75,7 +76,7 @@ int windows_socketpair(SOCKET socks[2], int make_overlapped)
         if (::listen(listener, 1) == SOCKET_ERROR)
             break;
 
-        socks[0] = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, flags);
+        socks[0] = WSASocketW(AF_INET, SOCK_STREAM, 0, NULL, 0, flags);
         if (socks[0] == INVALID_SOCKET)
             break;
         if (connect(socks[0], &a.addr, sizeof(a.inaddr)) == SOCKET_ERROR)

@@ -7,10 +7,10 @@
 #include <AK/Assertions.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/Platform.h>
+#include <LibGC/CellAllocator.h>
+#include <LibGC/Forward.h>
 #include <LibGC/Heap.h>
 #include <LibGC/HeapBlock.h>
-#include <stdio.h>
-#include <sys/mman.h>
 
 #ifdef HAS_ADDRESS_SANITIZER
 #    include <sanitizer/asan_interface.h>
@@ -18,23 +18,24 @@
 
 namespace GC {
 
-size_t HeapBlockBase::block_size = PAGE_SIZE;
-
-NonnullOwnPtr<HeapBlock> HeapBlock::create_with_cell_size(Heap& heap, CellAllocator& cell_allocator, size_t cell_size, [[maybe_unused]] char const* class_name)
+NonnullOwnPtr<HeapBlock> HeapBlock::create_with_cell_size(Heap& heap, CellAllocator& cell_allocator, size_t cell_size, bool overrides_must_survive_garbage_collection, bool overrides_finalize)
 {
     char const* name = nullptr;
     auto* block = static_cast<HeapBlock*>(cell_allocator.block_allocator().allocate_block(name));
-    new (block) HeapBlock(heap, cell_allocator, cell_size);
+    new (block) HeapBlock(heap, cell_allocator, cell_size, overrides_must_survive_garbage_collection, overrides_finalize);
+    heap.m_live_heap_blocks.set(block);
     return NonnullOwnPtr<HeapBlock>(NonnullOwnPtr<HeapBlock>::Adopt, *block);
 }
 
-HeapBlock::HeapBlock(Heap& heap, CellAllocator& cell_allocator, size_t cell_size)
+HeapBlock::HeapBlock(Heap& heap, CellAllocator& cell_allocator, size_t cell_size, bool overrides_must_survive_garbage_collection, bool overrides_finalize)
     : HeapBlockBase(heap)
     , m_cell_allocator(cell_allocator)
     , m_cell_size(cell_size)
+    , m_overrides_must_survive_garbage_collection(overrides_must_survive_garbage_collection)
+    , m_overrides_finalize(overrides_finalize)
 {
     VERIFY(cell_size >= sizeof(FreelistEntry));
-    ASAN_POISON_MEMORY_REGION(m_storage, block_size - sizeof(HeapBlock));
+    ASAN_POISON_MEMORY_REGION(m_storage, BLOCK_SIZE - sizeof(HeapBlock));
 }
 
 void HeapBlock::deallocate(Cell* cell)

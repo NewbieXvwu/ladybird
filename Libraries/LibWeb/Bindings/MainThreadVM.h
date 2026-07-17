@@ -20,15 +20,15 @@
 namespace Web::Bindings {
 
 struct WebEngineCustomJobCallbackData final : public JS::JobCallback::CustomData {
-    WebEngineCustomJobCallbackData(JS::Realm& incumbent_realm, OwnPtr<JS::ExecutionContext> active_script_context)
-        : incumbent_realm(incumbent_realm)
+    WebEngineCustomJobCallbackData(HTML::EnvironmentSettingsObject& incumbent_settings, OwnPtr<JS::ExecutionContext> active_script_context)
+        : incumbent_settings(incumbent_settings)
         , active_script_context(move(active_script_context))
     {
     }
 
     virtual ~WebEngineCustomJobCallbackData() override = default;
 
-    GC::Ref<JS::Realm> incumbent_realm;
+    GC::Ref<HTML::EnvironmentSettingsObject> incumbent_settings;
     OwnPtr<JS::ExecutionContext> active_script_context;
 };
 
@@ -37,8 +37,14 @@ HTML::Script* active_script();
 WEB_API void initialize_main_thread_vm(AgentType);
 WEB_API JS::VM& main_thread_vm();
 
-void queue_mutation_observer_microtask(DOM::Document const&);
+void queue_mutation_observer_microtask();
 WEB_API NonnullOwnPtr<JS::ExecutionContext> create_a_new_javascript_realm(JS::VM&, Function<JS::Object*(JS::Realm&)> create_global_object, Function<JS::Object*(JS::Realm&)> create_global_this_value);
-WEB_API void invoke_custom_element_reactions(Vector<GC::Root<DOM::Element>>& element_queue);
+WEB_API void invoke_custom_element_reactions(Vector<GC::Weak<DOM::Element>>& element_queue);
+
+// Creates a bare Window-backed realm for tests and tools that do not need a full Document.
+WEB_API GC::Ref<JS::Realm> create_a_simple_javascript_realm();
+
+// Creates a principal realm backed by a Page and window environment settings object.
+WEB_API GC::Ref<JS::Realm> create_a_principal_javascript_realm();
 
 }

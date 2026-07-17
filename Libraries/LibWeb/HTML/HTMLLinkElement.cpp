@@ -9,29 +9,33 @@
 
 #include <AK/ByteBuffer.h>
 #include <AK/Debug.h>
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibCore/ImmutableBytes.h>
+#include <LibGfx/Bitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibURL/URL.h>
-#include <LibWeb/Bindings/HTMLLinkElementPrototype.h>
-#include <LibWeb/Bindings/PrincipalHostDefined.h>
+#include <LibWeb/Bindings/HTMLLinkElement.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/Parser/Parser.h>
-#include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/CSS/StyleSheetList.h>
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
+#include <LibWeb/DOM/HTMLCollection.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/HTMLLinkElement.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/Infra/CharacterTypes.h>
-#include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/ImageCodecPlugin.h>
@@ -54,67 +58,60 @@ void HTMLLinkElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void HTMLLinkElement::removed_from(Node* old_parent, Node& old_root)
+void HTMLLinkElement::visit_edges(Cell::Visitor& visitor)
 {
-    Base::removed_from(old_parent, old_root);
-    if (m_loaded_style_sheet) {
-        auto& style_sheet_list = [&old_root] -> CSS::StyleSheetList& {
-            if (auto* shadow_root = as_if<DOM::ShadowRoot>(old_root); shadow_root)
-                return shadow_root->style_sheets();
+    Base::visit_edges(visitor);
+    visitor.visit(m_fetch_controller);
+    visitor.visit(m_loaded_style_sheet);
+    visitor.visit(m_rel_list);
+    visitor.visit(m_sizes);
+}
 
-            return as<DOM::Document>(old_root).style_sheets();
-        }();
+void HTMLLinkElement::adopted_from(DOM::Document& old_document)
+{
+    Base::adopted_from(old_document);
 
-        style_sheet_list.remove_a_css_style_sheet(*m_loaded_style_sheet);
-        m_loaded_style_sheet = nullptr;
-    }
+    if (m_document_load_event_delayer.has_value())
+        m_document_load_event_delayer.emplace(document());
 }
 
 void HTMLLinkElement::inserted()
 {
     HTMLElement::inserted();
 
-    if (!document().browsing_context()) {
+    if (!document().browsing_context())
         return;
-    }
 
-    if (m_relationship & Relationship::Stylesheet) {
-        // https://html.spec.whatwg.org/multipage/links.html#link-type-stylesheet:fetch-and-process-the-linked-resource
+    if (should_fetch_and_process_resource_type() && is_browsing_context_connected()) {
         // The appropriate times to fetch and process this type of link are:
         //  - When the external resource link is created on a link element that is already browsing-context connected.
         //  - When the external resource link's link element becomes browsing-context connected.
-        if (is_browsing_context_connected())
-            fetch_and_process_linked_resource();
-    }
-
-    // FIXME: Follow spec for fetching and processing these attributes as well
-    if (m_relationship & Relationship::Preload) {
-        if (auto maybe_href = document().encoding_parse_url(get_attribute_value(HTML::AttributeNames::href)); maybe_href.has_value()) {
-            // FIXME: Respect the "as" attribute.
-            LoadRequest request;
-            request.set_url(maybe_href.value());
-            request.set_page(Bindings::principal_host_defined_page(HTML::principal_realm(realm())));
-            set_resource(ResourceLoader::the().load_resource(Resource::Type::Generic, request));
-        }
-    } else if (m_relationship & Relationship::DNSPrefetch) {
-        if (auto dns_prefetch_url = document().encoding_parse_url(get_attribute_value(HTML::AttributeNames::href)); dns_prefetch_url.has_value()) {
-            ResourceLoader::the().prefetch_dns(dns_prefetch_url.value());
-        }
-    } else if (m_relationship & Relationship::Preconnect) {
-        if (auto maybe_href = document().encoding_parse_url(get_attribute_value(HTML::AttributeNames::href)); maybe_href.has_value()) {
-            ResourceLoader::the().preconnect(maybe_href.value());
-        }
-    } else if (m_relationship & Relationship::Icon) {
-        if (auto favicon_url = document().encoding_parse_url(href()); favicon_url.has_value()) {
-            auto favicon_request = LoadRequest::create_for_url_on_page(favicon_url.value(), &document().page());
-            set_resource(ResourceLoader::the().load_resource(Resource::Type::Generic, favicon_request));
-        }
+        fetch_and_process_linked_resource();
     }
 }
 
-WebIDL::ExceptionOr<void> HTMLLinkElement::set_as(String const& value)
+void HTMLLinkElement::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor, Node& old_root)
 {
-    return set_attribute(HTML::AttributeNames::as, move(value));
+    Base::removed_from(is_subtree_root, old_ancestor, old_root);
+
+    if (m_loaded_style_sheet) {
+        // NB: We can't use `old_root` here. When this link element is nested
+        //     inside a shadow tree within a larger removed subtree, `old_root`
+        //     is the outer subtree's root, not the shadow root that actually
+        //     contains our stylesheet. Use the sheet's own tracked owning
+        //     root, which is the one whose StyleSheetList it belongs to.
+        auto const& owning_roots = m_loaded_style_sheet->owning_documents_or_shadow_roots();
+        VERIFY(owning_roots.size() == 1);
+        auto& owning_root = **owning_roots.begin();
+        auto& style_sheet_list = [&owning_root] -> CSS::StyleSheetList& {
+            if (auto* shadow_root = as_if<DOM::ShadowRoot>(owning_root))
+                return shadow_root->style_sheets();
+            return as<DOM::Document>(owning_root).style_sheets();
+        }();
+
+        style_sheet_list.remove_a_css_style_sheet(*m_loaded_style_sheet);
+        m_loaded_style_sheet = nullptr;
+    }
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#dom-link-rellist
@@ -135,16 +132,16 @@ GC::Ref<DOM::DOMTokenList> HTMLLinkElement::sizes()
     return *m_sizes;
 }
 
-void HTMLLinkElement::set_media(String media)
+void HTMLLinkElement::set_media(Utf16View media)
 {
-    (void)set_attribute(HTML::AttributeNames::media, media);
+    set_attribute_value(HTML::AttributeNames::media, media);
     if (auto sheet = m_loaded_style_sheet)
         sheet->set_media(media);
 }
 
-String HTMLLinkElement::media() const
+Utf16String HTMLLinkElement::media() const
 {
-    return attribute(HTML::AttributeNames::media).value_or(String {});
+    return get_attribute_value(HTML::AttributeNames::media);
 }
 
 // https://drafts.csswg.org/cssom/#dom-linkstyle-sheet
@@ -153,12 +150,22 @@ GC::Ptr<CSS::CSSStyleSheet> HTMLLinkElement::sheet() const
     return m_loaded_style_sheet;
 }
 
-bool HTMLLinkElement::has_loaded_icon() const
+void HTMLLinkElement::finished_loading_critical_style_subresources(AnyFailed)
 {
-    return m_relationship & Relationship::Icon && resource() && resource()->is_loaded() && resource()->has_encoded_data();
+    m_document_load_event_delayer.clear();
 }
 
-void HTMLLinkElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+bool HTMLLinkElement::has_loaded_icon() const
+{
+    return m_relationship & Relationship::Icon && m_loaded_icon.has_value();
+}
+
+bool HTMLLinkElement::has_icon_keyword() const
+{
+    return m_relationship & Relationship::Icon;
+}
+
+void HTMLLinkElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -176,30 +183,37 @@ void HTMLLinkElement::attribute_changed(FlyString const& name, Optional<String> 
     // 4.6.7 Link types - https://html.spec.whatwg.org/multipage/links.html#linkTypes
     auto old_relationship = m_relationship;
     if (name == HTML::AttributeNames::rel) {
-        m_relationship = 0;
-        // Keywords are always ASCII case-insensitive, and must be compared as such.
-        auto lowercased_value = value.value_or(String {}).to_ascii_lowercase();
         // To determine which link types apply to a link, a, area, or form element,
         // the element's rel attribute must be split on ASCII whitespace.
         // The resulting tokens are the keywords for the link types that apply to that element.
-        auto parts = lowercased_value.bytes_as_string_view().split_view_if(Infra::is_ascii_whitespace);
-        for (auto& part : parts) {
-            if (part == "stylesheet"sv)
-                m_relationship |= Relationship::Stylesheet;
-            else if (part == "alternate"sv)
-                m_relationship |= Relationship::Alternate;
-            else if (part == "preload"sv)
-                m_relationship |= Relationship::Preload;
-            else if (part == "dns-prefetch"sv)
-                m_relationship |= Relationship::DNSPrefetch;
-            else if (part == "preconnect"sv)
-                m_relationship |= Relationship::Preconnect;
-            else if (part == "icon"sv)
-                m_relationship |= Relationship::Icon;
+        m_relationship = 0;
+        auto link_types = value.has_value() ? value->utf16_view() : u""sv;
+        size_t start = 0;
+        for (size_t i = 0; i <= link_types.length_in_code_units(); ++i) {
+            if (i != link_types.length_in_code_units() && !Infra::is_ascii_whitespace(link_types.code_unit_at(i)))
+                continue;
+
+            if (i > start) {
+                auto token = link_types.substring_view(start, i - start);
+                if (token.equals_ignoring_ascii_case(u"stylesheet"sv))
+                    m_relationship |= Relationship::Stylesheet;
+                else if (token.equals_ignoring_ascii_case(u"alternate"sv))
+                    m_relationship |= Relationship::Alternate;
+                else if (token.equals_ignoring_ascii_case(u"preload"sv))
+                    m_relationship |= Relationship::Preload;
+                else if (token.equals_ignoring_ascii_case(u"dns-prefetch"sv))
+                    m_relationship |= Relationship::DNSPrefetch;
+                else if (token.equals_ignoring_ascii_case(u"preconnect"sv))
+                    m_relationship |= Relationship::Preconnect;
+                else if (token.equals_ignoring_ascii_case(u"icon"sv))
+                    m_relationship |= Relationship::Icon;
+            }
+
+            start = i + 1;
         }
 
         if (m_rel_list)
-            m_rel_list->associated_attribute_changed(value.value_or(String {}));
+            m_rel_list->associated_attribute_changed(value.has_value() ? value->utf16_view() : u""sv);
     }
 
     // https://html.spec.whatwg.org/multipage/semantics.html#the-link-element:explicitly-enabled
@@ -207,98 +221,148 @@ void HTMLLinkElement::attribute_changed(FlyString const& name, Optional<String> 
     if (!value.has_value() && name == HTML::AttributeNames::disabled)
         m_explicitly_enabled = true;
 
-    if (m_relationship & Relationship::Stylesheet) {
-        if (name == HTML::AttributeNames::disabled && m_loaded_style_sheet) {
+    if ((m_relationship & Relationship::Stylesheet) && m_loaded_style_sheet) {
+        if (name == HTML::AttributeNames::disabled) {
             document_or_shadow_root_style_sheets().remove_a_css_style_sheet(*m_loaded_style_sheet);
             m_loaded_style_sheet = nullptr;
+        } else if (name == HTML::AttributeNames::media) {
+            m_loaded_style_sheet->set_media(value.has_value() ? value->utf16_view() : u""sv);
+        }
+    }
+
+    if (should_fetch_and_process_resource_type() && is_browsing_context_connected()) {
+        // The appropriate times to fetch and process this type of link are:
+        // - When the href attribute of the link element of an external resource link that is already browsing-context connected is changed.
+        auto fetch = name == AttributeNames::href;
+
+        if (!fetch && (m_relationship & (Relationship::Preconnect | Relationship::Stylesheet))) {
+            // - When the crossorigin attribute of the link element of an external resource link that is already browsing-context connected is set, changed, or removed.
+            fetch = name == AttributeNames::crossorigin;
         }
 
-        // https://html.spec.whatwg.org/multipage/links.html#link-type-stylesheet:fetch-and-process-the-linked-resource
-        // The appropriate times to fetch and process this type of link are:
-        if (
-            is_browsing_context_connected()
-            && (
-                // AD-HOC: When the link element's type becomes a stylesheet
-                !(old_relationship & Relationship::Stylesheet) ||
-                // - When the href attribute of the link element of an external resource link that is already browsing-context connected is changed.
-                name == AttributeNames::href ||
+        if (!fetch && (m_relationship & Relationship::Preload)) {
+            fetch =
+                // - When the as attribute of the link element of an external resource link that is already browsing-context connected is changed.
+                name == AttributeNames::as
+
+                // FIXME: - When the type attribute of the link element of an external resource link that is already browsing-context connected, but was previously not obtained due to the type attribute specifying an unsupported type for the request destination, is set, removed, or changed.
+                // FIXME: - When the media attribute of the link element of an external resource link that is already browsing-context connected, but was previously not obtained due to the media attribute not matching the environment, is changed or removed.
+                ;
+        }
+
+        if (!fetch && (m_relationship & Relationship::Stylesheet)) {
+            fetch =
                 // - When the disabled attribute of the link element of an external resource link that is already browsing-context connected is set, changed, or removed.
-                name == AttributeNames::disabled ||
-                // - When the crossorigin attribute of the link element of an external resource link that is already browsing-context connected is set, changed, or removed.
-                name == AttributeNames::crossorigin
+                name == AttributeNames::disabled
+
                 // FIXME: - When the type attribute of the link element of an external resource link that is already browsing-context connected is set or changed to a value that does not or no longer matches the Content-Type metadata of the previous obtained external resource, if any.
                 // FIXME: - When the type attribute of the link element of an external resource link that is already browsing-context connected, but was previously not obtained due to the type attribute specifying an unsupported type, is removed or changed.
-                )) {
+
+                // AD-HOC: When the link element's type becomes a stylesheet
+                || !(old_relationship & Relationship::Stylesheet);
+        }
+
+        if (fetch)
             fetch_and_process_linked_resource();
-        }
-
-        if (name == HTML::AttributeNames::media && m_loaded_style_sheet) {
-            m_loaded_style_sheet->set_media(value.value_or(String {}));
-        }
     }
 }
 
-void HTMLLinkElement::resource_did_fail()
+// https://html.spec.whatwg.org/multipage/semantics.html#contributes-a-script-blocking-style-sheet
+bool HTMLLinkElement::contributes_a_script_blocking_style_sheet() const
 {
-    dbgln_if(CSS_LOADER_DEBUG, "HTMLLinkElement: Resource did fail. URL: {}", resource()->url());
-    if (m_relationship & Relationship::Preload) {
-        dispatch_event(*DOM::Event::create(realm(), HTML::EventNames::error));
-    }
+    // An element el in the context of a Document of an HTML parser or XML parser
+    // contributes a script-blocking style sheet if all of the following are true:
+
+    // el was created by that Document's parser.
+    if (m_parser_document != &document())
+        return false;
+
+    // FIXME: el is either a style element or a link element that was an external resource link that contributes to the styling processing model when the el was created by the parser.
+
+    // FIXME: el's media attribute's value matches the environment.
+
+    // el's style sheet was enabled when the element was created by the parser.
+    if (!m_was_enabled_when_created_by_parser)
+        return false;
+
+    // FIXME: The last time the event loop reached step 1, el's root was that Document.
+
+    // The user agent hasn't given up on loading that particular style sheet yet.
+    // A user agent may give up on loading a style sheet at any time.
+    if (m_fetch_controller && m_fetch_controller->state() == Fetch::Infrastructure::FetchController::State::Terminated)
+        return false;
+    if (m_fetch_controller && m_fetch_controller->state() == Fetch::Infrastructure::FetchController::State::Aborted)
+        return false;
+
+    return true;
 }
 
-void HTMLLinkElement::resource_did_load()
+bool HTMLLinkElement::is_implicitly_potentially_render_blocking() const
 {
-    VERIFY(resource());
-    if (m_relationship & Relationship::Icon) {
-        resource_did_load_favicon();
-        m_document_load_event_delayer.clear();
-    }
-    if (m_relationship & Relationship::Preload) {
-        dispatch_event(*DOM::Event::create(realm(), HTML::EventNames::load));
-    }
+    // A link element of this type is implicitly potentially render-blocking if the element was created by its node document's parser.
+    return &document() == m_parser_document;
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#create-link-options-from-element
-HTMLLinkElement::LinkProcessingOptions HTMLLinkElement::create_link_options()
+GC::Ref<HTMLLinkElement::LinkProcessingOptions> HTMLLinkElement::create_link_options()
 {
     // 1. Let document be el's node document.
     auto& document = this->document();
+    auto referrerpolicy = get_attribute(AttributeNames::referrerpolicy);
+    auto referrerpolicy_value = referrerpolicy.has_value() ? referrerpolicy->utf16_view() : u""sv;
 
     // 2. Let options be a new link processing options with
-    LinkProcessingOptions options {
-        // FIXME: destination                      the result of translating the state of el's as attribute
-        // cryptographic nonce metadata     the current value of el's [[CryptographicNonce]] internal slot
-        .cryptographic_nonce_metadata = m_cryptographic_nonce,
-        // crossorigin                      the state of el's crossorigin content attribute
-        .crossorigin = cors_setting_attribute_from_keyword(get_attribute(AttributeNames::crossorigin)),
-        // referrer policy                  the state of el's referrerpolicy content attribute
-        .referrer_policy = ReferrerPolicy::from_string(get_attribute(AttributeNames::referrerpolicy).value_or(""_string)).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString),
-        // FIXME: source set                       el's source set
-        // base URL                         document's document base URL
-        .base_url = document.base_url(),
-        // origin                           document's origin
-        .origin = document.origin(),
-        // environment                      document's relevant settings object
-        .environment = &document.relevant_settings_object(),
-        // policy container                 document's policy container
-        .policy_container = document.policy_container(),
-        // document                         document
-        .document = &document,
-        // fetch priority                   the state of el's fetchpriority content attribute
-        .fetch_priority = Fetch::Infrastructure::request_priority_from_string(get_attribute_value(HTML::AttributeNames::fetchpriority)).value_or(Fetch::Infrastructure::Request::Priority::Auto),
-    };
+    auto options = realm().create<LinkProcessingOptions>(
+        // crossorigin
+        //     the state of el's crossorigin content attribute
+        cors_setting_attribute_from_keyword(get_attribute(AttributeNames::crossorigin).map([](auto const& value) { return value.utf16_view(); })),
+
+        // referrer policy
+        //     the state of el's referrerpolicy content attribute
+        ReferrerPolicy::from_string(referrerpolicy_value).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString),
+
+        // FIXME: source set
+        //     el's source set
+
+        // base URL
+        //     document's document base URL
+        document.base_url(),
+
+        // origin
+        //     document's origin
+        document.origin(),
+
+        // environment
+        //     document's relevant settings object
+        document.relevant_settings_object(),
+
+        // policy container
+        //     document's policy container
+        document.policy_container(),
+
+        // document
+        //     document
+        document,
+
+        // cryptographic nonce metadata
+        //     the current value of el's [[CryptographicNonce]] internal slot
+        m_cryptographic_nonce,
+
+        // fetch priority
+        //     the state of el's fetchpriority content attribute
+        Fetch::Infrastructure::request_priority_from_string(get_attribute_value_view(HTML::AttributeNames::fetchpriority).value_or({})).value_or(Fetch::Infrastructure::Request::Priority::Auto));
 
     // 3. If el has an href attribute, then set options's href to the value of el's href attribute.
     if (auto maybe_href = get_attribute(AttributeNames::href); maybe_href.has_value())
-        options.href = maybe_href.value();
+        options->href = maybe_href.release_value();
 
     // 4. If el has an integrity attribute, then set options's integrity to the value of el's integrity content attribute.
     if (auto maybe_integrity = get_attribute(AttributeNames::integrity); maybe_integrity.has_value())
-        options.integrity = maybe_integrity.value();
+        options->integrity = maybe_integrity.release_value();
 
     // 5. If el has a type attribute, then set options's type to the value of el's type attribute.
     if (auto maybe_type = get_attribute(AttributeNames::type); maybe_type.has_value())
-        options.type = maybe_type.value();
+        options->type = maybe_type.release_value();
 
     // FIXME: 6. Assert: options's href is not the empty string, or options's source set is not null.
     //           A link element with neither an href or an imagesrcset does not represent a link.
@@ -318,7 +382,7 @@ GC::Ptr<Fetch::Infrastructure::Request> HTMLLinkElement::create_link_request(HTM
     // 3. Let url be the result of encoding-parsing a URL given options's href, relative to options's base URL.
     // FIXME: Spec issue: We should be parsing this URL relative to a document or environment settings object.
     //        https://github.com/whatwg/html/issues/9715
-    auto url = DOMURL::parse(options.href, options.base_url);
+    auto url = DOMURL::parse(options.href.utf16_view(), options.base_url);
 
     // 4. If url is failure, then return null.
     if (!url.has_value())
@@ -352,11 +416,25 @@ GC::Ptr<Fetch::Infrastructure::Request> HTMLLinkElement::create_link_request(HTM
 // https://html.spec.whatwg.org/multipage/semantics.html#fetch-and-process-the-linked-resource
 void HTMLLinkElement::fetch_and_process_linked_resource()
 {
-    default_fetch_and_process_linked_resource();
+    auto fetch_generation = ++m_current_fetch_generation;
+
+    if (m_fetch_controller) {
+        m_fetch_controller->stop_fetch();
+        document().remove_from_script_blocking_style_sheet_set(*this);
+    }
+
+    if (m_relationship & ~(Relationship::DNSPrefetch | Relationship::Preconnect | Relationship::Preload))
+        default_fetch_and_process_linked_resource(fetch_generation);
+    else if (m_relationship & Relationship::Preload)
+        fetch_and_process_linked_preload_resource();
+    else if (m_relationship & Relationship::Preconnect)
+        fetch_and_process_linked_preconnect_resource();
+    else if (m_relationship & Relationship::DNSPrefetch)
+        fetch_and_process_linked_dns_prefetch_resource();
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#default-fetch-and-process-the-linked-resource
-void HTMLLinkElement::default_fetch_and_process_linked_resource()
+void HTMLLinkElement::default_fetch_and_process_linked_resource(u64 fetch_generation)
 {
     // https://html.spec.whatwg.org/multipage/semantics.html#the-link-element:attr-link-href-4
     // If both the href and imagesrcset attributes are absent, then the element does not define a link.
@@ -390,50 +468,393 @@ void HTMLLinkElement::default_fetch_and_process_linked_resource()
 
     // 7. Fetch request with processResponseConsumeBody set to the following steps given response response and null, failure, or a byte sequence bodyBytes:
     Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
-    fetch_algorithms_input.process_response_consume_body = [this, hr = options](auto response, auto body_bytes) {
+    fetch_algorithms_input.process_response_consume_body = [this, fetch_generation](auto response, auto body_bytes) {
+        // "if, since the resource in question was fetched, it has become appropriate to fetch it again"
+        if (fetch_generation != m_current_fetch_generation)
+            return;
+        m_fetch_controller = nullptr;
+
         // FIXME: If the response is CORS cross-origin, we must use its internal response to query any of its data. See:
         //        https://github.com/whatwg/html/issues/9355
         response = response->unsafe_response();
 
         // 1. Let success be true.
         bool success = true;
+        Core::ImmutableBytes const* successful_body_bytes = nullptr;
 
         // 2. If either of the following conditions are met:
         // - bodyBytes is null or failure; or
         // - response's status is not an ok status,
-        if (body_bytes.template has<Empty>() || body_bytes.template has<Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag>() || !Fetch::Infrastructure::is_ok_status(response->status())) {
-            // then set success to false.
-            success = false;
-        }
+        // then set success to false.
+        body_bytes.visit(
+            [&](Core::ImmutableBytes& body_bytes) {
+                if (Fetch::Infrastructure::is_ok_status(response->status()))
+                    successful_body_bytes = &body_bytes;
+                else
+                    success = false;
+            },
+            [&](auto) { success = false; });
 
         // FIXME: 3. Otherwise, wait for the link resource's critical subresources to finish loading.
 
         // 4. Process the linked resource given el, success, response, and bodyBytes.
-        process_linked_resource(success, response, body_bytes);
+        process_linked_resource(success, response, successful_body_bytes);
     };
 
-    if (m_fetch_controller)
-        m_fetch_controller->abort(realm(), {});
-    m_fetch_controller = MUST(Fetch::Fetching::fetch(realm(), *request, Fetch::Infrastructure::FetchAlgorithms::create(vm(), move(fetch_algorithms_input))));
+    m_fetch_controller = Fetch::Fetching::fetch(realm(), *request, Fetch::Infrastructure::FetchAlgorithms::create(vm(), move(fetch_algorithms_input)));
+}
+
+// https://html.spec.whatwg.org/multipage/links.html#link-type-dns-prefetch:fetch-and-process-the-linked-resource-2
+void HTMLLinkElement::fetch_and_process_linked_dns_prefetch_resource()
+{
+    auto href = get_attribute(AttributeNames::href);
+    if (!href.has_value())
+        return;
+
+    // 1. Let url be the result of encoding-parsing a URL given el's href attribute's value, relative to el's node document.
+    auto url = document().encoding_parse_url(*href);
+
+    // 2. If url is failure, then return.
+    if (!url.has_value())
+        return;
+
+    // FIXME: 3. Let partitionKey be the result of determining the network partition key given el's node document's relevant
+    //           settings object.
+
+    // 4. The user agent should resolve an origin given partitionKey and url's origin.
+    // FIXME: This should go through Fetch: https://fetch.spec.whatwg.org/#resolve-an-origin
+    if (!ResourceLoader::is_initialized())
+        return;
+    ResourceLoader::the().prefetch_dns(url.value(), document().fallback_base_url());
+}
+
+// https://html.spec.whatwg.org/multipage/links.html#link-type-preconnect:fetch-and-process-the-linked-resource-2
+void HTMLLinkElement::fetch_and_process_linked_preconnect_resource()
+{
+    // The fetch and process the linked resource steps for this type of linked resource, given a link element el, are to
+    // create link options from el and to preconnect given the result.
+    preconnect(create_link_options());
+}
+
+// https://html.spec.whatwg.org/multipage/links.html#link-type-preload:fetch-and-process-the-linked-resource-2
+void HTMLLinkElement::fetch_and_process_linked_preload_resource()
+{
+    // FIXME: 1. Update the source set for el.
+
+    // 2. Let options be the result of creating link options from el.
+    auto options = create_link_options();
+
+    // 3. Let destination be the result of translating the keyword representing the state of el's as attribute.
+    auto destination = translate_a_preload_destination(get_attribute_value_view(HTML::AttributeNames::as).value_or({}));
+
+    // 4. If destination is null, then return.
+    if (destination.has<Empty>())
+        return;
+
+    // 5. Set options's destination to destination.
+    options->destination = destination.get<Optional<Fetch::Infrastructure::Request::Destination>>();
+
+    // 6. Preload options, with the following steps given a response response:
+    GC::Weak weak_this { *this };
+    auto fetch_generation = m_current_fetch_generation;
+    preload(options, [weak_this, fetch_generation](Fetch::Infrastructure::Response& response) {
+        // 1. If response is a network error, fire an event named error at el. Otherwise, fire an event named load at el.
+        if (auto link_element = weak_this.ptr()) {
+            if (fetch_generation != link_element->m_current_fetch_generation)
+                return;
+            link_element->m_fetch_controller = nullptr;
+            if (response.is_network_error())
+                link_element->dispatch_event(DOM::Event::create(link_element->realm(), HTML::EventNames::error));
+            else
+                link_element->dispatch_event(DOM::Event::create(link_element->realm(), HTML::EventNames::load));
+        }
+    });
+}
+
+// https://html.spec.whatwg.org/multipage/semantics.html#linked-resource-fetch-setup-steps
+bool HTMLLinkElement::linked_resource_fetch_setup_steps(Fetch::Infrastructure::Request& request)
+{
+    if (m_relationship & Relationship::Icon)
+        return icon_linked_resource_fetch_setup_steps(request);
+    if (m_relationship & Relationship::Stylesheet)
+        return stylesheet_linked_resource_fetch_setup_steps(request);
+    return true;
+}
+
+// https://html.spec.whatwg.org/multipage/links.html#rel-icon:linked-resource-fetch-setup-steps
+bool HTMLLinkElement::icon_linked_resource_fetch_setup_steps(Fetch::Infrastructure::Request& request)
+{
+    // 1. Set request's destination to "image".
+    request.set_destination(Fetch::Infrastructure::Request::Destination::Image);
+
+    // 2. Return true.
+    return true;
+}
+
+// https://html.spec.whatwg.org/multipage/links.html#link-type-stylesheet:linked-resource-fetch-setup-steps
+bool HTMLLinkElement::stylesheet_linked_resource_fetch_setup_steps(Fetch::Infrastructure::Request& request)
+{
+    // 1. If el's disabled attribute is set, then return false.
+    if (has_attribute(AttributeNames::disabled))
+        return false;
+
+    // 2. If el contributes a script-blocking style sheet, append el to its node document's script-blocking style sheet set.
+    if (contributes_a_script_blocking_style_sheet())
+        document().script_blocking_style_sheet_set().set(*this);
+
+    // 3. If el's media attribute's value matches the environment and el is potentially render-blocking, then block rendering on el.
+    // FIXME: Check media attribute value.
+    if (is_potentially_render_blocking())
+        block_rendering();
+
+    m_document_load_event_delayer.emplace(document());
+
+    // 4. If el is currently render-blocking, then set request's render-blocking to true.
+    if (document().is_render_blocking_element(*this))
+        request.set_render_blocking(true);
+
+    // FIXME: We currently don't set the destination for stylesheets, so we do it here.
+    //        File a spec issue that the destination for stylesheets is not actually set if the `as` attribute is missing.
+    request.set_destination(Fetch::Infrastructure::Request::Destination::Style);
+
+    // 5. Return true.
+    return true;
+}
+
+// https://html.spec.whatwg.org/multipage/links.html#preconnect
+void HTMLLinkElement::preconnect(LinkProcessingOptions const& options)
+{
+    // 1. If options's href is an empty string, return.
+    if (options.href.is_empty())
+        return;
+
+    // 2. Let url be the result of encoding-parsing a URL given options's href, relative to options's base URL.
+    // FIXME: Spec issue: We should be parsing this URL relative to a document or environment settings object.
+    //        https://github.com/whatwg/html/issues/9715
+    auto url = DOMURL::parse(options.href.utf16_view(), options.base_url);
+
+    // 3. If url is failure, then return.
+    if (!url.has_value())
+        return;
+
+    // 4. If url's scheme is not an HTTP(S) scheme, then return.
+    if (!url->scheme().is_one_of("http"sv, "https"sv))
+        return;
+
+    // FIXME: 5. Let partitionKey be the result of determining the network partition key given options's environment.
+    // FIXME: 6. Let useCredentials be true.
+    // FIXME: 7. If options's crossorigin is Anonymous and options's origin does not have the same origin as url's origin,
+    //           then set useCredentials to false.
+
+    // 8. The user agent should obtain a connection given partitionKey, url's origin, and useCredentials.
+    // FIXME: This should go through Fetch: https://fetch.spec.whatwg.org/#concept-connection-obtain
+    if (!ResourceLoader::is_initialized())
+        return;
+    auto source_url = options.document ? options.document->fallback_base_url() : options.environment->api_base_url();
+    ResourceLoader::the().preconnect(*url, source_url);
+}
+
+// https://html.spec.whatwg.org/multipage/links.html#match-preload-type
+static bool type_matches_destination(Utf16View type, Optional<Fetch::Infrastructure::Request::Destination> destination)
+{
+    using enum Fetch::Infrastructure::Request::Destination;
+
+    // 1. If type is an empty string, then return true.
+    if (type.is_empty())
+        return true;
+
+    // 2. If destination is "fetch", then return true.
+    // FIXME: Spec issue: "fetch" will have been turned to an empty string by this point.
+    if (!destination.has_value())
+        return true;
+
+    // 3. Let mimeTypeRecord be the result of parsing type.
+    auto mime_type_record = MimeSniff::MimeType::parse(type);
+
+    // 4. If mimeTypeRecord is failure, then return false.
+    if (!mime_type_record.has_value())
+        return false;
+
+    // FIXME: 5. If mimeTypeRecord is not supported by the user agent, then return false.
+
+    // 6. If any of the following are true:
+    if (
+        // destination is "audio" or "video", and mimeTypeRecord is an audio or video MIME type;
+        ((destination == Audio || destination == Video) && mime_type_record->is_audio_or_video())
+
+        // destination is a script-like destination and mimeTypeRecord is a JavaScript MIME type;
+        || (Fetch::Infrastructure::destination_is_script_like(*destination) && mime_type_record->is_javascript())
+
+        // destination is "image" and mimeTypeRecord is an image MIME type;
+        || (destination == Image && mime_type_record->is_image())
+
+        // destination is "font" and mimeTypeRecord is a font MIME type;
+        || (destination == Font && mime_type_record->is_font())
+
+        // destination is "json" and mimeTypeRecord is a JSON MIME type;
+        || (destination == JSON && mime_type_record->is_json())
+
+        // destination is "style" and mimeTypeRecord's essence is text/css; or
+        || (destination == Style && mime_type_record->essence() == "text/css"sv)
+
+        // destination is "track" and mimeTypeRecord's essence is text/vtt,
+        || (destination == Track && mime_type_record->essence() == "text/vtt"sv)) {
+        // then return true.
+        return true;
+    }
+
+    // 7. Return false.
+    return false;
+}
+
+// https://html.spec.whatwg.org/multipage/links.html#preload
+void HTMLLinkElement::preload(LinkProcessingOptions& options, Function<void(Fetch::Infrastructure::Response&)> process_response)
+{
+    auto& realm = this->realm();
+    auto& vm = realm.vm();
+
+    // 1. If options's type doesn't match options's destination, then return.
+    if (!type_matches_destination(options.type, options.destination))
+        return;
+
+    // FIXME: 2. If options's destination is "image" and options's source set is not null, then set options's href to the
+    //           result of selecting an image source from options's source set.
+    if (options.href.is_empty())
+        return;
+
+    // 3. Let request be the result of creating a link request given options.
+    auto request = create_link_request(options);
+
+    // 4. If request is null, then return.
+    if (!request)
+        return;
+
+    // FIXME: 5. Let unsafeEndTime be 0.
+
+    // 6. Let entry be a new preload entry whose integrity metadata is options's integrity.
+    auto entry = realm.create<PreloadEntry>();
+    entry->integrity_metadata = options.integrity;
+
+    // 7. Let key be the result of creating a preload key given request.
+    auto key = create_a_preload_key(*request);
+
+    // 8. If options's document is null, then set request's initiator type to "early hint".
+    if (!options.document)
+        request->set_initiator_type(Fetch::Infrastructure::Request::InitiatorType::EarlyHint);
+
+    // 9. Let controller be null.
+    auto controller_holder = Fetch::Infrastructure::FetchControllerHolder::create(vm);
+
+    // 10. Let reportTiming given a Document document be to report timing for controller given document's relevant global object.
+    auto report_timing = GC::Function<void(DOM::Document const&)>::create(realm.heap(), [controller_holder](DOM::Document const& document) {
+        controller_holder->controller()->report_timing(relevant_global_object(document));
+    });
+
+    // 11. Set controller to the result of fetching request, with processResponseConsumeBody set to the following steps
+    //     given a response response and null, failure, or a byte sequence bodyBytes:
+    Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
+    fetch_algorithms_input.process_response_consume_body = [&realm, options = GC::Ref { options }, process_response = move(process_response), entry, report_timing](GC::Ref<Fetch::Infrastructure::Response> response, Fetch::Infrastructure::FetchAlgorithms::BodyBytes body_bytes) {
+        // FIXME: If the response is CORS cross-origin, we must use its internal response to query any of its data. See:
+        //        https://github.com/whatwg/html/issues/9355
+        response = response->unsafe_response();
+
+        // 1. If bodyBytes is a byte sequence, then set response's body to bodyBytes as a body.
+        if (auto* byte_sequence = body_bytes.get_pointer<Core::ImmutableBytes>())
+            response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, byte_sequence->bytes()));
+        // 2. Otherwise, set response to a network error.
+        else
+            response = Fetch::Infrastructure::Response::network_error(realm.vm(), "Expected preload response to contain a body"_string);
+
+        // FIXME: 3. Set unsafeEndTime to the unsafe shared current time.
+
+        // 4. If options's document is not null, then call reportTiming given options's document.
+        if (options->document)
+            report_timing->function()(*options->document);
+
+        // 5. If entry's on response available is null, then set entry's response to response; otherwise call entry's
+        //    on response available given response.
+        if (!entry->on_response_available)
+            entry->response = response;
+        else
+            entry->on_response_available->function()(response);
+
+        // 6. If processResponse is given, then call processResponse with response.
+        if (process_response)
+            process_response(response);
+    };
+
+    m_fetch_controller = Fetch::Fetching::fetch(realm, *request, Fetch::Infrastructure::FetchAlgorithms::create(vm, move(fetch_algorithms_input)));
+    controller_holder->set_controller(*m_fetch_controller);
+
+    // 12. Let commit be the following steps given a Document document:
+    auto commit = GC::Function<void(DOM::Document&)>::create(realm.heap(), [entry, report_timing, key = move(key)](DOM::Document& document) {
+        // 1. If entry's response is not null, then call reportTiming given document.
+        if (entry->response)
+            report_timing->function()(document);
+
+        // 2. Set document's map of preloaded resources[key] to entry.
+        document.map_of_preloaded_resources().set(key, entry);
+    });
+
+    // 13. If options's document is null, then set options's on document ready to commit. Otherwise, call commit with
+    //     options's document.
+    if (!options.document)
+        options.on_document_ready = commit;
+    else
+        commit->function()(*options.document);
+}
+
+// https://html.spec.whatwg.org/multipage/semantics.html#process-the-linked-resource
+void HTMLLinkElement::process_linked_resource(bool success, Fetch::Infrastructure::Response const& response, Core::ImmutableBytes const* body_bytes)
+{
+    if (success)
+        VERIFY(body_bytes);
+
+    if (m_relationship & Relationship::Icon) {
+        ByteBuffer icon_bytes;
+        if (success)
+            icon_bytes = body_bytes->copy_to_byte_buffer().release_value_but_fixme_should_propagate_errors();
+        process_icon_resource(success, response, move(icon_bytes));
+    } else if (m_relationship & Relationship::Stylesheet) {
+        process_stylesheet_resource(success, response, success ? body_bytes->bytes() : ReadonlyBytes {});
+    }
+}
+
+// AD-HOC: The spec is underspecified for fetching and processing rel="icon" See:
+//         https://github.com/whatwg/html/issues/1769
+void HTMLLinkElement::process_icon_resource(bool success, Fetch::Infrastructure::Response const& response, ByteBuffer body_bytes)
+{
+    if (!success)
+        return;
+
+    m_loaded_icon = { response.url().value_or({}), move(body_bytes) };
+    document().check_favicon_after_loading_link_resource();
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#link-type-stylesheet:process-the-linked-resource
-void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastructure::Response const& response, Variant<Empty, Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag, ByteBuffer> body_bytes)
+void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastructure::Response const& response, ReadonlyBytes body_bytes)
 {
+    if (!document().is_fully_active())
+        return;
+
     // 1. If the resource's Content-Type metadata is not text/css, then set success to false.
     auto mime_type_string = m_mime_type;
-    if (!mime_type_string.has_value()) {
-        auto extracted_mime_type = response.header_list()->extract_mime_type();
-        if (extracted_mime_type.has_value())
-            mime_type_string = extracted_mime_type->essence();
+    Optional<StringView> mime_type_charset;
+    auto extracted_mime_type = Fetch::Infrastructure::extract_mime_type(response.header_list());
+    if (extracted_mime_type.has_value()) {
+        if (!mime_type_string.has_value())
+            mime_type_string = Utf16String::from_ascii_without_validation(extracted_mime_type->essence().bytes());
+        if (auto charset = extracted_mime_type->parameters().get("charset"sv); charset.has_value())
+            mime_type_charset = charset->bytes_as_string_view();
     }
 
-    if (mime_type_string.has_value() && mime_type_string != "text/css"sv) {
+    if (mime_type_string.has_value() && mime_type_string != u"text/css"sv)
         success = false;
-    }
 
-    // FIXME: 2. If el no longer creates an external resource link that contributes to the styling processing model,
-    //           or if, since the resource in question was fetched, it has become appropriate to fetch it again, then return.
+    // 2. If el no longer creates an external resource link that contributes to the styling processing model, or
+    //    if, since the resource in question was fetched, it has become appropriate to fetch it again, then return.
+    // NB: The "fetch it again" case is handled by the fetch generation check in
+    //     default_fetch_and_process_linked_resource().
 
     // 3. If el has an associated CSS style sheet, remove the CSS style sheet.
     if (m_loaded_style_sheet) {
@@ -469,43 +890,35 @@ void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastru
         // The CSS environment encoding is the result of running the following steps: [CSSSYNTAX]
         //     1. If the element has a charset attribute, get an encoding from that attribute's value. If that succeeds, return the resulting encoding. [ENCODING]
         //     2. Otherwise, return the document's character encoding. [DOM]
-
-        Optional<String> encoding;
+        Optional<StringView> environment_encoding;
         if (auto charset = attribute(HTML::AttributeNames::charset); charset.has_value())
-            encoding = charset.release_value();
+            environment_encoding = TextCodec::get_standardized_encoding(*charset);
 
-        if (!encoding.has_value())
-            encoding = document().encoding_or_default();
+        if (!environment_encoding.has_value() && document().encoding().has_value())
+            environment_encoding = TextCodec::get_standardized_encoding(document().encoding().value());
 
-        auto decoder = TextCodec::decoder_for(*encoding);
-
-        if (!decoder.has_value()) {
-            // If we don't support the encoding yet, let's error out instead of trying to decode it as something it's most likely not.
-            dbgln("FIXME: Style sheet encoding '{}' is not supported yet", encoding);
+        auto maybe_decoded_string = css_decode_bytes(environment_encoding, mime_type_charset, body_bytes);
+        if (maybe_decoded_string.is_error()) {
+            dbgln("Failed to decode CSS file: {}", response.url().value_or(URL::URL()));
             dispatch_event(*DOM::Event::create(realm(), HTML::EventNames::error));
         } else {
-            auto const& encoded_string = body_bytes.get<ByteBuffer>();
-            auto maybe_decoded_string = TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(*decoder, encoded_string);
-            if (maybe_decoded_string.is_error()) {
-                dbgln("Style sheet {} claimed to be '{}' but decoding failed", response.url().value_or(URL::URL()), encoding);
-                dispatch_event(*DOM::Event::create(realm(), HTML::EventNames::error));
-            } else {
-                VERIFY(!response.url_list().is_empty());
-                m_loaded_style_sheet = document_or_shadow_root_style_sheets().create_a_css_style_sheet(
-                    maybe_decoded_string.release_value(),
-                    "text/css"_string,
-                    this,
-                    attribute(HTML::AttributeNames::media).value_or({}),
-                    in_a_document_tree() ? attribute(HTML::AttributeNames::title).value_or({}) : String {},
-                    (m_relationship & Relationship::Alternate && !m_explicitly_enabled) ? CSS::StyleSheetList::Alternate::Yes : CSS::StyleSheetList::Alternate::No,
-                    CSS::StyleSheetList::OriginClean::Yes,
-                    response.url_list().first(),
-                    nullptr,
-                    nullptr);
+            VERIFY(!response.url_list().is_empty());
+            auto media = attribute(HTML::AttributeNames::media);
+            auto media_value = media.has_value() ? media->utf16_view() : u""sv;
+            auto title = in_a_document_tree() ? attribute(HTML::AttributeNames::title) : Optional<Utf16String> {};
+            m_loaded_style_sheet = document_or_shadow_root_style_sheets().create_a_css_style_sheet(
+                maybe_decoded_string.release_value(),
+                this,
+                media_value,
+                title.has_value() ? title.release_value() : Utf16String {},
+                (m_relationship & Relationship::Alternate && !m_explicitly_enabled) ? CSS::StyleSheetList::Alternate::Yes : CSS::StyleSheetList::Alternate::No,
+                CSS::StyleSheetList::OriginClean::Yes,
+                response.url_list().first(),
+                nullptr,
+                nullptr);
 
-                // 2. Fire an event named load at el.
-                dispatch_event(*DOM::Event::create(realm(), HTML::EventNames::load));
-            }
+            // 2. Fire an event named load at el.
+            dispatch_event(*DOM::Event::create(realm(), HTML::EventNames::load));
         }
     }
     // 5. Otherwise, fire an event named error at el.
@@ -519,90 +932,28 @@ void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastru
         VERIFY(document().script_blocking_style_sheet_set().contains(*this));
 
         // 2. Remove el from its node document's script-blocking style sheet set.
-        document().script_blocking_style_sheet_set().remove(*this);
+        document().remove_from_script_blocking_style_sheet_set(*this);
     }
 
     // 7. Unblock rendering on el.
     unblock_rendering();
 
-    m_document_load_event_delayer.clear();
-}
-
-// https://html.spec.whatwg.org/multipage/semantics.html#process-the-linked-resource
-void HTMLLinkElement::process_linked_resource(bool success, Fetch::Infrastructure::Response const& response, Variant<Empty, Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag, ByteBuffer> body_bytes)
-{
-    if (m_relationship & Relationship::Stylesheet)
-        process_stylesheet_resource(success, response, body_bytes);
-}
-
-// https://html.spec.whatwg.org/multipage/semantics.html#linked-resource-fetch-setup-steps
-bool HTMLLinkElement::linked_resource_fetch_setup_steps(Fetch::Infrastructure::Request& request)
-{
-    if (m_relationship & Relationship::Stylesheet)
-        return stylesheet_linked_resource_fetch_setup_steps(request);
-
-    return true;
-}
-
-// https://html.spec.whatwg.org/multipage/links.html#link-type-stylesheet:linked-resource-fetch-setup-steps
-bool HTMLLinkElement::stylesheet_linked_resource_fetch_setup_steps(Fetch::Infrastructure::Request& request)
-{
-    // 1. If el's disabled attribute is set, then return false.
-    if (has_attribute(AttributeNames::disabled))
-        return false;
-
-    // 2. If el contributes a script-blocking style sheet, append el to its node document's script-blocking style sheet set.
-    if (contributes_a_script_blocking_style_sheet())
-        document().script_blocking_style_sheet_set().set(*this);
-
-    // 3. If el's media attribute's value matches the environment and el is potentially render-blocking, then block rendering on el.
-    // FIXME: Check media attribute value.
-    if (is_potentially_render_blocking())
-        block_rendering();
-
-    m_document_load_event_delayer.emplace(document());
-
-    // 4. If el is currently render-blocking, then set request's render-blocking to true.
-    if (document().is_render_blocking_element(*this))
-        request.set_render_blocking(true);
-
-    // FIXME: We currently don't set the destination for stylesheets, so we do it here.
-    //        File a spec issue that the destination for stylesheets is not actually set if the `as` attribute is missing.
-    request.set_destination(Fetch::Infrastructure::Request::Destination::Style);
-
-    // 5. Return true.
-    return true;
-}
-
-void HTMLLinkElement::set_parser_document(Badge<HTMLParser>, GC::Ref<DOM::Document> document)
-{
-    m_parser_document = document->make_weak_ptr<DOM::Document>();
-}
-
-bool HTMLLinkElement::is_implicitly_potentially_render_blocking() const
-{
-    // A link element of this type is implicitly potentially render-blocking if the element was created by its node document's parser.
-    return &document() == m_parser_document;
-}
-
-void HTMLLinkElement::resource_did_load_favicon()
-{
-    VERIFY(m_relationship & (Relationship::Icon));
-    if (!resource()->has_encoded_data()) {
-        dbgln_if(SPAM_DEBUG, "Favicon downloaded, no encoded data");
-        return;
+    if (m_loaded_style_sheet) {
+        auto style_sheet_loading_state = m_loaded_style_sheet->loading_state();
+        if (style_sheet_loading_state == CSS::CSSStyleSheet::LoadingState::Loaded || style_sheet_loading_state == CSS::CSSStyleSheet::LoadingState::Error) {
+            finished_loading_critical_style_subresources(style_sheet_loading_state == CSS::CSSStyleSheet::LoadingState::Error ? AnyFailed::Yes : AnyFailed::No);
+        }
+    } else {
+        m_document_load_event_delayer.clear();
     }
-
-    dbgln_if(SPAM_DEBUG, "Favicon downloaded, {} bytes from {}", resource()->encoded_data().size(), resource()->url());
-
-    document().check_favicon_after_loading_link_resource();
 }
 
-static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_data, URL::URL const& favicon_url, GC::Ref<DOM::Document> document)
+static NonnullRefPtr<Core::Promise<NonnullRefPtr<Gfx::Bitmap const>>> decode_favicon(ReadonlyBytes favicon_data, URL::URL const& favicon_url, GC::Ref<DOM::Document> document)
 {
+    auto promise = Core::Promise<NonnullRefPtr<Gfx::Bitmap const>>::construct();
+
     if (favicon_url.basename().ends_with(".svg"sv)) {
         auto result = SVG::SVGDecodedImageData::create(document->realm(), document->page(), favicon_url, favicon_data);
-        auto promise = Core::Promise<bool>::construct();
         if (result.is_error()) {
             promise->reject(Error::from_string_view("Failed to decode SVG favicon"sv));
             return promise;
@@ -610,51 +961,49 @@ static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_d
 
         // FIXME: Calculate size based on device pixel ratio
         Gfx::IntSize size { 32, 32 };
-        auto immutable_bitmap = result.release_value()->bitmap(0, size);
-        auto bitmap = immutable_bitmap->bitmap();
-        if (!bitmap) {
+        auto decoded_frame = result.release_value()->default_frame(size);
+        if (!decoded_frame.has_value()) {
             promise->reject(Error::from_string_view("Failed to get bitmap from SVG favicon"sv));
             return promise;
         }
-        auto navigable = document->navigable();
-        if (navigable && navigable->is_traversable())
-            navigable->traversable_navigable()->page().client().page_did_change_favicon(*bitmap);
-        promise->resolve(true);
+
+        promise->resolve(decoded_frame->bitmap_ref());
         return promise;
     }
 
-    auto on_failed_decode = [favicon_url]([[maybe_unused]] Error& error) {
+    auto on_failed_decode = [favicon_url, promise]([[maybe_unused]] Error& error) {
         dbgln_if(IMAGE_DECODER_DEBUG, "Failed to decode favicon {}: {}", favicon_url, error);
+        promise->reject(move(error));
     };
 
-    auto on_successful_decode = [document = GC::Root(document)](Web::Platform::DecodedImage& decoded_image) -> ErrorOr<void> {
+    auto on_successful_decode = [document = GC::Root(document), promise](Web::Platform::DecodedImage& decoded_image) -> ErrorOr<void> {
         auto favicon_bitmap = decoded_image.frames[0].bitmap;
         dbgln_if(IMAGE_DECODER_DEBUG, "Decoded favicon, {}", favicon_bitmap->size());
 
-        auto navigable = document->navigable();
-        if (navigable && navigable->is_traversable())
-            navigable->traversable_navigable()->page().client().page_did_change_favicon(*favicon_bitmap);
-
+        promise->resolve(favicon_bitmap.release_nonnull());
         return {};
     };
 
-    auto promise = Platform::ImageCodecPlugin::the().decode_image(favicon_data, move(on_successful_decode), move(on_failed_decode));
-    return promise->map<bool>([](auto const&) { return true; });
+    (void)Platform::ImageCodecPlugin::the().decode_image(favicon_data, move(on_successful_decode), move(on_failed_decode));
+
+    return promise;
 }
 
-bool HTMLLinkElement::load_favicon_and_use_if_window_is_active()
+RefPtr<Gfx::Bitmap const> HTMLLinkElement::load_favicon_if_window_is_active()
 {
     if (!has_loaded_icon())
-        return false;
+        return {};
 
     // FIXME: Refactor the caller(s) to handle the async nature of image loading
-    auto promise = decode_favicon(resource()->encoded_data(), *resource()->url(), document());
-    auto result = promise->await();
-    return !result.is_error();
+    auto promise = decode_favicon(m_loaded_icon->icon, m_loaded_icon->url, document());
+
+    if (auto result = promise->await(); !result.is_error())
+        return result.release_value();
+    return {};
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#rel-icon:the-link-element-3
-WebIDL::ExceptionOr<void> HTMLLinkElement::load_fallback_favicon_if_needed(GC::Ref<DOM::Document> document)
+void HTMLLinkElement::load_fallback_favicon_if_needed(GC::Ref<DOM::Document> document)
 {
     auto& realm = document->realm();
     auto& vm = realm.vm();
@@ -662,16 +1011,37 @@ WebIDL::ExceptionOr<void> HTMLLinkElement::load_fallback_favicon_if_needed(GC::R
     // In the absence of a link with the icon keyword, for Document objects whose URL's scheme is an HTTP(S) scheme,
     // user agents may instead run these steps in parallel:
     if (document->has_active_favicon())
-        return {};
+        return;
     if (!document->url().scheme().is_one_of("http"sv, "https"sv))
-        return {};
+        return;
+    auto icon_link_elements = DOM::HTMLCollection::create(*document, DOM::HTMLCollection::Scope::Descendants, [](DOM::Element const& element) {
+        if (!is<HTMLLinkElement>(element))
+            return false;
+
+        return static_cast<HTMLLinkElement const&>(element).has_icon_keyword();
+    });
+    if (icon_link_elements->length() != 0)
+        return;
+
+    // AD-HOC: Don't load fallback favicon for auxiliary browsing contexts (popup windows).
+    // This matches the behavior observed in Chrome and Firefox, and avoids unnecessary network requests
+    // that can interfere with Content Security Policy violation reporting.
+    // See: https://github.com/whatwg/html/issues/12082
+    if (auto browsing_context = document->browsing_context(); browsing_context->is_auxiliary())
+        return;
 
     // 1. Let request be a new request whose URL is the URL record obtained by resolving the URL "/favicon.ico" against
     //    the Document object's URL, client is the Document object's relevant settings object, destination is "image",
     //    synchronous flag is set, credentials mode is "include", and whose use-URL-credentials flag is set.
     // NOTE: Fetch requests no longer have a synchronous flag, see https://github.com/whatwg/fetch/pull/1165
+    auto favicon_url = document->encoding_parse_url("/favicon.ico"_utf16);
+
+    // It is possible for the URL parser to fail if the document's base URL is invalid.
+    if (!favicon_url.has_value())
+        return;
+
     auto request = Fetch::Infrastructure::Request::create(vm);
-    request->set_url(*document->encoding_parse_url("/favicon.ico"sv));
+    request->set_url(favicon_url.release_value());
     request->set_client(&document->relevant_settings_object());
     request->set_destination(Fetch::Infrastructure::Request::Destination::Image);
     request->set_credentials_mode(Fetch::Infrastructure::Request::CredentialsMode::Include);
@@ -684,7 +1054,11 @@ WebIDL::ExceptionOr<void> HTMLLinkElement::load_fallback_favicon_if_needed(GC::R
         auto global = GC::Ref { realm.global_object() };
 
         auto process_body = GC::create_function(realm.heap(), [document, request](ByteBuffer body) {
-            (void)decode_favicon(body, request->url(), document);
+            decode_favicon(body, request->url(), document)
+                ->when_resolved(GC::weak_callback(*document, [](DOM::Document& document, NonnullRefPtr<Gfx::Bitmap const>& favicon) {
+                    if (auto navigable = document.navigable(); navigable && navigable->is_traversable())
+                        navigable->traversable_navigable()->page().client().page_did_change_favicon(*favicon);
+                }));
         });
         auto process_body_error = GC::create_function(realm.heap(), [](JS::Value) {
         });
@@ -699,47 +1073,54 @@ WebIDL::ExceptionOr<void> HTMLLinkElement::load_fallback_favicon_if_needed(GC::R
             body->fully_read(realm, process_body, process_body_error, global);
     };
 
-    TRY(Fetch::Fetching::fetch(realm, request, Fetch::Infrastructure::FetchAlgorithms::create(vm, move(fetch_algorithms_input))));
-    return {};
+    Fetch::Fetching::fetch(realm, request, Fetch::Infrastructure::FetchAlgorithms::create(vm, move(fetch_algorithms_input)));
 }
 
-void HTMLLinkElement::visit_edges(Cell::Visitor& visitor)
+bool HTMLLinkElement::should_fetch_and_process_resource_type() const
+{
+    // https://html.spec.whatwg.org/multipage/links.html#link-type-dns-prefetch:fetch-and-process-the-linked-resource
+    // https://html.spec.whatwg.org/multipage/links.html#link-type-preconnect:fetch-and-process-the-linked-resource
+    // https://html.spec.whatwg.org/multipage/links.html#link-type-preload:fetch-and-process-the-linked-resource
+    // https://html.spec.whatwg.org/multipage/links.html#link-type-stylesheet:fetch-and-process-the-linked-resource
+    if (m_relationship & (Relationship::DNSPrefetch | Relationship::Preconnect | Relationship::Preload | Relationship::Stylesheet))
+        return true;
+
+    // AD-HOC: The spec is underspecified for fetching and processing rel="icon". See:
+    //         https://github.com/whatwg/html/issues/1769
+    return m_relationship & Relationship::Icon;
+}
+
+HTMLLinkElement::LinkProcessingOptions::LinkProcessingOptions(
+    CORSSettingAttribute crossorigin,
+    ReferrerPolicy::ReferrerPolicy referrer_policy,
+    URL::URL base_url,
+    URL::Origin origin,
+    GC::Ref<HTML::EnvironmentSettingsObject> environment,
+    GC::Ref<HTML::PolicyContainer> policy_container,
+    GC::Ptr<Web::DOM::Document> document,
+    Utf16String cryptographic_nonce_metadata,
+    Fetch::Infrastructure::Request::Priority fetch_priority)
+    : cryptographic_nonce_metadata(move(cryptographic_nonce_metadata))
+    , crossorigin(crossorigin)
+    , referrer_policy(referrer_policy)
+    , base_url(move(base_url))
+    , origin(move(origin))
+    , environment(environment)
+    , policy_container(policy_container)
+    , document(document)
+    , fetch_priority(fetch_priority)
+{
+}
+
+void HTMLLinkElement::LinkProcessingOptions::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_fetch_controller);
-    visitor.visit(m_loaded_style_sheet);
-    visitor.visit(m_rel_list);
-    visitor.visit(m_sizes);
+    visitor.visit(environment);
+    visitor.visit(policy_container);
+    visitor.visit(document);
+    visitor.visit(on_document_ready);
 }
 
-// https://html.spec.whatwg.org/multipage/semantics.html#contributes-a-script-blocking-style-sheet
-bool HTMLLinkElement::contributes_a_script_blocking_style_sheet() const
-{
-    // An element el in the context of a Document of an HTML parser or XML parser
-    // contributes a script-blocking style sheet if all of the following are true:
-
-    // el was created by that Document's parser.
-    if (m_parser_document != &document())
-        return false;
-
-    // FIXME: el is either a style element or a link element that was an external resource link that contributes to the styling processing model when the el was created by the parser.
-
-    // FIXME: el's media attribute's value matches the environment.
-
-    // el's style sheet was enabled when the element was created by the parser.
-    if (!m_was_enabled_when_created_by_parser)
-        return false;
-
-    // FIXME: The last time the event loop reached step 1, el's root was that Document.
-
-    // The user agent hasn't given up on loading that particular style sheet yet.
-    // A user agent may give up on loading a style sheet at any time.
-    if (m_fetch_controller && m_fetch_controller->state() == Fetch::Infrastructure::FetchController::State::Terminated)
-        return false;
-    if (m_fetch_controller && m_fetch_controller->state() == Fetch::Infrastructure::FetchController::State::Aborted)
-        return false;
-
-    return true;
-}
+GC_DEFINE_ALLOCATOR(HTMLLinkElement::LinkProcessingOptions);
 
 }

@@ -10,17 +10,39 @@
 
 #pragma once
 
+#include <AK/Array.h>
 #include <AK/ByteString.h>
 #include <AK/Format.h>
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
 #include <AK/LexicalPath.h>
 #include <AK/QuickSort.h>
+#include <AK/StringBuilder.h>
 #include <AK/Vector.h>
+#include <LibTest/LiveDisplay.h>
 #include <LibTest/Results.h>
 #include <LibTest/TestRunnerUtil.h>
 
+#include <limits.h>
+
+#if !defined(AK_OS_WINDOWS)
+#    include <unistd.h>
+#endif
+
+#if defined(AK_OS_MACOS) || defined(AK_OS_BSD_GENERIC)
+#    include <stdlib.h>
+#endif
+
 namespace Test {
+
+[[maybe_unused]] inline auto const& s_invocation_cwd = [] {
+#if !defined(AK_OS_WINDOWS)
+    char buf[PATH_MAX];
+    if (getcwd(buf, sizeof(buf)))
+        return ByteString(buf);
+#endif
+    return ByteString {};
+}();
 
 class TestRunner {
 public:
@@ -29,12 +51,13 @@ public:
         return s_the;
     }
 
-    TestRunner(ByteString test_root, bool print_times, bool print_progress, bool print_json, bool detailed_json = false)
+    TestRunner(ByteString test_root, bool print_times, bool print_progress, bool print_json, bool detailed_json = false, bool print_each_test = false)
         : m_test_root(move(test_root))
         , m_print_times(print_times)
         , m_print_progress(print_progress)
         , m_print_json(print_json)
         , m_detailed_json(detailed_json)
+        , m_print_each_test(print_each_test)
     {
         VERIFY(!s_the);
         s_the = this;
@@ -51,11 +74,11 @@ public:
     bool needs_detailed_suites() const { return m_detailed_json; }
     Vector<Test::Suite> const& suites() const { return *m_suites; }
 
+    bool needs_timings() const { return m_print_times; }
+
     Vector<Test::Suite>& ensure_suites()
     {
-        if (!m_suites.has_value())
-            m_suites = Vector<Suite> {};
-        return *m_suites;
+        return m_suites.ensure([] { return Vector<Suite> {}; });
     }
 
 protected:
@@ -68,15 +91,22 @@ protected:
     virtual void do_run_single_test(ByteString const&, size_t current_test_index, size_t num_tests) = 0;
     virtual Vector<ByteString> const* get_failed_test_names() const { return nullptr; }
 
+    void render_live_display(size_t completed, size_t total);
+    bool begin_live_display();
+
     ByteString m_test_root;
     bool m_print_times;
     bool m_print_progress;
     bool m_print_json;
     bool m_detailed_json;
+    bool m_print_each_test;
 
     double m_total_elapsed_time_in_ms { 0 };
     Test::Counts m_counts;
     Optional<Vector<Test::Suite>> m_suites;
+
+    LiveDisplay m_live_display;
+    ByteString m_current_test_label;
 };
 
 inline void cleanup()
@@ -92,18 +122,95 @@ inline void cleanup()
     exit(1);
 }
 
+inline bool TestRunner::begin_live_display()
+{
+#if defined(AK_OS_WINDOWS)
+    return false;
+#else
+#    if defined(__GLIBC__)
+    char const* program = program_invocation_short_name;
+#    elif defined(AK_OS_MACOS) || defined(AK_OS_BSD_GENERIC)
+    char const* program = ::getprogname();
+#    else
+    char const* program = nullptr;
+#    endif
+    if (!program || !*program)
+        program = "test-runner";
+    auto const& cwd = s_invocation_cwd;
+    ByteString log_path = cwd.is_empty()
+        ? ByteString::formatted("./{}.log", program)
+        : ByteString::formatted("{}/{}.log", cwd, program);
+
+    return m_live_display.begin({ .reserved_lines = 3, .log_file_path = move(log_path) });
+#endif
+}
+
+inline void TestRunner::render_live_display(size_t completed, size_t total)
+{
+    m_live_display.render([&](LiveDisplay::RenderTarget& t) {
+        t.lines(
+            [&] {
+                if (!m_current_test_label.is_empty())
+                    t.label("⏺ "sv, m_current_test_label);
+                else
+                    t.label("⏺ (idle)"sv, {}, { .prefix = LiveDisplay::Gray, .text = LiveDisplay::None });
+            },
+            [&] {
+                t.counter({
+                    { .label = "Pass"sv, .color = LiveDisplay::Green, .value = m_counts.tests_passed },
+                    { .label = "Fail"sv, .color = LiveDisplay::Red, .value = m_counts.tests_failed },
+                    { .label = "Skipped"sv, .color = LiveDisplay::Gray, .value = m_counts.tests_skipped },
+                    { .label = "XFail"sv, .color = LiveDisplay::Yellow, .value = m_counts.tests_expected_failed },
+                });
+            },
+            [&] {
+                t.progress_bar(completed, total);
+            });
+    });
+}
+
 inline void TestRunner::run(ReadonlySpan<ByteString> test_globs)
 {
-    size_t progress_counter = 0;
     auto test_paths = get_test_paths();
+    size_t total_tests = 0;
+    for (auto& path : test_paths) {
+        if (any_of(test_globs, [&](auto& glob) { return path.matches(glob); }))
+            ++total_tests;
+    }
+
+    bool live_display_enabled = !m_print_json && !m_print_each_test && stdout_is_tty() && begin_live_display();
+
+    if (live_display_enabled)
+        render_live_display(0, total_tests);
+
+    size_t progress_counter = 0;
     for (auto& path : test_paths) {
         if (!any_of(test_globs, [&](auto& glob) { return path.matches(glob); }))
             continue;
         ++progress_counter;
-        do_run_single_test(path, progress_counter, test_paths.size());
+
+        if (live_display_enabled) {
+            auto label = LexicalPath::relative_path(path, m_test_root);
+            m_current_test_label = label.has_value() ? label.release_value() : path;
+            render_live_display(progress_counter - 1, total_tests);
+        }
+
+        if (m_print_each_test) {
+            auto label = LexicalPath::relative_path(path, m_test_root);
+            warnln("[{}/{}] {}", progress_counter, total_tests, label.has_value() ? label.release_value() : path);
+        }
+
+        do_run_single_test(path, progress_counter, total_tests);
+
+        if (live_display_enabled)
+            render_live_display(progress_counter, total_tests);
+
         if (m_print_progress)
-            warn("\033]9;{};{};\033\\", progress_counter, test_paths.size());
+            warn("\033]9;{};{};\033\\", progress_counter, total_tests);
     }
+
+    ByteString saved_log_path = m_live_display.log_file_path();
+    m_live_display.end();
 
     if (m_print_progress)
         warn("\033]9;-1;\033\\");
@@ -112,6 +219,9 @@ inline void TestRunner::run(ReadonlySpan<ByteString> test_globs)
         print_test_results();
     else
         print_test_results_as_json();
+
+    if (live_display_enabled && !saved_log_path.is_empty())
+        outln("Full test output: {}", saved_log_path);
 }
 
 enum Modifier {
@@ -129,6 +239,11 @@ enum Modifier {
 
 inline void print_modifiers(Vector<Modifier> modifiers)
 {
+    // Strip ANSI escapes for non-tty output.
+#if !defined(AK_OS_WINDOWS)
+    if (!isatty(STDOUT_FILENO))
+        return;
+#endif
     for (auto& modifier : modifiers) {
         auto code = [&] {
             switch (modifier) {

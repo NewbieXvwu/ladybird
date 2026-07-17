@@ -14,16 +14,16 @@
 namespace Web::Layout {
 
 class WEB_API SVGGraphicsBox : public SVGBox {
-    GC_CELL(SVGGraphicsBox, SVGBox);
+    LAYOUT_NODE(SVGGraphicsBox, SVGBox);
 
 public:
-    SVGGraphicsBox(DOM::Document&, SVG::SVGGraphicsElement&, GC::Ref<CSS::ComputedProperties>);
+    SVGGraphicsBox(DOM::Document&, SVG::SVGGraphicsElement&, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~SVGGraphicsBox() override = default;
 
     SVG::SVGGraphicsElement& dom_node() { return as<SVG::SVGGraphicsElement>(SVGBox::dom_node()); }
     SVG::SVGGraphicsElement const& dom_node() const { return as<SVG::SVGGraphicsElement>(SVGBox::dom_node()); }
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
 private:
     virtual bool is_svg_graphics_box() const override { return true; }

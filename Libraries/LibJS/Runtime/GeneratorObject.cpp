@@ -4,42 +4,57 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/TemporaryChange.h>
-#include <LibJS/Bytecode/Generator.h>
-#include <LibJS/Bytecode/Interpreter.h>
-#include <LibJS/Runtime/CompletionCell.h>
+#include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/GeneratorObject.h>
 #include <LibJS/Runtime/GeneratorPrototype.h>
-#include <LibJS/Runtime/GeneratorResult.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/Iterator.h>
+#include <LibJS/Runtime/NativeJavaScriptBackedFunction.h>
+#include <LibJS/Runtime/VM.h>
 
 namespace JS {
 
 GC_DEFINE_ALLOCATOR(GeneratorObject);
 
-ThrowCompletionOr<GC::Ref<GeneratorObject>> GeneratorObject::create(Realm& realm, Value initial_value, ECMAScriptFunctionObject* generating_function, NonnullOwnPtr<ExecutionContext> execution_context)
+GC::Ref<GeneratorObject> GeneratorObject::create(Realm& realm, Variant<GC::Ref<ECMAScriptFunctionObject>, GC::Ref<NativeJavaScriptBackedFunction>> generating_function, NonnullOwnPtr<ExecutionContext> execution_context)
 {
     auto& vm = realm.vm();
-    // This is "g1.prototype" in figure-2 (https://tc39.es/ecma262/img/figure-2.png)
-    Value generating_function_prototype;
-    if (generating_function->kind() == FunctionKind::Async) {
+
+    auto kind = generating_function.visit(
+        [](auto function) {
+            return function->kind();
+        });
+
+    GC::Ptr<Object> generating_function_prototype_object = nullptr;
+    if (kind == FunctionKind::Async) {
         // We implement async functions by transforming them to generator function in the bytecode
         // interpreter. However an async function does not have a prototype and should not be
         // changed thus we hardcode the prototype.
-        generating_function_prototype = realm.intrinsics().generator_prototype();
+        generating_function_prototype_object = realm.intrinsics().generator_prototype();
     } else {
-        generating_function_prototype = TRY(generating_function->get(vm.names.prototype));
+        // 1. Let _generator_ be ? OrdinaryCreateFromConstructor(_functionObject_, *"%GeneratorPrototype%"*,
+        //    « [[GeneratorState]], [[GeneratorContext]], [[GeneratorBrand]] »).
+        generating_function_prototype_object = MUST(generating_function.visit([&vm](auto function) -> ThrowCompletionOr<Object*> {
+            return get_prototype_from_constructor(vm, *function, &Intrinsics::generator_prototype);
+        }));
     }
-    auto generating_function_prototype_object = TRY(generating_function_prototype.to_object(vm));
+
+    auto generating_executable = generating_function.visit(
+        [](GC::Ref<ECMAScriptFunctionObject> function) -> GC::Ref<Bytecode::Executable> {
+            return function->bytecode_executable().as_nonnull();
+        },
+        [](GC::Ref<NativeJavaScriptBackedFunction> function) -> GC::Ref<Bytecode::Executable> {
+            return function->bytecode_executable();
+        });
+
     auto object = realm.create<GeneratorObject>(realm, generating_function_prototype_object, move(execution_context));
-    object->m_generating_function = generating_function;
-    object->m_previous_value = initial_value;
+    object->m_generating_executable = generating_executable;
+    object->m_yield_continuation = object->m_execution_context->yield_continuation;
     return object;
 }
 
-GeneratorObject::GeneratorObject(Realm&, Object& prototype, NonnullOwnPtr<ExecutionContext> context, Optional<StringView> generator_brand)
-    : Object(ConstructWithPrototypeTag::Tag, prototype)
+GeneratorObject::GeneratorObject(Realm& realm, Object* prototype, NonnullOwnPtr<ExecutionContext> context, Optional<StringView> generator_brand)
+    : Object(realm, prototype)
     , m_execution_context(move(context))
     , m_generator_brand(move(generator_brand))
 {
@@ -48,9 +63,9 @@ GeneratorObject::GeneratorObject(Realm&, Object& prototype, NonnullOwnPtr<Execut
 void GeneratorObject::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_generating_function);
-    visitor.visit(m_previous_value);
+    visitor.visit(m_generating_executable);
     m_execution_context->visit_edges(visitor);
+    visitor.visit(m_pending_completion_value);
 }
 
 // 27.5.3.2 GeneratorValidate ( generator, generatorBrand ), https://tc39.es/ecma262/#sec-generatorvalidate
@@ -82,47 +97,37 @@ ThrowCompletionOr<GeneratorObject::IterationResult> GeneratorObject::execute(VM&
 {
     // Loosely based on step 4 of https://tc39.es/ecma262/#sec-generatorstart mixed with https://tc39.es/ecma262/#sec-generatoryield at the end.
 
-    auto generated_value = [](Value value) -> Value {
-        if (value.is_cell())
-            return static_cast<GeneratorResult const&>(value.as_cell()).result();
-        return value.is_special_empty_value() ? js_undefined() : value;
-    };
-
-    auto generated_continuation = [&](Value value) -> Optional<size_t> {
-        if (value.is_cell()) {
-            auto number_value = static_cast<GeneratorResult const&>(value.as_cell()).continuation();
-            if (number_value.is_null())
-                return {};
-            return static_cast<u64>(number_value.as_double());
-        }
-        return {};
-    };
-
-    auto compleion_cell = heap().allocate<CompletionCell>(completion);
-
-    auto& bytecode_interpreter = vm.bytecode_interpreter();
-
-    auto const next_block = generated_continuation(m_previous_value);
+    set_pending_completion(completion);
 
     // We should never enter `execute` again after the generator is complete.
-    VERIFY(next_block.has_value());
+    VERIFY(m_yield_continuation != ExecutionContext::no_yield_continuation);
 
-    auto next_result = bytecode_interpreter.run_executable(*m_generating_function->bytecode_executable(), next_block, compleion_cell);
+    // Clear yield state so that a normal return (no yield) is detected as done.
+    m_execution_context->yield_continuation = ExecutionContext::no_yield_continuation;
+    m_execution_context->yield_value_is_iterator_result = false;
+
+    auto result_value = vm.run_executable(vm.running_execution_context(), *m_generating_executable, m_yield_continuation, Value(this));
+    clear_pending_completion();
 
     vm.pop_execution_context();
 
-    auto result_value = move(next_result.value);
     if (result_value.is_throw_completion()) {
         // Uncaught exceptions disable the generator.
         m_generator_state = GeneratorState::Completed;
         return result_value.throw_completion();
     }
-    m_previous_value = result_value.release_value();
-    bool done = !generated_continuation(m_previous_value).has_value();
+
+    auto value = result_value.release_value();
+    if (value.is_special_empty_value())
+        value = js_undefined();
+
+    m_yield_continuation = m_execution_context->yield_continuation;
+    bool done = m_yield_continuation == ExecutionContext::no_yield_continuation;
+    bool value_is_iterator_result = m_execution_context->yield_value_is_iterator_result;
 
     m_generator_state = done ? GeneratorState::Completed : GeneratorState::SuspendedYield;
 
-    return IterationResult(generated_value(m_previous_value), done);
+    return IterationResult(value, done, value_is_iterator_result && !done);
 }
 
 // 27.5.3.3 GeneratorResume ( generator, value, generatorBrand ), https://tc39.es/ecma262/#sec-generatorresume

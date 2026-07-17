@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <AK/Format.h>
+#include <AK/Types.h>
 
 namespace JS::Bytecode {
 
@@ -19,14 +19,7 @@ public:
         return Register(accumulator_index);
     }
 
-    constexpr static u32 saved_return_value_index = 1;
-
-    static constexpr Register saved_return_value()
-    {
-        return Register(saved_return_value_index);
-    }
-
-    static constexpr u32 exception_index = 2;
+    static constexpr u32 exception_index = 1;
 
     static constexpr Register exception()
     {
@@ -35,14 +28,20 @@ public:
 
     static constexpr Register this_value()
     {
-        constexpr u32 this_value_index = 3;
+        constexpr u32 this_value_index = 2;
         return Register(this_value_index);
     }
 
     static constexpr Register return_value()
     {
-        constexpr u32 return_value_index = 4;
+        constexpr u32 return_value_index = 3;
         return Register(return_value_index);
+    }
+
+    static constexpr Register saved_lexical_environment()
+    {
+        constexpr u32 saved_lexical_environment_index = 4;
+        return Register(saved_lexical_environment_index);
     }
 
     static constexpr u32 reserved_register_count = 5;
@@ -61,13 +60,3 @@ private:
 };
 
 }
-
-template<>
-struct AK::Formatter<JS::Bytecode::Register> : AK::Formatter<FormatString> {
-    ErrorOr<void> format(FormatBuilder& builder, JS::Bytecode::Register const& value)
-    {
-        if (value.index() == JS::Bytecode::Register::accumulator_index)
-            return builder.put_string("acc"sv);
-        return AK::Formatter<FormatString>::format(builder, "${}"sv, value.index());
-    }
-};

@@ -1,0 +1,20 @@
+$e52776fd logical-constant-folding.js:1:1
+  Registers: 6
+  Blocks:    1
+  Constants:
+    [0] = Null
+    [1] = Int32(42)
+    [2] = Undefined
+    [3] = Int32(0)
+    [4] = Bool(false)
+    [5] = Bool(true)
+
+block0:
+  [   0] SetGlobal `a`, src:Int32(42)
+  [  10] SetGlobal `b`, src:Int32(42)
+  [  20] SetGlobal `c`, src:Int32(0)
+  [  30] SetGlobal `d`, src:Int32(42)
+  [  40] SetGlobal `e`, src:Bool(true)
+  [  50] SetGlobal `f`, src:Int32(42)
+  [  60] SetGlobal `g`, src:Bool(false)
+  [  70] End value:Undefined

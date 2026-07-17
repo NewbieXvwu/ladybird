@@ -29,17 +29,14 @@ void SetIterator::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_set);
+    m_iterator.visit_edges(visitor);
 }
 
-BuiltinIterator* SetIterator::as_builtin_iterator_if_next_is_not_redefined(IteratorRecord const& iterator_record)
+BuiltinIterator* SetIterator::as_builtin_iterator_if_next_is_not_redefined(Value next_method)
 {
-    if (iterator_record.next_method.is_object()) {
-        auto const& next_function = iterator_record.next_method.as_object();
-        if (next_function.is_native_function()) {
-            auto const& native_function = static_cast<NativeFunction const&>(next_function);
-            if (native_function.is_set_prototype_next_builtin())
-                return this;
-        }
+    if (auto native_function = next_method.as_if<NativeFunction>()) {
+        if (native_function->is_set_prototype_next_builtin())
+            return this;
     }
     return nullptr;
 }
@@ -61,7 +58,7 @@ ThrowCompletionOr<void> SetIterator::next(VM& vm, bool& done, Value& value)
 
     VERIFY(m_iteration_kind != Object::PropertyKind::Key);
 
-    value = (*m_iterator).key;
+    value = *m_iterator;
     ++m_iterator;
     if (m_iteration_kind == Object::PropertyKind::Value) {
         return {};

@@ -2,6 +2,7 @@
  * Copyright (c) 2024, Shannon Booth <shannon@serenityos.org>
  * Copyright (c) 2024, Jamie Mansfield <jmansfield@cadixdev.org>
  * Copyright (c) 2024-2025, stelar7 <dudedbz@gmail.com>
+ * Copyright (c) 2025, Luke Wilde <luke@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -24,8 +25,8 @@ IDBRequest::~IDBRequest() = default;
 IDBRequest::IDBRequest(JS::Realm& realm, IDBRequestSource source)
     : EventTarget(realm)
     , m_source(source)
+    , m_uuid(Crypto::generate_random_uuid())
 {
-    m_uuid = MUST(Crypto::generate_random_uuid());
 }
 
 void IDBRequest::initialize(JS::Realm& realm)
@@ -44,13 +45,15 @@ void IDBRequest::visit_edges(Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_result);
     visitor.visit(m_transaction);
+    visitor.visit(m_source);
+    visitor.visit(m_error);
+}
 
-    m_source.visit(
-        [&](Empty) {},
-        [&](auto const& object) { visitor.visit(object); });
-
-    if (m_error.has_value())
-        visitor.visit(*m_error);
+DOM::EventTarget* IDBRequest::get_parent(DOM::Event const&)
+{
+    // https://w3c.github.io/IndexedDB/#request-construct
+    // A request’s get the parent algorithm returns the request’s transaction.
+    return m_transaction.ptr();
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbrequest-onsuccess

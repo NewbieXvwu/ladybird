@@ -9,6 +9,7 @@
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/PrimitiveString.h>
 #include <LibJS/Runtime/TypedArray.h>
+#include <LibJS/Runtime/ValueInlines.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Crypto/KeyAlgorithms.h>
 
@@ -20,6 +21,7 @@ GC_DEFINE_ALLOCATOR(RsaHashedKeyAlgorithm);
 GC_DEFINE_ALLOCATOR(EcKeyAlgorithm);
 GC_DEFINE_ALLOCATOR(AesKeyAlgorithm);
 GC_DEFINE_ALLOCATOR(HmacKeyAlgorithm);
+GC_DEFINE_ALLOCATOR(KmacKeyAlgorithm);
 
 template<typename T>
 static JS::ThrowCompletionOr<T*> impl_from(JS::VM& vm, StringView Name)
@@ -102,7 +104,7 @@ WebIDL::ExceptionOr<void> RsaKeyAlgorithm::set_public_exponent(::Crypto::Unsigne
 
     // The BigInteger typedef from the WebCrypto spec requires the bytes in the Uint8Array be ordered in Big Endian
     m_public_exponent = TRY(JS::Uint8Array::create(realm, result.size()));
-    m_public_exponent->viewed_array_buffer()->buffer().overwrite(0, result.data(), result.size());
+    m_public_exponent->viewed_array_buffer()->overwrite(0, result.data(), result.size());
 
     return {};
 }
@@ -149,7 +151,7 @@ GC::Ref<RsaHashedKeyAlgorithm> RsaHashedKeyAlgorithm::create(JS::Realm& realm)
 
 RsaHashedKeyAlgorithm::RsaHashedKeyAlgorithm(JS::Realm& realm)
     : RsaKeyAlgorithm(realm)
-    , m_hash(String {})
+    , m_hash(Utf16String {})
 {
 }
 
@@ -165,7 +167,7 @@ JS_DEFINE_NATIVE_FUNCTION(RsaHashedKeyAlgorithm::hash_getter)
     auto* impl = TRY(impl_from<RsaHashedKeyAlgorithm>(vm, "RsaHashedKeyAlgorithm"sv));
     auto hash = TRY(Bindings::throw_dom_exception_if_needed(vm, [&] { return impl->hash(); }));
     return hash.visit(
-        [&](String const& hash_string) -> JS::Value {
+        [&](Utf16String const& hash_string) -> JS::Value {
             auto& realm = *vm.current_realm();
             auto object = KeyAlgorithm::create(realm);
             object->set_name(hash_string);
@@ -233,6 +235,28 @@ JS_DEFINE_NATIVE_FUNCTION(HmacKeyAlgorithm::hash_getter)
 JS_DEFINE_NATIVE_FUNCTION(HmacKeyAlgorithm::length_getter)
 {
     auto* impl = TRY(impl_from<HmacKeyAlgorithm>(vm, "HmacKeyAlgorithm"sv));
+    return TRY(Bindings::throw_dom_exception_if_needed(vm, [&] { return impl->length(); }));
+}
+
+GC::Ref<KmacKeyAlgorithm> KmacKeyAlgorithm::create(JS::Realm& realm)
+{
+    return realm.create<KmacKeyAlgorithm>(realm);
+}
+
+KmacKeyAlgorithm::KmacKeyAlgorithm(JS::Realm& realm)
+    : KeyAlgorithm(realm)
+{
+}
+
+void KmacKeyAlgorithm::initialize(JS::Realm& realm)
+{
+    Base::initialize(realm);
+    define_native_accessor(realm, "length"_utf16_fly_string, length_getter, {}, JS::Attribute::Enumerable | JS::Attribute::Configurable);
+}
+
+JS_DEFINE_NATIVE_FUNCTION(KmacKeyAlgorithm::length_getter)
+{
+    auto* impl = TRY(impl_from<KmacKeyAlgorithm>(vm, "KmacKeyAlgorithm"sv));
     return TRY(Bindings::throw_dom_exception_if_needed(vm, [&] { return impl->length(); }));
 }
 

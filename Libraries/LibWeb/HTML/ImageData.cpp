@@ -5,9 +5,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Checked.h>
 #include <LibGfx/Bitmap.h>
 #include <LibJS/Runtime/TypedArray.h>
-#include <LibWeb/Bindings/ImageDataPrototype.h>
+#include <LibWeb/Bindings/ImageData.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/ImageData.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
@@ -19,9 +20,28 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(ImageData);
 
-[[nodiscard]] static auto create_bitmap_backed_by_uint8_clamped_array(u32 const width, u32 const height, JS::Uint8ClampedArray& data)
+[[nodiscard]] static ErrorOr<void> validate_uint8_clamped_array_can_back_bitmap(u32 const width, u32 const height, JS::Uint8ClampedArray const& data)
 {
-    return Gfx::Bitmap::create_wrapper(Gfx::BitmapFormat::RGBA8888, Gfx::AlphaType::Unpremultiplied, Gfx::IntSize(width, height), width * sizeof(u32), data.data().data());
+    auto data_record = JS::make_typed_array_with_buffer_witness_record(data, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(data_record))
+        return Error::from_errno(EINVAL);
+
+    Checked<size_t> expected_byte_length = width;
+    expected_byte_length *= height;
+    expected_byte_length *= sizeof(u32);
+    if (expected_byte_length.has_overflow())
+        return Error::from_errno(EINVAL);
+
+    if (JS::typed_array_byte_length(data_record) < expected_byte_length.value())
+        return Error::from_errno(EINVAL);
+
+    return {};
+}
+
+[[nodiscard]] static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> create_bitmap_backed_by_uint8_clamped_array(u32 const width, u32 const height, JS::Uint8ClampedArray& data)
+{
+    TRY(validate_uint8_clamped_array_can_back_bitmap(width, height, data));
+    return Gfx::Bitmap::create_wrapper(Gfx::BitmapFormat::RGBA8888, Gfx::AlphaType::Unpremultiplied, Gfx::IntSize(width, height), width * sizeof(u32), data.viewed_array_buffer()->data_at(data.byte_offset()));
 }
 
 GC::Ref<ImageData> ImageData::create(JS::Realm& realm)
@@ -30,7 +50,7 @@ GC::Ref<ImageData> ImageData::create(JS::Realm& realm)
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-imagedata
-WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::create(JS::Realm& realm, u32 sw, u32 sh, Optional<ImageDataSettings> const& settings)
+WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::create(JS::Realm& realm, u32 sw, u32 sh, Optional<Bindings::ImageDataSettings> const& settings)
 {
     // 1. If one or both of sw and sh are zero, then throw an "IndexSizeError" DOMException.
     if (sw == 0 || sh == 0)
@@ -41,23 +61,20 @@ WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::create(JS::Realm& realm, u32 
     return initialize(realm, sh, sw, settings);
 }
 
-WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::construct_impl(JS::Realm& realm, u32 sw, u32 sh, Optional<ImageDataSettings> const& settings)
+WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::construct_impl(JS::Realm& realm, u32 sw, u32 sh, Optional<Bindings::ImageDataSettings> const& settings)
 {
     return ImageData::create(realm, sw, sh, settings);
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-imagedata-with-data
-WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::create(JS::Realm& realm, GC::Root<WebIDL::BufferSource> const& data, u32 sw, Optional<u32> sh, Optional<ImageDataSettings> const& settings)
+WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::create(JS::Realm& realm, GC::Ref<JS::Uint8ClampedArray> uint8_clamped_array_data, u32 sw, Optional<u32> sh, Optional<Bindings::ImageDataSettings> const& settings)
 {
-    auto& vm = realm.vm();
-
-    if (!is<JS::Uint8ClampedArray>(*data->raw_object()))
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "Uint8ClampedArray");
-
-    auto& uint8_clamped_array_data = static_cast<JS::Uint8ClampedArray&>(*data->raw_object());
+    auto data_record = JS::make_typed_array_with_buffer_witness_record(*uint8_clamped_array_data, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(data_record))
+        return WebIDL::InvalidStateError::create(realm, "Source data must not be out-of-bounds."_utf16);
 
     // 1. Let length be the number of bytes in data.
-    auto length = uint8_clamped_array_data.byte_length().length();
+    auto length = JS::typed_array_length(data_record);
 
     // 2. If length is not a nonzero integral multiple of four, then throw an "InvalidStateError" DOMException.
     if (length == 0 || length % 4 != 0)
@@ -81,16 +98,16 @@ WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::create(JS::Realm& realm, GC::
 
     // 7. Initialize this given sw, sh, settings set to settings, and source set to data.
     // FIXME: This seems to be a spec issue, sh is an optional but height always have a value.
-    return initialize(realm, height, sw, settings, uint8_clamped_array_data);
+    return initialize(realm, height, sw, settings, *uint8_clamped_array_data);
 }
 
-WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::construct_impl(JS::Realm& realm, GC::Root<WebIDL::BufferSource> const& data, u32 sw, Optional<u32> sh, Optional<ImageDataSettings> const& settings)
+WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::construct_impl(JS::Realm& realm, GC::Ref<JS::Uint8ClampedArray> data, u32 sw, Optional<u32> sh, Optional<Bindings::ImageDataSettings> const& settings)
 {
     return ImageData::create(realm, data, sw, move(sh), settings);
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#initialize-an-imagedata-object
-WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::initialize(JS::Realm& realm, u32 rows, u32 pixels_per_row, Optional<ImageDataSettings> const& settings, GC::Ptr<JS::Uint8ClampedArray> source, Optional<Bindings::PredefinedColorSpace> default_color_space)
+WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::initialize(JS::Realm& realm, u32 rows, u32 pixels_per_row, Optional<Bindings::ImageDataSettings> const& settings, GC::Ptr<JS::Uint8ClampedArray> source, Optional<Bindings::PredefinedColorSpace> default_color_space)
 {
     auto data = TRY([&]() -> WebIDL::ExceptionOr<GC::Ref<JS::Uint8ClampedArray>> {
         // 1. If source was given, then initialize the data attribute of imageData to source.
@@ -112,16 +129,17 @@ WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::initialize(JS::Realm& realm, 
         return TRY(JS::Uint8ClampedArray::create(realm, sizeof(u32) * rows * pixels_per_row));
     }());
 
-    // AD-HOC: Create the bitmap backed by the Uint8ClampedArray.
-    auto bitmap = TRY_OR_THROW_OOM(realm.vm(), create_bitmap_backed_by_uint8_clamped_array(pixels_per_row, rows, *data));
+    // AD-HOC: Validate that the bitmap can be backed by the Uint8ClampedArray.
+    if (validate_uint8_clamped_array_can_back_bitmap(pixels_per_row, rows, *data).is_error())
+        return WebIDL::InvalidStateError::create(realm, "Source data must not be detached or out-of-bounds."_utf16);
 
     // 4. Initialize the width attribute of imageData to pixelsPerRow.
     // 5. Initialize the height attribute of imageData to rows.
 
     // 6. If settings was given and settings["colorSpace"] exists, then initialize the colorSpace attribute of imageData to settings["colorSpace"].
     Bindings::PredefinedColorSpace color_space {};
-    if (settings.has_value())
-        color_space = settings->color_space;
+    if (settings.has_value() && settings->color_space.has_value())
+        color_space = *settings->color_space;
     // 7. Otherwise, if defaultColorSpace was given, then initialize the colorSpace attribute of imageData to defaultColorSpace.
     else if (default_color_space.has_value())
         color_space = *default_color_space;
@@ -129,7 +147,7 @@ WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::initialize(JS::Realm& realm, 
     else
         color_space = Bindings::PredefinedColorSpace::Srgb;
 
-    return realm.create<ImageData>(realm, move(bitmap), data, color_space);
+    return realm.create<ImageData>(realm, pixels_per_row, rows, data, color_space);
 }
 
 ImageData::ImageData(JS::Realm& realm)
@@ -137,9 +155,10 @@ ImageData::ImageData(JS::Realm& realm)
 {
 }
 
-ImageData::ImageData(JS::Realm& realm, NonnullRefPtr<Gfx::Bitmap> bitmap, GC::Ref<JS::Uint8ClampedArray> data, Bindings::PredefinedColorSpace color_space)
+ImageData::ImageData(JS::Realm& realm, u32 width, u32 height, GC::Ref<JS::Uint8ClampedArray> data, Bindings::PredefinedColorSpace color_space)
     : PlatformObject(realm)
-    , m_bitmap(move(bitmap))
+    , m_width(width)
+    , m_height(height)
     , m_color_space(color_space)
     , m_data(move(data))
 {
@@ -151,6 +170,9 @@ void ImageData::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(ImageData);
     Base::initialize(realm);
+
+    if (m_data)
+        define_direct_property("data"_utf16_fly_string, m_data, JS::Attribute::Enumerable);
 }
 
 void ImageData::visit_edges(Cell::Visitor& visitor)
@@ -161,12 +183,19 @@ void ImageData::visit_edges(Cell::Visitor& visitor)
 
 WebIDL::UnsignedLong ImageData::width() const
 {
-    return m_bitmap->width();
+    return m_width;
 }
 
 WebIDL::UnsignedLong ImageData::height() const
 {
-    return m_bitmap->height();
+    return m_height;
+}
+
+ErrorOr<NonnullRefPtr<Gfx::Bitmap>> ImageData::bitmap()
+{
+    VERIFY(m_data);
+    // The wrapper aliases mutable ImageData storage. Use it synchronously only.
+    return create_bitmap_backed_by_uint8_clamped_array(m_width, m_height, *m_data);
 }
 
 JS::Uint8ClampedArray* ImageData::data()
@@ -180,19 +209,18 @@ JS::Uint8ClampedArray const* ImageData::data() const
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#pixel-manipulation:serialization-steps
-WebIDL::ExceptionOr<void> ImageData::serialization_steps(HTML::TransferDataEncoder& serialized, bool for_storage, HTML::SerializationMemory& memory)
+WebIDL::ExceptionOr<void> ImageData::serialization_steps(HTML::StructuredSerializeWriter& serialized, bool for_storage, HTML::SerializationMemory& memory)
 {
     auto& vm = this->vm();
 
     // 1. Set serialized.[[Data]] to the sub-serialization of the value of value's data attribute.
-    auto serialized_data = TRY(structured_serialize_internal(vm, m_data, for_storage, memory));
-    serialized.append(move(serialized_data));
+    TRY(structured_serialize_internal(vm, serialized, m_data, for_storage, memory));
 
     // 2. Set serialized.[[Width]] to the value of value's width attribute.
-    serialized.encode(m_bitmap->width());
+    serialized.encode(m_width);
 
     // 3. Set serialized.[[Height]] to the value of value's height attribute.
-    serialized.encode(m_bitmap->height());
+    serialized.encode(m_height);
 
     // 4. Set serialized.[[ColorSpace]] to the value of value's colorSpace attribute.
     serialized.encode(m_color_space);
@@ -203,28 +231,30 @@ WebIDL::ExceptionOr<void> ImageData::serialization_steps(HTML::TransferDataEncod
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#pixel-manipulation:deserialization-steps
-WebIDL::ExceptionOr<void> ImageData::deserialization_steps(HTML::TransferDataDecoder& serialized, HTML::DeserializationMemory& memory)
+WebIDL::ExceptionOr<void> ImageData::deserialization_steps(HTML::StructuredSerializeReader& serialized, HTML::DeserializationMemory& memory)
 {
     auto& vm = this->vm();
     auto& realm = this->realm();
 
     // 1. Initialize value's data attribute to the sub-deserialization of serialized.[[Data]].
-    auto deserialized = TRY(structured_deserialize_internal(vm, serialized, realm, memory));
-    m_data = as<JS::Uint8ClampedArray>(deserialized.as_object());
+    m_data = TRY(deserialize_nested_as<JS::Uint8ClampedArray>(vm, serialized, realm, memory));
 
     // 2. Initialize value's width attribute to serialized.[[Width]].
-    auto width = serialized.decode<int>();
+    m_width = TRY(HTML::decode_or_throw_data_clone_error<u32>(realm, serialized));
 
     // 3. Initialize value's height attribute to serialized.[[Height]].
-    auto height = serialized.decode<int>();
+    m_height = TRY(HTML::decode_or_throw_data_clone_error<u32>(realm, serialized));
 
     // 4. Initialize value's colorSpace attribute to serialized.[[ColorSpace]].
-    m_color_space = serialized.decode<Bindings::PredefinedColorSpace>();
+    m_color_space = TRY(HTML::decode_or_throw_data_clone_error<Bindings::PredefinedColorSpace>(realm, serialized));
 
     // FIXME: 5. Initialize value's pixelFormat attribute to serialized.[[PixelFormat]].
 
-    // AD-HOC: Create the bitmap backed by the Uint8ClampedArray.
-    m_bitmap = TRY_OR_THROW_OOM(vm, create_bitmap_backed_by_uint8_clamped_array(width, height, *m_data));
+    // AD-HOC: Validate that the bitmap can be backed by the Uint8ClampedArray.
+    if (validate_uint8_clamped_array_can_back_bitmap(m_width, m_height, *m_data).is_error())
+        return WebIDL::InvalidStateError::create(realm, "Image data must not be detached or out-of-bounds."_utf16);
+
+    define_direct_property("data"_utf16_fly_string, m_data, JS::Attribute::Enumerable);
 
     return {};
 }

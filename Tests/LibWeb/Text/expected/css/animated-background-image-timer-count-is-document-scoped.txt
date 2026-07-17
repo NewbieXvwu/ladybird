@@ -1,0 +1,2 @@
+top document has animation state: false
+iframe document timer active: true

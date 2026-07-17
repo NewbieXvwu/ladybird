@@ -18,6 +18,7 @@ class CSSMathMax final : public CSSMathValue {
 public:
     [[nodiscard]] static GC::Ref<CSSMathMax> create(JS::Realm&, NumericType, GC::Ref<CSSNumericArray>);
     static WebIDL::ExceptionOr<GC::Ref<CSSMathMax>> construct_impl(JS::Realm&, Vector<CSSNumberish>);
+    static WebIDL::ExceptionOr<GC::Ref<CSSMathMax>> add_all_types_into_math_max(JS::Realm&, GC::RootVector<GC::Ref<CSSNumericValue>> const&);
 
     virtual ~CSSMathMax() override;
 
@@ -26,9 +27,11 @@ public:
 
     GC::Ref<CSSNumericArray> values() const;
 
-    virtual String serialize_math_value(Nested, Parens) const override;
+    virtual void serialize_math_value(Utf16StringBuilder&, Nested, Parens) const override;
     virtual bool is_equal_numeric_value(GC::Ref<CSSNumericValue> other) const override;
     virtual Optional<SumValue> create_a_sum_value() const override;
+
+    virtual WebIDL::ExceptionOr<NonnullRefPtr<CalculationNode const>> create_calculation_node(CalculationContext const&) const override;
 
 private:
     CSSMathMax(JS::Realm&, NumericType, GC::Ref<CSSNumericArray>);

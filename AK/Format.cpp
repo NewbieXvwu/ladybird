@@ -15,8 +15,12 @@
 #include <AK/LexicalPath.h>
 #include <AK/String.h>
 #include <AK/StringBuilder.h>
-#include <AK/StringFloatingPointConversions.h>
+#include <AK/StringConversions.h>
+#include <AK/Time.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16StringBuilder.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -31,6 +35,10 @@
 
 #if defined(AK_OS_WINDOWS)
 #    include <AK/Windows.h>
+#endif
+
+#if defined(AK_OS_FREEBSD)
+#    include <pthread_np.h>
 #endif
 
 namespace AK {
@@ -209,16 +217,40 @@ bool FormatParser::consume_replacement_field(size_t& index)
     return true;
 }
 
+ErrorOr<void> FormatBuilder::append(char ch)
+{
+    if (m_string_builder)
+        return m_string_builder->try_append(ch);
+    m_utf16_builder->append_ascii(ch);
+    return {};
+}
+
+ErrorOr<void> FormatBuilder::append(StringView string)
+{
+    if (m_string_builder)
+        return m_string_builder->try_append(string);
+    m_utf16_builder->append(Utf16String::from_utf8_without_validation(string));
+    return {};
+}
+
+ErrorOr<void> FormatBuilder::append(Utf16View const& string)
+{
+    if (m_string_builder)
+        return m_string_builder->try_append(string);
+    m_utf16_builder->append(string);
+    return {};
+}
+
 ErrorOr<void> FormatBuilder::put_padding(char fill, size_t amount)
 {
     for (size_t i = 0; i < amount; ++i)
-        TRY(m_builder.try_append(fill));
+        TRY(append(fill));
     return {};
 }
 ErrorOr<void> FormatBuilder::put_literal(StringView value)
 {
     for (size_t i = 0; i < value.length(); ++i) {
-        TRY(m_builder.try_append(value[i]));
+        TRY(append(value[i]));
         if (value[i] == '{' || value[i] == '}')
             ++i;
     }
@@ -239,19 +271,25 @@ ErrorOr<void> FormatBuilder::put_string(
         value = value.substring_view(0, used_by_string);
 
     if (align == Align::Left || align == Align::Default) {
-        TRY(m_builder.try_append(value));
+        TRY(append(value));
         TRY(put_padding(fill, used_by_padding));
     } else if (align == Align::Center) {
         auto const used_by_left_padding = used_by_padding / 2;
         auto const used_by_right_padding = ceil_div<size_t, size_t>(used_by_padding, 2);
 
         TRY(put_padding(fill, used_by_left_padding));
-        TRY(m_builder.try_append(value));
+        TRY(append(value));
         TRY(put_padding(fill, used_by_right_padding));
     } else if (align == Align::Right) {
         TRY(put_padding(fill, used_by_padding));
-        TRY(m_builder.try_append(value));
+        TRY(append(value));
     }
+    return {};
+}
+
+ErrorOr<void> FormatBuilder::put_string(Utf16View const& value)
+{
+    TRY(append(value));
     return {};
 }
 
@@ -299,25 +337,25 @@ ErrorOr<void> FormatBuilder::put_u64(
 
     auto const put_prefix = [&]() -> ErrorOr<void> {
         if (is_negative)
-            TRY(m_builder.try_append('-'));
+            TRY(append('-'));
         else if (sign_mode == SignMode::Always)
-            TRY(m_builder.try_append('+'));
+            TRY(append('+'));
         else if (sign_mode == SignMode::Reserved)
-            TRY(m_builder.try_append(' '));
+            TRY(append(' '));
 
         if (prefix) {
             if (base == 2) {
                 if (upper_case)
-                    TRY(m_builder.try_append("0B"sv));
+                    TRY(append("0B"sv));
                 else
-                    TRY(m_builder.try_append("0b"sv));
+                    TRY(append("0b"sv));
             } else if (base == 8) {
-                TRY(m_builder.try_append("0"sv));
+                TRY(append("0"sv));
             } else if (base == 16) {
                 if (upper_case)
-                    TRY(m_builder.try_append("0X"sv));
+                    TRY(append("0X"sv));
                 else
-                    TRY(m_builder.try_append("0x"sv));
+                    TRY(append("0x"sv));
             }
         }
         return {};
@@ -325,7 +363,7 @@ ErrorOr<void> FormatBuilder::put_u64(
 
     auto const put_digits = [&]() -> ErrorOr<void> {
         for (size_t i = 0; i < used_by_digits; ++i)
-            TRY(m_builder.try_append(buffer[i]));
+            TRY(append(buffer[i]));
         return {};
     };
 
@@ -337,7 +375,7 @@ ErrorOr<void> FormatBuilder::put_u64(
         TRY(put_padding(fill, used_by_right_padding));
     } else if (align == Align::Center) {
         auto const used_by_left_padding = used_by_padding / 2;
-        auto const used_by_right_padding = ceil_div<size_t, size_t>(used_by_padding, 2);
+        auto const used_by_right_padding = used_by_padding - used_by_left_padding;
 
         TRY(put_padding(fill, used_by_left_padding));
         TRY(put_prefix());
@@ -590,7 +628,7 @@ ErrorOr<void> FormatBuilder::put_f32_or_f64(
         return put_string(special_case_builder.string_view(), align, min_width, NumericLimits<size_t>::max(), fill);
     }
 
-    auto const [sign, mantissa, exponent] = convert_floating_point_to_decimal_exponential_form(value);
+    auto const [sign, mantissa, exponent] = convert_to_decimal_exponential_form(value);
 
     auto convert_to_decimal_digits_array = [](auto x, auto& digits) -> size_t {
         size_t length = 0;
@@ -787,7 +825,7 @@ ErrorOr<void> FormatBuilder::put_hexdump(ReadonlyBytes bytes, size_t width, char
         TRY(put_padding(fill, 4));
         for (size_t j = i - min(i, width); j < i; ++j) {
             auto ch = bytes[j];
-            TRY(m_builder.try_append(ch >= 32 && ch <= 127 ? ch : '.')); // silly hack
+            TRY(append(ch >= 32 && ch <= 127 ? ch : '.')); // silly hack
         }
         return {};
     };
@@ -809,6 +847,15 @@ ErrorOr<void> FormatBuilder::put_hexdump(ReadonlyBytes bytes, size_t width, char
 }
 
 ErrorOr<void> vformat(StringBuilder& builder, StringView fmtstr, TypeErasedFormatParams& params)
+{
+    FormatBuilder fmtbuilder { builder };
+    FormatParser parser { fmtstr };
+
+    TRY(vformat_impl(params, fmtbuilder, parser));
+    return {};
+}
+
+ErrorOr<void> vformat(Utf16StringBuilder& builder, StringView fmtstr, TypeErasedFormatParams& params)
 {
     FormatBuilder fmtbuilder { builder };
     FormatParser parser { fmtstr };
@@ -1150,22 +1197,22 @@ void vout(FILE* file, StringView fmtstr, TypeErasedFormatParams& params, bool ne
 #if defined(AK_OS_WINDOWS)
 ErrorOr<void> Formatter<Error>::format_windows_error(FormatBuilder& builder, Error const& error)
 {
-    thread_local HashMap<u32, ByteString> windows_errors;
+    static thread_local HashMap<u32, ByteString> windows_errors;
 
-    int code = error.code();
-    Optional<ByteString&> string = windows_errors.get(static_cast<u32>(code));
+    u32 code = error.code();
+    Optional<ByteString&> string = windows_errors.get(code);
     if (string.has_value()) {
         return Formatter<StringView>::format(builder, string->view());
     }
 
-    TCHAR* message = nullptr;
+    TCHAR message[256] = {};
     u32 size = FormatMessage(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
         nullptr,
-        static_cast<DWORD>(code),
+        code,
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
         message,
-        0,
+        256,
         nullptr);
     if (size == 0) {
         auto format_error = GetLastError();
@@ -1173,8 +1220,7 @@ ErrorOr<void> Formatter<Error>::format_windows_error(FormatBuilder& builder, Err
     }
 
     auto& string_in_map = windows_errors.ensure(code, [message, size] { return ByteString { message, size }; });
-    LocalFree(message);
-    return Formatter<StringView>::format(builder, string_in_map.view());
+    return Formatter<FormatString>::format(builder, "Error {:x}: {}"sv, code, string_in_map.view());
 }
 #else
 ErrorOr<void> Formatter<Error>::format_windows_error(FormatBuilder&, Error const&)
@@ -1297,11 +1343,38 @@ void set_rich_debug_enabled(bool value)
     is_rich_debug_enabled = value;
 }
 
+#define DEFAULT_FORMAT "\033[0m"
+#define BOLD_YELLOW_FORMAT "\033[33;1m"
+
+static auto current_process_id()
+{
+#if defined(AK_OS_WINDOWS)
+    return GetCurrentProcessId();
+#else
+    return getpid();
+#endif
+}
+
+static auto current_thread_id()
+{
+#if defined(AK_OS_LINUX)
+    return gettid();
+#elif defined(AK_OS_WINDOWS)
+    return GetCurrentThreadId();
+#elif defined(AK_OS_MACOS)
+    u64 thread_id { 0 };
+    pthread_threadid_np(nullptr, &thread_id);
+    return thread_id;
+#elif defined(AK_OS_FREEBSD)
+    return pthread_getthreadid_np();
+#else
+    return Empty();
+#endif
+}
+
+static auto s_main_thread_id = current_thread_id();
+
 #ifdef AK_OS_WINDOWS
-
-#    define YELLOW(str) "\33[93m" str "\33[0m"
-
-static int main_thread_id = GetCurrentThreadId();
 
 static int initialize_console_settings()
 {
@@ -1321,6 +1394,7 @@ static int initialize_console_settings()
 
     // Enable Virtual Terminal Processing to allow ANSI escape codes
     mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    mode |= ENABLE_PROCESSED_OUTPUT;
     if (!SetConsoleMode(console_handle, mode)) {
         dbgln("Unable to set console mode");
         return 0;
@@ -1344,36 +1418,27 @@ void vdbg(StringView fmtstr, TypeErasedFormatParams& params, bool newline)
     StringBuilder builder;
 
     if (is_rich_debug_enabled) {
-#ifndef AK_OS_WINDOWS
         auto process_name = process_name_for_logging();
         if (!process_name.is_empty()) {
-            struct timespec ts = {};
-            clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
-            auto pid = getpid();
-#    if defined(AK_OS_SERENITY) || defined(AK_OS_LINUX)
-            // Linux and Serenity handle thread IDs as if they are related to process ids
-            auto tid = gettid();
-            if (pid == tid)
-#    endif
-            {
-                builder.appendff("{}.{:03} \033[33;1m{}({})\033[0m: ", ts.tv_sec, ts.tv_nsec / 1000000, process_name, pid);
+            auto time = MonotonicTime::now_coarse();
+            builder.appendff("{}.{:03} " BOLD_YELLOW_FORMAT "{}", time.truncated_seconds(), time.nanoseconds_within_second() / 1000000, process_name);
+            auto process_id = current_process_id();
+            builder.appendff("({})", process_id);
+            auto thread_id = current_thread_id();
+
+            if constexpr (!IsSame<decltype(thread_id), Empty>) {
+                if (thread_id != s_main_thread_id) {
+                    char thread_name[16];
+                    auto thread_name_result = pthread_getname_np(pthread_self(), thread_name, sizeof(thread_name));
+                    if (thread_name_result == 0 && strlen(thread_name) > 0)
+                        builder.appendff(" {}", thread_name);
+                    else
+                        builder.append(" Thread"sv);
+                    builder.appendff("({})", thread_id);
+                }
             }
-#    if defined(AK_OS_SERENITY) || defined(AK_OS_LINUX)
-            else {
-                builder.appendff("{}.{:03} \033[33;1m{}({}:{})\033[0m: ", ts.tv_sec, ts.tv_nsec / 1000000, process_name, pid, tid);
-            }
-#    endif
+            builder.append(DEFAULT_FORMAT ": "sv);
         }
-#else
-        auto process_name = process_name_for_logging();
-        if (!process_name.is_empty()) {
-            int tid = GetCurrentThreadId();
-            if (tid == main_thread_id)
-                builder.appendff(YELLOW("{}: "), process_name);
-            else
-                builder.appendff(YELLOW("{}:{}: "), process_name, tid);
-        }
-#endif
     }
 
     MUST(vformat(builder, fmtstr, params));

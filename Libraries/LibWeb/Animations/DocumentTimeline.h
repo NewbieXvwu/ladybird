@@ -7,15 +7,11 @@
 #pragma once
 
 #include <LibWeb/Animations/AnimationTimeline.h>
+#include <LibWeb/Bindings/DocumentTimeline.h>
 #include <LibWeb/HighResolutionTime/DOMHighResTimeStamp.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::Animations {
-
-// https://www.w3.org/TR/web-animations-1/#dictdef-documenttimelineoptions
-struct DocumentTimelineOptions {
-    HighResolutionTime::DOMHighResTimeStamp origin_time { 0.0 };
-};
 
 // https://www.w3.org/TR/web-animations-1/#the-documenttimeline-interface
 class DocumentTimeline : public AnimationTimeline {
@@ -24,12 +20,14 @@ class DocumentTimeline : public AnimationTimeline {
 
 public:
     static GC::Ref<DocumentTimeline> create(JS::Realm&, DOM::Document&, HighResolutionTime::DOMHighResTimeStamp origin_time);
-    static WebIDL::ExceptionOr<GC::Ref<DocumentTimeline>> construct_impl(JS::Realm&, DocumentTimelineOptions options = {});
+    static WebIDL::ExceptionOr<GC::Ref<DocumentTimeline>> construct_impl(JS::Realm&, Bindings::DocumentTimelineOptions options = {});
 
-    virtual void set_current_time(Optional<double> current_time) override;
+    virtual Optional<TimeValue> duration() const override { return {}; }
+
+    virtual void update_current_time(double timestamp) override;
     virtual bool is_inactive() const override;
 
-    virtual Optional<double> convert_a_timeline_time_to_an_origin_relative_time(Optional<double>) override;
+    virtual Optional<double> convert_a_timeline_time_to_an_origin_relative_time(Optional<TimeValue>) override;
     virtual bool can_convert_a_timeline_time_to_an_origin_relative_time() const override { return true; }
 
 private:

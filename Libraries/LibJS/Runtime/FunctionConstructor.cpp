@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibJS/Lexer.h>
-#include <LibJS/Parser.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/ECMAScriptFunctionObject.h>
 #include <LibJS/Runtime/Error.h>
@@ -15,6 +13,8 @@
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/Realm.h>
+#include <LibJS/RustIntegration.h>
+#include <LibJS/SourceCode.h>
 
 namespace JS {
 
@@ -109,23 +109,23 @@ ThrowCompletionOr<GC::Ref<ECMAScriptFunctionObject>> FunctionConstructor::create
     auto arg_count = parameter_args.size();
 
     // 7. Let parameterStrings be a new empty List.
-    Vector<String> parameter_strings;
+    Vector<Utf16String> parameter_strings;
     parameter_strings.ensure_capacity(arg_count);
 
     // 8. For each element arg of parameterArgs, do
     for (auto const& parameter_value : parameter_args) {
         // a. Append ? ToString(arg) to parameterStrings.
-        parameter_strings.unchecked_append(TRY(parameter_value.to_string(vm)));
+        parameter_strings.unchecked_append(TRY(parameter_value.to_utf16_string(vm)));
     }
 
     // 9. Let bodyString be ? ToString(bodyArg).
-    auto body_string = TRY(body_arg.to_string(vm));
+    auto body_string = TRY(body_arg.to_utf16_string(vm));
 
     // 10. Let currentRealm be the current Realm Record.
     auto& realm = *vm.current_realm();
 
     // 11. Let P be the empty String.
-    String parameters_string;
+    Utf16String parameters_string;
 
     // 12. If argCount > 0, then
     if (arg_count > 0) {
@@ -135,59 +135,27 @@ ThrowCompletionOr<GC::Ref<ECMAScriptFunctionObject>> FunctionConstructor::create
         //     i. Let nextArgString be parameterStrings[k].
         //     ii. Set P to the string-concatenation of P, "," (a comma), and nextArgString.
         //     iii. Set k to k + 1.
-        parameters_string = MUST(String::join(',', parameter_strings));
+        parameters_string = Utf16String::join(',', parameter_strings);
     }
 
     // 13. Let bodyParseString be the string-concatenation of 0x000A (LINE FEED), bodyString, and 0x000A (LINE FEED).
-    auto body_parse_string = ByteString::formatted("\n{}\n", body_string);
+    auto body_parse_string = Utf16String::formatted("\n{}\n", body_string);
 
     // 14. Let sourceString be the string-concatenation of prefix, " anonymous(", P, 0x000A (LINE FEED), ") {", bodyParseString, and "}".
     // 15. Let sourceText be StringToCodePoints(sourceString).
-    auto source_text = ByteString::formatted("{} anonymous({}\n) {{{}}}", prefix, parameters_string, body_parse_string);
+    auto source_text = Utf16String::formatted("{} anonymous({}\n) {{{}}}", prefix, parameters_string, body_parse_string);
 
     // 16. Perform ? HostEnsureCanCompileStrings(currentRealm, parameterStrings, bodyString, sourceString, FUNCTION, parameterArgs, bodyArg).
     TRY(vm.host_ensure_can_compile_strings(realm, parameter_strings, body_string, source_text, CompilationType::Function, parameter_args, body_arg));
 
-    u8 parse_options = FunctionNodeParseOptions::CheckForFunctionAndName;
-    if (kind == FunctionKind::Async || kind == FunctionKind::AsyncGenerator)
-        parse_options |= FunctionNodeParseOptions::IsAsyncFunction;
-    if (kind == FunctionKind::Generator || kind == FunctionKind::AsyncGenerator)
-        parse_options |= FunctionNodeParseOptions::IsGeneratorFunction;
+    GC::Ptr<SharedFunctionInstanceData> function_data;
 
-    // 17. Let parameters be ParseText(P, parameterSym).
-    i32 function_length = 0;
-    auto parameters_parser = Parser { Lexer { parameters_string } };
-    auto parameters = parameters_parser.parse_formal_parameters(function_length, parse_options);
-
-    // 18. If parameters is a List of errors, throw a SyntaxError exception.
-    if (parameters_parser.has_errors()) {
-        auto error = parameters_parser.errors()[0];
-        return vm.throw_completion<SyntaxError>(error.to_string());
-    }
-
-    // 19. Let body be ParseText(bodyParseString, bodySym).
-    FunctionParsingInsights parsing_insights;
-    auto body_parser = Parser::parse_function_body_from_string(body_parse_string, parse_options, parameters, kind, parsing_insights);
-
-    // 20. If body is a List of errors, throw a SyntaxError exception.
-    if (body_parser.has_errors()) {
-        auto error = body_parser.errors()[0];
-        return vm.throw_completion<SyntaxError>(error.to_string());
-    }
-
-    // 21. NOTE: The parameters and body are parsed separately to ensure that each is valid alone. For example, new Function("/*", "*/ ) {") does not evaluate to a function.
-    // 22. NOTE: If this step is reached, sourceText must have the syntax of exprSym (although the reverse implication does not hold). The purpose of the next two steps is to enforce any Early Error rules which apply to exprSym directly.
-
-    // 23. Let expr be ParseText(sourceText, exprSym).
-    auto source_parser = Parser { Lexer { source_text } };
-    // This doesn't need any parse_options, it determines those & the function type based on the tokens that were found.
-    auto expr = source_parser.parse_function_node<FunctionExpression>();
-
-    // 24. If expr is a List of errors, throw a SyntaxError exception.
-    if (source_parser.has_errors()) {
-        auto error = source_parser.errors()[0];
-        return vm.throw_completion<SyntaxError>(error.to_string());
-    }
+    auto rust_compilation = RustIntegration::compile_dynamic_function(vm, source_text, parameters_string, body_parse_string, kind);
+    if (!rust_compilation.has_value())
+        return vm.throw_completion<SyntaxError>("Failed to compile dynamic function"_utf16);
+    if (rust_compilation->is_error())
+        return vm.throw_completion<SyntaxError>(rust_compilation->release_error());
+    function_data = rust_compilation->value();
 
     // 25. Let proto be ? GetPrototypeFromConstructor(newTarget, fallbackProto).
     auto* prototype = TRY(get_prototype_from_constructor(vm, *new_target, fallback_prototype));
@@ -198,9 +166,12 @@ ThrowCompletionOr<GC::Ref<ECMAScriptFunctionObject>> FunctionConstructor::create
     // 27. Let privateEnv be null.
     PrivateEnvironment* private_environment = nullptr;
 
-    // 28. Let F be OrdinaryFunctionCreate(proto, sourceText, parameters, body, non-lexical-this, env, privateEnv).
-    parsing_insights.might_need_arguments_object = true;
-    auto function = ECMAScriptFunctionObject::create(realm, "anonymous"_utf16_fly_string, *prototype, move(source_text), expr->body(), expr->parameters(), expr->function_length(), expr->local_variables_names(), &environment, private_environment, expr->kind(), expr->is_strict_mode(), parsing_insights);
+    auto function = ECMAScriptFunctionObject::create_from_function_data(
+        realm,
+        *function_data,
+        &environment,
+        private_environment,
+        *prototype);
 
     // FIXME: Remove the name argument from create() and do this instead.
     // 29. Perform SetFunctionName(F, "anonymous").
@@ -246,7 +217,7 @@ ThrowCompletionOr<GC::Ref<Object>> FunctionConstructor::construct(FunctionObject
 {
     auto& vm = this->vm();
 
-    ReadonlySpan<Value> arguments = vm.running_execution_context().arguments;
+    ReadonlySpan<Value> arguments = vm.running_execution_context().arguments_span();
 
     ReadonlySpan<Value> parameter_args = arguments;
     if (!parameter_args.is_empty())

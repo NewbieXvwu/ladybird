@@ -1,6 +1,3 @@
-#import <HTML/HTMLElement.idl>
-#import <HTML/HTMLFormElement.idl>
-
 // https://html.spec.whatwg.org/multipage/semantics.html#htmlfieldsetelement
 [Exposed=Window]
 interface HTMLFieldSetElement : HTMLElement {
@@ -8,9 +5,9 @@ interface HTMLFieldSetElement : HTMLElement {
 
     [CEReactions, Reflect] attribute boolean disabled;
     readonly attribute HTMLFormElement? form;
-    [CEReactions, Reflect] attribute DOMString name;
+    [CEReactions, Reflect] attribute Utf16DOMString name;
 
-    readonly attribute DOMString type;
+    readonly attribute Utf16DOMString type;
 
     [SameObject] readonly attribute HTMLCollection elements;
 
@@ -19,5 +16,5 @@ interface HTMLFieldSetElement : HTMLElement {
     readonly attribute Utf16DOMString validationMessage;
     boolean checkValidity();
     boolean reportValidity();
-    undefined setCustomValidity(DOMString error);
+    undefined setCustomValidity(Utf16DOMString error);
 };

@@ -2,24 +2,32 @@
  * Copyright (c) 2022, Andrew Kaster <akaster@serenityos.org>
  * Copyright (c) 2023, Linus Groh <linusg@serenityos.org>
  * Copyright (c) 2023, Luke Wilde <lukew@serenityos.org>
- * Copyright (c) 2025, Shannon Booth <shannon@serenityos.org>
+ * Copyright (c) 2025-2026, Shannon Booth <shannon@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/NumericLimits.h>
 #include <AK/QuickSort.h>
 #include <AK/String.h>
 #include <AK/Utf8View.h>
 #include <AK/Vector.h>
 #include <LibGC/Function.h>
+#include <LibGfx/Bitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibGfx/ScalingMode.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/TypedArray.h>
+#include <LibWeb/Bindings/ImageBitmap.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
+#include <LibWeb/Bindings/PerformanceObserver.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/Fetch/FetchMethod.h>
 #include <LibWeb/HTML/CanvasRenderingContext2D.h>
+#include <LibWeb/HTML/DedicatedWorkerGlobalScope.h>
 #include <LibWeb/HTML/ErrorEvent.h>
+#include <LibWeb/HTML/ErrorInformation.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/EventSource.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
@@ -32,10 +40,15 @@
 #include <LibWeb/HTML/Timer.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
+#include <LibWeb/HTML/WorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/Performance.h>
 #include <LibWeb/HighResolutionTime/SupportedPerformanceTypes.h>
+#include <LibWeb/IndexedDB/IDBDatabase.h>
 #include <LibWeb/IndexedDB/IDBFactory.h>
+#include <LibWeb/IndexedDB/Internal/Algorithms.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Infra/Strings.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/PerformanceTimeline/EntryTypes.h>
 #include <LibWeb/PerformanceTimeline/EventNames.h>
 #include <LibWeb/PerformanceTimeline/PerformanceObserver.h>
@@ -94,10 +107,10 @@ void WindowOrWorkerGlobalScopeMixin::finalize()
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#dom-origin
-String WindowOrWorkerGlobalScopeMixin::origin() const
+Utf16String WindowOrWorkerGlobalScopeMixin::origin() const
 {
     // The origin getter steps are to return this's relevant settings object's origin, serialized.
-    return relevant_settings_object(this_impl()).origin().serialize();
+    return utf16_string_from_url_ascii(relevant_settings_object(this_impl()).origin().serialize());
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#dom-issecurecontext
@@ -115,19 +128,19 @@ bool WindowOrWorkerGlobalScopeMixin::cross_origin_isolated() const
 }
 
 // https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#dom-createimagebitmap
-GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap(ImageBitmapSource image, Optional<ImageBitmapOptions> options) const
+GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap(ImageBitmapSource image, Optional<Bindings::ImageBitmapOptions> options) const
 {
     return create_image_bitmap_impl(image, {}, {}, {}, {}, options);
 }
 
 // https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#dom-createimagebitmap
-GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap(ImageBitmapSource image, WebIDL::Long sx, WebIDL::Long sy, WebIDL::Long sw, WebIDL::Long sh, Optional<ImageBitmapOptions> options) const
+GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap(ImageBitmapSource image, WebIDL::Long sx, WebIDL::Long sy, WebIDL::Long sw, WebIDL::Long sh, Optional<Bindings::ImageBitmapOptions> options) const
 {
     return create_image_bitmap_impl(image, sx, sy, sw, sh, options);
 }
 
 // https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#cropped-to-the-source-rectangle-with-formatting
-static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> crop_to_the_source_rectangle_with_formatting(RefPtr<Gfx::Bitmap const> input, Optional<WebIDL::Long> sx, Optional<WebIDL::Long> sy, Optional<WebIDL::Long> sw, Optional<WebIDL::Long> sh, Optional<ImageBitmapOptions> const& options)
+static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> crop_to_the_source_rectangle_with_formatting(RefPtr<Gfx::Bitmap const> input, Optional<WebIDL::Long> sx, Optional<WebIDL::Long> sy, Optional<WebIDL::Long> sw, Optional<WebIDL::Long> sh, Optional<Bindings::ImageBitmapOptions> const& options)
 {
     // 1. Let input be the bitmap data being transformed.
 
@@ -135,21 +148,25 @@ static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> crop_to_the_source_rectangle_with_for
     //    (sx, sy), (sx+sw, sy), (sx+sw, sy+sh), (sx, sy+sh). Otherwise, let sourceRectangle be a rectangle whose
     //    corners are the four points (0, 0), (width of input, 0), (width of input, height of input), (0, height of input).
     //    NOTE: If either sw or sh are negative, then the top-left corner of this rectangle will be to the left or above the (sx, sy) point.
+    auto clamp_to_i32 = [](i64 value) {
+        return static_cast<int>(AK::clamp<i64>(value, NumericLimits<int>::min(), NumericLimits<int>::max()));
+    };
+
     Gfx::IntRect source_rectangle;
     if (sx.has_value() && sy.has_value() && sw.has_value() && sh.has_value()) {
-        WebIDL::Long effective_sx = sx.value();
-        WebIDL::Long effective_sy = sy.value();
-        WebIDL::Long effective_sw = sw.value();
-        WebIDL::Long effective_sh = sh.value();
+        i64 effective_sx = sx.value();
+        i64 effective_sy = sy.value();
+        i64 effective_sw = sw.value();
+        i64 effective_sh = sh.value();
         if (effective_sw < 0) {
+            effective_sx += effective_sw;
             effective_sw = -effective_sw;
-            effective_sx -= effective_sw;
         }
         if (effective_sh < 0) {
+            effective_sy += effective_sh;
             effective_sh = -effective_sh;
-            effective_sy -= effective_sh;
         }
-        source_rectangle = { effective_sx, effective_sy, effective_sw, effective_sh };
+        source_rectangle = { clamp_to_i32(effective_sx), clamp_to_i32(effective_sy), clamp_to_i32(effective_sw), clamp_to_i32(effective_sh) };
     } else {
         source_rectangle = input->rect();
     }
@@ -165,7 +182,7 @@ static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> crop_to_the_source_rectangle_with_for
     else if (options.has_value() && options->resize_height.has_value()) {
         // the width of sourceRectangle, times the value of the resizeHeight member of options, divided by the height
         //  of sourceRectangle, rounded up to the nearest integer
-        output_width = ceil_div(source_rectangle.width() * options->resize_height.value(), source_rectangle.height());
+        output_width = clamp_to_i32(ceil_div(static_cast<i64>(source_rectangle.width()) * options->resize_height.value(), static_cast<i64>(source_rectangle.height())));
     }
     // -> If neither resizeWidth nor resizeHeight are specified
     else {
@@ -184,7 +201,7 @@ static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> crop_to_the_source_rectangle_with_for
     else if (options.has_value() && options->resize_width.has_value()) {
         // the height of sourceRectangle, times the value of the resizeWidth member of options, divided by the width
         //  of sourceRectangle, rounded up to the nearest integer
-        output_height = ceil_div(source_rectangle.height() * options->resize_width.value(), source_rectangle.width());
+        output_height = clamp_to_i32(ceil_div(static_cast<i64>(source_rectangle.height()) * options->resize_width.value(), static_cast<i64>(source_rectangle.width())));
     }
     // -> If neither resizeWidth nor resizeHeight are specified
     else {
@@ -198,10 +215,49 @@ static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> crop_to_the_source_rectangle_with_for
     // 6. Let output be the rectangle on the plane denoted by sourceRectangle.
     auto output = TRY(input->cropped(source_rectangle, Gfx::Color::Transparent));
 
-    // FIXME: 7. Scale output to the size specified by outputWidth and outputHeight. The user agent should use the
+    // 7. Scale output to the size specified by outputWidth and outputHeight. The user agent should use the
     //  value of the resizeQuality option to guide the choice of scaling algorithm.
-    (void)output_width;
-    (void)output_height;
+    struct ScalingPass {
+        Gfx::ScalingMode mode { Gfx::ScalingMode::None };
+        int width { 0 };
+        int height { 0 };
+    };
+    Vector<ScalingPass> scaling_passes;
+    switch (options.has_value() ? options->resize_quality : Bindings::ResizeQuality::Low) {
+        // NOTE: The spec mentions Bicubic or Lanczos scaling as higher quality options; however, Skia does not implement the latter, so for now we will use SkCubicResampler::Mitchell() for both medium and high
+    case Bindings::ResizeQuality::High:
+        // The "high" value indicates a preference for a high level of image interpolation quality. High-quality image interpolation may be more computationally expensive than lower settings.
+    case Bindings::ResizeQuality::Medium:
+        // The "medium" value indicates a preference for a medium level of image interpolation quality.
+        scaling_passes.append(ScalingPass { .mode = Gfx::ScalingMode::BilinearMipmap, .width = output_width, .height = output_height });
+        break;
+    case Bindings::ResizeQuality::Low:
+        // The "low" value indicates a preference for a low level of image interpolation quality. Low-quality image interpolation may be more computationally efficient than higher settings.
+        scaling_passes.append(ScalingPass { .mode = Gfx::ScalingMode::Bilinear, .width = output_width, .height = output_height });
+        break;
+    case Bindings::ResizeQuality::Pixelated: {
+        // The "pixelated" value indicates a preference for scaling the image to preserve the pixelation of the original as much as possible, with minor smoothing as necessary to avoid distorting the image when the target size is not a clean multiple of the original.
+
+        // To implement "pixelated", for each axis independently, first determine the integer multiple of its natural size that puts it closest to the target size and is greater than zero. Scale it to this integer-multiple-size using nearest neighbor,
+        auto determine_closest_multiple = [](int const source_length, int const output_length) {
+            // NOTE: The previous cropping action would've failed if the source bitmap we are scaling had invalid lengths. Given the precondition that are lengths are always > 0, this integer division is safe from divide-by-zero and the quotient truncation is also safe as we will always round down
+            ASSERT(source_length > 0);
+            return output_length / source_length;
+        };
+        auto const source_width = source_rectangle.width();
+        auto const source_height = source_rectangle.height();
+        auto const width_multiple = determine_closest_multiple(source_width, output_width);
+        auto const height_multiple = determine_closest_multiple(source_height, output_height);
+        if (width_multiple > 0 && height_multiple > 0)
+            scaling_passes.append(ScalingPass { .mode = Gfx::ScalingMode::NearestNeighbor, .width = source_width * width_multiple, .height = source_height * height_multiple });
+
+        // then scale it the rest of the way to the target size using bilinear interpolation.
+        scaling_passes.append(ScalingPass { .mode = Gfx::ScalingMode::Bilinear, .width = output_width, .height = output_height });
+    } break;
+    }
+    for (ScalingPass& scaling_pass : scaling_passes) {
+        output = TRY(output->scaled(scaling_pass.width, scaling_pass.height, scaling_pass.mode));
+    }
 
     // FIXME: 8. If the value of the imageOrientation member of options is "flipY", output must be flipped vertically,
     //  disregarding any image orientation metadata of the source (such as EXIF metadata), if any. [EXIF]
@@ -213,13 +269,13 @@ static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> crop_to_the_source_rectangle_with_for
     return output;
 }
 
-GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_impl(ImageBitmapSource& image, Optional<WebIDL::Long> sx, Optional<WebIDL::Long> sy, Optional<WebIDL::Long> sw, Optional<WebIDL::Long> sh, Optional<ImageBitmapOptions>& options) const
+GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_impl(ImageBitmapSource& image, Optional<WebIDL::Long> sx, Optional<WebIDL::Long> sy, Optional<WebIDL::Long> sw, Optional<WebIDL::Long> sh, Optional<Bindings::ImageBitmapOptions>& options) const
 {
     auto& realm = this_impl().realm();
 
     // 1. If either sw or sh is given and is 0, then return a promise rejected with a RangeError.
     if (sw == 0 || sh == 0) {
-        auto error_message = MUST(String::formatted("{} is an invalid value for {}", sw == 0 ? *sw : *sh, sw == 0 ? "sw"sv : "sh"sv));
+        auto error_message = Utf16String::formatted("{} is an invalid value for {}", sw == 0 ? *sw : *sh, sw == 0 ? "sw"sv : "sh"sv);
         auto error = JS::RangeError::create(realm, move(error_message));
         return WebIDL::create_rejected_promise(realm, move(error));
     }
@@ -230,10 +286,10 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
 
     // 3. Check the usability of the image argument. If this throws an exception or returns bad, then return a promise rejected with an "InvalidStateError" DOMException.
     auto error_promise = image.visit(
-        [](GC::Root<FileAPI::Blob>&) -> Optional<GC::Ref<WebIDL::Promise>> {
+        [](GC::Ref<FileAPI::Blob>) -> Optional<GC::Ref<WebIDL::Promise>> {
             return {};
         },
-        [](GC::Root<ImageData>&) -> Optional<GC::Ref<WebIDL::Promise>> {
+        [](GC::Ref<ImageData>) -> Optional<GC::Ref<WebIDL::Promise>> {
             return {};
         },
         [&](auto& canvas_image_source) -> Optional<GC::Ref<WebIDL::Promise>> {
@@ -259,7 +315,7 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
     // 6. Switch on image:
     image.visit(
         // -> Blob
-        [&](GC::Root<FileAPI::Blob>& blob) {
+        [&](GC::Ref<FileAPI::Blob> blob) {
             // Run these step in parallel:
             Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(realm.heap(), [=]() {
                 // 1. Let imageData be the result of reading image's data. If an error occurs during reading of the
@@ -317,7 +373,7 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
             }));
         },
         // -> ImageData
-        [&](GC::Root<ImageData> const& image_data) -> void {
+        [&](GC::Ref<ImageData> image_data) -> void {
             // 1. Let buffer be image's data attribute value's [[ViewedArrayBuffer]] internal slot.
             auto const buffer = image_data->data()->viewed_array_buffer();
 
@@ -327,8 +383,14 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
                 return;
             }
 
+            auto bitmap_or_error = image_data->bitmap();
+            if (bitmap_or_error.is_error()) {
+                WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image data is detached or out-of-bounds"_utf16));
+                return;
+            }
+
             // 3. Set imageBitmap's bitmap data to image's image data, cropped to the source rectangle with formatting.
-            auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(image_data->bitmap(), sx, sy, sw, sh, options);
+            auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(bitmap_or_error.release_value(), sx, sy, sw, sh, options);
             // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
             // Spec issue: https://github.com/whatwg/html/issues/3323
             if (cropped_bitmap_or_error.is_error()) {
@@ -347,7 +409,7 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
         [&](CanvasImageSource const& image_source) {
             image_source.visit(
                 // -> canvas
-                [&](GC::Root<HTMLCanvasElement> const& canvas_element) {
+                [&](GC::Ref<HTMLCanvasElement> canvas_element) {
                     // 1. Set imageBitmap's bitmap data to a copy of image's bitmap data, cropped to the source rectangle with formatting.
                     auto canvas_bitmap = canvas_element->get_bitmap_from_surface();
                     // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
@@ -375,44 +437,67 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
                     }));
                 },
                 // -> ImageBitmap
-                [&](GC::Root<ImageBitmap> const&) {
-                    dbgln("(STUBBED) createImageBitmap() for ImageBitmap");
-                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for ImageBitmap"sv);
-                    TemporaryExecutionContext const context { relevant_realm(p->promise()), TemporaryExecutionContext::CallbacksEnabled::Yes };
-                    WebIDL::reject_promise(realm, *p, error);
+                [&](GC::Ref<ImageBitmap> source_image_bitmap) {
+                    // 1. Set imageBitmap's bitmap data to a copy of image's bitmap data, cropped to the source rectangle with formatting.
+                    auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(source_image_bitmap->bitmap(), sx, sy, sw, sh, options);
+                    // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
+                    // Spec issue: https://github.com/whatwg/html/issues/3323
+                    if (cropped_bitmap_or_error.is_error()) {
+                        WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image size is invalid"_utf16));
+                        return;
+                    }
+                    image_bitmap->set_bitmap(cropped_bitmap_or_error.release_value());
+
+                    // FIXME: 2. Set the origin-clean flag of imageBitmap's bitmap to the same value as the origin-clean flag of image's bitmap.
+
+                    // 3. Queue a global task, using the bitmap task source, to resolve promise with imageBitmap.
+                    queue_global_task(Task::Source::BitmapTask, image_bitmap, GC::create_function(realm.heap(), [p, image_bitmap] {
+                        auto& realm = relevant_realm(image_bitmap);
+                        TemporaryExecutionContext const context { realm, TemporaryExecutionContext::CallbacksEnabled::Yes };
+                        WebIDL::resolve_promise(realm, *p, image_bitmap);
+                    }));
                 },
-                [&](GC::Root<OffscreenCanvas> const&) {
+                [&](GC::Ref<OffscreenCanvas>) {
                     dbgln("(STUBBED) createImageBitmap() for OffscreenCanvas");
-                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for OffscreenCanvas"sv);
+                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for OffscreenCanvas"_utf16);
                     TemporaryExecutionContext const context { relevant_realm(p->promise()), TemporaryExecutionContext::CallbacksEnabled::Yes };
                     WebIDL::reject_promise(realm, *p, error);
                 },
                 // -> video
-                [&](GC::Root<HTMLVideoElement> const&) {
+                [&](GC::Ref<HTMLVideoElement>) {
                     dbgln("(STUBBED) createImageBitmap() for HTMLVideoElement");
-                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for HTMLVideoElement"sv);
+                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for HTMLVideoElement"_utf16);
                     TemporaryExecutionContext const context { relevant_realm(p->promise()), TemporaryExecutionContext::CallbacksEnabled::Yes };
                     WebIDL::reject_promise(realm, *p, error);
                 },
                 // -> img
                 // -> SVG image
                 [&](auto const& image_element) {
-                    // 1. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified content size) and options's resizeWidth or options's resizeHeight is not present, then return a promise rejected with an "InvalidStateError" DOMException.
+                    // 1. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified
+                    //    content size) and options's resizeWidth or options's resizeHeight is not present, then return
+                    //    a promise rejected with an "InvalidStateError" DOMException.
                     auto const has_natural_dimensions = image_element->intrinsic_width().has_value() && image_element->intrinsic_height().has_value();
-                    if (!has_natural_dimensions && (!options.has_value() || !options->resize_width.has_value() || !options->resize_width.has_value())) {
+                    if (!has_natural_dimensions && (!options.has_value() || !options->resize_width.has_value() || !options->resize_height.has_value())) {
                         WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image data is detached"_utf16));
                         return;
                     }
 
-                    // 2. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified content size), it should be rendered to a bitmap of the size specified by the resizeWidth and the resizeHeight options.
-                    // 3. Set imageBitmap's bitmap data to a copy of image's media data, cropped to the source rectangle with formatting. If this is an animated image, imageBitmap's bitmap data must only be taken from the default image of the animation (the one that the format defines is to be used when animation is not supported or is disabled), or, if there is no such image, the first frame of the animation.
-                    RefPtr<Gfx::ImmutableBitmap> immutable_bitmap;
+                    // 2. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified
+                    //    content size), it should be rendered to a bitmap of the size specified by the resizeWidth and
+                    //    the resizeHeight options.
+
+                    // 3. Set imageBitmap's bitmap data to a copy of image's media data, cropped to the source rectangle
+                    //    with formatting. If this is an animated image, imageBitmap's bitmap data must only be taken
+                    //    from the default image of the animation (the one that the format defines is to be used when
+                    //    animation is not supported or is disabled), or, if there is no such image, the first frame of
+                    //    the animation.
+                    Optional<Gfx::DecodedImageFrame> decoded_frame;
                     if (has_natural_dimensions) {
-                        immutable_bitmap = image_element->default_image_bitmap_sized(Gfx::IntSize { *image_element->intrinsic_width(), *image_element->intrinsic_height() });
+                        decoded_frame = image_element->default_image_frame(Gfx::IntSize { *image_element->intrinsic_width(), *image_element->intrinsic_height() });
                     } else {
-                        immutable_bitmap = image_element->default_image_bitmap_sized(Gfx::IntSize { *options->resize_width, *options->resize_height });
+                        decoded_frame = image_element->default_image_frame(Gfx::IntSize { *options->resize_width, *options->resize_height });
                     }
-                    auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(immutable_bitmap->bitmap(), sx, sy, sw, sh, options);
+                    auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(decoded_frame->bitmap(), sx, sy, sw, sh, options);
                     // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
                     // Spec issue: https://github.com/whatwg/html/issues/3323
                     if (cropped_bitmap_or_error.is_error()) {
@@ -436,7 +521,7 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
     return p;
 }
 
-GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::fetch(Fetch::RequestInfo const& input, Fetch::RequestInit const& init) const
+GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::fetch(Fetch::RequestInfo const& input, Bindings::RequestInit const& init) const
 {
     auto& vm = this_impl().vm();
     return Fetch::fetch(vm, input, init);
@@ -460,6 +545,7 @@ void WindowOrWorkerGlobalScopeMixin::clear_timeout(i32 id)
     if (auto timer = m_timers.get(id); timer.has_value())
         timer.value()->stop();
     m_timers.remove(id);
+    m_timer_nesting_levels.remove(id);
 }
 
 // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#dom-clearinterval
@@ -468,6 +554,7 @@ void WindowOrWorkerGlobalScopeMixin::clear_interval(i32 id)
     if (auto timer = m_timers.get(id); timer.has_value())
         timer.value()->stop();
     m_timers.remove(id);
+    m_timer_nesting_levels.remove(id);
 }
 
 void WindowOrWorkerGlobalScopeMixin::clear_map_of_active_timers()
@@ -475,6 +562,7 @@ void WindowOrWorkerGlobalScopeMixin::clear_map_of_active_timers()
     for (auto& it : m_timers)
         it.value->stop();
     m_timers.clear();
+    m_timer_nesting_levels.clear();
 }
 
 // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#timer-initialisation-steps
@@ -486,13 +574,19 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
     // 2. If previousId was given, let id be previousId; otherwise, let id be an implementation-defined integer that is greater than zero and does not already exist in global's map of setTimeout and setInterval IDs.
     auto id = previous_id.has_value() ? previous_id.value() : m_timer_id_allocator.allocate();
 
-    // FIXME: 3. If the surrounding agent's event loop's currently running task is a task that was created by this algorithm, then let nesting level be the task's timer nesting level. Otherwise, let nesting level be 0.
+    // 3. If the surrounding agent's event loop's currently running task is a task that was created by this algorithm,
+    //    then let nesting level be the task's timer nesting level. Otherwise, let nesting level be 0.
+    u32 nesting_level = 0;
+    if (previous_id.has_value())
+        nesting_level = m_timer_nesting_levels.get(previous_id.value()).value_or(0);
 
     // 4. If timeout is less than 0, then set timeout to 0.
     if (timeout < 0)
         timeout = 0;
 
-    // FIXME: 5. If nesting level is greater than 5, and timeout is less than 4, then set timeout to 4.
+    // 5. If nesting level is greater than 5, and timeout is less than 4, then set timeout to 4.
+    if (nesting_level > 5 && timeout < 4)
+        timeout = 4;
 
     // 6. Let realm be global's relevant realm.
     auto& realm = relevant_realm(this_impl());
@@ -502,7 +596,7 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
 
     auto& vm = this_impl().vm();
 
-    // FIXME 8. Let uniqueHandle be null.
+    // FIXME: 8. Let uniqueHandle be null.
 
     // 9. Let task be a task that runs the following substeps:
     auto task = GC::create_function(vm.heap(), Function<void()>([this, handler = move(handler), timeout, arguments = move(arguments), repeat, id, initiating_script, previous_id, &vm, &realm]() {
@@ -522,7 +616,7 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
                 return true;
             },
             // 6. Otherwise:
-            [&](String const& source) {
+            [&](Utf16String const& source) {
                 // 1. If previousId was not given:
                 if (!previous_id.has_value()) {
                     // 1. Let globalName be "Window" if global is a Window object; "WorkerGlobalScope" otherwise.
@@ -532,7 +626,7 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
                     auto method_name = repeat == Repeat::Yes ? "setInterval"sv : "setTimeout"sv;
 
                     // 3. Let sink be a concatenation of globalName, U+0020 SPACE, and methodName.
-                    [[maybe_unused]] auto sink = String::formatted("{} {}", global_name, method_name);
+                    [[maybe_unused]] auto sink = Utf16String::formatted("{} {}", global_name, method_name);
 
                     // FIXME: 4. Set handler to the result of invoking the Get Trusted Type compliant string algorithm with TrustedScript, global, handler, sink, and "script".
                 }
@@ -568,10 +662,10 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
                     //            done by eval(). That is, module script fetches via import() will behave the same in both contexts.
                 }
 
-                // 8. Let script be the result of creating a classic script given handler, realm, base URL, and fetch options.
+                // 8. Let script be the result of creating a classic script given handler, settings object, base URL, and fetch options.
                 // FIXME: Pass fetch options.
                 auto basename = base_url.basename();
-                auto script = ClassicScript::create(basename, source, this_impl().realm(), move(base_url));
+                auto script = ClassicScript::create(basename, source, settings_object, move(base_url));
 
                 // 9. Run the classic script script.
                 (void)script->run();
@@ -596,12 +690,16 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
         // 10. Otherwise, remove global's map of active timers[id].
         case Repeat::No:
             m_timers.remove(id);
+            m_timer_nesting_levels.remove(id);
             break;
         }
     }));
 
-    // FIXME: 10. Increment nesting level by one.
-    // FIXME: 11. Set task's timer nesting level to nesting level.
+    // 10. Increment nesting level by one.
+    nesting_level++;
+
+    // 11. Set task's timer nesting level to nesting level.
+    m_timer_nesting_levels.set(id, nesting_level);
 
     // 12. Let completionStep be an algorithm step which queues a global task on the timer task source given global to run task.
     Function<void()> completion_step = [this, task = move(task)]() mutable {
@@ -614,7 +712,7 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
     // 13. Set uniqueHandle to the result of running steps after a timeout given global, "setTimeout/setInterval",
     //     timeout, and completionStep.
     //     FIXME: run_steps_after_a_timeout() needs to be updated to return a unique internal value that can be used here.
-    run_steps_after_a_timeout_impl(timeout, move(completion_step), id);
+    run_steps_after_a_timeout_impl(timeout, move(completion_step), id, repeat);
 
     // FIXME: 14. Set global's map of setTimeout and setInterval IDs[id] to uniqueHandle.
 
@@ -623,7 +721,7 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
 }
 
 // 1. https://www.w3.org/TR/performance-timeline/#dfn-relevant-performance-entry-tuple
-PerformanceTimeline::PerformanceEntryTuple& WindowOrWorkerGlobalScopeMixin::relevant_performance_entry_tuple(FlyString const& entry_type)
+PerformanceTimeline::PerformanceEntryTuple& WindowOrWorkerGlobalScopeMixin::relevant_performance_entry_tuple(Utf16FlyString const& entry_type)
 {
     // 1. Let map be the performance entry buffer map associated with globalObject.
     // 2. Return the result of getting the value of an entry from map, given entryType as the key.
@@ -651,9 +749,9 @@ void WindowOrWorkerGlobalScopeMixin::queue_performance_entry(GC::Ref<Performance
     for (auto const& registered_observer : m_registered_performance_observer_objects) {
         // 1. If regObs's options list contains a PerformanceObserverInit options whose entryTypes member includes entryType
         //    or whose type member equals to entryType:
-        auto iterator = registered_observer->options_list().find_if([&entry_type](PerformanceTimeline::PerformanceObserverInit const& entry) {
+        auto iterator = registered_observer->options_list().find_if([&entry_type](Bindings::PerformanceObserverInit const& entry) {
             if (entry.entry_types.has_value())
-                return entry.entry_types->contains_slow(entry_type.to_string());
+                return entry.entry_types->contains_slow(entry_type);
 
             VERIFY(entry.type.has_value());
             return entry.type.value() == entry_type;
@@ -709,22 +807,22 @@ void WindowOrWorkerGlobalScopeMixin::add_performance_entry(GC::Ref<PerformanceTi
         tuple.performance_entry_buffer.append(new_entry);
 }
 
-void WindowOrWorkerGlobalScopeMixin::clear_performance_entry_buffer(Badge<HighResolutionTime::Performance>, FlyString const& entry_type)
+void WindowOrWorkerGlobalScopeMixin::clear_performance_entry_buffer(Badge<HighResolutionTime::Performance>, Utf16FlyString const& entry_type)
 {
     auto& tuple = relevant_performance_entry_tuple(entry_type);
     tuple.performance_entry_buffer.clear();
 }
 
-void WindowOrWorkerGlobalScopeMixin::remove_entries_from_performance_entry_buffer(Badge<HighResolutionTime::Performance>, FlyString const& entry_type, String entry_name)
+void WindowOrWorkerGlobalScopeMixin::remove_entries_from_performance_entry_buffer(Badge<HighResolutionTime::Performance>, Utf16FlyString const& entry_type, Utf16View entry_name)
 {
     auto& tuple = relevant_performance_entry_tuple(entry_type);
     tuple.performance_entry_buffer.remove_all_matching([&entry_name](GC::Root<PerformanceTimeline::PerformanceEntry> const& entry) {
-        return entry->name() == entry_name;
+        return entry->name().utf16_view() == entry_name;
     });
 }
 
 // https://www.w3.org/TR/performance-timeline/#dfn-filter-buffer-map-by-name-and-type
-ErrorOr<Vector<GC::Root<PerformanceTimeline::PerformanceEntry>>> WindowOrWorkerGlobalScopeMixin::filter_buffer_map_by_name_and_type(Optional<String> name, Optional<String> type) const
+ErrorOr<Vector<GC::Root<PerformanceTimeline::PerformanceEntry>>> WindowOrWorkerGlobalScopeMixin::filter_buffer_map_by_name_and_type(Optional<Utf16String> const& name, Optional<Utf16FlyString> type) const
 {
     // 1. Let result be an initially empty list.
     Vector<GC::Root<PerformanceTimeline::PerformanceEntry>> result;
@@ -838,7 +936,7 @@ void WindowOrWorkerGlobalScopeMixin::queue_the_performance_observer_task()
                 // 2. For each PerformanceObserverInit item in registeredObserver's options list:
                 for (auto const& item : registered_observer->options_list()) {
                     // 1. For each DOMString entryType that appears either as item's type or in item's entryTypes:
-                    auto increment_dropped_entries_count = [this, &dropped_entries_count](FlyString const& type) {
+                    auto increment_dropped_entries_count = [this, &dropped_entries_count](Utf16FlyString const& type) {
                         // 1. Let map be relevantGlobal's performance entry buffer map.
                         auto const& map = m_performance_entry_buffer_map;
 
@@ -991,6 +1089,18 @@ void WindowOrWorkerGlobalScopeMixin::forcibly_close_all_event_sources()
         event_source->forcibly_close();
 }
 
+void WindowOrWorkerGlobalScopeMixin::close_all_idb_connections()
+{
+    IndexedDB::Database::for_each_database([&](IndexedDB::Database& database) {
+        for (auto& connection : database.associated_connections_as_root_vector()) {
+            if (connection->close_pending())
+                continue;
+            if (&as<WindowOrWorkerGlobalScopeMixin>(relevant_global_object(*connection)) == this)
+                IndexedDB::close_a_database_connection(connection);
+        }
+    });
+}
+
 void WindowOrWorkerGlobalScopeMixin::register_web_socket(Badge<WebSockets::WebSocket>, GC::Ref<WebSockets::WebSocket> web_socket)
 {
     m_registered_web_sockets.append(web_socket);
@@ -1016,20 +1126,36 @@ WindowOrWorkerGlobalScopeMixin::AffectedAnyWebSockets WindowOrWorkerGlobalScopeM
 // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#run-steps-after-a-timeout
 void WindowOrWorkerGlobalScopeMixin::run_steps_after_a_timeout(i32 timeout, Function<void()> completion_step)
 {
-    return run_steps_after_a_timeout_impl(timeout, move(completion_step));
+    run_steps_after_a_timeout_impl(timeout, move(completion_step), {});
 }
 
-void WindowOrWorkerGlobalScopeMixin::run_steps_after_a_timeout_impl(i32 timeout, Function<void()> completion_step, Optional<i32> timer_key)
+void WindowOrWorkerGlobalScopeMixin::run_steps_after_a_timeout_impl(i32 timeout, Function<void()> completion_step, Optional<i32> timer_key, Repeat repeat)
 {
     // 1. Assert: if timerKey is given, then the caller of this algorithm is the timer initialization steps. (Other specifications must not pass timerKey.)
     // Note: This is enforced by the caller.
 
-    // 2. If timerKey is not given, then set it to a new unique non-numeric value.
-    if (!timer_key.has_value())
+    // NB: We deviate from the spec here slightly by reusing existing timers if a timer_key is provided.
+    GC::Ptr<Timer> existing_timer;
+    if (timer_key.has_value()) {
+        auto result = m_timers.get(timer_key.value());
+        if (result.has_value()) {
+            existing_timer = result.value().ptr();
+            existing_timer->set_callback(move(completion_step));
+            existing_timer->set_interval(timeout);
+        }
+    } else {
+        // 2. If timerKey is not given, then set it to a new unique non-numeric value.
         timer_key = m_timer_id_allocator.allocate();
+    }
 
     // FIXME: 3. Let startTime be the current high resolution time given global.
-    auto timer = Timer::create(this_impl(), timeout, move(completion_step), timer_key.value());
+
+    // NB: For repeating timers (setInterval), we use a repeating Core::Timer to reduce drift.
+    // The next firing is based on when the timer was supposed to fire, not when the callback
+    // completed. The task callback still calls run_timer_initialization_steps to update nesting
+    // levels and potentially clamp the interval.
+    auto repeating = repeat == Repeat::Yes ? Timer::Repeating::Yes : Timer::Repeating::No;
+    auto timer = existing_timer ? GC::Ref { *existing_timer } : Timer::create(this_impl(), timeout, move(completion_step), timer_key.value(), repeating);
 
     // FIXME: 4. Set global's map of active timers[timerKey] to startTime plus milliseconds.
     m_timers.set(timer_key.value(), timer);
@@ -1042,7 +1168,10 @@ void WindowOrWorkerGlobalScopeMixin::run_steps_after_a_timeout_impl(i32 timeout,
     // FIXME:    4. Perform completionSteps.
     // FIXME:    5. If timerKey is a non-numeric value, remove global's map of active timers[timerKey].
 
-    timer->start();
+    // NB: Don't restart an already-active repeating timer. It's already firing on schedule and
+    // restarting it would cause drift (next fire = now + interval instead of previous fire + interval).
+    if (!existing_timer)
+        timer->start();
 }
 
 // https://w3c.github.io/hr-time/#dom-windoworworkerglobalscope-performance
@@ -1073,7 +1202,7 @@ GC::Ref<JS::Object> WindowOrWorkerGlobalScopeMixin::supported_entry_types() cons
     auto& realm = this_impl().realm();
 
     if (!m_supported_entry_types_array) {
-        GC::RootVector<JS::Value> supported_entry_types(vm.heap());
+        GC::RootVector<JS::Value> supported_entry_types;
 
 #define __ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES(entry_type, cpp_class) \
     supported_entry_types.append(JS::PrimitiveString::create(vm, entry_type));
@@ -1092,72 +1221,6 @@ void WindowOrWorkerGlobalScopeMixin::report_error(JS::Value e)
 {
     // The reportError(e) method steps are to report an exception e for this.
     report_an_exception(e);
-}
-
-// https://html.spec.whatwg.org/multipage/webappapis.html#extract-error
-struct ErrorInformation {
-    String message;
-    String filename;
-    JS::Value error;
-    size_t lineno { 0 };
-    size_t colno { 0 };
-};
-
-// https://html.spec.whatwg.org/multipage/webappapis.html#extract-error
-static ErrorInformation extract_error_information(JS::VM& vm, JS::Value exception)
-{
-    // 1. Let attributes be an empty map keyed by IDL attributes.
-    ErrorInformation attributes;
-
-    // 2. Set attributes[error] to exception.
-    attributes.error = exception;
-
-    // 3. Set attributes[message], attributes[filename], attributes[lineno], and attributes[colno] to
-    //    implementation-defined values derived from exception.
-    attributes.message = [&] {
-        if (exception.is_object()) {
-            auto& object = exception.as_object();
-            if (MUST(object.has_own_property(vm.names.message))) {
-                auto message = object.get_without_side_effects(vm.names.message);
-                return message.to_string_without_side_effects();
-            }
-        }
-
-        return MUST(String::formatted("Uncaught exception: {}", exception.to_string_without_side_effects()));
-    }();
-
-    // FIXME: This offset is relative to the javascript source. Other browsers appear to do it relative
-    //        to the entire source document! Calculate that somehow.
-
-    // If we got an Error object, then try and extract the information from the location the object was made.
-    if (exception.is_object() && is<JS::Error>(exception.as_object())) {
-        auto const& error = static_cast<JS::Error&>(exception.as_object());
-        for (auto const& frame : error.traceback()) {
-            auto source_range = frame.source_range();
-            if (source_range.start.line != 0 || source_range.start.column != 0) {
-                attributes.filename = MUST(String::from_byte_string(source_range.filename()));
-                attributes.lineno = source_range.start.line;
-                attributes.colno = source_range.start.column;
-                break;
-            }
-        }
-    }
-    // Otherwise, we fall back to try and find the location of the invocation of the function itself.
-    else {
-        for (ssize_t i = vm.execution_context_stack().size() - 1; i >= 0; --i) {
-            auto& frame = vm.execution_context_stack()[i];
-            if (frame->executable) {
-                auto source_range = frame->executable->source_range_at(frame->program_counter).realize();
-                attributes.filename = MUST(String::from_byte_string(source_range.filename()));
-                attributes.lineno = source_range.start.line;
-                attributes.colno = source_range.start.column;
-                break;
-            }
-        }
-    }
-
-    // 4. Return attributes.
-    return attributes;
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#report-an-exception
@@ -1184,8 +1247,8 @@ void WindowOrWorkerGlobalScopeMixin::report_an_exception(JS::Value exception, Om
         [&](GC::Ref<JS::Script> const& js_script) {
             if (as<ClassicScript>(js_script->host_defined())->muted_errors() == ClassicScript::MutedErrors::Yes) {
                 error_info.error = JS::js_null();
-                error_info.message = "Script error."_string;
-                error_info.filename = String {};
+                error_info.message = "Script error."_utf16;
+                error_info.filename = Utf16String {};
                 error_info.lineno = 0;
                 error_info.colno = 0;
             }
@@ -1204,7 +1267,7 @@ void WindowOrWorkerGlobalScopeMixin::report_an_exception(JS::Value exception, Om
         // 2. If global implements EventTarget, then set notHandled to the result of firing an event named
         //    error at global, using ErrorEvent, with the cancelable attribute initialized to true, and
         //    additional attributes initialized according to errorInfo.
-        ErrorEventInit event_init = {};
+        Bindings::ErrorEventInit event_init = {};
         event_init.cancelable = true;
         event_init.message = error_info.message;
         event_init.filename = error_info.filename;
@@ -1223,17 +1286,16 @@ void WindowOrWorkerGlobalScopeMixin::report_an_exception(JS::Value exception, Om
         // 1. Set errorInfo[error] to null.
         error_info.error = JS::js_null();
 
-        // FIXME: 2. If global implements DedicatedWorkerGlobalScope, queue a global task on the DOM manipulation
-        //        task source with the global's associated Worker's relevant global object to run these steps:
-        if (false) {
-            // FIXME: 1. Let workerObject be the Worker object associated with global.
-
-            // FIXME: 2. Set notHandled to the result of firing an event named error at workerObject, using ErrorEvent,
-            //    with the cancelable attribute initialized to true, and additional attributes initialized
-            //    according to errorInfo.
-
-            // FIXME: 3. If notHandled is true, then report exception for workerObject's relevant global object with
-            //    omitError set to true.
+        // 2. If global implements DedicatedWorkerGlobalScope, queue a global task on the DOM manipulation
+        //    task source with the global's associated Worker's relevant global object to run these steps:
+        if (auto* dedicated_worker_global_scope = as_if<DedicatedWorkerGlobalScope>(target)) {
+            if (auto* page = dedicated_worker_global_scope->page()) {
+                page->client().page_did_report_worker_exception(
+                    error_info.message,
+                    error_info.filename,
+                    error_info.lineno,
+                    error_info.colno);
+            }
         }
         // 3. Otherwise, the user agent may report exception to a developer console.
         else {
@@ -1273,6 +1335,19 @@ GC::Ref<TrustedTypes::TrustedTypePolicyFactory> WindowOrWorkerGlobalScopeMixin::
     if (!m_trusted_type_policy_factory)
         m_trusted_type_policy_factory = realm.create<TrustedTypes::TrustedTypePolicyFactory>(realm);
     return *m_trusted_type_policy_factory;
+}
+
+// https://html.spec.whatwg.org/multipage/webappapis.html#windoworworkerglobalscope-mixin:extract-an-origin
+Optional<URL::Origin> WindowOrWorkerGlobalScopeMixin::window_or_worker_global_scope_extract_an_origin() const
+{
+    auto relevant_origin = relevant_settings_object(this_impl()).origin();
+
+    // 1. If this's relevant settings object's origin is not same origin-domain with the entry settings object's origin, then return null.
+    if (!relevant_origin.is_same_origin_domain(entry_settings_object().origin()))
+        return {};
+
+    // 2. Return this's relevant settings object's origin.
+    return relevant_origin;
 }
 
 }

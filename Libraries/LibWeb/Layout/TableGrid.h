@@ -20,7 +20,7 @@ public:
     };
 
     struct Row {
-        GC::Ref<Box const> box;
+        Box const& box;
         CSSPixels base_height { 0 };
         CSSPixels reference_height { 0 };
         CSSPixels final_height { 0 };
@@ -35,7 +35,7 @@ public:
     };
 
     struct Cell {
-        GC::Ref<Box const> box;
+        Box const& box;
         size_t column_index;
         size_t row_index;
         size_t column_span;
@@ -55,26 +55,41 @@ public:
     size_t column_count() const { return m_column_count; }
     HashMap<GridPosition, bool> const& occupancy_grid() const { return m_occupancy_grid; }
 
-    static bool is_table_row_group(Box const& box)
+    static bool is_table_row_group(Node const& node)
     {
-        auto const& display = box.display();
+        auto const* node_with_style = as_if<NodeWithStyle>(node);
+        if (!node_with_style)
+            return false;
+        auto const& display = node_with_style->display();
         return display.is_table_row_group() || display.is_table_header_group() || display.is_table_footer_group();
     }
 
-    static bool is_table_row(Box const& box)
+    static bool is_table_row(Node const& node)
     {
-        return box.display().is_table_row();
+        auto const* node_with_style = as_if<NodeWithStyle>(node);
+        return node_with_style && node_with_style->display().is_table_row();
     }
 
-    static bool is_table_column_group(Box const& box)
+    static bool is_table_column_group(Node const& node)
     {
-        return box.display().is_table_column_group();
+        auto const* node_with_style = as_if<NodeWithStyle>(node);
+        return node_with_style && node_with_style->display().is_table_column_group();
     }
 
     template<typename Matcher, typename Callback>
     static void for_each_child_box_matching(Box const& parent, Matcher matcher, Callback callback)
     {
         parent.for_each_child_of_type<Box>([&](Box const& child_box) {
+            if (matcher(child_box))
+                callback(child_box);
+            return IterationDecision::Continue;
+        });
+    }
+
+    template<typename Matcher, typename Callback>
+    static void for_each_child_box_matching(Box& parent, Matcher matcher, Callback callback)
+    {
+        parent.for_each_child_of_type<Box>([&](Box& child_box) {
             if (matcher(child_box))
                 callback(child_box);
             return IterationDecision::Continue;

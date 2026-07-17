@@ -5,7 +5,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/SVGTextContentElementPrototype.h>
+#include <LibWeb/Bindings/DOMPointReadOnly.h>
+#include <LibWeb/Bindings/SVGTextContentElement.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/SVG/AttributeParser.h>
@@ -24,11 +25,12 @@ void SVGTextContentElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
+// NB: Called during painting.
 Optional<TextAnchor> SVGTextContentElement::text_anchor() const
 {
-    if (!layout_node())
+    if (!unsafe_layout_node())
         return {};
-    switch (layout_node()->computed_values().text_anchor()) {
+    switch (unsafe_layout_node()->computed_values().text_anchor()) {
     case CSS::TextAnchor::Start:
         return TextAnchor::Start;
     case CSS::TextAnchor::Middle:
@@ -54,7 +56,7 @@ WebIDL::ExceptionOr<WebIDL::Long> SVGTextContentElement::get_number_of_chars() c
 GC::Ref<Geometry::DOMPoint> SVGTextContentElement::get_start_position_of_char(WebIDL::UnsignedLong charnum)
 {
     dbgln("(STUBBED) SVGTextContentElement::get_start_position_of_char(charnum={}). Called on: {}", charnum, debug_description());
-    return Geometry::DOMPoint::from_point(vm(), Geometry::DOMPointInit {});
+    return Geometry::DOMPoint::from_point(vm(), Bindings::DOMPointInit {});
 }
 
 }

@@ -89,6 +89,20 @@ TEST_CASE(to_int)
     EXPECT_EQ(b.to_int(), 12);
 }
 
+TEST_CASE(float_conversion)
+{
+    auto value = 620.0 * .333333;
+    EXPECT_EQ(CSSPixels::nearest_value_for(value), CSSPixels::from_raw(13227));
+    EXPECT_EQ(CSSPixels::floored_value_for(value), CSSPixels::from_raw(13226));
+    EXPECT_EQ(CSSPixels::truncated_value_for(value), CSSPixels::from_raw(13226));
+
+    EXPECT_EQ(CSSPixels::floored_value_for(-value), CSSPixels::from_raw(-13227));
+    EXPECT_EQ(CSSPixels::truncated_value_for(-value), CSSPixels::from_raw(-13226));
+
+    EXPECT_EQ(CSSPixels::truncated_value_for(INFINITY), CSSPixels::max());
+    EXPECT_EQ(CSSPixels::truncated_value_for(-INFINITY), CSSPixels::min());
+}
+
 TEST_CASE(comparison1)
 {
     EXPECT_EQ(CSSPixels(1) < CSSPixels(2), true);
@@ -108,6 +122,14 @@ TEST_CASE(saturated_subtraction)
 {
     auto value = CSSPixels(INFINITY);
     EXPECT_EQ(value - -1, CSSPixels(INFINITY));
+}
+
+TEST_CASE(saturated_abs)
+{
+    // abs() of the minimum saturates to the maximum instead of overflowing.
+    EXPECT_EQ(CSSPixels::min().abs(), CSSPixels::max());
+    EXPECT_EQ(CSSPixels::from_raw(-5).abs(), CSSPixels::from_raw(5));
+    EXPECT_EQ(CSSPixels::from_raw(5).abs(), CSSPixels::from_raw(5));
 }
 
 TEST_CASE(multiplication_uses_i64_for_raw_values)

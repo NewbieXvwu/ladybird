@@ -6,24 +6,27 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/HTMLElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/InitialInsertion.h>
 
 namespace Web::HTML {
 
 class WEB_API NavigableContainer : public HTMLElement {
-    WEB_PLATFORM_OBJECT(NavigableContainer, HTMLElement);
+    WEB_NON_IDL_PLATFORM_OBJECT(NavigableContainer, HTMLElement);
 
 public:
-    static GC::Ptr<NavigableContainer> navigable_container_with_content_navigable(GC::Ref<Navigable> navigable);
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
+    static GC::Ptr<NavigableContainer> navigable_container_with_content_navigable(GC::Ref<LocalNavigable> navigable);
 
     virtual ~NavigableContainer() override;
 
     static HashTable<NavigableContainer*>& all_instances();
 
     GC::Ptr<Navigable> content_navigable() { return m_content_navigable; }
-    GC::Ptr<Navigable const> content_navigable() const { return m_content_navigable.ptr(); }
+    GC::Ptr<Navigable const> content_navigable() const { return m_content_navigable; }
 
     DOM::Document const* content_document() const;
     DOM::Document const* content_document_without_origin_check() const;
@@ -39,12 +42,7 @@ public:
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#potentially-delays-the-load-event
     bool currently_delays_the_load_event() const;
 
-    bool content_navigable_has_session_history_entry_and_ready_for_navigation() const
-    {
-        if (!content_navigable())
-            return false;
-        return m_content_navigable->has_session_history_entry_and_ready_for_navigation();
-    }
+    bool content_navigable_has_session_history_entry_and_ready_for_navigation() const;
 
 protected:
     NavigableContainer(DOM::Document&, DOM::QualifiedName);
@@ -55,24 +53,22 @@ protected:
     Optional<URL::URL> shared_attribute_processing_steps_for_iframe_and_frame(InitialInsertion initial_insertion);
 
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#navigate-an-iframe-or-frame
-    void navigate_an_iframe_or_frame(URL::URL url, ReferrerPolicy::ReferrerPolicy referrer_policy, Optional<String> srcdoc_string = {}, InitialInsertion = InitialInsertion::No);
+    void navigate_an_iframe_or_frame(URL::URL url, ReferrerPolicy::ReferrerPolicy referrer_policy, Optional<Utf16String> srcdoc_string = {}, InitialInsertion = InitialInsertion::No);
 
-    WebIDL::ExceptionOr<void> create_new_child_navigable(GC::Ptr<GC::Function<void()>> after_session_history_update = {});
+    void create_new_child_navigable();
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#content-navigable
     GC::Ptr<Navigable> m_content_navigable { nullptr };
 
-    void set_potentially_delays_the_load_event(bool value) { m_potentially_delays_the_load_event = value; }
+    void set_potentially_delays_the_load_event(bool value);
 
-    void set_content_navigable_has_session_history_entry_and_ready_for_navigation()
-    {
-        if (!content_navigable())
-            return;
-        content_navigable()->set_has_session_history_entry_and_ready_for_navigation();
-    }
+    void set_content_navigable_has_session_history_entry_and_ready_for_navigation();
 
 private:
     virtual bool is_navigable_container() const override { return true; }
+
+    virtual void finalize() override;
+
     bool m_potentially_delays_the_load_event { true };
 };
 

@@ -8,21 +8,23 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibWeb/Layout/Box.h>
 
 namespace Web::Layout {
 
 class ListItemMarkerBox final : public Box {
-    GC_CELL(ListItemMarkerBox, Box);
-    GC_DECLARE_ALLOCATOR(ListItemMarkerBox);
+    LAYOUT_NODE(ListItemMarkerBox, Box);
 
 public:
-    explicit ListItemMarkerBox(DOM::Document&, CSS::ListStyleType, CSS::ListStylePosition, GC::Ref<DOM::Element>, GC::Ref<CSS::ComputedProperties>);
+    static bool counter_style_is_rendered_with_custom_image(RefPtr<CSS::CounterStyle const> const& counter_style);
+
+    explicit ListItemMarkerBox(DOM::Document&, CSS::ListStyleType, CSS::ListStylePosition, GC::Ref<DOM::Element>, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~ListItemMarkerBox() override;
 
-    Optional<String> text() const;
+    Optional<Utf16String> text() const;
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
     CSS::ListStyleType const& list_style_type() const { return m_list_style_type; }
     CSS::ListStylePosition list_style_position() const { return m_list_style_position; }
@@ -30,14 +32,12 @@ public:
     CSSPixels relative_size() const;
 
 private:
-    virtual void visit_edges(Cell::Visitor&) override;
-
     virtual bool is_list_item_marker_box() const final { return true; }
     virtual bool can_have_children() const override { return false; }
 
-    CSS::ListStyleType m_list_style_type { CSS::CounterStyleNameKeyword::None };
+    CSS::ListStyleType m_list_style_type;
     CSS::ListStylePosition m_list_style_position { CSS::ListStylePosition::Outside };
-    GC::Ref<DOM::Element> m_list_item_element;
+    GC::Weak<DOM::Element> m_list_item_element;
 };
 
 template<>

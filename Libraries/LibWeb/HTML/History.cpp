@@ -5,13 +5,14 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HistoryPrototype.h>
+#include <LibWeb/Bindings/History.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/History.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/Navigation.h>
+#include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 
 namespace Web::HTML {
@@ -44,14 +45,14 @@ void History::visit_edges(Cell::Visitor& visitor)
 
 // https://html.spec.whatwg.org/multipage/history.html#dom-history-pushstate
 // The pushState(data, unused, url) method steps are to run the shared history push/replace state steps given this, data, url, and "push".
-WebIDL::ExceptionOr<void> History::push_state(JS::Value data, String const&, Optional<String> const& url)
+WebIDL::ExceptionOr<void> History::push_state(JS::Value data, Utf16View, Optional<Utf16String> const& url)
 {
     return shared_history_push_replace_state(data, url, HistoryHandlingBehavior::Push);
 }
 
 // https://html.spec.whatwg.org/multipage/history.html#dom-history-replacestate
 // The replaceState(data, unused, url) method steps are to run the shared history push/replace state steps given this, data, url, and "replace".
-WebIDL::ExceptionOr<void> History::replace_state(JS::Value data, String const&, Optional<String> const& url)
+WebIDL::ExceptionOr<void> History::replace_state(JS::Value data, Utf16View, Optional<Utf16String> const& url)
 {
     return shared_history_push_replace_state(data, url, HistoryHandlingBehavior::Replace);
 }
@@ -169,7 +170,7 @@ bool can_have_its_url_rewritten(DOM::Document const& document, URL::URL const& t
 }
 
 // https://html.spec.whatwg.org/multipage/history.html#shared-history-push/replace-state-steps
-WebIDL::ExceptionOr<void> History::shared_history_push_replace_state(JS::Value data, Optional<String> const& url, HistoryHandlingBehavior history_handling)
+WebIDL::ExceptionOr<void> History::shared_history_push_replace_state(JS::Value data, Optional<Utf16String> const& url, HistoryHandlingBehavior history_handling)
 {
     auto& vm = this->vm();
 
@@ -197,7 +198,7 @@ WebIDL::ExceptionOr<void> History::shared_history_push_replace_state(JS::Value d
     if (url.has_value() && !url->is_empty()) {
 
         // 1. Parse url, relative to the relevant settings object of history.
-        auto parsed_url = relevant_settings_object(*this).parse_url(url->to_byte_string());
+        auto parsed_url = relevant_settings_object(*this).encoding_parse_url(*url);
 
         // 2. If that fails, then throw a "SecurityError" DOMException.
         if (!parsed_url.has_value())
@@ -267,6 +268,9 @@ WebIDL::ExceptionOr<void> History::set_scroll_restoration(Bindings::ScrollRestor
         active_session_history_entry->set_scroll_restoration_mode(ScrollRestorationMode::Manual);
         break;
     }
+
+    auto navigable = this_relevant_global_object.navigable();
+    this_relevant_global_object.associated_document().page().client().page_did_update_session_history_entry_scroll_restoration_mode(navigable->id(), active_session_history_entry->navigation_api_key(), active_session_history_entry->scroll_restoration_mode());
 
     return {};
 }

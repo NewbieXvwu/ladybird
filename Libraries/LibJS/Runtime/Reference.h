@@ -24,36 +24,36 @@ public:
         Environment,
     };
 
-    Reference(BaseType type, PropertyKey name, bool strict)
-        : m_base_type(type)
-        , m_name(move(name))
+    Reference(BaseType type, PropertyKey name, Strict strict)
+        : m_name(move(name))
+        , m_base_type(type)
         , m_strict(strict)
     {
     }
 
-    Reference(Value base, PropertyKey name, Optional<Value> this_value, bool strict = false)
-        : m_base_type(BaseType::Value)
+    Reference(Value base, PropertyKey name, Optional<Value> this_value, Strict strict)
+        : m_name(move(name))
         , m_base_value(base)
-        , m_name(move(name))
         , m_this_value(this_value)
+        , m_base_type(BaseType::Value)
         , m_strict(strict)
     {
     }
 
-    Reference(Environment& base, Utf16FlyString referenced_name, bool strict = false, Optional<EnvironmentCoordinate> environment_coordinate = {})
-        : m_base_type(BaseType::Environment)
+    Reference(Environment& base, Utf16FlyString referenced_name, Strict strict, Optional<EnvironmentCoordinate> environment_coordinate = {})
+        : m_name(move(referenced_name))
         , m_base_environment(&base)
-        , m_name(move(referenced_name))
-        , m_strict(strict)
         , m_environment_coordinate(move(environment_coordinate))
+        , m_base_type(BaseType::Environment)
+        , m_strict(strict)
     {
     }
 
     Reference(Value base, PrivateName name)
-        : m_base_type(BaseType::Value)
+        : m_name(move(name))
         , m_base_value(base)
-        , m_name(move(name))
-        , m_strict(true)
+        , m_base_type(BaseType::Value)
+        , m_strict(Strict::Yes)
     {
     }
 
@@ -71,7 +71,7 @@ public:
 
     PropertyKey const& name() const { return m_name.get<PropertyKey>(); }
     PrivateName const& private_name() const { return m_name.get<PrivateName>(); }
-    bool is_strict() const { return m_strict; }
+    bool is_strict() const { return m_strict == Strict::Yes; }
 
     // 6.2.4.2 IsUnresolvableReference ( V ), https://tc39.es/ecma262/#sec-isunresolvablereference
     bool is_unresolvable() const { return m_base_type == BaseType::Unresolvable; }
@@ -123,19 +123,32 @@ public:
 
     Optional<EnvironmentCoordinate> environment_coordinate() const { return m_environment_coordinate; }
 
+    void visit_edges(Cell::Visitor& visitor)
+    {
+        if (m_base_type == BaseType::Value) {
+            visitor.visit(m_base_value);
+        } else if (m_base_type == BaseType::Environment) {
+            visitor.visit(m_base_environment);
+        }
+        m_name.visit(
+            [&](PropertyKey const& key) { key.visit_edges(visitor); },
+            [&](PrivateName const&) { /* no GC pointers */ });
+        if (m_this_value.has_value())
+            visitor.visit(*m_this_value);
+    }
+
 private:
     Completion throw_reference_error(VM&) const;
 
-    BaseType m_base_type { BaseType::Unresolvable };
+    Variant<PropertyKey, PrivateName> m_name;
     union {
         Value m_base_value {};
         mutable Environment* m_base_environment;
     };
-    Variant<PropertyKey, PrivateName> m_name;
     Optional<Value> m_this_value;
-    bool m_strict { false };
-
     Optional<EnvironmentCoordinate> m_environment_coordinate;
+    BaseType m_base_type { BaseType::Unresolvable };
+    Strict m_strict { Strict::No };
 };
 
 }

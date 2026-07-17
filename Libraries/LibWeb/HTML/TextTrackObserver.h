@@ -9,16 +9,18 @@
 #include <LibGC/Function.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/Bindings/TextTrackPrototype.h>
+#include <LibWeb/Bindings/TextTrack.h>
 #include <LibWeb/HTML/TextTrack.h>
 
 namespace Web::HTML {
 
 class TextTrackObserver final : public Bindings::PlatformObject {
-    WEB_PLATFORM_OBJECT(TextTrackObserver, Bindings::PlatformObject);
+    WEB_NON_IDL_PLATFORM_OBJECT(TextTrackObserver, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(TextTrackObserver);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     [[nodiscard]] GC::Ptr<GC::Function<void(TextTrack::ReadinessState)>> track_readiness_observer() const { return m_track_readiness_observer; }
     void set_track_readiness_observer(Function<void(TextTrack::ReadinessState)>);
 

@@ -1,13 +1,15 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLHeadingElementPrototype.h>
+#include <LibWeb/Bindings/HTMLHeadingElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/HTMLHeadingElement.h>
 
 namespace Web::HTML {
@@ -27,7 +29,7 @@ void HTMLHeadingElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-bool HTMLHeadingElement::is_presentational_hint(FlyString const& name) const
+bool HTMLHeadingElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -36,21 +38,32 @@ bool HTMLHeadingElement::is_presentational_hint(FlyString const& name) const
 }
 
 // https://html.spec.whatwg.org/multipage/rendering.html#tables-2
-void HTMLHeadingElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void HTMLHeadingElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
-    HTMLElement::apply_presentational_hints(cascaded_properties);
-    for_each_attribute([&](auto& name, auto& value) {
+    HTMLElement::apply_presentational_hints(properties);
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == HTML::AttributeNames::align) {
-            if (value == "left"sv)
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::Left));
-            else if (value == "right"sv)
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::Right));
-            else if (value == "center"sv)
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::Center));
-            else if (value == "justify"sv)
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::Justify));
+            if (value == u"left"sv)
+                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Left) });
+            else if (value == u"right"sv)
+                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Right) });
+            else if (value == u"center"sv)
+                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Center) });
+            else if (value == u"justify"sv)
+                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Justify) });
         }
     });
+}
+
+// https://html.spec.whatwg.org/multipage/sections.html#heading-level
+WebIDL::UnsignedLong HTMLHeadingElement::heading_level() const
+{
+    // h1–h6 elements have a heading level, which is given by getting the element's computed heading level.
+    if (m_dom_tree_version_for_cached_heading_level < document().dom_tree_version()) {
+        m_dom_tree_version_for_cached_heading_level = document().dom_tree_version();
+        m_cached_heading_level = computed_heading_level();
+    }
+    return m_cached_heading_level;
 }
 
 }

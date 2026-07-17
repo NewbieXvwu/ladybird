@@ -14,17 +14,16 @@
 namespace Web::Painting {
 
 class WEB_API SVGPathPaintable final : public SVGGraphicsPaintable {
-    GC_CELL(SVGPathPaintable, SVGGraphicsPaintable);
-    GC_DECLARE_ALLOCATOR(SVGPathPaintable);
-
 public:
-    static GC::Ref<SVGPathPaintable> create(Layout::SVGGraphicsBox const&);
+    static NonnullRefPtr<SVGPathPaintable> create(Layout::SVGGraphicsBox const&);
+    virtual StringView class_name() const override { return "SVGPathPaintable"sv; }
 
-    virtual TraversalDecision hit_test(CSSPixelPoint, HitTestType, Function<TraversalDecision(HitTestResult)> const& callback) const override;
+    virtual Optional<CSSPixelRect> clip_path_geometry_bounds(Gfx::AffineTransform const& additional_transform) const override;
 
     virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
+    virtual void record_hit_test_items(DisplayListRecordingContext&, PaintPhase) const override;
 
-    Layout::SVGGraphicsBox const& layout_box() const;
+    SVG::SVGGraphicsElement const& dom_node() const { return as<SVG::SVGGraphicsElement>(*Paintable::dom_node()); }
 
     void set_computed_path(Gfx::Path path)
     {
@@ -33,10 +32,18 @@ public:
 
     Optional<Gfx::Path> const& computed_path() const { return m_computed_path; }
 
+    virtual void reset_for_relayout() override;
+
 protected:
     SVGPathPaintable(Layout::SVGGraphicsBox const&);
 
     Optional<Gfx::Path> m_computed_path = {};
+
+private:
+    virtual bool is_svg_path_paintable() const final { return true; }
 };
+
+template<>
+inline bool Paintable::fast_is<SVGPathPaintable>() const { return is_svg_path_paintable(); }
 
 }

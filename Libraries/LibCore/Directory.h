@@ -14,13 +14,14 @@
 #include <AK/Noncopyable.h>
 #include <LibCore/DirIterator.h>
 #include <LibCore/DirectoryEntry.h>
+#include <LibCore/Export.h>
 #include <LibCore/File.h>
 #include <sys/stat.h>
 
 namespace Core {
 
 // Deal with real system directories. Any Directory instance always refers to a valid existing directory.
-class Directory {
+class CORE_API Directory {
     AK_MAKE_NONCOPYABLE(Directory);
 
 public:
@@ -38,7 +39,7 @@ public:
     static ErrorOr<Directory> adopt_fd(int fd, LexicalPath path);
 
     ErrorOr<NonnullOwnPtr<File>> open(StringView filename, File::OpenMode mode) const;
-    ErrorOr<struct stat> stat(StringView filename, int flags) const;
+    ErrorOr<struct stat> stat(StringView filename) const;
     ErrorOr<struct stat> stat() const;
     int fd() const { return m_directory_fd; }
 

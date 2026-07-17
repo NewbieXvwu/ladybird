@@ -12,12 +12,18 @@
 #include <AK/Base64.h>
 #include <AK/Debug.h>
 #include <AK/ScopeGuard.h>
+#include <AK/Utf16String.h>
+#include <LibHTTP/Cache/MemoryCache.h>
+#include <LibHTTP/Cache/Utilities.h>
+#include <LibHTTP/Method.h>
 #include <LibJS/Runtime/Completion.h>
+#include <LibRequests/Request.h>
 #include <LibRequests/RequestTimingInfo.h>
+#include <LibTextCodec/Encoder.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
+#include <LibWeb/Bindings/Transformer.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
-#include <LibWeb/Cookie/Cookie.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/BodyInit.h>
@@ -31,8 +37,8 @@
 #include <LibWeb/Fetch/Infrastructure/FetchParams.h>
 #include <LibWeb/Fetch/Infrastructure/FetchRecord.h>
 #include <LibWeb/Fetch/Infrastructure/FetchTimingInfo.h>
-#include <LibWeb/Fetch/Infrastructure/HTTP/Headers.h>
-#include <LibWeb/Fetch/Infrastructure/HTTP/Methods.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/CORS.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Statuses.h>
@@ -40,16 +46,20 @@
 #include <LibWeb/Fetch/Infrastructure/NetworkPartitionKey.h>
 #include <LibWeb/Fetch/Infrastructure/NoSniffBlocking.h>
 #include <LibWeb/Fetch/Infrastructure/PortBlocking.h>
+#include <LibWeb/Fetch/Infrastructure/PreflightCache.h>
 #include <LibWeb/Fetch/Infrastructure/Task.h>
 #include <LibWeb/Fetch/Infrastructure/URL.h>
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/FileAPI/BlobURLStore.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/HTML/PreloadEntry.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Loader/LoadRequest.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/MixedContent/AbstractOperations.h>
@@ -61,12 +71,11 @@
 #include <LibWeb/Streams/TransformStream.h>
 #include <LibWeb/Streams/TransformStreamDefaultController.h>
 #include <LibWeb/Streams/TransformStreamOperations.h>
-#include <LibWeb/Streams/Transformer.h>
 #include <LibWeb/WebIDL/DOMException.h>
 
 namespace Web::Fetch::Fetching {
 
-bool g_http_cache_enabled = false;
+static bool g_http_memory_cache_enabled = false;
 
 #define TRY_OR_IGNORE(expression)                                                                    \
     ({                                                                                               \
@@ -78,8 +87,91 @@ bool g_http_cache_enabled = false;
         _temporary_result.release_value();                                                           \
     })
 
+class HTTPCache {
+public:
+    HTTP::MemoryCache& get(Infrastructure::NetworkPartitionKey const& key)
+    {
+        return *m_cache.ensure(key, [] {
+            return HTTP::MemoryCache::create();
+        });
+    }
+
+    HTTP::MemoryCache* get_if_exists(Infrastructure::NetworkPartitionKey const& key)
+    {
+        auto it = m_cache.find(key);
+        if (it == m_cache.end())
+            return nullptr;
+        return it->value.ptr();
+    }
+
+    static HTTPCache& the()
+    {
+        static HTTPCache& cache = *new HTTPCache;
+        return cache;
+    }
+
+    void clear_cache()
+    {
+        m_cache.clear();
+    }
+
+private:
+    HashMap<Infrastructure::NetworkPartitionKey, NonnullRefPtr<HTTP::MemoryCache>> m_cache;
+};
+
+// https://fetch.spec.whatwg.org/#determine-the-http-cache-partition
+static RefPtr<HTTP::MemoryCache> determine_the_http_cache_partition(Infrastructure::Request const& request)
+{
+    // 1. Let key be the result of determining the network partition key given request.
+    auto key = Infrastructure::determine_the_network_partition_key(request);
+
+    // 2. If key is null, then return null.
+    if (!key.has_value())
+        return nullptr;
+
+    // 3. Return the unique HTTP cache associated with key. [HTTP-CACHING]
+    return HTTPCache::the().get(key.value());
+}
+
+static GC::Ptr<Infrastructure::Response> select_response_from_cache(JS::Realm& realm, HTTP::MemoryCache& http_cache, Infrastructure::Request const& request)
+{
+    if (!g_http_memory_cache_enabled)
+        return {};
+
+    auto cache_entry = http_cache.open_entry(request.current_url(), request.method(), request.header_list(), request.cache_mode());
+    if (!cache_entry.has_value())
+        return {};
+
+    auto response = Infrastructure::Response::create(realm.vm());
+    response->url_list().append(request.current_url());
+    response->set_method(request.method());
+
+    response->set_status(cache_entry->status_code);
+    response->set_status_message(cache_entry->reason_phrase);
+    response->set_header_list(cache_entry->response_headers);
+    response->set_javascript_bytecode_cache(cache_entry->javascript_bytecode_cache);
+    response->set_javascript_bytecode_cache_vary_key(cache_entry->javascript_bytecode_cache_vary_key);
+    response->set_javascript_bytecode_cache_memory_cache_request_headers(HTTP::HeaderList::create(cache_entry->request_headers->headers()));
+
+    auto [response_body, _] = safely_extract_body(realm, cache_entry->response_body.bytes());
+    response->set_body(response_body);
+
+    return response;
+}
+
+static void store_response_in_cache(HTTP::MemoryCache& http_cache, Infrastructure::Request const& request, Infrastructure::Response& response)
+{
+    if (!g_http_memory_cache_enabled)
+        return;
+    if (request.cache_mode() == HTTP::CacheMode::NoStore)
+        return;
+
+    response.set_javascript_bytecode_cache_memory_cache_request_headers(HTTP::HeaderList::create(request.header_list()->headers()));
+    http_cache.create_entry(request.current_url(), request.method(), request.header_list(), request.request_time(), response.status(), response.status_message(), response.header_list(), response.javascript_bytecode_cache(), response.javascript_bytecode_cache_vary_key());
+}
+
 // https://fetch.spec.whatwg.org/#concept-fetch
-WebIDL::ExceptionOr<GC::Ref<Infrastructure::FetchController>> fetch(JS::Realm& realm, Infrastructure::Request& request, Infrastructure::FetchAlgorithms const& algorithms, UseParallelQueue use_parallel_queue)
+GC::Ref<Infrastructure::FetchController> fetch(JS::Realm& realm, Infrastructure::Request& request, Infrastructure::FetchAlgorithms const& algorithms, UseParallelQueue use_parallel_queue)
 {
     dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'fetch' with: request @ {}", &request);
 
@@ -114,7 +206,7 @@ WebIDL::ExceptionOr<GC::Ref<Infrastructure::FetchController>> fetch(JS::Realm& r
     //    shared current time given crossOriginIsolatedCapability, and render-blocking is set to request’s
     //    render-blocking.
     auto timing_info = Infrastructure::FetchTimingInfo::create(vm);
-    auto now = HighResolutionTime::coarsened_shared_current_time(cross_origin_isolated_capability == HTML::CanUseCrossOriginIsolatedAPIs::Yes);
+    auto now = HighResolutionTime::coarsened_shared_current_time(cross_origin_isolated_capability);
     timing_info->set_start_time(now);
     timing_info->set_post_redirect_start_time(now);
     timing_info->set_render_blocking(request.render_blocking());
@@ -142,7 +234,7 @@ WebIDL::ExceptionOr<GC::Ref<Infrastructure::FetchController>> fetch(JS::Realm& r
         // - request’s client is not null, and request’s client’s global object is a Window object
         && request.client() && is<HTML::Window>(request.client()->global_object())
         // - request’s method is `GET`
-        && StringView { request.method() }.equals_ignoring_ascii_case("GET"sv)
+        && request.method().equals_ignoring_ascii_case("GET"sv)
         // - request’s unsafe-request flag is not set or request’s header list is empty
         && (!request.unsafe_request() || request.header_list()->is_empty())) {
         // 1. Assert: request’s origin is same origin with request’s client’s origin.
@@ -152,13 +244,28 @@ WebIDL::ExceptionOr<GC::Ref<Infrastructure::FetchController>> fetch(JS::Realm& r
         //    response: set fetchParams’s preloaded response candidate to response.
         auto on_preloaded_response_available = GC::create_function(realm.heap(), [fetch_params](GC::Ref<Infrastructure::Response> response) {
             fetch_params->set_preloaded_response_candidate(response);
+
+            // NB: main fetch may already be parked on this preload result.
+            // Resolve that waiter here instead of spinning the event loop.
+            auto controller = fetch_params->controller();
+            if (auto pending_preloaded_response = controller->pending_preloaded_response()) {
+                controller->set_pending_preloaded_response(nullptr);
+                pending_preloaded_response->resolve(response);
+            }
         });
 
-        // FIXME: 3. Let foundPreloadedResource be the result of invoking consume a preloaded resource for request’s
+        // 3. Let foundPreloadedResource be the result of invoking consume a preloaded resource for request’s
         //    window, given request’s URL, request’s destination, request’s mode, request’s credentials mode,
         //    request’s integrity metadata, and onPreloadedResponseAvailable.
-        auto found_preloaded_resource = false;
-        (void)on_preloaded_response_available;
+        auto& window = as<HTML::Window>(request.client()->global_object());
+        auto found_preloaded_resource = HTML::consume_a_preloaded_resource(
+            window,
+            request.url(),
+            request.destination(),
+            request.mode(),
+            request.credentials_mode(),
+            request.integrity_metadata(),
+            on_preloaded_response_available);
 
         // 4. If foundPreloadedResource is true and fetchParams’s preloaded response candidate is null, then set
         //    fetchParams’s preloaded response candidate to "pending".
@@ -167,7 +274,7 @@ WebIDL::ExceptionOr<GC::Ref<Infrastructure::FetchController>> fetch(JS::Realm& r
     }
 
     // 11. If request’s header list does not contain `Accept`, then:
-    if (!request.header_list()->contains("Accept"sv.bytes())) {
+    if (!request.header_list()->contains("Accept"sv)) {
         // 1. Let value be `*/*`.
         auto value = "*/*"sv;
 
@@ -191,7 +298,10 @@ WebIDL::ExceptionOr<GC::Ref<Infrastructure::FetchController>> fetch(JS::Realm& r
             // -> "image"
             case Infrastructure::Request::Destination::Image:
                 // `image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5`
-                value = "image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5"sv;
+                // AD-HOC: The spec default omits AVIF and WebP, which causes CDNs that perform format negotiation to
+                //         potentially fall back to non alpha-preserving formats.
+                //         Spec issue: https://github.com/whatwg/fetch/issues/1740
+                value = "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5"sv;
                 break;
             // -> "json"
             case Infrastructure::Request::Destination::JSON:
@@ -209,17 +319,20 @@ WebIDL::ExceptionOr<GC::Ref<Infrastructure::FetchController>> fetch(JS::Realm& r
         }
 
         // 4. Append (`Accept`, value) to request’s header list.
-        auto header = Infrastructure::Header::from_string_pair("Accept"sv, value.bytes());
+        auto header = HTTP::Header::isomorphic_encode("Accept"sv, value);
         request.header_list()->append(move(header));
     }
 
     // 12. If request’s header list does not contain `Accept-Language`, then user agents should append
     //     (`Accept-Language, an appropriate header value) to request’s header list.
-    if (!request.header_list()->contains("Accept-Language"sv.bytes())) {
+    if (!request.header_list()->contains("Accept-Language"sv)) {
         StringBuilder accept_language;
-        accept_language.join(","sv, ResourceLoader::the().preferred_languages());
+        if (ResourceLoader::is_initialized())
+            accept_language.join(","sv, ResourceLoader::the().preferred_languages());
+        else
+            accept_language.append("en-US"sv);
 
-        auto header = Infrastructure::Header::from_string_pair("Accept-Language"sv, accept_language.string_view());
+        auto header = HTTP::Header::isomorphic_encode("Accept-Language"sv, accept_language.string_view());
         request.header_list()->append(move(header));
     }
 
@@ -239,7 +352,7 @@ WebIDL::ExceptionOr<GC::Ref<Infrastructure::FetchController>> fetch(JS::Realm& r
     }
 
     // 15. Run main fetch given fetchParams.
-    (void)TRY(main_fetch(realm, fetch_params));
+    (void)main_fetch(realm, fetch_params);
 
     // 16. Return fetchParams’s controller.
     return fetch_params->controller();
@@ -294,7 +407,7 @@ void populate_request_from_client(JS::Realm const& realm, Infrastructure::Reques
 }
 
 // https://fetch.spec.whatwg.org/#concept-main-fetch
-WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, Recursive recursive)
+GC::Ptr<PendingResponse> main_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, Recursive recursive)
 {
     dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'main fetch' with: fetch_params @ {}", &fetch_params);
 
@@ -355,24 +468,37 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infra
         request->current_url().scheme() == "http"sv
         // - request’s current URL’s host is a domain
         && request->current_url().host().has_value() && request->current_url().host()->is_domain()
-        // FIXME: - Matching request’s current URL’s host per Known HSTS Host Domain Name Matching results in either a
-        //          superdomain match with an asserted includeSubDomains directive or a congruent match (with or without an
-        //          asserted includeSubDomains directive) [HSTS]; or DNS resolution for the request finds a matching HTTPS RR
-        //          per section 9.5 of [SVCB].
-        && false) {
+        // - Matching request’s current URL’s host per Known HSTS Host Domain Name Matching results in either a
+        //   superdomain match with an asserted includeSubDomains directive or a congruent match (with or without an
+        //   asserted includeSubDomains directive) [HSTS]
+        && ResourceLoader::is_known_hsts_host(Bindings::principal_host_defined_page(realm), request->current_url().host()->get<String>())
+        // FIXME: or DNS resolution for the request finds a matching HTTPS RR per section 9.5 of [SVCB].
+    ) {
         request->current_url().set_scheme("https"_string);
     }
 
-    auto get_response = GC::create_function(vm.heap(), [&realm, &vm, &fetch_params, request]() -> WebIDL::ExceptionOr<GC::Ref<PendingResponse>> {
+    auto get_response = GC::create_function(vm.heap(), [&realm, &vm, &fetch_params, request]() -> GC::Ref<PendingResponse> {
         dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'main fetch' get_response() function");
         auto const* origin = request->origin().get_pointer<URL::Origin>();
 
         // -> fetchParams’s preloaded response candidate is not null
         if (!fetch_params.preloaded_response_candidate().has<Empty>()) {
-            // 1. Wait until fetchParams’s preloaded response candidate is not "pending".
-            HTML::main_thread_event_loop().spin_until(GC::create_function(vm.heap(), [&] {
-                return !fetch_params.preloaded_response_candidate().has<Infrastructure::FetchParams::PreloadedResponseCandidatePendingTag>();
-            }));
+            // 1. Wait until fetchParams's preloaded response candidate is not "pending".
+            if (fetch_params.preloaded_response_candidate().has<Infrastructure::FetchParams::PreloadedResponseCandidatePendingTag>()) {
+                // NB: The spec says to wait here. Spinning the main-thread event
+                // loop strands the queued preload callback behind nested work,
+                // so we park a PendingResponse and let that callback resolve it.
+                auto controller = fetch_params.controller();
+
+                // NB: Reuse the parked response if this branch is re-entered
+                // before the preload callback runs.
+                if (auto pending_preloaded_response = controller->pending_preloaded_response())
+                    return *pending_preloaded_response;
+
+                auto pending_preloaded_response = PendingResponse::create(vm, request);
+                controller->set_pending_preloaded_response(pending_preloaded_response);
+                return pending_preloaded_response;
+            }
 
             // 2. Assert: fetchParams’s preloaded response candidate is a response.
             VERIFY(fetch_params.preloaded_response_candidate().has<GC::Ref<Infrastructure::Response>>());
@@ -384,8 +510,17 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infra
         // -> request’s current URL’s origin is same origin with request’s origin, and request’s response tainting is "basic"
         // -> request’s current URL’s scheme is "data"
         // -> request’s mode is "navigate" or "websocket"
+        // AD-HOC: Treat file:// font loads from file:// pages as same-origin.
+        //         Fonts require CORS mode per spec, but file:// origins are opaque in our implementation,
+        //         so the standard same-origin check always fails. Other browsers (Chromium, WebKit, Firefox)
+        //         all allow loading fonts from file:// URLs on file:// pages.
+        auto is_file_to_file_font_load = origin && origin->is_opaque_file_origin()
+            && request->current_url().scheme() == "file"sv
+            && request->destination() == Infrastructure::Request::Destination::Font;
+
         if (
             (origin && request->current_url().origin().is_same_origin(*origin) && request->response_tainting() == Infrastructure::Request::ResponseTainting::Basic)
+            || is_file_to_file_font_load
             || request->current_url().scheme() == "data"sv
             || (request->mode() == Infrastructure::Request::Mode::Navigate || request->mode() == Infrastructure::Request::Mode::WebSocket)) {
             // 1. Set request’s response tainting to "basic".
@@ -434,7 +569,7 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infra
         if (
             request->use_cors_preflight()
             || (request->unsafe_request()
-                && (!Infrastructure::is_cors_safelisted_method(request->method())
+                && (!HTTP::is_cors_safelisted_method(request->method())
                     || !Infrastructure::get_cors_unsafe_header_names(request->header_list()).is_empty()))) {
             // 1. Set request’s response tainting to "cors".
             request->set_response_tainting(Infrastructure::Request::ResponseTainting::CORS);
@@ -442,12 +577,12 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infra
             auto returned_pending_response = PendingResponse::create(vm, request);
 
             // 2. Let corsWithPreflightResponse be the result of running HTTP fetch given fetchParams and true.
-            auto cors_with_preflight_response = TRY(http_fetch(realm, fetch_params, MakeCORSPreflight::Yes));
-            cors_with_preflight_response->when_loaded([returned_pending_response](GC::Ref<Infrastructure::Response> cors_with_preflight_response) {
+            auto cors_with_preflight_response = http_fetch(realm, fetch_params, MakeCORSPreflight::Yes);
+            cors_with_preflight_response->when_loaded([request, returned_pending_response](GC::Ref<Infrastructure::Response> cors_with_preflight_response) {
                 dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'main fetch' cors_with_preflight_response load callback");
                 // 3. If corsWithPreflightResponse is a network error, then clear cache entries using request.
                 if (cors_with_preflight_response->is_network_error()) {
-                    // FIXME: Clear cache entries
+                    Infrastructure::PreflightCache::the().clear_cache_entries(request);
                 }
 
                 // 4. Return corsWithPreflightResponse.
@@ -469,7 +604,7 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infra
         // 12. If response is null, then set response to the result of running the steps corresponding to the first
         //     matching statement:
         auto pending_response = !response
-            ? TRY(get_response->function()())
+            ? get_response->function()()
             : PendingResponse::create(vm, request, *response);
 
         // 13. If recursive is true, then return response.
@@ -482,10 +617,7 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infra
         //     matching statement:
         auto pending_response = PendingResponse::create(vm, request, Infrastructure::Response::create(vm));
         if (!response) {
-            auto pending_response_or_error = get_response->function()();
-            if (pending_response_or_error.is_error())
-                return;
-            pending_response = pending_response_or_error.release_value();
+            pending_response = get_response->function()();
         }
         pending_response->when_loaded([&realm, &vm, &fetch_params, request, response, response_was_null = !response](GC::Ref<Infrastructure::Response> resolved_response) mutable {
             dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'main fetch' pending_response load callback");
@@ -497,20 +629,21 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infra
                 if (request->response_tainting() == Infrastructure::Request::ResponseTainting::CORS) {
                     // 1. Let headerNames be the result of extracting header list values given
                     //    `Access-Control-Expose-Headers` and response’s header list.
-                    auto header_names_or_failure = Infrastructure::extract_header_list_values("Access-Control-Expose-Headers"sv.bytes(), response->header_list());
-                    auto header_names = header_names_or_failure.has<Vector<ByteBuffer>>() ? header_names_or_failure.get<Vector<ByteBuffer>>() : Vector<ByteBuffer> {};
+                    auto header_names_or_failure = response->header_list()->extract_header_list_values("Access-Control-Expose-Headers"sv);
 
-                    // 2. If request’s credentials mode is not "include" and headerNames contains `*`, then set
-                    //    response’s CORS-exposed header-name list to all unique header names in response’s header
-                    //    list.
-                    if (request->credentials_mode() != Infrastructure::Request::CredentialsMode::Include && header_names.contains_slow("*"sv.bytes())) {
-                        auto unique_header_names = response->header_list()->unique_names();
-                        response->set_cors_exposed_header_name_list(move(unique_header_names));
-                    }
-                    // 3. Otherwise, if headerNames is not null or failure, then set response’s CORS-exposed
-                    //    header-name list to headerNames.
-                    else if (!header_names.is_empty()) {
-                        response->set_cors_exposed_header_name_list(move(header_names));
+                    if (auto* header_names = header_names_or_failure.get_pointer<Vector<ByteString>>()) {
+                        // 2. If request’s credentials mode is not "include" and headerNames contains `*`, then set
+                        //    response’s CORS-exposed header-name list to all unique header names in response’s header
+                        //    list.
+                        if (request->credentials_mode() != Infrastructure::Request::CredentialsMode::Include && header_names->contains_slow("*"sv)) {
+                            auto unique_header_names = response->header_list()->unique_names();
+                            response->set_cors_exposed_header_name_list(move(unique_header_names));
+                        }
+                        // 3. Otherwise, if headerNames is not null or failure, then set response’s CORS-exposed
+                        //    header-name list to headerNames.
+                        else if (!header_names->is_empty()) {
+                            response->set_cors_exposed_header_name_list(move(*header_names));
+                        }
                     }
                 }
 
@@ -577,7 +710,7 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infra
             if (response->type() == Infrastructure::Response::Type::Opaque
                 && internal_response->status() == 206
                 && internal_response->range_requested()
-                && !request->header_list()->contains("Range"sv.bytes())) {
+                && !request->header_list()->contains("Range"sv)) {
                 response = internal_response = Infrastructure::Response::network_error(vm, "Response has status 206 and 'range-requested' flag set, but request has no 'Range' header"_string);
             }
 
@@ -585,7 +718,7 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> main_fetch(JS::Realm& realm, Infra
             //     internalResponse’s status is a null body status, set internalResponse’s body to null and disregard
             //     any enqueuing toward it (if any).
             // NOTE: This standardizes the error handling for servers that violate HTTP.
-            if (!response->is_network_error() && (StringView { request->method() }.is_one_of("HEAD"sv, "CONNECT"sv) || Infrastructure::is_null_body_status(internal_response->status())))
+            if (!response->is_network_error() && (request->method().is_one_of("HEAD"sv, "CONNECT"sv) || Infrastructure::is_null_body_status(internal_response->status())))
                 internal_response->set_body({});
 
             // 22. If request’s integrity metadata is not the empty string, then:
@@ -661,13 +794,17 @@ void fetch_response_handover(JS::Realm& realm, Infrastructure::FetchParams const
     //    The user agent may decide to expose `Server-Timing` headers to non-secure contexts requests as well.
     auto client = fetch_params.request()->client();
     if (!response.is_network_error() && client != nullptr && HTML::is_secure_context(*client)) {
-        auto server_timing_headers = response.header_list()->get_decode_and_split("Server-Timing"sv.bytes());
-        if (server_timing_headers.has_value())
+        if (auto server_timing_headers = response.header_list()->get_decode_and_split("Server-Timing"sv); server_timing_headers.has_value())
             timing_info->set_server_timing_headers(server_timing_headers.release_value());
     }
 
-    // 3. Let processResponseEndOfBody be the following steps:
-    auto process_response_end_of_body = [&vm, &response, &fetch_params, timing_info] {
+    // AD-HOC: We extract steps 1-3 of processResponseEndOfBody into a separate lambda so we can also call it from
+    //         the error path. The fetch spec only runs processResponseEndOfBody on successful body read (via the
+    //         transform stream's flush algorithm). However, processResponseConsumeBody is called for both success
+    //         and failure, and specs like HTML's preload algorithm expect to be able to call reportTiming from
+    //         within processResponseConsumeBody. So we ensure report_timing_steps is set on error too, which allows
+    //         reportTiming to work without asserting, and still produces useful timing data for failed fetches.
+    auto setup_report_timing_steps = [&vm, &response, &fetch_params, timing_info] {
         // 1. Let unsafeEndTime be the unsafe shared current time.
         auto unsafe_end_time = HighResolutionTime::unsafe_shared_current_time();
 
@@ -713,19 +850,25 @@ void fetch_response_handover(JS::Realm& realm, Infrastructure::FetchParams const
                 response_status = response.status();
 
                 // 2. Let mimeType be the result of extracting a MIME type from response’s header list.
-                auto mime_type = response.header_list()->extract_mime_type();
+                auto mime_type = Infrastructure::extract_mime_type(response.header_list());
 
                 // 3. If mimeType is non-null, then set bodyInfo’s content type to the result of minimizing a supported MIME type given mimeType.
                 if (mime_type.has_value())
-                    body_info.content_type = MimeSniff::minimise_a_supported_mime_type(mime_type.value());
+                    body_info.content_type = Utf16String::from_utf8(MimeSniff::minimise_a_supported_mime_type(mime_type.value()));
             }
 
             // 8. If fetchParams’s request’s initiator type is not null, then mark resource timing given timingInfo,
             //    request’s URL, request’s initiator type, global, cacheState, bodyInfo, and responseStatus.
             if (fetch_params.request()->initiator_type().has_value()) {
-                ResourceTiming::PerformanceResourceTiming::mark_resource_timing(timing_info, fetch_params.request()->url().to_string(), Infrastructure::initiator_type_to_string(fetch_params.request()->initiator_type().value()), global, cache_state, body_info, response_status);
+                ResourceTiming::PerformanceResourceTiming::mark_resource_timing(timing_info, utf16_string_from_url_ascii(fetch_params.request()->url().to_string()), Infrastructure::initiator_type_to_string(fetch_params.request()->initiator_type().value()), global, cache_state, body_info, response_status);
             }
         });
+    };
+
+    // 3. Let processResponseEndOfBody be the following steps:
+    auto process_response_end_of_body = [&vm, &fetch_params, &response, setup_report_timing_steps] {
+        // 1-3. (See setup_report_timing_steps above)
+        setup_report_timing_steps();
 
         // 4. Let processResponseEndOfBodyTask be the following steps:
         auto process_response_end_of_body_task = GC::create_function(vm.heap(), [&fetch_params, &response] {
@@ -793,24 +936,35 @@ void fetch_response_handover(JS::Realm& realm, Infrastructure::FetchParams const
     }
 
     // 8. If fetchParams’s process response consume body is non-null, then:
-    if (fetch_params.algorithms()->process_response_consume_body()) {
+    auto algorithms = fetch_params.algorithms();
+    if (algorithms->process_response_consume_body()) {
         // 1. Let processBody given nullOrBytes be this step: run fetchParams’s process response consume body given
         //    response and nullOrBytes.
-        auto process_body = GC::create_function(vm.heap(), [&fetch_params, &response](ByteBuffer null_or_bytes) {
-            (fetch_params.algorithms()->process_response_consume_body())(response, null_or_bytes);
+        auto process_body = GC::create_function(vm.heap(), [algorithms, &response](ByteBuffer bytes) {
+            if (response.body()) {
+                if (auto const* source_bytes = response.body()->source().get_pointer<Core::ImmutableBytes>()) {
+                    (algorithms->process_response_consume_body())(response, *source_bytes);
+                    return;
+                }
+            }
+            (algorithms->process_response_consume_body())(response, Core::ImmutableBytes::adopt(move(bytes)));
         });
 
         // 2. Let processBodyError be this step: run fetchParams’s process response consume body given response and
         //    failure.
-        auto process_body_error = GC::create_function(vm.heap(), [&fetch_params, &response](JS::Value) {
-            (fetch_params.algorithms()->process_response_consume_body())(response, Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag {});
+        auto process_body_error = GC::create_function(vm.heap(), [algorithms, &response, setup_report_timing_steps](JS::Value) {
+            // AD-HOC: See comment on setup_report_timing_steps above.
+            setup_report_timing_steps();
+            (algorithms->process_response_consume_body())(response, Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag {});
         });
 
         // 3. If internalResponse's body is null, then queue a fetch task to run processBody given null, with
         //    fetchParams’s task destination.
         if (!internal_response->body()) {
-            Infrastructure::queue_fetch_task(fetch_params.controller(), fetch_params.task_destination(), GC::create_function(vm.heap(), [process_body]() {
-                process_body->function()({});
+            Infrastructure::queue_fetch_task(fetch_params.controller(), fetch_params.task_destination(), GC::create_function(vm.heap(), [algorithms, &response]() {
+                // NOTE: We have to provide `fully_read` a callback which accepts a ByteBuffer. Since that is not
+                //       nullable, we just invoke `process_response_consume_body` with a null value manually here.
+                (algorithms->process_response_consume_body())(response, Empty {});
             }));
         }
         // 4. Otherwise, fully read internalResponse body given processBody, processBodyError, and fetchParams’s task
@@ -822,7 +976,7 @@ void fetch_response_handover(JS::Realm& realm, Infrastructure::FetchParams const
 }
 
 // https://fetch.spec.whatwg.org/#concept-scheme-fetch
-WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params)
+GC::Ref<PendingResponse> scheme_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params)
 {
     dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'scheme fetch' with: fetch_params @ {}", &fetch_params);
 
@@ -845,17 +999,15 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
         //       of fetching.
         if (request->current_url().paths().size() == 1 && request->current_url().paths()[0] == "blank"sv) {
             auto response = Infrastructure::Response::create(vm);
-            response->set_status_message(MUST(ByteBuffer::copy("OK"sv.bytes())));
-
-            auto header = Infrastructure::Header::from_string_pair("Content-Type"sv, "text/html;charset=utf-8"sv);
-            response->header_list()->append(move(header));
-
+            response->set_status_message("OK"sv);
+            response->header_list()->append({ "Content-Type"sv, "text/html;charset=utf-8"sv });
             response->set_body(Infrastructure::byte_sequence_as_body(realm, ""sv.bytes()));
+
             return PendingResponse::create(vm, request, response);
         }
 
         // FIXME: This is actually wrong, see note above.
-        return TRY(nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params));
+        return nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params);
     }
     // -> "blob"
     else if (request->current_url().scheme() == "blob"sv) {
@@ -863,28 +1015,50 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
         auto const& blob_url_entry = request->current_url().blob_url_entry();
 
         // 2. If request’s method is not `GET` or blobURLEntry is null, then return a network error. [FILEAPI]
-        if (request->method() != "GET"sv.bytes() || !blob_url_entry.has_value())
+        if (request->method() != "GET"sv || !blob_url_entry.has_value())
             return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Request has an invalid 'blob:' URL"_string));
 
         // 3. Let requestEnvironment be the result of determining the environment given request.
         auto request_environment = determine_the_environment(request);
 
-        // 4. Let isTopLevelNavigation be true if request’s destination is "document"; otherwise, false.
-        bool is_top_level_navigation = request->destination() == Infrastructure::Request::Destination::Document;
+        // 4. Let isTopLevelSelfFetch be false.
+        bool is_top_level_self_fetch = false;
 
-        // 5. If isTopLevelNavigation is false and requestEnvironment is null, then return a network error.
-        if (!is_top_level_navigation && !request_environment)
-            return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Request is missing fetch client"_string));
+        // 5. If request’s client is non-null:
+        if (request->client() != nullptr) {
+            // 1. Let global be request’s client’s global object.
+            auto const* global_window = as_if<HTML::Window>(request->client()->global_object());
 
-        // 6. Let navigationOrEnvironment be the string "navigation" if isTopLevelNavigation is true; otherwise, requestEnvironment.
-        auto navigation_or_environment = [&]() -> Variant<FileAPI::NavigationEnvironment, GC::Ref<HTML::Environment>> {
-            if (is_top_level_navigation)
-                return FileAPI::NavigationEnvironment {};
-            return GC::Ref { *request_environment };
+            // 2. If all of the following conditions are true:
+            if (
+                // global is a Window object;
+                global_window != nullptr &&
+                // global’s navigable is not null;
+                global_window->navigable() != nullptr &&
+                // global’s navigable’s parent is null; and
+                global_window->navigable()->parent() == nullptr &&
+                // requestEnvironment’s creation URL equals request’s current URL,
+                request_environment->creation_url == request->current_url())
+                // then set isTopLevelSelfFetch to true.
+                is_top_level_self_fetch = true;
+        }
+
+        // 6. Let stringOrEnvironment be the result of these steps:
+        auto string_or_environment = [&]() -> Variant<GC::Ref<HTML::Environment>, FileAPI::TopLevelNavigation, FileAPI::TopLevelSelfFetch> {
+            // 1. If request’s destination is "document", then return "top-level-navigation".
+            if (request->destination() == Infrastructure::Request::Destination::Document)
+                return FileAPI::TopLevelNavigation();
+
+            // 2. If isTopLevelSelfFetch is true, then return "top-level-self-fetch".
+            if (is_top_level_self_fetch)
+                return FileAPI::TopLevelSelfFetch();
+
+            // 3. Return requestEnvironment.
+            return GC::Ref(*request_environment);
         }();
 
         // 7. Let blob be the result of obtaining a blob object given blobURLEntry and navigationOrEnvironment.
-        auto maybe_blob_object = FileAPI::obtain_a_blob_object(blob_url_entry.value(), navigation_or_environment);
+        auto maybe_blob_object = FileAPI::obtain_a_blob_object(blob_url_entry.value(), string_or_environment);
 
         // 8. If blob is not a Blob object, then return a network error.
         if (!maybe_blob_object.has_value())
@@ -893,7 +1067,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
         URL::BlobURLEntry::Blob* blob_object;
         if (blob_object = maybe_blob_object.value().get_pointer<URL::BlobURLEntry::Blob>(); !blob_object)
             return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Failed to obtain a Blob object from 'blob:' URL"_string));
-        auto const blob = FileAPI::Blob::create(realm, blob_object->data, blob_object->type);
+        auto const blob = FileAPI::Blob::create(realm, blob_object->data, Utf16String::from_utf8(blob_object->type));
 
         // 9. Let response be a new response.
         auto response = Infrastructure::Response::create(vm);
@@ -908,21 +1082,21 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
         auto const& type = blob->type();
 
         // 13. If request’s header list does not contain `Range`:
-        if (!request->header_list()->contains("Range"sv.bytes())) {
+        if (!request->header_list()->contains("Range"sv)) {
             // 1. Let bodyWithType be the result of safely extracting blob.
             auto body_with_type = safely_extract_body(realm, blob->raw_bytes());
 
             // 2. Set response’s status message to `OK`.
-            response->set_status_message(MUST(ByteBuffer::copy("OK"sv.bytes())));
+            response->set_status_message("OK"sv);
 
             // 3. Set response’s body to bodyWithType’s body.
             response->set_body(body_with_type.body);
 
             // 4. Set response’s header list to « (`Content-Length`, serializedFullLength), (`Content-Type`, type) ».
-            auto content_length_header = Infrastructure::Header::from_string_pair("Content-Length"sv, serialized_full_length);
+            auto content_length_header = HTTP::Header::isomorphic_encode("Content-Length"sv, serialized_full_length);
             response->header_list()->append(move(content_length_header));
 
-            auto content_type_header = Infrastructure::Header::from_string_pair("Content-Type"sv, type);
+            auto content_type_header = HTTP::Header::isomorphic_encode("Content-Type"sv, type);
             response->header_list()->append(move(content_type_header));
         }
         // 14. Otherwise:
@@ -931,10 +1105,10 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
             response->set_range_requested(true);
 
             // 2. Let rangeHeader be the result of getting `Range` from request’s header list.
-            auto const range_header = request->header_list()->get("Range"sv.bytes()).value_or(ByteBuffer {});
+            auto const range_header = request->header_list()->get("Range"sv).value_or({});
 
             // 3. Let rangeValue be the result of parsing a single range header value given rangeHeader and true.
-            auto maybe_range_value = Infrastructure::parse_single_range_header_value(range_header, true);
+            auto maybe_range_value = HTTP::parse_single_range_header_value(range_header, true);
 
             // 4. If rangeValue is failure, then return a network error.
             if (!maybe_range_value.has_value())
@@ -965,7 +1139,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
             }
 
             // 8. Let slicedBlob be the result of invoking slice blob given blob, rangeStart, rangeEnd + 1, and type.
-            auto sliced_blob = TRY(blob->slice(*range_start, *range_end + 1, type));
+            auto sliced_blob = MUST(blob->slice(*range_start, *range_end + 1, type));
 
             // 9. Let slicedBodyWithType be the result of safely extracting slicedBlob.
             auto sliced_body_with_type = safely_extract_body(realm, sliced_blob->raw_bytes());
@@ -977,26 +1151,26 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
             auto serialized_sliced_length = String::number(sliced_blob->size());
 
             // 12. Let contentRange be the result of invoking build a content range given rangeStart, rangeEnd, and fullLength.
-            auto content_range = Infrastructure::build_content_range(*range_start, *range_end, full_length);
+            auto content_range = HTTP::build_content_range(*range_start, *range_end, full_length);
 
             // 13. Set response’s status to 206.
             response->set_status(206);
 
             // 14. Set response’s status message to `Partial Content`.
-            response->set_status_message(MUST(ByteBuffer::copy("Partial Content"sv.bytes())));
+            response->set_status_message("Partial Content"sv);
 
             // 15. Set response’s header list to «
 
             // (`Content-Length`, serializedSlicedLength),
-            auto content_length_header = Infrastructure::Header::from_string_pair("Content-Length"sv, serialized_sliced_length);
+            auto content_length_header = HTTP::Header::isomorphic_encode("Content-Length"sv, serialized_sliced_length);
             response->header_list()->append(move(content_length_header));
 
             // (`Content-Type`, type),
-            auto content_type_header = Infrastructure::Header::from_string_pair("Content-Type"sv, type);
+            auto content_type_header = HTTP::Header::isomorphic_encode("Content-Type"sv, type);
             response->header_list()->append(move(content_type_header));
 
             // (`Content-Range`, contentRange) ».
-            auto content_range_header = Infrastructure::Header::from_string_pair("Content-Range"sv, content_range);
+            auto content_range_header = HTTP::Header::isomorphic_encode("Content-Range"sv, content_range);
             response->header_list()->append(move(content_range_header));
         }
 
@@ -1018,9 +1192,9 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
         // 4. Return a new response whose status message is `OK`, header list is « (`Content-Type`, mimeType) », and
         //    body is dataURLStruct’s body as a body.
         auto response = Infrastructure::Response::create(vm);
-        response->set_status_message(MUST(ByteBuffer::copy("OK"sv.bytes())));
+        response->set_status_message("OK"sv);
 
-        auto header = Infrastructure::Header::from_string_pair("Content-Type"sv, mime_type);
+        auto header = HTTP::Header::isomorphic_encode("Content-Type"sv, mime_type);
         response->header_list()->append(move(header));
 
         response->set_body(Infrastructure::byte_sequence_as_body(realm, data_url_struct.value().body));
@@ -1031,10 +1205,25 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
     else if (request->current_url().scheme() == "file"sv || request->current_url().scheme() == "resource"sv) {
         // For now, unfortunate as it is, file: URLs are left as an exercise for the reader.
         // When in doubt, return a network error.
-        if (request->origin().has<URL::Origin>() && (request->origin().get<URL::Origin>().is_opaque() || request->origin().get<URL::Origin>().scheme() == "file"sv || request->origin().get<URL::Origin>().scheme() == "resource"sv))
-            return TRY(nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params));
-        else
-            return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Request with 'file:' or 'resource:' URL blocked"_string));
+
+        auto error = PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Request with 'file:' or 'resource:' URL blocked"_string));
+
+        auto const* origin = request->origin().get_pointer<URL::Origin>();
+        if (!origin)
+            return error;
+
+        if (!(origin->is_opaque() || origin->scheme() == "file"sv || origin->scheme() == "resource"sv))
+            return error;
+
+        // Allow file:// pages to load subresources (scripts, styles, fonts, etc.) from other file:// URLs,
+        // but block the fetch() API and other requests without a destination from reading arbitrary files.
+        // Requests made via fetch() have an empty destination, so we use that to distinguish between
+        // subresource loads initiated by the browser (which have a destination) and programmatic fetches
+        // (which do not). This prevents data exfiltration via fetch() from file:// pages.
+        if (!request->destination().has_value())
+            return error;
+
+        return nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params);
     }
     // -> HTTP(S) scheme
     else if (Infrastructure::is_http_or_https_scheme(request->current_url().scheme())) {
@@ -1050,7 +1239,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> scheme_fetch(JS::Realm& realm, Inf
 }
 
 // https://fetch.spec.whatwg.org/#concept-http-fetch
-WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, MakeCORSPreflight make_cors_preflight)
+GC::Ref<PendingResponse> http_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, MakeCORSPreflight make_cors_preflight)
 {
     dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'HTTP fetch' with: fetch_params @ {}, make_cors_preflight = {}",
         &fetch_params, make_cors_preflight == MakeCORSPreflight::Yes ? "Yes"sv : "No"sv);
@@ -1080,7 +1269,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_fetch(JS::Realm& realm, Infra
 
         // 3. Let serviceWorkerStartTime be the coarsened shared current time given fetchParams’s cross-origin isolated
         //    capability.
-        auto service_worker_start_time = HighResolutionTime::coarsened_shared_current_time(fetch_params.cross_origin_isolated_capability() == HTML::CanUseCrossOriginIsolatedAPIs::Yes);
+        auto service_worker_start_time = HighResolutionTime::coarsened_shared_current_time(fetch_params.cross_origin_isolated_capability());
 
         // FIXME: 4. Set response to the result of invoking handle fetch for requestForServiceWorker, with fetchParams’s
         //           controller and fetchParams’s cross-origin isolated capability.
@@ -1126,27 +1315,33 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_fetch(JS::Realm& realm, Infra
     // 4. If response is null, then:
     if (!response) {
         // 1. If makeCORSPreflight is true and one of these conditions is true:
+        GC::Ptr<PendingResponse> pending_preflight_response;
+        auto& preflight_cache = Infrastructure::PreflightCache::the();
+
+        // - There is no method cache entry match for request's method using request,
+        //   and either request's method is not a CORS-safelisted method or request's use-CORS-preflight flag is set.
+        bool method_needs_preflight = !preflight_cache.is_a_method_cache_entry_match(*request, request->method())
+            && (!HTTP::is_cors_safelisted_method(request->method()) || request->use_cors_preflight());
+
+        // - There is at least one item in the CORS-unsafe request-header names with request's header list for
+        //   which there is no header-name cache entry match using request.
+        bool headers_need_preflight = any_of(Infrastructure::get_cors_unsafe_header_names(request->header_list()),
+            [&](auto const& name) {
+                return !preflight_cache.is_a_header_name_cache_entry_match(*request, name);
+            });
+
+        if (make_cors_preflight == MakeCORSPreflight::Yes && (method_needs_preflight || headers_need_preflight)) {
+            // 1. Let preflightResponse be the result of running CORS-preflight fetch given request.
+            pending_preflight_response = cors_preflight_fetch(realm, request);
+
+            // NOTE: Step 2 is performed in pending_preflight_response's load callback below.
+        }
         // NOTE: This step checks the CORS-preflight cache and if there is no suitable entry it performs a
         //       CORS-preflight fetch which, if successful, populates the cache. The purpose of the CORS-preflight
         //       fetch is to ensure the fetched resource is familiar with the CORS protocol. The cache is there to
         //       minimize the number of CORS-preflight fetches.
-        GC::Ptr<PendingResponse> pending_preflight_response;
-        if (make_cors_preflight == MakeCORSPreflight::Yes && (
-                // - There is no method cache entry match for request’s method using request, and either request’s
-                //   method is not a CORS-safelisted method or request’s use-CORS-preflight flag is set.
-                //   FIXME: We currently have no cache, so there will always be no method cache entry.
-                (!Infrastructure::is_cors_safelisted_method(request->method()) || request->use_cors_preflight())
-                // - There is at least one item in the CORS-unsafe request-header names with request’s header list for
-                //   which there is no header-name cache entry match using request.
-                //   FIXME: We currently have no cache, so there will always be no header-name cache entry.
-                || !Infrastructure::get_cors_unsafe_header_names(request->header_list()).is_empty())) {
-            // 1. Let preflightResponse be the result of running CORS-preflight fetch given request.
-            pending_preflight_response = TRY(cors_preflight_fetch(realm, request));
 
-            // NOTE: Step 2 is performed in pending_preflight_response's load callback below.
-        }
-
-        auto fetch_main_content = [request = GC::make_root(request), realm = GC::make_root(realm), fetch_params = GC::make_root(fetch_params)]() -> WebIDL::ExceptionOr<GC::Ref<PendingResponse>> {
+        auto fetch_main_content = GC::create_function(realm.heap(), [request, realm = GC::Ref { realm }, fetch_params = GC::Ref { fetch_params }]() -> GC::Ref<PendingResponse> {
             // 2. If request’s redirect mode is "follow", then set request’s service-workers mode to "none".
             // NOTE: Redirects coming from the network (as opposed to from a service worker) are not to be exposed to a
             //       service worker.
@@ -1155,11 +1350,11 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_fetch(JS::Realm& realm, Infra
 
             // 3. Set response and internalResponse to the result of running HTTP-network-or-cache fetch given fetchParams.
             return http_network_or_cache_fetch(*realm, *fetch_params);
-        };
+        });
 
         if (pending_preflight_response) {
             pending_actual_response = PendingResponse::create(vm, request);
-            pending_preflight_response->when_loaded([returned_pending_response, pending_actual_response, fetch_main_content = move(fetch_main_content)](GC::Ref<Infrastructure::Response> preflight_response) {
+            pending_preflight_response->when_loaded([returned_pending_response, pending_actual_response, fetch_main_content](GC::Ref<Infrastructure::Response> preflight_response) {
                 dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'HTTP fetch' pending_preflight_response load callback");
 
                 // 2. If preflightResponse is a network error, then return preflightResponse.
@@ -1168,14 +1363,14 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_fetch(JS::Realm& realm, Infra
                     return;
                 }
 
-                auto pending_main_content_response = TRY_OR_IGNORE(fetch_main_content());
+                auto pending_main_content_response = fetch_main_content->function()();
                 pending_main_content_response->when_loaded([pending_actual_response](GC::Ref<Infrastructure::Response> main_content_response) {
                     dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'HTTP fetch' pending_main_content_response load callback");
                     pending_actual_response->resolve(main_content_response);
                 });
             });
         } else {
-            pending_actual_response = TRY(fetch_main_content());
+            pending_actual_response = fetch_main_content->function()();
         }
     } else {
         pending_actual_response = PendingResponse::create(vm, request, Infrastructure::Response::create(vm));
@@ -1246,7 +1441,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_fetch(JS::Realm& realm, Infra
             // -> "follow"
             case Infrastructure::Request::RedirectMode::Follow:
                 // 1. Set response to the result of running HTTP-redirect fetch given fetchParams and response.
-                inner_pending_response = TRY_OR_IGNORE(http_redirect_fetch(realm, fetch_params, *response));
+                inner_pending_response = http_redirect_fetch(realm, fetch_params, *response);
                 break;
             default:
                 VERIFY_NOT_REACHED();
@@ -1269,7 +1464,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_fetch(JS::Realm& realm, Infra
 }
 
 // https://fetch.spec.whatwg.org/#concept-http-redirect-fetch
-WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> http_redirect_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, Infrastructure::Response& response)
+GC::Ptr<PendingResponse> http_redirect_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, Infrastructure::Response& response)
 {
     dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'HTTP-redirect fetch' with: fetch_params @ {}, response = {}", &fetch_params, &response);
 
@@ -1290,6 +1485,13 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> http_redirect_fetch(JS::Realm& rea
     // 4. If locationURL is null, then return response.
     if (!location_url_or_error.is_error() && !location_url_or_error.value().has_value())
         return PendingResponse::create(vm, request, response);
+
+    // AD-HOC: Navigation responses are kept alive in RequestServer so they can be transferred to the UI process if
+    //         they become downloads. This response will be discarded in favor of either a network error or the
+    //         redirect response, so release that hold and stop the request if it is still active.
+    internal_response->release_request_for_transfer();
+    if (auto const& request_server_request = internal_response->request_server_request(); request_server_request.has_value() && request_server_request->request)
+        request_server_request->request->stop();
 
     // 5. If locationURL is failure, then return a network error.
     if (location_url_or_error.is_error())
@@ -1333,13 +1535,13 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> http_redirect_fetch(JS::Realm& rea
     // 12. If one of the following is true
     if (
         // - internalResponse’s status is 301 or 302 and request’s method is `POST`
-        ((internal_response->status() == 301 || internal_response->status() == 302) && request->method() == "POST"sv.bytes())
+        ((internal_response->status() == 301 || internal_response->status() == 302) && request->method() == "POST"sv)
         // - internalResponse’s status is 303 and request’s method is not `GET` or `HEAD`
-        || (internal_response->status() == 303 && !(request->method() == "GET"sv.bytes() || request->method() == "HEAD"sv.bytes()))
+        || (internal_response->status() == 303 && !(request->method() == "GET"sv || request->method() == "HEAD"sv))
         // then:
     ) {
         // 1. Set request’s method to `GET` and request’s body to null.
-        request->set_method(MUST(ByteBuffer::copy("GET"sv.bytes())));
+        request->set_method("GET"sv);
         request->set_body({});
 
         static constexpr Array request_body_header_names {
@@ -1350,7 +1552,7 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> http_redirect_fetch(JS::Realm& rea
         };
         // 2. For each headerName of request-body-header name, delete headerName from request’s header list.
         for (auto header_name : request_body_header_names.span())
-            request->header_list()->delete_(header_name.bytes());
+            request->header_list()->delete_(header_name);
     }
 
     // 13. If request’s current URL’s origin is not same origin with locationURL’s origin, then for each headerName of
@@ -1361,7 +1563,7 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> http_redirect_fetch(JS::Realm& rea
             "Authorization"sv
         };
         for (auto header_name : cors_non_wildcard_request_header_names)
-            request->header_list()->delete_(header_name.bytes());
+            request->header_list()->delete_(header_name);
     }
 
     // 14. If request’s body is non-null, then set request’s body to the body of the result of safely extracting
@@ -1370,9 +1572,11 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> http_redirect_fetch(JS::Realm& rea
     if (!request->body().has<Empty>()) {
         auto const& source = request->body().get<GC::Ref<Infrastructure::Body>>()->source();
         // NOTE: BodyInitOrReadableBytes is a superset of Body::SourceType
-        auto converted_source = source.has<ByteBuffer>()
-            ? BodyInitOrReadableBytes { source.get<ByteBuffer>() }
-            : BodyInitOrReadableBytes { source.get<GC::Root<FileAPI::Blob>>() };
+        auto converted_source = source.visit(
+            [](ByteBuffer const& byte_buffer) -> BodyInitOrReadableBytes { return byte_buffer.bytes(); },
+            [](Core::ImmutableBytes const& bytes) -> BodyInitOrReadableBytes { return bytes; },
+            [](GC::Ref<FileAPI::Blob> blob) -> BodyInitOrReadableBytes { return blob; },
+            [](Empty) -> BodyInitOrReadableBytes { VERIFY_NOT_REACHED(); });
         auto [body, _] = safely_extract_body(realm, converted_source);
         request->set_body(body);
     }
@@ -1382,7 +1586,7 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> http_redirect_fetch(JS::Realm& rea
 
     // 16. Set timingInfo’s redirect end time and post-redirect start time to the coarsened shared current time given
     //     fetchParams’s cross-origin isolated capability.
-    auto now = HighResolutionTime::coarsened_shared_current_time(fetch_params.cross_origin_isolated_capability() == HTML::CanUseCrossOriginIsolatedAPIs::Yes);
+    auto now = HighResolutionTime::coarsened_shared_current_time(fetch_params.cross_origin_isolated_capability());
     timing_info->set_redirect_end_time(now);
     timing_info->set_post_redirect_start_time(now);
 
@@ -1413,283 +1617,8 @@ WebIDL::ExceptionOr<GC::Ptr<PendingResponse>> http_redirect_fetch(JS::Realm& rea
     return main_fetch(realm, fetch_params, recursive);
 }
 
-class CachePartition : public RefCounted<CachePartition> {
-public:
-    // https://httpwg.org/specs/rfc9111.html#constructing.responses.from.caches
-    GC::Ptr<Infrastructure::Response> select_response(JS::Realm& realm, URL::URL const& url, ReadonlyBytes method, Vector<Infrastructure::Header> const& headers, Vector<GC::Ptr<Infrastructure::Response>>& initial_set_of_stored_responses) const
-    {
-        // When presented with a request, a cache MUST NOT reuse a stored response unless:
-
-        // - the presented target URI (Section 7.1 of [HTTP]) and that of the stored response match, and
-        auto it = m_cache.find(url);
-        if (it == m_cache.end()) {
-            dbgln("\033[31;1mHTTP CACHE MISS!\033[0m {}", url);
-            return {};
-        }
-        auto const& cached_response = it->value;
-
-        // - the request method associated with the stored response allows it to be used for the presented request, and
-        if (method != cached_response->method()) {
-            dbgln("\033[31;1mHTTP CACHE MISS!\033[0m (Bad method) {}", url);
-            return {};
-        }
-
-        // FIXME: - request header fields nominated by the stored response (if any) match those presented (see Section 4.1), and
-        (void)headers;
-
-        // FIXME: - the stored response does not contain the no-cache directive (Section 5.2.2.4), unless it is successfully validated (Section 4.3), and
-
-        initial_set_of_stored_responses.append(*cached_response);
-
-        // FIXME: - the stored response is one of the following:
-        //          + fresh (see Section 4.2), or
-        //          + allowed to be served stale (see Section 4.2.4), or
-        //          + successfully validated (see Section 4.3).
-
-        dbgln("\033[32;1mHTTP CACHE HIT!\033[0m {}", url);
-
-        return cached_response->clone(realm);
-    }
-
-    void store_response(JS::Realm& realm, Infrastructure::Request const& http_request, Infrastructure::Response const& response)
-    {
-        if (!is_cacheable(http_request, response))
-            return;
-
-        auto cached_response = Infrastructure::Response::create(realm.vm());
-
-        store_header_and_trailer_fields(response, *cached_response->header_list());
-        cached_response->set_body(response.body()->clone(realm));
-        cached_response->set_body_info(response.body_info());
-        cached_response->set_method(MUST(ByteBuffer::copy(http_request.method())));
-        cached_response->set_status(response.status());
-        cached_response->url_list().append(http_request.current_url());
-        m_cache.set(http_request.current_url(), move(cached_response));
-    }
-
-    // https://httpwg.org/specs/rfc9111.html#freshening.responses
-    void freshen_stored_responses_upon_validation(Infrastructure::Response const& response, Vector<GC::Ptr<Infrastructure::Response>>& initial_set_of_stored_responses)
-    {
-        // When a cache receives a 304 (Not Modified) response, it needs to identify stored
-        // responses that are suitable for updating with the new information provided, and then do so.
-
-        // The initial set of stored responses to update are those that could have been
-        // chosen for that request — i.e., those that meet the requirements in Section 4,
-        // except the last requirement to be fresh, able to be served stale, or just validated.
-        for (auto stored_response : initial_set_of_stored_responses) {
-            // Then, that initial set of stored responses is further filtered by the first match of:
-
-            // - FIXME: If the new response contains one or more strong validators (see Section 8.8.1 of [HTTP]),
-            //   then each of those strong validators identifies a selected representation for update.
-            //   All the stored responses in the initial set with one of those same strong validators
-            //   are identified for update.
-            //   If none of the initial set contains at least one of the same strong validators,
-            //   then the cache MUST NOT use the new response to update any stored responses.
-            // - FIXME: If the new response contains no strong validators but does contain one or more weak validators,
-            //   and those validators correspond to one of the initial set's stored responses,
-            //   then the most recent of those matching stored responses is identified for update.
-            // - FIXME: If the new response does not include any form of validator (such as where a client generates an
-            //   `If-Modified-Since` request from a source other than the `Last-Modified` response header field),
-            //   and there is only one stored response in the initial set, and that stored response also lacks a validator,
-            //   then that stored response is identified for update.
-
-            // For each stored response identified, the cache MUST update its header fields
-            // with the header fields provided in the 304 (Not Modified) response, as per Section 3.2.
-            update_stored_header_fields(response, stored_response->header_list());
-        }
-    }
-
-private:
-    // https://httpwg.org/specs/rfc9111.html#storing.fields
-    bool is_exempted_for_storage(StringView header_name)
-    {
-        // Caches MUST include all received response header fields — including unrecognized ones — when storing a response;
-        // this assures that new HTTP header fields can be successfully deployed. However, the following exceptions are made:
-
-        // - The Connection header field and fields whose names are listed in it are required by Section 7.6.1 of [HTTP]
-        //   to be removed before forwarding the message. This MAY be implemented by doing so before storage.
-
-        // - Likewise, some fields' semantics require them to be removed before forwarding the message, and this MAY be
-        //   implemented by doing so before storage; see Section 7.6.1 of [HTTP] for some examples.
-
-        // FIXME: - The no-cache (Section 5.2.2.4) and private (Section 5.2.2.7) cache directives can have arguments that
-        //          prevent storage of header fields by all caches and shared caches, respectively.
-
-        // FIXME: - Header fields that are specific to the proxy that a cache uses when forwarding a request MUST NOT be stored,
-        //          unless the cache incorporates the identity of the proxy into the cache key.
-        //          Effectively, this is limited to Proxy-Authenticate (Section 11.7.1 of [HTTP]), Proxy-Authentication-Info (Section 11.7.3 of [HTTP]), and Proxy-Authorization (Section 11.7.2 of [HTTP]).
-
-        return header_name.is_one_of_ignoring_ascii_case(
-            "Connection"sv,
-            "Proxy-Connection"sv,
-            "Keep-Alive"sv,
-            "TE"sv,
-            "Transfer-Encoding"sv,
-            "Upgrade"sv);
-    }
-
-    // https://httpwg.org/specs/rfc9111.html#update
-    bool is_exempted_for_updating(StringView header_name)
-    {
-        // Caches are required to update a stored response's header fields from another
-        // (typically newer) response in several situations; for example, see Sections 3.4, 4.3.4, and 4.3.5.
-
-        // When doing so, the cache MUST add each header field in the provided response to the stored response,
-        // replacing field values that are already present, with the following exceptions:
-
-        // - Header fields excepted from storage in Section 3.1,
-        return is_exempted_for_storage(header_name)
-            // - Header fields that the cache's stored response depends upon, as described below,
-            || false
-            // - Header fields that are automatically processed and removed by the recipient, as described below, and
-            || false
-            // - The Content-Length header field.
-            || header_name.equals_ignoring_ascii_case("Content-Length"sv);
-
-        // In some cases, caches (especially in user agents) store the results of processing
-        // the received response, rather than the response itself, and updating header fields
-        // that affect that processing can result in inconsistent behavior and security issues.
-        // Caches in this situation MAY omit these header fields from updating stored responses
-        // on an exceptional basis but SHOULD limit such omission to those fields necessary to
-        // assure integrity of the stored response.
-
-        // For example, a browser might decode the content coding of a response while it is being received,
-        // creating a disconnect between the data it has stored and the response's original metadata.
-        // Updating that stored metadata with a different Content-Encoding header field would be problematic.
-        // Likewise, a browser might store a post-parse HTML tree rather than the content received in the response;
-        // updating the Content-Type header field would not be workable in this case because any assumptions about
-        // the format made in parsing would now be invalid.
-
-        // Furthermore, some fields are automatically processed and removed by the HTTP implementation,
-        // such as the Content-Range header field. Implementations MAY automatically omit such header fields from updates,
-        // even when the processing does not actually occur.
-
-        // Note that the Content-* prefix is not a signal that a header field is omitted from update; it is a convention for MIME header fields, not HTTP.
-    }
-
-    // https://httpwg.org/specs/rfc9111.html#update
-    void update_stored_header_fields(Infrastructure::Response const& response, Infrastructure::HeaderList& headers)
-    {
-        for (auto& header : *response.header_list()) {
-            auto name = StringView(header.name);
-
-            if (is_exempted_for_updating(name))
-                continue;
-
-            headers.delete_(header.name);
-        }
-
-        for (auto& header : *response.header_list()) {
-            auto name = StringView(header.name);
-
-            if (is_exempted_for_updating(name))
-                continue;
-
-            headers.append(Infrastructure::Header::copy(header));
-        }
-    }
-
-    // https://httpwg.org/specs/rfc9111.html#storing.fields
-    void store_header_and_trailer_fields(Infrastructure::Response const& response, Web::Fetch::Infrastructure::HeaderList& headers)
-    {
-        for (auto& header : *response.header_list()) {
-            auto name = StringView(header.name);
-
-            if (is_exempted_for_storage(name))
-                continue;
-
-            headers.append(Infrastructure::Header::copy(header));
-        }
-    }
-
-    // https://httpwg.org/specs/rfc9111.html#response.cacheability
-    static bool is_cacheable(Infrastructure::Request const& request, Infrastructure::Response const& response)
-    {
-        // A cache MUST NOT store a response to a request unless:
-
-        // - AD-HOC: For now, we simply don't cache responses without a simple ByteBuffer body.
-        if (!response.body() || !response.body()->source().has<ByteBuffer>())
-            return false;
-
-        // - the request method is understood by the cache;
-        if (request.method() != "GET"sv.bytes() && request.method() != "HEAD"sv.bytes())
-            return false;
-
-        // - the response status code is final (see Section 15 of [HTTP]);
-        if (response.status() < 200)
-            return false;
-
-        // - if the response status code is 206 or 304,
-        //   or the must-understand cache directive (see Section 5.2.2.3) is present:
-        //       the cache understands the response status code;
-        if (response.status() == 206 || response.status() == 304) {
-            // FIXME: Implement must-understand cache directive
-        }
-
-        // - the no-store cache directive is not present in the response (see Section 5.2.2.5);
-        if (request.cache_mode() == Infrastructure::Request::CacheMode::NoStore)
-            return false;
-
-        // FIXME: - if the cache is shared: the private response directive is either not present
-        //          or allows a shared cache to store a modified response; see Section 5.2.2.7);
-
-        // FIXME: - if the cache is shared: the Authorization header field is not present in the
-        //          request (see Section 11.6.2 of [HTTP]) or a response directive is present
-        //          that explicitly allows shared caching (see Section 3.5); and
-
-        // FIXME: - the response contains at least one of the following:
-        //          + a public response directive (see Section 5.2.2.9);
-        //          + a private response directive, if the cache is not shared (see Section 5.2.2.7);
-        //          + an Expires header field (see Section 5.3);
-        //          + a max-age response directive (see Section 5.2.2.1);
-        //          + if the cache is shared: an s-maxage response directive (see Section 5.2.2.10);
-        //          + a cache extension that allows it to be cached (see Section 5.2.3); or
-        //          + a status code that is defined as heuristically cacheable (see Section 4.2.2).
-
-        return true;
-    }
-
-    HashMap<URL::URL, GC::Root<Infrastructure::Response>> m_cache;
-};
-
-class HTTPCache {
-public:
-    CachePartition& get(Infrastructure::NetworkPartitionKey const& key)
-    {
-        return *m_cache.ensure(key, [] {
-            return adopt_ref(*new CachePartition);
-        });
-    }
-
-    static HTTPCache& the()
-    {
-        static HTTPCache s_cache;
-        return s_cache;
-    }
-
-private:
-    HashMap<Infrastructure::NetworkPartitionKey, NonnullRefPtr<CachePartition>> m_cache;
-};
-
-// https://fetch.spec.whatwg.org/#determine-the-http-cache-partition
-static RefPtr<CachePartition> determine_the_http_cache_partition(Infrastructure::Request const& request)
-{
-    if (!g_http_cache_enabled)
-        return nullptr;
-
-    // 1. Let key be the result of determining the network partition key given request.
-    auto key = Infrastructure::determine_the_network_partition_key(request);
-
-    // 2. If key is null, then return null.
-    if (!key.has_value())
-        return nullptr;
-
-    // 3. Return the unique HTTP cache associated with key. [HTTP-CACHING]
-    return HTTPCache::the().get(key.value());
-}
-
 // https://fetch.spec.whatwg.org/#concept-http-network-or-cache-fetch
-WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, IsAuthenticationFetch is_authentication_fetch, IsNewConnectionFetch is_new_connection_fetch)
+GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, IsAuthenticationFetch is_authentication_fetch, IsNewConnectionFetch is_new_connection_fetch)
 {
     dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'HTTP-network-or-cache fetch' with: fetch_params @ {}, is_authentication_fetch = {}, is_new_connection_fetch = {}",
         &fetch_params, is_authentication_fetch == IsAuthenticationFetch::Yes ? "Yes"sv : "No"sv, is_new_connection_fetch == IsNewConnectionFetch::Yes ? "Yes"sv : "No"sv);
@@ -1710,16 +1639,13 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
 
     // 5. Let storedResponse be null.
     GC::Ptr<Infrastructure::Response> stored_response;
-    GC::RootVector<GC::Ptr<Infrastructure::Response>> initial_set_of_stored_responses(realm.heap());
 
     // 6. Let httpCache be null.
-    // (Typeless until we actually implement it, needed for checks below)
-    RefPtr<CachePartition> http_cache;
+    RefPtr<HTTP::MemoryCache> http_cache;
 
     // 7. Let the revalidatingFlag be unset.
-    auto revalidating_flag = RefCountedFlag::create(false);
 
-    auto include_credentials = IncludeCredentials::No;
+    auto include_credentials = HTTP::Cookie::IncludeCredentials::No;
 
     // 8. Run these steps, but abort when fetchParams is canceled:
     // NOTE: There's an 'if aborted' check after this anyway, so not doing this is fine and only incurs a small delay.
@@ -1748,12 +1674,9 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
             http_request = request->clone(realm);
 
             // 2. Set httpFetchParams to a copy of fetchParams.
+            auto new_http_fetch_params = Infrastructure::FetchParams::copy(fetch_params);
             // 3. Set httpFetchParams’s request to httpRequest.
-            auto new_http_fetch_params = Infrastructure::FetchParams::create(vm, *http_request, fetch_params.timing_info());
-            new_http_fetch_params->set_algorithms(fetch_params.algorithms());
-            new_http_fetch_params->set_task_destination(fetch_params.task_destination());
-            new_http_fetch_params->set_cross_origin_isolated_capability(fetch_params.cross_origin_isolated_capability());
-            new_http_fetch_params->set_preloaded_response_candidate(fetch_params.preloaded_response_candidate());
+            new_http_fetch_params->set_request(*http_request);
             http_fetch_params = new_http_fetch_params;
         }
 
@@ -1766,15 +1689,15 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
                 && request->response_tainting() == Infrastructure::Request::ResponseTainting::Basic)
             // is true; otherwise false.
         ) {
-            include_credentials = IncludeCredentials::Yes;
+            include_credentials = HTTP::Cookie::IncludeCredentials::Yes;
         } else {
-            include_credentials = IncludeCredentials::No;
+            include_credentials = HTTP::Cookie::IncludeCredentials::No;
         }
 
         // 4. If Cross-Origin-Embedder-Policy allows credentials with request returns false, then set
         //    includeCredentials to false.
         if (!request->cross_origin_embedder_policy_allows_credentials())
-            include_credentials = IncludeCredentials::No;
+            include_credentials = HTTP::Cookie::IncludeCredentials::No;
 
         // 5. Let contentLength be httpRequest’s body’s length, if httpRequest’s body is non-null; otherwise null.
         auto content_length = http_request->body().has<GC::Ref<Infrastructure::Body>>()
@@ -1782,27 +1705,22 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
             : Optional<u64> {};
 
         // 6. Let contentLengthHeaderValue be null.
-        auto content_length_header_value = Optional<ByteBuffer> {};
+        Optional<ByteString> content_length_header_value;
 
         // 7. If httpRequest’s body is null and httpRequest’s method is `POST` or `PUT`, then set
         //    contentLengthHeaderValue to `0`.
-        if (http_request->body().has<Empty>() && StringView { http_request->method() }.is_one_of("POST"sv, "PUT"sv))
-            content_length_header_value = MUST(ByteBuffer::copy("0"sv.bytes()));
+        if (http_request->body().has<Empty>() && http_request->method().is_one_of("POST"sv, "PUT"sv))
+            content_length_header_value = "0"sv;
 
         // 8. If contentLength is non-null, then set contentLengthHeaderValue to contentLength, serialized and
         //    isomorphic encoded.
         if (content_length.has_value())
-            content_length_header_value = MUST(ByteBuffer::copy(String::number(*content_length).bytes()));
+            content_length_header_value = ByteString::number(*content_length);
 
         // 9. If contentLengthHeaderValue is non-null, then append (`Content-Length`, contentLengthHeaderValue) to
         //    httpRequest’s header list.
-        if (content_length_header_value.has_value()) {
-            auto header = Infrastructure::Header {
-                .name = MUST(ByteBuffer::copy("Content-Length"sv.bytes())),
-                .value = content_length_header_value.release_value(),
-            };
-            http_request->header_list()->append(move(header));
-        }
+        if (content_length_header_value.has_value())
+            http_request->header_list()->append({ "Content-Length"sv, content_length_header_value.release_value() });
 
         // 10. If contentLength is non-null and httpRequest’s keepalive is true, then:
         if (content_length.has_value() && http_request->keepalive()) {
@@ -1813,7 +1731,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
             auto& group = http_request->client()->fetch_group();
 
             // 3. Let inflightRecords be the set of fetch records in group whose request’s keepalive is true and done flag is unset.
-            GC::RootVector<GC::Ref<Infrastructure::FetchRecord>> in_flight_records(vm.heap());
+            GC::RootVector<GC::Ref<Infrastructure::FetchRecord>> in_flight_records;
             for (auto& fetch_record : group) {
                 if (fetch_record.request()->keepalive() && !fetch_record.request()->done())
                     in_flight_records.append(fetch_record);
@@ -1842,17 +1760,12 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
         }
 
         // 11. If httpRequest’s referrer is a URL, then:
-        if (http_request->referrer().has<URL::URL>()) {
+        if (auto const* referrer_url = http_request->referrer().get_pointer<URL::URL>()) {
             // 1. Let referrerValue be httpRequest’s referrer, serialized and isomorphic encoded.
-            auto referrer_string = http_request->referrer().get<URL::URL>().serialize();
-            auto referrer_value = TRY_OR_THROW_OOM(vm, ByteBuffer::copy(referrer_string.bytes()));
+            auto referrer_value = TextCodec::isomorphic_encode(referrer_url->serialize());
 
             // 2. Append (`Referer`, referrerValue) to httpRequest’s header list.
-            auto header = Infrastructure::Header {
-                .name = MUST(ByteBuffer::copy("Referer"sv.bytes())),
-                .value = move(referrer_value),
-            };
-            http_request->header_list()->append(move(header));
+            http_request->header_list()->append({ "Referer"sv, move(referrer_value) });
         }
 
         // 12. Append a request `Origin` header for httpRequest.
@@ -1861,67 +1774,55 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
         // 13. Append the Fetch metadata headers for httpRequest.
         append_fetch_metadata_headers_for_request(*http_request);
 
-        // 14. FIXME If httpRequest’s initiator is "prefetch", then set a structured field value
+        // 14. FIXME: If httpRequest’s initiator is "prefetch", then set a structured field value
         //     given (`Sec-Purpose`, the token prefetch) in httpRequest’s header list.
 
         // 15. If httpRequest’s header list does not contain `User-Agent`, then user agents should append
         //     (`User-Agent`, default `User-Agent` value) to httpRequest’s header list.
-        if (!http_request->header_list()->contains("User-Agent"sv.bytes())) {
-            auto header = Infrastructure::Header {
-                .name = MUST(ByteBuffer::copy("User-Agent"sv.bytes())),
-                .value = Infrastructure::default_user_agent_value(),
-            };
-            http_request->header_list()->append(move(header));
-        }
+        if (!http_request->header_list()->contains("User-Agent"sv))
+            http_request->header_list()->append({ "User-Agent"sv, Infrastructure::default_user_agent_value() });
 
         // 16. If httpRequest’s cache mode is "default" and httpRequest’s header list contains `If-Modified-Since`,
         //     `If-None-Match`, `If-Unmodified-Since`, `If-Match`, or `If-Range`, then set httpRequest’s cache mode to
         //     "no-store".
-        if (http_request->cache_mode() == Infrastructure::Request::CacheMode::Default
-            && (http_request->header_list()->contains("If-Modified-Since"sv.bytes())
-                || http_request->header_list()->contains("If-None-Match"sv.bytes())
-                || http_request->header_list()->contains("If-Unmodified-Since"sv.bytes())
-                || http_request->header_list()->contains("If-Match"sv.bytes())
-                || http_request->header_list()->contains("If-Range"sv.bytes()))) {
-            http_request->set_cache_mode(Infrastructure::Request::CacheMode::NoStore);
+        if (http_request->cache_mode() == HTTP::CacheMode::Default
+            && (http_request->header_list()->contains("If-Modified-Since"sv)
+                || http_request->header_list()->contains("If-None-Match"sv)
+                || http_request->header_list()->contains("If-Unmodified-Since"sv)
+                || http_request->header_list()->contains("If-Match"sv)
+                || http_request->header_list()->contains("If-Range"sv))) {
+            http_request->set_cache_mode(HTTP::CacheMode::NoStore);
         }
 
         // 17. If httpRequest’s cache mode is "no-cache", httpRequest’s prevent no-cache cache-control header
         //     modification flag is unset, and httpRequest’s header list does not contain `Cache-Control`, then append
         //     (`Cache-Control`, `max-age=0`) to httpRequest’s header list.
-        if (http_request->cache_mode() == Infrastructure::Request::CacheMode::NoCache
+        if (http_request->cache_mode() == HTTP::CacheMode::NoCache
             && !http_request->prevent_no_cache_cache_control_header_modification()
-            && !http_request->header_list()->contains("Cache-Control"sv.bytes())) {
-            auto header = Infrastructure::Header::from_string_pair("Cache-Control"sv, "max-age=0"sv);
-            http_request->header_list()->append(move(header));
+            && !http_request->header_list()->contains("Cache-Control"sv)) {
+            http_request->header_list()->append({ "Cache-Control"sv, "max-age=0"sv });
         }
 
         // 18. If httpRequest’s cache mode is "no-store" or "reload", then:
-        if (http_request->cache_mode() == Infrastructure::Request::CacheMode::NoStore
-            || http_request->cache_mode() == Infrastructure::Request::CacheMode::Reload) {
+        if (http_request->cache_mode() == HTTP::CacheMode::NoStore
+            || http_request->cache_mode() == HTTP::CacheMode::Reload) {
             // 1. If httpRequest’s header list does not contain `Pragma`, then append (`Pragma`, `no-cache`) to
             //    httpRequest’s header list.
-            if (!http_request->header_list()->contains("Pragma"sv.bytes())) {
-                auto header = Infrastructure::Header::from_string_pair("Pragma"sv, "no-cache"sv);
-                http_request->header_list()->append(move(header));
-            }
+            if (!http_request->header_list()->contains("Pragma"sv))
+                http_request->header_list()->append({ "Pragma"sv, "no-cache"sv });
 
             // 2. If httpRequest’s header list does not contain `Cache-Control`, then append
             //    (`Cache-Control`, `no-cache`) to httpRequest’s header list.
-            if (!http_request->header_list()->contains("Cache-Control"sv.bytes())) {
-                auto header = Infrastructure::Header::from_string_pair("Cache-Control"sv, "no-cache"sv);
-                http_request->header_list()->append(move(header));
-            }
+            if (!http_request->header_list()->contains("Cache-Control"sv))
+                http_request->header_list()->append({ "Cache-Control"sv, "no-cache"sv });
         }
 
         // 19. If httpRequest’s header list contains `Range`, then append (`Accept-Encoding`, `identity`) to
         //     httpRequest’s header list.
         // NOTE: This avoids a failure when handling content codings with a part of an encoded response.
         //       Additionally, many servers mistakenly ignore `Range` headers if a non-identity encoding is accepted.
-        if (http_request->header_list()->contains("Range"sv.bytes())) {
-            auto header = Infrastructure::Header::from_string_pair("Accept-Encoding"sv, "identity"sv);
-            http_request->header_list()->append(move(header));
-        }
+        if (http_request->header_list()->contains("Range"sv))
+            http_request->header_list()->append({ "Accept-Encoding"sv, "identity"sv });
 
         // 20. Modify httpRequest’s header list per HTTP. Do not append a given header if httpRequest’s header list
         //     contains that header’s name.
@@ -1931,32 +1832,22 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
         // NOTE: `Accept` and `Accept-Language` are already included (unless fetch() is used, which does not include
         //       the latter by default), and `Accept-Charset` is a waste of bytes. See HTTP header layer division for
         //       more details.
-        if (ResourceLoader::the().enable_do_not_track() && !http_request->header_list()->contains("DNT"sv.bytes())) {
-            auto header = Infrastructure::Header::from_string_pair("DNT"sv, "1"sv);
-            http_request->header_list()->append(move(header));
-        }
+        //
+        // https://w3c.github.io/gpc/#the-sec-gpc-header-field-for-http-requests
+        if (ResourceLoader::is_initialized() && ResourceLoader::the().enable_global_privacy_control() && !http_request->header_list()->contains("Sec-GPC"sv))
+            http_request->header_list()->append({ "Sec-GPC"sv, "1"sv });
 
         // 21. If includeCredentials is true, then:
-        if (include_credentials == IncludeCredentials::Yes) {
+        if (include_credentials == HTTP::Cookie::IncludeCredentials::Yes) {
             // 1. If the user agent is not configured to block cookies for httpRequest (see section 7 of [COOKIES]),
             //    then:
-            if (true) {
-                // 1. Let cookies be the result of running the "cookie-string" algorithm (see section 5.4 of [COOKIES])
-                //    with the user agent’s cookie store and httpRequest’s current URL.
-                auto cookies = ([&] {
-                    auto& page = Bindings::principal_host_defined_page(HTML::principal_realm(realm));
-                    return page.client().page_did_request_cookie(http_request->current_url(), Cookie::Source::Http);
-                })();
-
-                // 2. If cookies is not the empty string, then append (`Cookie`, cookies) to httpRequest’s header list.
-                if (!cookies.is_empty()) {
-                    auto header = Infrastructure::Header::from_string_pair("Cookie"sv, cookies);
-                    http_request->header_list()->append(move(header));
-                }
-            }
+            //     1. Let cookies be the result of running the "cookie-string" algorithm (see section 5.4 of [COOKIES])
+            //        with the user agent’s cookie store and httpRequest’s current URL.
+            //     2. If cookies is not the empty string, then append (`Cookie`, cookies) to httpRequest’s header list.
+            // NB: HTTP cookies are attached by RequestServer.
 
             // 2. If httpRequest’s header list does not contain `Authorization`, then:
-            if (!http_request->header_list()->contains("Authorization"sv.bytes())) {
+            if (!http_request->header_list()->contains("Authorization"sv)) {
                 // 1. Let authorizationValue be null.
                 auto authorization_value = Optional<String> {};
 
@@ -1972,13 +1863,13 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
                 else if (http_request->current_url().includes_credentials() && is_authentication_fetch == IsAuthenticationFetch::Yes) {
                     auto const& url = http_request->current_url();
                     auto payload = MUST(String::formatted("{}:{}", URL::percent_decode(url.username()), URL::percent_decode(url.password())));
-                    authorization_value = TRY_OR_THROW_OOM(vm, encode_base64(payload.bytes()));
+                    authorization_value = MUST(encode_base64(payload.bytes()));
                 }
 
                 // 4. If authorizationValue is non-null, then append (`Authorization`, authorizationValue) to
                 //    httpRequest’s header list.
                 if (authorization_value.has_value()) {
-                    auto header = Infrastructure::Header::from_string_pair("Authorization"sv, *authorization_value);
+                    auto header = HTTP::Header::isomorphic_encode("Authorization"sv, *authorization_value);
                     http_request->header_list()->append(move(header));
                 }
             }
@@ -1992,74 +1883,34 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
 
         // 24. If httpCache is null, then set httpRequest’s cache mode to "no-store".
         if (!http_cache)
-            http_request->set_cache_mode(Infrastructure::Request::CacheMode::NoStore);
+            http_request->set_cache_mode(HTTP::CacheMode::NoStore);
 
         // 25. If httpRequest’s cache mode is neither "no-store" nor "reload", then:
-        if (http_request->cache_mode() != Infrastructure::Request::CacheMode::NoStore
-            && http_request->cache_mode() != Infrastructure::Request::CacheMode::Reload) {
+        if (http_request->cache_mode() != HTTP::CacheMode::NoStore
+            && http_request->cache_mode() != HTTP::CacheMode::Reload) {
             // 1. Set storedResponse to the result of selecting a response from the httpCache, possibly needing
             //    validation, as per the "Constructing Responses from Caches" chapter of HTTP Caching [HTTP-CACHING],
             //    if any.
             // NOTE: As mandated by HTTP, this still takes the `Vary` header into account.
-            stored_response = http_cache->select_response(realm, http_request->current_url(), http_request->method(), *http_request->header_list(), initial_set_of_stored_responses);
+            stored_response = select_response_from_cache(realm, *http_cache, *http_request);
+
             // 2. If storedResponse is non-null, then:
             if (stored_response) {
-                // 1. If cache mode is "default", storedResponse is a stale-while-revalidate response,
-                //    and httpRequest’s client is non-null, then:
-                if (http_request->cache_mode() == Infrastructure::Request::CacheMode::Default
-                    && stored_response->is_stale_while_revalidate()
-                    && http_request->client() != nullptr) {
-
-                    // 1. Set response to storedResponse.
-                    response = stored_response;
-
-                    // 2. Set response’s cache state to "local".
-                    response->set_cache_state(Infrastructure::Response::CacheState::Local);
-
-                    // 3. Let revalidateRequest be a clone of request.
-                    auto revalidate_request = request->clone(realm);
-
-                    // 4. Set revalidateRequest’s cache mode set to "no-cache".
-                    revalidate_request->set_cache_mode(Infrastructure::Request::CacheMode::NoCache);
-
-                    // 5. Set revalidateRequest’s prevent no-cache cache-control header modification flag.
-                    revalidate_request->set_prevent_no_cache_cache_control_header_modification(true);
-
-                    // 6. Set revalidateRequest’s service-workers mode set to "none".
-                    revalidate_request->set_service_workers_mode(Infrastructure::Request::ServiceWorkersMode::None);
-
-                    // 7. In parallel, run main fetch given a new fetch params whose request is revalidateRequest.
-                    Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(realm.heap(), [&vm, &realm, revalidate_request, fetch_params = GC::Ref(fetch_params)] {
-                        (void)main_fetch(realm, Infrastructure::FetchParams::create(vm, revalidate_request, fetch_params->timing_info()));
-                    }));
-                }
+                // 1. If cache mode is "default", storedResponse is a stale-while-revalidate response, and httpRequest’s
+                //    client is non-null, then:
                 // 2. Otherwise:
-                else {
-                    // 1. If storedResponse is a stale response, then set the revalidatingFlag.
-                    if (stored_response->is_stale())
-                        revalidating_flag->set_value(true);
+                //     1. If storedResponse is a stale response, then set the revalidatingFlag.
+                //     2. If the revalidatingFlag is set and httpRequest’s cache mode is neither "force-cache" nor
+                //        "only-if-cached", then:
+                //         1. If storedResponse’s header list contains `ETag`, then append (`If-None-Match`, `ETag`'s value)
+                //            to httpRequest’s header list.
+                //         2. If storedResponse’s header list contains `Last-Modified`, then append (`If-Modified-Since`,
+                //            `Last-Modified`'s value) to httpRequest’s header list.
+                //     3. Otherwise, set response to storedResponse and set response’s cache state to "local".
 
-                    // 2. If the revalidatingFlag is set and httpRequest’s cache mode is neither "force-cache" nor "only-if-cached", then:
-                    if (revalidating_flag->value()
-                        && http_request->cache_mode() != Infrastructure::Request::CacheMode::ForceCache
-                        && http_request->cache_mode() != Infrastructure::Request::CacheMode::OnlyIfCached) {
-
-                        // 1. If storedResponse’s header list contains `ETag`, then append (`If-None-Match`, `ETag`'s value) to httpRequest’s header list.
-                        if (auto etag = stored_response->header_list()->get("ETag"sv.bytes()); etag.has_value()) {
-                            http_request->header_list()->append(Infrastructure::Header::from_string_pair("If-None-Match"sv, *etag));
-                        }
-
-                        // 2. If storedResponse’s header list contains `Last-Modified`, then append (`If-Modified-Since`, `Last-Modified`'s value) to httpRequest’s header list.
-                        if (auto last_modified = stored_response->header_list()->get("Last-Modified"sv.bytes()); last_modified.has_value()) {
-                            http_request->header_list()->append(Infrastructure::Header::from_string_pair("If-Modified-Since"sv, *last_modified));
-                        }
-                    }
-                    // 3. Otherwise, set response to storedResponse and set response’s cache state to "local".
-                    else {
-                        response = stored_response;
-                        response->set_cache_state(Infrastructure::Response::CacheState::Local);
-                    }
-                }
+                // NB: We only cache fresh responses in WebContent. Revalidation is handled by RequestServer.
+                response = stored_response;
+                response->set_cache_state(Infrastructure::Response::CacheState::Local);
             }
         }
     }
@@ -2073,25 +1924,29 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
     // 10. If response is null, then:
     if (!response) {
         // 1. If httpRequest’s cache mode is "only-if-cached", then return a network error.
-        if (http_request->cache_mode() == Infrastructure::Request::CacheMode::OnlyIfCached)
-            return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Request with 'only-if-cached' cache mode doesn't have a cached response"_string));
+        // NB: We skip this step in order to allow the disk cache in RequestServer to handle this request. If a disk
+        //     cache entry does not exist, it will return a network error itself.
 
         // 2. Let forwardResponse be the result of running HTTP-network fetch given httpFetchParams, includeCredentials,
         //    and isNewConnectionFetch.
-        pending_forward_response = TRY(nonstandard_resource_loader_file_or_http_network_fetch(realm, *http_fetch_params, include_credentials, is_new_connection_fetch));
+        pending_forward_response = nonstandard_resource_loader_file_or_http_network_fetch(realm, *http_fetch_params, include_credentials, is_new_connection_fetch, http_cache);
     } else {
         pending_forward_response = PendingResponse::create(vm, request, Infrastructure::Response::create(vm));
     }
 
+    // AD-HOC: If the controller is already in the non-spec Stopped state, we should cancel the network request immediately.
+    if (http_fetch_params->controller()->state() == Infrastructure::FetchController::State::Stopped)
+        http_fetch_params->controller()->stop_fetch();
+
     auto returned_pending_response = PendingResponse::create(vm, request);
 
-    pending_forward_response->when_loaded([&realm, &vm, &fetch_params, request, response, stored_response, initial_set_of_stored_responses, http_request, returned_pending_response, is_authentication_fetch, is_new_connection_fetch, revalidating_flag, include_credentials, response_was_null = !response, http_cache](GC::Ref<Infrastructure::Response> resolved_forward_response) mutable {
+    pending_forward_response->when_loaded([&realm, &vm, &fetch_params, request, response, stored_response, http_request, returned_pending_response, is_authentication_fetch, is_new_connection_fetch, include_credentials, response_was_null = !response, http_cache](GC::Ref<Infrastructure::Response> resolved_forward_response) mutable {
         dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'HTTP-network-or-cache fetch' pending_forward_response load callback");
         if (response_was_null) {
             auto forward_response = resolved_forward_response;
 
             // NOTE: TRACE is omitted as it is a forbidden method in Fetch.
-            auto method_is_unsafe = !(StringView { http_request->method() }.is_one_of("GET"sv, "HEAD"sv, "OPTIONS"sv));
+            auto method_is_unsafe = !http_request->method().is_one_of("GET"sv, "HEAD"sv, "OPTIONS"sv);
 
             // 3. If httpRequest’s method is unsafe and forwardResponse’s status is in the range 200 to 399, inclusive,
             //    invalidate appropriate stored responses in httpCache, as per the "Invalidation" chapter of HTTP
@@ -2102,20 +1957,11 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
             }
 
             // 4. If the revalidatingFlag is set and forwardResponse’s status is 304, then:
-            if (revalidating_flag->value() && forward_response->status() == 304) {
-                dbgln("\033[34;1mHTTP CACHE REVALIDATE (304)\033[0m {}", http_request->current_url());
-                // 1. Update storedResponse’s header list using forwardResponse’s header list, as per the "Freshening
-                //    Stored Responses upon Validation" chapter of HTTP Caching.
-                // NOTE: This updates the stored response in cache as well.
-                http_cache->freshen_stored_responses_upon_validation(*forward_response, initial_set_of_stored_responses);
-
-                // 2. Set response to storedResponse.
-                response = stored_response;
-
-                // 3. Set response’s cache state to "validated".
-                if (response)
-                    response->set_cache_state(Infrastructure::Response::CacheState::Validated);
-            }
+            //     1. Update storedResponse’s header list using forwardResponse’s header list, as per the "Freshening
+            //        Stored Responses upon Validation" chapter of HTTP Caching.
+            //     2. Set response to storedResponse.
+            //     3. Set response’s cache state to "validated".
+            // NB: We only cache fresh responses in WebContent. Revalidation is handled by RequestServer.
 
             // 5. If response is null, then:
             if (!response) {
@@ -2127,7 +1973,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
                 //       sometimes known as "negative caching".
                 // NOTE: The associated body info is stored in the cache alongside the response.
                 if (http_cache)
-                    http_cache->store_response(realm, *http_request, *forward_response);
+                    store_response_in_cache(*http_cache, *http_request, *forward_response);
             }
         }
 
@@ -2135,23 +1981,42 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
         response->set_url_list(http_request->url_list());
 
         // 12. If httpRequest’s header list contains `Range`, then set response’s range-requested flag.
-        if (http_request->header_list()->contains("Range"sv.bytes()))
+        if (http_request->header_list()->contains("Range"sv))
             response->set_range_requested(true);
 
         // 13. Set response’s request-includes-credentials to includeCredentials.
-        response->set_request_includes_credentials(include_credentials == IncludeCredentials::Yes);
+        response->set_request_includes_credentials(include_credentials == HTTP::Cookie::IncludeCredentials::Yes);
 
         auto inner_pending_response = PendingResponse::create(vm, request, *response);
 
         // 14. If response’s status is 401, httpRequest’s response tainting is not "cors", includeCredentials is true,
         //     and request’s traversable for user prompts is a traversable navigable:
+        // AD-HOC: Only enter the 401 handling path if the server is requesting an authentication
+        //         scheme we can handle with a username/password prompt (Basic or Digest).
+        //         Other schemes like PrivateToken (RFC 9577) are not user-prompt-based and should
+        //         not trigger credential prompting or request retries.
+        auto www_authenticate_has_credential_based_scheme = [&] {
+            auto www_authenticate = response->header_list()->get("WWW-Authenticate"sv);
+            if (!www_authenticate.has_value())
+                return false;
+            // The value is a comma-separated list of challenges. Each challenge starts with a scheme name.
+            // We check if any of the schemes are ones we can handle with a username/password prompt.
+            auto value = *www_authenticate;
+            for (auto challenge : value.view().split_view(',')) {
+                auto trimmed = challenge.trim_whitespace();
+                auto space_index = trimmed.find(' ');
+                auto scheme = space_index.has_value() ? trimmed.substring_view(0, *space_index) : trimmed;
+                if (scheme.equals_ignoring_ascii_case("Basic"sv) || scheme.equals_ignoring_ascii_case("Digest"sv))
+                    return true;
+            }
+            return false;
+        };
+
         if (response->status() == 401
             && http_request->response_tainting() != Infrastructure::Request::ResponseTainting::CORS
-            && include_credentials == IncludeCredentials::Yes
-            && request->traversable_for_user_prompts().has<GC::Ptr<HTML::TraversableNavigable>>()
-            // AD-HOC: Require at least one WWW-Authenticate header to be set before automatically retrying an authenticated
-            //         request (see rule 1 below). See: https://github.com/whatwg/fetch/issues/1766
-            && request->header_list()->contains("WWW-Authenticate"sv.bytes())) {
+            && include_credentials == HTTP::Cookie::IncludeCredentials::Yes
+            && request->traversable_for_user_prompts().has<GC::Ptr<HTML::LocalTraversableNavigable>>()
+            && www_authenticate_has_credential_based_scheme()) {
             // 1. Needs testing: multiple `WWW-Authenticate` headers, missing, parsing issues.
             // (Red box in the spec, no-op)
 
@@ -2166,9 +2031,11 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
                 // 2. Set request’s body to the body of the result of safely extracting request’s body’s source.
                 auto const& source = request->body().get<GC::Ref<Infrastructure::Body>>()->source();
                 // NOTE: BodyInitOrReadableBytes is a superset of Body::SourceType
-                auto converted_source = source.has<ByteBuffer>()
-                    ? BodyInitOrReadableBytes { source.get<ByteBuffer>() }
-                    : BodyInitOrReadableBytes { source.get<GC::Root<FileAPI::Blob>>() };
+                auto converted_source = source.visit(
+                    [](ByteBuffer const& byte_buffer) -> BodyInitOrReadableBytes { return byte_buffer.bytes(); },
+                    [](Core::ImmutableBytes const& bytes) -> BodyInitOrReadableBytes { return bytes; },
+                    [](GC::Ref<FileAPI::Blob> blob) -> BodyInitOrReadableBytes { return blob; },
+                    [](Empty) -> BodyInitOrReadableBytes { VERIFY_NOT_REACHED(); });
                 auto [body, _] = safely_extract_body(realm, converted_source);
                 request->set_body(body);
             }
@@ -2195,7 +2062,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
             }
 
             // 4. Set response to the result of running HTTP-network-or-cache fetch given fetchParams and true.
-            inner_pending_response = TRY_OR_IGNORE(http_network_or_cache_fetch(realm, fetch_params, IsAuthenticationFetch::Yes));
+            inner_pending_response = http_network_or_cache_fetch(realm, fetch_params, IsAuthenticationFetch::Yes);
         }
 
         inner_pending_response->when_loaded([&realm, &vm, &fetch_params, request, returned_pending_response, is_authentication_fetch, is_new_connection_fetch](GC::Ref<Infrastructure::Response> response) {
@@ -2245,7 +2112,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> http_network_or_cache_fetch(JS::Re
                 }
                 // 2. Set response to the result of running HTTP-network-or-cache fetch given fetchParams,
                 //    isAuthenticationFetch, and true.
-                inner_pending_response = TRY_OR_IGNORE(http_network_or_cache_fetch(realm, fetch_params, is_authentication_fetch, IsNewConnectionFetch::Yes));
+                inner_pending_response = http_network_or_cache_fetch(realm, fetch_params, is_authentication_fetch, IsNewConnectionFetch::Yes);
             }
 
             inner_pending_response->when_loaded([returned_pending_response, is_authentication_fetch](GC::Ref<Infrastructure::Response> response) {
@@ -2288,10 +2155,24 @@ static void log_response(auto const& status_code, auto const& headers, auto cons
 }
 #endif
 
+static URL::URL content_blocker_source_url_for_request(Infrastructure::Request& request)
+{
+    if (request.destination().has_value() && request.destination().value() == Infrastructure::Request::Destination::Document)
+        return request.current_url();
+
+    if (auto client = request.client()) {
+        if (auto document = client->responsible_document())
+            return document->fallback_base_url();
+        return client->api_base_url();
+    }
+
+    return request.current_url();
+}
+
 // https://fetch.spec.whatwg.org/#concept-http-network-fetch
 // Drop-in replacement for 'HTTP-network fetch', but obviously non-standard :^)
 // It also handles file:// URLs since those can also go through ResourceLoader.
-WebIDL::ExceptionOr<GC::Ref<PendingResponse>> nonstandard_resource_loader_file_or_http_network_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, IncludeCredentials include_credentials, IsNewConnectionFetch is_new_connection_fetch)
+GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, HTTP::Cookie::IncludeCredentials include_credentials, IsNewConnectionFetch is_new_connection_fetch, RefPtr<HTTP::MemoryCache> http_cache)
 {
     dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'non-standard HTTP-network fetch' with: fetch_params @ {}", &fetch_params);
 
@@ -2302,34 +2183,40 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> nonstandard_resource_loader_file_o
 
     (void)include_credentials;
     (void)is_new_connection_fetch;
+    (void)fetch_timing_info;
+    (void)cross_origin_isolated_capability;
 
     auto request = fetch_params.request();
 
-    auto& page = Bindings::principal_host_defined_page(HTML::principal_realm(realm));
+    auto& page = Bindings::principal_host_defined_page(realm);
 
-    // NOTE: Using LoadRequest::create_for_url_on_page here will unconditionally add cookies as long as there's a page available.
-    //       However, it is up to http_network_or_cache_fetch to determine if cookies should be added to the request.
-    LoadRequest load_request;
+    LoadRequest load_request { request->header_list() };
     load_request.set_url(request->current_url());
     load_request.set_page(page);
-    load_request.set_method(ByteString::copy(request->method()));
-
-    for (auto const& header : *request->header_list())
-        load_request.set_header(ByteString::copy(header.name), ByteString::copy(header.value));
+    load_request.set_method(request->method());
+    load_request.set_cache_mode(request->cache_mode());
+    load_request.set_include_credentials(include_credentials);
+    load_request.set_initiator_type(request->initiator_type());
+    load_request.set_destination(request->destination());
+    load_request.set_request_mode(request->mode());
+    load_request.set_referrer_policy(request->referrer_policy());
+    load_request.set_is_navigation_request(request->is_navigation_request());
+    load_request.set_priority(request->priority());
+    load_request.set_source_url(content_blocker_source_url_for_request(*request));
 
     if (auto const* body = request->body().get_pointer<GC::Ref<Infrastructure::Body>>()) {
-        TRY((*body)->source().visit(
-            [&](ByteBuffer const& byte_buffer) -> WebIDL::ExceptionOr<void> {
-                load_request.set_body(TRY_OR_THROW_OOM(vm, ByteBuffer::copy(byte_buffer)));
-                return {};
+        (*body)->source().visit(
+            [&](ByteBuffer const& byte_buffer) {
+                load_request.set_body(MUST(ByteBuffer::copy(byte_buffer)));
             },
-            [&](GC::Root<FileAPI::Blob> const& blob_handle) -> WebIDL::ExceptionOr<void> {
-                load_request.set_body(TRY_OR_THROW_OOM(vm, ByteBuffer::copy(blob_handle->raw_bytes())));
-                return {};
+            [&](Core::ImmutableBytes const& bytes) {
+                load_request.set_body(MUST(bytes.copy_to_byte_buffer()));
             },
-            [](Empty) -> WebIDL::ExceptionOr<void> {
-                return {};
-            }));
+            [&](GC::Ref<FileAPI::Blob> const& blob) {
+                load_request.set_body(MUST(ByteBuffer::copy(blob->raw_bytes())));
+            },
+            [](Empty) {
+            });
     }
 
     auto pending_response = PendingResponse::create(vm, request);
@@ -2339,185 +2226,125 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> nonstandard_resource_loader_file_o
         log_load_request(load_request);
     }
 
-    // FIXME: This check should be removed and all HTTP requests should go through the `ResourceLoader::load_unbuffered`
-    //        path. The buffer option should then be supplied to the steps below that allow us to buffer data up to a
-    //        user-agent-defined limit (or not). However, we will need to fully use stream operations throughout the
-    //        fetch process to enable this (e.g. Body::fully_read must use streams for this to work).
-    if (request->buffer_policy() == Infrastructure::Request::BufferPolicy::DoNotBufferResponse) {
+    if (!ResourceLoader::is_initialized()) {
+        pending_response->resolve(Infrastructure::Response::network_error(vm, "ResourceLoader is not initialized"_string));
+        return pending_response;
+    }
+
+    HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+
+    // 10. Let stream be a new ReadableStream.
+    auto stream = realm.create<Streams::ReadableStream>(realm);
+
+    // 9. Let buffer be an empty byte sequence.
+    auto fetched_data_receiver = realm.create<FetchedDataReceiver>(fetch_params, stream, move(http_cache));
+
+    // 11. Let pullAlgorithm be the following steps:
+    auto pull_algorithm = GC::create_function(realm.heap(), [&realm]() {
+        // 1. Let promise be a new promise.
+        // 2. Run the following steps in parallel:
+        // NOTE: This is handled by FetchedDataReceiver, which pushes bytes into the controller as they arrive.
+
+        // 3. Return promise.
+        return WebIDL::create_resolved_promise(realm, JS::js_undefined());
+    });
+
+    // 12. Let cancelAlgorithm be an algorithm that aborts fetchParams’s controller with reason, given reason.
+    auto cancel_algorithm = GC::create_function(realm.heap(), [&realm, &fetch_params](JS::Value reason) {
+        fetch_params.controller()->abort(realm, reason);
+        return WebIDL::create_resolved_promise(realm, JS::js_undefined());
+    });
+
+    // 13. Set up stream with byte reading support with pullAlgorithm set to pullAlgorithm, cancelAlgorithm set to cancelAlgorithm.
+    stream->set_up_with_byte_reading_support(pull_algorithm, cancel_algorithm);
+
+    auto on_headers_received = GC::create_function(vm.heap(), [&vm, pending_response, stream, request, fetched_data_receiver](Requests::Request* request_server_request, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key, Requests::CameFromCache) {
+        if (pending_response->is_resolved()) {
+            // RequestServer will send us the response headers twice, the second time being for HTTP trailers. This
+            // fetch algorithm is not interested in trailers, so just drop them here.
+            return;
+        }
+
+        auto response = Infrastructure::Response::create(vm);
+        response->set_status(status_code.value_or(200));
+
+        if (reason_phrase.has_value())
+            response->set_status_message(reason_phrase->to_byte_string());
+        response->set_javascript_bytecode_cache(move(javascript_bytecode));
+        response->set_javascript_bytecode_cache_vary_key(javascript_bytecode_cache_vary_key);
+        if (request_server_request) {
+            response->set_request_server_request({
+                .client_id = request_server_request->request_server_client_id(),
+                .request_id = request_server_request->id(),
+                .request = request_server_request,
+            });
+        }
+
+        (void)request;
+        if constexpr (WEB_FETCH_DEBUG) {
+            dbgln("Fetch: ResourceLoader load for '{}' {}: (status {})",
+                request->url(),
+                Infrastructure::is_ok_status(response->status()) ? "complete"sv : "failed"sv,
+                response->status());
+            log_response(status_code, response_headers, ReadonlyBytes {});
+        }
+
+        for (auto const& [name, value] : response_headers.headers())
+            response->header_list()->append({ name, value });
+
+        fetched_data_receiver->set_response(response);
+
+        // 14. Set response’s body to a new body whose stream is stream.
+        auto body = Infrastructure::Body::create(vm, stream);
+        response->set_body(body);
+        fetched_data_receiver->set_body(body);
+
+        // 17. Return response.
+        // NOTE: Typically response’s body’s stream is still being enqueued to after returning.
+        pending_response->resolve(response);
+    });
+
+    // 16. Run these steps in parallel:
+    //     FIXME: 1. Run these steps, but abort when fetchParams is canceled:
+    auto on_data_received = GC::create_function(vm.heap(), [fetched_data_receiver](Requests::ResponseData data) {
+        fetched_data_receiver->handle_network_data(move(data), FetchedDataReceiver::NetworkState::Ongoing);
+    });
+
+    auto on_cached_body_available = GC::create_function(vm.heap(), [fetched_data_receiver](Core::ImmutableBytes data) {
+        fetched_data_receiver->set_cached_response_body(move(data));
+    });
+
+    auto on_complete = GC::create_function(vm.heap(), [&vm, &realm, pending_response, stream, fetched_data_receiver](bool success, Requests::RequestTimingInfo const&, Optional<StringView> error_message) {
+        // FIXME: Implement on_complete timing info for unbuffered requests
         HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
-        // 10. Let stream be a new ReadableStream.
-        auto stream = realm.create<Streams::ReadableStream>(realm);
-        auto fetched_data_receiver = realm.create<FetchedDataReceiver>(fetch_params, stream);
-
-        // 11. Let pullAlgorithm be the following steps:
-        auto pull_algorithm = GC::create_function(realm.heap(), [&realm, fetched_data_receiver]() {
-            // 1. Let promise be a new promise.
-            auto promise = WebIDL::create_promise(realm);
-
-            // 2. Run the following steps in parallel:
-            // NOTE: This is handled by FetchedDataReceiver.
-            fetched_data_receiver->set_pending_promise(promise);
-
-            // 3. Return promise.
-            return promise;
-        });
-
-        // 12. Let cancelAlgorithm be an algorithm that aborts fetchParams’s controller with reason, given reason.
-        auto cancel_algorithm = GC::create_function(realm.heap(), [&realm, &fetch_params](JS::Value reason) {
-            fetch_params.controller()->abort(realm, reason);
-            return WebIDL::create_resolved_promise(realm, JS::js_undefined());
-        });
-
-        // 13. Set up stream with byte reading support with pullAlgorithm set to pullAlgorithm, cancelAlgorithm set to cancelAlgorithm.
-        stream->set_up_with_byte_reading_support(pull_algorithm, cancel_algorithm);
-
-        auto on_headers_received = GC::create_function(vm.heap(), [&vm, request, pending_response, stream](HTTP::HeaderMap const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase) {
-            (void)request;
-            if (pending_response->is_resolved()) {
-                // RequestServer will send us the response headers twice, the second time being for HTTP trailers. This
-                // fetch algorithm is not interested in trailers, so just drop them here.
-                return;
-            }
-
-            auto response = Infrastructure::Response::create(vm);
-            response->set_status(status_code.value_or(200));
-
-            if (reason_phrase.has_value())
-                response->set_status_message(MUST(ByteBuffer::copy(reason_phrase.value().bytes())));
-
-            if constexpr (WEB_FETCH_DEBUG) {
-                dbgln("Fetch: ResourceLoader load for '{}' {}: (status {})",
-                    request->url(),
-                    Infrastructure::is_ok_status(response->status()) ? "complete"sv : "failed"sv,
-                    response->status());
-                log_response(status_code, response_headers, ReadonlyBytes {});
-            }
-
-            for (auto const& [name, value] : response_headers.headers()) {
-                auto header = Infrastructure::Header::from_latin1_pair(name, value);
-                response->header_list()->append(move(header));
-            }
-
-            // 14. Set response’s body to a new body whose stream is stream.
-            response->set_body(Infrastructure::Body::create(vm, stream));
-
-            // 17. Return response.
-            // NOTE: Typically response’s body’s stream is still being enqueued to after returning.
-            pending_response->resolve(response);
-        });
-
-        // 16. Run these steps in parallel:
-        //    FIXME: 1. Run these steps, but abort when fetchParams is canceled:
-        auto on_data_received = GC::create_function(vm.heap(), [fetched_data_receiver](ReadonlyBytes bytes) {
-            // 1. If one or more bytes have been transmitted from response’s message body, then:
-            if (!bytes.is_empty()) {
-                // 1. Let bytes be the transmitted bytes.
-
-                // FIXME: 2. Let codings be the result of extracting header list values given `Content-Encoding` and response’s header list.
-                // FIXME: 3. Increase response’s body info’s encoded size by bytes’s length.
-                // FIXME: 4. Set bytes to the result of handling content codings given codings and bytes.
-                // FIXME: 5. Increase response’s body info’s decoded size by bytes’s length.
-                // FIXME: 6. If bytes is failure, then terminate fetchParams’s controller.
-
-                // 7. Append bytes to buffer.
-                fetched_data_receiver->on_data_received(bytes);
-
-                // FIXME: 8. If the size of buffer is larger than an upper limit chosen by the user agent, ask the user agent
-                //           to suspend the ongoing fetch.
-            }
-        });
-
-        auto on_complete = GC::create_function(vm.heap(), [&vm, &realm, pending_response, stream](bool success, Requests::RequestTimingInfo const&, Optional<StringView> error_message) {
-            dbgln("FIXME: Implement on_complete timing info for unbuffered requests");
-            HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
-
-            // 16.1.1.2. Otherwise, if the bytes transmission for response’s message body is done normally and stream is readable,
-            //           then close stream, and abort these in-parallel steps.
-            if (success) {
-                if (stream->is_readable())
-                    stream->close();
-            }
+        if (success) {
+            fetched_data_receiver->handle_network_data(Requests::ResponseData::from_bytes({}), FetchedDataReceiver::NetworkState::Complete);
+        } else {
             // 16.1.2.2. Otherwise, if stream is readable, error stream with a TypeError.
-            else {
-                auto error = MUST(String::formatted("Load failed: {}", error_message));
+            auto error = Utf16String::formatted("Load failed: {}", error_message.value_or("Unknown error"sv));
 
-                if (stream->is_readable())
-                    stream->error(JS::TypeError::create(realm, error));
+            if (stream->is_readable())
+                stream->error(JS::TypeError::create(realm, error));
 
-                if (!pending_response->is_resolved())
-                    pending_response->resolve(Infrastructure::Response::network_error(vm, error));
-            }
-        });
+            if (!pending_response->is_resolved())
+                pending_response->resolve(Infrastructure::Response::network_error(vm, error.to_utf8_but_should_be_ported_to_utf16()));
+        }
+    });
 
-        ResourceLoader::the().load_unbuffered(load_request, on_headers_received, on_data_received, on_complete);
-    } else {
-        auto on_load_success = GC::create_function(vm.heap(), [&realm, &vm, request, pending_response, fetch_timing_info, cross_origin_isolated_capability](ReadonlyBytes data, Requests::RequestTimingInfo const& timing_info, HTTP::HeaderMap const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase) {
-            (void)request;
-            dbgln_if(WEB_FETCH_DEBUG, "Fetch: ResourceLoader load for '{}' complete", request->url());
-            if constexpr (WEB_FETCH_DEBUG)
-                log_response(status_code, response_headers, data);
-            auto [body, _] = TRY_OR_IGNORE(extract_body(realm, data));
-            auto response = Infrastructure::Response::create(vm);
-            response->set_status(status_code.value_or(200));
-            response->set_body(move(body));
-            auto body_info = response->body_info();
-            body_info.encoded_size = timing_info.encoded_body_size;
-            body_info.decoded_size = data.size();
-            response->set_body_info(body_info);
-            for (auto const& [name, value] : response_headers.headers()) {
-                auto header = Infrastructure::Header::from_latin1_pair(name, value);
-                response->header_list()->append(move(header));
-            }
-
-            if (reason_phrase.has_value())
-                response->set_status_message(MUST(ByteBuffer::copy(reason_phrase.value().bytes())));
-
-            fetch_timing_info->update_final_timings(timing_info, cross_origin_isolated_capability);
-
-            pending_response->resolve(response);
-        });
-
-        auto on_load_error = GC::create_function(vm.heap(), [&realm, &vm, request, pending_response, fetch_timing_info, cross_origin_isolated_capability](ByteString const& error, Requests::RequestTimingInfo const& timing_info, Optional<u32> status_code, Optional<String> const& reason_phrase, ReadonlyBytes data, HTTP::HeaderMap const& response_headers) {
-            (void)request;
-            dbgln_if(WEB_FETCH_DEBUG, "Fetch: ResourceLoader load for '{}' failed: {} (status {})", request->url(), error, status_code.value_or(0));
-            if constexpr (WEB_FETCH_DEBUG)
-                log_response(status_code, response_headers, data);
-            auto response = Infrastructure::Response::create(vm);
-            // FIXME: This is ugly, ResourceLoader should tell us.
-            if (status_code.value_or(0) == 0) {
-                response = Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::from_byte_string(error)));
-            } else {
-                response->set_type(Infrastructure::Response::Type::Error);
-                response->set_status(status_code.value_or(400));
-                auto [body, _] = TRY_OR_IGNORE(extract_body(realm, data));
-                response->set_body(move(body));
-                auto body_info = response->body_info();
-                body_info.encoded_size = timing_info.encoded_body_size;
-                body_info.decoded_size = data.size();
-                response->set_body_info(body_info);
-                for (auto const& [name, value] : response_headers.headers()) {
-                    auto header = Infrastructure::Header::from_latin1_pair(name, value);
-                    response->header_list()->append(move(header));
-                }
-
-                if (reason_phrase.has_value())
-                    response->set_status_message(MUST(ByteBuffer::copy(reason_phrase.value().bytes())));
-            }
-
-            fetch_timing_info->update_final_timings(timing_info, cross_origin_isolated_capability);
-
-            pending_response->resolve(response);
-        });
-
-        ResourceLoader::the().load(load_request, on_load_success, on_load_error);
-    }
+    auto keep_alive_for_transfer = request->destination() == Infrastructure::Request::Destination::Document
+        ? Requests::RequestClient::KeepAliveForTransfer::Yes
+        : Requests::RequestClient::KeepAliveForTransfer::No;
+    auto network_request = ResourceLoader::the().load(load_request, on_headers_received, on_data_received, on_cached_body_available, on_complete, keep_alive_for_transfer);
+    if (network_request && request->destination() == Infrastructure::Request::Destination::Document)
+        network_request->set_body_delivery_paused(true);
+    fetch_params.controller()->set_pending_request(network_request);
 
     return pending_response;
 }
 
 // https://fetch.spec.whatwg.org/#cors-preflight-fetch-0
-WebIDL::ExceptionOr<GC::Ref<PendingResponse>> cors_preflight_fetch(JS::Realm& realm, Infrastructure::Request& request)
+GC::Ref<PendingResponse> cors_preflight_fetch(JS::Realm& realm, Infrastructure::Request& request)
 {
     dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'CORS-preflight fetch' with request @ {}", &request);
 
@@ -2527,9 +2354,11 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> cors_preflight_fetch(JS::Realm& re
     //    request’s initiator, destination is request’s destination, origin is request’s origin, referrer is request’s referrer,
     //    referrer policy is request’s referrer policy, mode is "cors", and response tainting is "cors".
     auto preflight = Fetch::Infrastructure::Request::create(vm);
-    preflight->set_method(TRY_OR_THROW_OOM(vm, ByteBuffer::copy("OPTIONS"sv.bytes())));
+    preflight->set_method("OPTIONS"sv);
     preflight->set_url_list(request.url_list());
+    preflight->set_client(request.client());
     preflight->set_initiator(request.initiator());
+    preflight->set_initiator_type(request.initiator_type());
     preflight->set_destination(request.destination());
     preflight->set_origin(request.origin());
     preflight->set_referrer(request.referrer());
@@ -2538,11 +2367,10 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> cors_preflight_fetch(JS::Realm& re
     preflight->set_response_tainting(Infrastructure::Request::ResponseTainting::CORS);
 
     // 2. Append (`Accept`, `*/*`) to preflight’s header list.
-    auto temp_header = Infrastructure::Header::from_string_pair("Accept"sv, "*/*"sv);
-    preflight->header_list()->append(move(temp_header));
+    preflight->header_list()->append({ "Accept"sv, "*/*"sv });
 
     // 3. Append (`Access-Control-Request-Method`, request’s method) to preflight’s header list.
-    temp_header = Infrastructure::Header::from_string_pair("Access-Control-Request-Method"sv, request.method());
+    auto temp_header = HTTP::Header::isomorphic_encode("Access-Control-Request-Method"sv, request.method());
     preflight->header_list()->append(move(temp_header));
 
     // 4. Let headers be the CORS-unsafe request-header names with request’s header list.
@@ -2553,22 +2381,10 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> cors_preflight_fetch(JS::Realm& re
         // 1. Let value be the items in headers separated from each other by `,`.
         // NOTE: This intentionally does not use combine, as 0x20 following 0x2C is not the way this was implemented,
         //       for better or worse.
-        ByteBuffer value;
-
-        bool first = true;
-        for (auto const& header : headers) {
-            if (!first)
-                TRY_OR_THROW_OOM(vm, value.try_append(','));
-            TRY_OR_THROW_OOM(vm, value.try_append(header));
-            first = false;
-        }
+        auto value = ByteString::join(',', headers);
 
         // 2. Append (`Access-Control-Request-Headers`, value) to preflight’s header list.
-        temp_header = Infrastructure::Header {
-            .name = TRY_OR_THROW_OOM(vm, ByteBuffer::copy("Access-Control-Request-Headers"sv.bytes())),
-            .value = move(value),
-        };
-        preflight->header_list()->append(move(temp_header));
+        preflight->header_list()->append({ "Access-Control-Request-Headers"sv, move(value) });
     }
 
     // 6. Let response be the result of running HTTP-network-or-cache fetch given a new fetch params whose request is preflight.
@@ -2578,7 +2394,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> cors_preflight_fetch(JS::Realm& re
 
     auto returned_pending_response = PendingResponse::create(vm, request);
 
-    auto preflight_response = TRY(http_network_or_cache_fetch(realm, fetch_params));
+    auto preflight_response = http_network_or_cache_fetch(realm, fetch_params);
 
     preflight_response->when_loaded([&vm, &request, returned_pending_response](GC::Ref<Infrastructure::Response> response) {
         dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'CORS-preflight fetch' preflight_response load callback");
@@ -2587,44 +2403,47 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> cors_preflight_fetch(JS::Realm& re
         // NOTE: The CORS check is done on request rather than preflight to ensure the correct credentials mode is used.
         if (cors_check(request, response) && Infrastructure::is_ok_status(response->status())) {
             // 1. Let methods be the result of extracting header list values given `Access-Control-Allow-Methods` and response’s header list.
-            auto methods_or_failure = Infrastructure::extract_header_list_values("Access-Control-Allow-Methods"sv.bytes(), response->header_list());
+            auto methods_or_failure = response->header_list()->extract_header_list_values("Access-Control-Allow-Methods"sv);
 
             // 2. Let headerNames be the result of extracting header list values given `Access-Control-Allow-Headers` and
             //    response’s header list.
-            auto header_names_or_failure = Infrastructure::extract_header_list_values("Access-Control-Allow-Headers"sv.bytes(), response->header_list());
+            auto header_names_or_failure = response->header_list()->extract_header_list_values("Access-Control-Allow-Headers"sv);
 
             // 3. If either methods or headerNames is failure, return a network error.
-            if (methods_or_failure.has<Infrastructure::ExtractHeaderParseFailure>()) {
+            if (methods_or_failure.has<HTTP::HeaderList::ExtractHeaderParseFailure>()) {
                 returned_pending_response->resolve(Infrastructure::Response::network_error(vm, "The Access-Control-Allow-Methods in the CORS-preflight response is syntactically invalid"_string));
                 return;
             }
-
-            if (header_names_or_failure.has<Infrastructure::ExtractHeaderParseFailure>()) {
+            if (header_names_or_failure.has<HTTP::HeaderList::ExtractHeaderParseFailure>()) {
                 returned_pending_response->resolve(Infrastructure::Response::network_error(vm, "The Access-Control-Allow-Headers in the CORS-preflight response is syntactically invalid"_string));
                 return;
             }
 
             // NOTE: We treat "methods_or_failure" being `Empty` as empty Vector here.
-            auto methods = methods_or_failure.has<Vector<ByteBuffer>>() ? methods_or_failure.get<Vector<ByteBuffer>>() : Vector<ByteBuffer> {};
+            auto methods = methods_or_failure.visit(
+                [](Vector<ByteString>& methods) { return move(methods); },
+                [](auto) -> Vector<ByteString> { return {}; });
 
             // NOTE: We treat "header_names_or_failure" being `Empty` as empty Vector here.
-            auto header_names = header_names_or_failure.has<Vector<ByteBuffer>>() ? header_names_or_failure.get<Vector<ByteBuffer>>() : Vector<ByteBuffer> {};
+            auto header_names = header_names_or_failure.visit(
+                [](Vector<ByteString>& header_names) { return move(header_names); },
+                [](auto) -> Vector<ByteString> { return {}; });
 
             // 4. If methods is null and request’s use-CORS-preflight flag is set, then set methods to a new list containing request’s method.
             // NOTE: This ensures that a CORS-preflight fetch that happened due to request’s use-CORS-preflight flag being set is cached.
             if (methods.is_empty() && request.use_cors_preflight())
-                methods = Vector { TRY_OR_IGNORE(ByteBuffer::copy(request.method())) };
+                methods = { request.method() };
 
             // 5. If request’s method is not in methods, request’s method is not a CORS-safelisted method, and request’s credentials mode
             //    is "include" or methods does not contain `*`, then return a network error.
-            if (!methods.contains_slow(request.method()) && !Infrastructure::is_cors_safelisted_method(request.method())) {
+            if (!methods.contains_slow(request.method()) && !HTTP::is_cors_safelisted_method(request.method())) {
                 if (request.credentials_mode() == Infrastructure::Request::CredentialsMode::Include) {
-                    returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("Non-CORS-safelisted method '{}' not found in the CORS-preflight response's Access-Control-Allow-Methods header (the header may be missing). '*' is not allowed as the main request includes credentials.", StringView { request.method() }))));
+                    returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("Non-CORS-safelisted method '{}' not found in the CORS-preflight response's Access-Control-Allow-Methods header (the header may be missing). '*' is not allowed as the main request includes credentials.", request.method()))));
                     return;
                 }
 
-                if (!methods.contains_slow("*"sv.bytes())) {
-                    returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("Non-CORS-safelisted method '{}' not found in the CORS-preflight response's Access-Control-Allow-Methods header and there was no '*' entry. The header may be missing.", StringView { request.method() }))));
+                if (!methods.contains_slow("*"sv)) {
+                    returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("Non-CORS-safelisted method '{}' not found in the CORS-preflight response's Access-Control-Allow-Methods header and there was no '*' entry. The header may be missing.", request.method()))));
                     return;
                 }
             }
@@ -2636,14 +2455,14 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> cors_preflight_fetch(JS::Realm& re
                     bool is_in_header_names = false;
 
                     for (auto const& allowed_header_name : header_names) {
-                        if (StringView { allowed_header_name }.equals_ignoring_ascii_case(header.name)) {
+                        if (allowed_header_name.equals_ignoring_ascii_case(header.name)) {
                             is_in_header_names = true;
                             break;
                         }
                     }
 
                     if (!is_in_header_names) {
-                        returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("Main request contains the header '{}' that is not specified in the CORS-preflight response's Access-Control-Allow-Headers header (the header may be missing). '*' does not capture this header.", StringView { header.name }))));
+                        returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("Main request contains the header '{}' that is not specified in the CORS-preflight response's Access-Control-Allow-Headers header (the header may be missing). '*' does not capture this header.", header.name))));
                         return;
                     }
                 }
@@ -2657,7 +2476,7 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> cors_preflight_fetch(JS::Realm& re
                 bool is_in_header_names = false;
 
                 for (auto const& header_name : header_names) {
-                    if (StringView { unsafe_name }.equals_ignoring_ascii_case(header_name)) {
+                    if (unsafe_name.equals_ignoring_ascii_case(header_name)) {
                         is_in_header_names = true;
                         break;
                     }
@@ -2665,35 +2484,50 @@ WebIDL::ExceptionOr<GC::Ref<PendingResponse>> cors_preflight_fetch(JS::Realm& re
 
                 if (!is_in_header_names) {
                     if (request.credentials_mode() == Infrastructure::Request::CredentialsMode::Include) {
-                        returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("CORS-unsafe request-header '{}' not found in the CORS-preflight response's Access-Control-Allow-Headers header (the header may be missing). '*' is not allowed as the main request includes credentials.", StringView { unsafe_name }))));
+                        returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("CORS-unsafe request-header '{}' not found in the CORS-preflight response's Access-Control-Allow-Headers header (the header may be missing). '*' is not allowed as the main request includes credentials.", unsafe_name))));
                         return;
                     }
 
-                    if (!header_names.contains_slow("*"sv.bytes())) {
-                        returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("CORS-unsafe request-header '{}' not found in the CORS-preflight response's Access-Control-Allow-Headers header and there was no '*' entry. The header may be missing.", StringView { unsafe_name }))));
+                    if (!header_names.contains_slow("*"sv)) {
+                        returned_pending_response->resolve(Infrastructure::Response::network_error(vm, TRY_OR_IGNORE(String::formatted("CORS-unsafe request-header '{}' not found in the CORS-preflight response's Access-Control-Allow-Headers header and there was no '*' entry. The header may be missing.", unsafe_name))));
                         return;
                     }
                 }
             }
 
-            // FIXME: 8. Let max-age be the result of extracting header list values given `Access-Control-Max-Age` and response’s header list.
-            // FIXME: 9. If max-age is failure or null, then set max-age to 5.
-            // FIXME: 10. If max-age is greater than an imposed limit on max-age, then set max-age to the imposed limit.
+            // 8. Let max-age be the result of extracting header list values given `Access-Control-Max-Age` and response's header list.
+            auto max_age_result = response->header_list()->extract_header_list_values("Access-Control-Max-Age"sv);
+            auto* maybe_max_age = max_age_result.get_pointer<Vector<ByteString>>();
+
+            // 9. If max-age is failure or null, then set max-age to 5.
+            // 10. If max-age is greater than an imposed limit on max-age, then set max-age to the imposed limit.
+            auto max_age = AK::Duration::from_seconds(5);
+            if (maybe_max_age && maybe_max_age->size() == 1) {
+                if (auto maybe_number = maybe_max_age->first().to_number<i32>(); maybe_number.has_value())
+                    max_age = min(AK::Duration::from_seconds(maybe_number.value()), Infrastructure::PreflightCache::MAX_AGE_LIMIT);
+            }
 
             // 11. If the user agent does not provide for a cache, then return response.
-            // NOTE: Since we don't currently have a cache, this is always true.
+            // NB: We do provide for a cache, so continue.
+
+            // 12. For each method in methods for which there is a method cache entry match using request, set matching entry's max-age
+            //     to max-age.
+            // 13. For each method in methods for which there is no method cache entry match using request, create a new cache entry
+            //     with request, max-age, method, and null.
+            auto& preflight_cache = Infrastructure::PreflightCache::the();
+            for (auto const& method : methods)
+                preflight_cache.cache_method(request, method, max_age);
+
+            // 14. For each headerName in headerNames for which there is a header-name cache entry match using request, set matching
+            //     entry's max-age to max-age.
+            // 15. For each headerName in headerNames for which there is no header-name cache entry match using request, create a
+            //     new cache entry with request, max-age, null, and headerName.
+            for (auto const& header_name : header_names)
+                preflight_cache.cache_header_name(request, header_name, max_age);
+
+            // 16. Return response.
             returned_pending_response->resolve(response);
             return;
-
-            // FIXME: 12. For each method in methods for which there is a method cache entry match using request, set matching entry’s max-age
-            //            to max-age.
-            // FIXME: 13. For each method in methods for which there is no method cache entry match using request, create a new cache entry
-            //            with request, max-age, method, and null.
-            // FIXME: 14. For each headerName in headerNames for which there is a header-name cache entry match using request, set matching
-            //            entry’s max-age to max-age.
-            // FIXME: 15. For each headerName in headerNames for which there is no header-name cache entry match using request, create a
-            //            new cache entry with request, max-age, null, and headerName.
-            // FIXME: 16. Return response.
         }
 
         // 8. Otherwise, return a network error.
@@ -2713,19 +2547,12 @@ void set_sec_fetch_dest_header(Infrastructure::Request& request)
     // FIXME: This is handled below, as Serenity doesn't have APIs for RFC 8941.
 
     // 3. If r’s destination is the empty string, set header’s value to the string "empty". Otherwise, set header’s value to r’s destination.
-    ByteBuffer header_value;
-    if (!request.destination().has_value()) {
-        header_value = MUST(ByteBuffer::copy("empty"sv.bytes()));
-    } else {
-        header_value = MUST(ByteBuffer::copy(Infrastructure::request_destination_to_string(request.destination().value()).bytes()));
-    }
+    auto value = request.destination().has_value()
+        ? Infrastructure::request_destination_to_string(*request.destination())
+        : "empty"sv;
 
     // 4. Set a structured field value `Sec-Fetch-Dest`/header in r’s header list.
-    auto header = Infrastructure::Header {
-        .name = MUST(ByteBuffer::copy("Sec-Fetch-Dest"sv.bytes())),
-        .value = move(header_value),
-    };
-    request.header_list()->append(move(header));
+    request.header_list()->append({ "Sec-Fetch-Dest"sv, value });
 }
 
 // https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-set-dest
@@ -2738,14 +2565,10 @@ void set_sec_fetch_mode_header(Infrastructure::Request& request)
     // FIXME: This is handled below, as Serenity doesn't have APIs for RFC 8941.
 
     // 3. Set header’s value to r’s mode.
-    auto header_value = MUST(ByteBuffer::copy(Infrastructure::request_mode_to_string(request.mode()).bytes()));
+    auto value = Infrastructure::request_mode_to_string(request.mode());
 
     // 4. Set a structured field value `Sec-Fetch-Mode`/header in r’s header list.
-    auto header = Infrastructure::Header {
-        .name = MUST(ByteBuffer::copy("Sec-Fetch-Mode"sv.bytes())),
-        .value = move(header_value),
-    };
-    request.header_list()->append(move(header));
+    request.header_list()->append({ "Sec-Fetch-Mode"sv, value });
 }
 
 // https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-set-site
@@ -2758,39 +2581,35 @@ void set_sec_fetch_site_header(Infrastructure::Request& request)
     // FIXME: This is handled below, as Serenity doesn't have APIs for RFC 8941.
 
     // 3. Set header’s value to same-origin.
-    auto header_value = "same-origin"sv;
+    auto value = "same-origin"sv;
 
     // FIXME: 4. If r is a navigation request that was explicitly caused by a user’s interaction with the user agent (by typing an address
     //           into the user agent directly, for example, or by clicking a bookmark, etc.), then set header’s value to none.
 
     // 5. If header’s value is not none, then for each url in r’s url list:
-    if (!header_value.equals_ignoring_ascii_case("none"sv)) {
+    if (!value.equals_ignoring_ascii_case("none"sv)) {
         VERIFY(request.origin().has<URL::Origin>());
-        auto& request_origin = request.origin().get<URL::Origin>();
+        auto const& request_origin = request.origin().get<URL::Origin>();
 
-        for (auto& url : request.url_list()) {
+        for (auto const& url : request.url_list()) {
             // 1. If url is same origin with r’s origin, continue.
             if (url.origin().is_same_origin(request_origin))
                 continue;
 
             // 2. Set header’s value to cross-site.
-            header_value = "cross-site"sv;
+            value = "cross-site"sv;
 
             // 3. If r’s origin is not same site with url’s origin, then break.
             if (!request_origin.is_same_site(url.origin()))
                 break;
 
             // 4. Set header’s value to same-site.
-            header_value = "same-site"sv;
+            value = "same-site"sv;
         }
     }
 
     // 6. Set a structured field value `Sec-Fetch-Site`/header in r’s header list.
-    auto header = Infrastructure::Header {
-        .name = MUST(ByteBuffer::copy("Sec-Fetch-Site"sv.bytes())),
-        .value = MUST(ByteBuffer::copy(header_value.bytes())),
-    };
-    request.header_list()->append(move(header));
+    request.header_list()->append({ "Sec-Fetch-Site"sv, value });
 }
 
 // https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-set-user
@@ -2808,14 +2627,10 @@ void set_sec_fetch_user_header(Infrastructure::Request& request)
 
     // 4. Set header’s value to true.
     // NOTE: See https://datatracker.ietf.org/doc/html/rfc8941#name-booleans for boolean format in RFC 8941.
-    auto header_value = MUST(ByteBuffer::copy("?1"sv.bytes()));
+    static ByteString const& value = *new ByteString("?1"sv);
 
     // 5. Set a structured field value `Sec-Fetch-User`/header in r’s header list.
-    auto header = Infrastructure::Header {
-        .name = MUST(ByteBuffer::copy("Sec-Fetch-User"sv.bytes())),
-        .value = move(header_value),
-    };
-    request.header_list()->append(move(header));
+    request.header_list()->append({ "Sec-Fetch-User"sv, value });
 }
 
 // https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-append-the-fetch-metadata-headers-for-a-request
@@ -2838,9 +2653,29 @@ void append_fetch_metadata_headers_for_request(Infrastructure::Request& request)
     set_sec_fetch_user_header(request);
 }
 
-void set_http_cache_enabled(bool const enabled)
+void set_http_memory_cache_enabled(bool const enabled)
 {
-    g_http_cache_enabled = enabled;
+    g_http_memory_cache_enabled = enabled;
+}
+
+bool http_memory_cache_enabled()
+{
+    return g_http_memory_cache_enabled;
+}
+
+void clear_http_memory_cache()
+{
+    HTTPCache::the().clear_cache();
+}
+
+void update_javascript_bytecode_cache_in_http_memory_cache(Infrastructure::NetworkPartitionKey const& partition_key, URL::URL const& url, ByteString const& method, HTTP::HeaderList const& request_headers, u64 vary_key, Core::ImmutableBytes javascript_bytecode_cache)
+{
+    if (!g_http_memory_cache_enabled)
+        return;
+
+    // Only back-fill into a partition that already has a cache; do not create an empty one just to drop bytecode into.
+    if (auto* http_cache = HTTPCache::the().get_if_exists(partition_key))
+        http_cache->update_javascript_bytecode_cache(url, method, request_headers, vary_key, move(javascript_bytecode_cache));
 }
 
 }

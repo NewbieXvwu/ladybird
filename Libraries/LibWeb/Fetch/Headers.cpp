@@ -6,10 +6,11 @@
 
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/VM.h>
-#include <LibWeb/Bindings/HeadersPrototype.h>
+#include <LibTextCodec/Decoder.h>
+#include <LibWeb/Bindings/Headers.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Fetch/Headers.h>
-#include <LibWeb/Infra/Strings.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/CORS.h>
 
 namespace Web::Fetch {
 
@@ -18,10 +19,8 @@ GC_DEFINE_ALLOCATOR(Headers);
 // https://fetch.spec.whatwg.org/#dom-headers
 WebIDL::ExceptionOr<GC::Ref<Headers>> Headers::construct_impl(JS::Realm& realm, Optional<HeadersInit> const& init)
 {
-    auto& vm = realm.vm();
-
     // The new Headers(init) constructor steps are:
-    auto headers = realm.create<Headers>(realm, Infrastructure::HeaderList::create(vm));
+    auto headers = realm.create<Headers>(realm, HTTP::HeaderList::create());
 
     // 1. Set this’s guard to "none".
     headers->m_guard = Guard::None;
@@ -33,9 +32,9 @@ WebIDL::ExceptionOr<GC::Ref<Headers>> Headers::construct_impl(JS::Realm& realm, 
     return headers;
 }
 
-Headers::Headers(JS::Realm& realm, GC::Ref<Infrastructure::HeaderList> header_list)
+Headers::Headers(JS::Realm& realm, NonnullRefPtr<HTTP::HeaderList> header_list)
     : PlatformObject(realm)
-    , m_header_list(header_list)
+    , m_header_list(move(header_list))
 {
 }
 
@@ -47,30 +46,23 @@ void Headers::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void Headers::visit_edges(JS::Cell::Visitor& visitor)
-{
-    Base::visit_edges(visitor);
-    visitor.visit(m_header_list);
-}
-
 // https://fetch.spec.whatwg.org/#dom-headers-append
 WebIDL::ExceptionOr<void> Headers::append(String const& name_string, String const& value_string)
 {
     // The append(name, value) method steps are to append (name, value) to this.
-    auto header = Infrastructure::Header::from_string_pair(name_string, value_string);
+    auto header = HTTP::Header::isomorphic_encode(name_string, value_string);
     TRY(append(move(header)));
     return {};
 }
 
 // https://fetch.spec.whatwg.org/#dom-headers-delete
-WebIDL::ExceptionOr<void> Headers::delete_(String const& name_string)
+WebIDL::ExceptionOr<void> Headers::delete_(String const& name)
 {
     // The delete(name) method steps are:
-    auto name = name_string.bytes();
 
     // 1. If validating (name, ``) for headers returns false, then return.
     // NOTE: Passing a dummy header value ought not to have any negative repercussions.
-    auto header = Infrastructure::Header::from_string_pair(name, ""sv);
+    auto header = HTTP::Header::isomorphic_encode(name, ""sv);
     if (!TRY(validate(header)))
         return {};
 
@@ -93,18 +85,17 @@ WebIDL::ExceptionOr<void> Headers::delete_(String const& name_string)
 }
 
 // https://fetch.spec.whatwg.org/#dom-headers-get
-WebIDL::ExceptionOr<Optional<String>> Headers::get(String const& name_string)
+WebIDL::ExceptionOr<Optional<String>> Headers::get(String const& name)
 {
     // The get(name) method steps are:
-    auto name = name_string.bytes();
 
     // 1. If name is not a header name, then throw a TypeError.
-    if (!Infrastructure::is_header_name(name))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid header name"sv };
+    if (!HTTP::is_header_name(name))
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid header name"_utf16 };
 
     // 2. Return the result of getting name from this’s header list.
     auto byte_buffer = m_header_list->get(name);
-    return byte_buffer.has_value() ? Infra::isomorphic_decode(*byte_buffer) : Optional<String> {};
+    return byte_buffer.has_value() ? TextCodec::isomorphic_decode(*byte_buffer) : Optional<String> {};
 }
 
 // https://fetch.spec.whatwg.org/#dom-headers-getsetcookie
@@ -114,43 +105,40 @@ Vector<String> Headers::get_set_cookie()
     auto values = Vector<String> {};
 
     // 1. If this’s header list does not contain `Set-Cookie`, then return « ».
-    if (!m_header_list->contains("Set-Cookie"sv.bytes()))
+    if (!m_header_list->contains("Set-Cookie"sv))
         return values;
 
     // 2. Return the values of all headers in this’s header list whose name is a byte-case-insensitive match for
     //    `Set-Cookie`, in order.
     for (auto const& header : *m_header_list) {
-        if (StringView { header.name }.equals_ignoring_ascii_case("Set-Cookie"sv))
-            values.append(Infra::isomorphic_decode(header.value));
+        if (header.name.equals_ignoring_ascii_case("Set-Cookie"sv))
+            values.append(TextCodec::isomorphic_decode(header.value));
     }
     return values;
 }
 
 // https://fetch.spec.whatwg.org/#dom-headers-has
-WebIDL::ExceptionOr<bool> Headers::has(String const& name_string)
+WebIDL::ExceptionOr<bool> Headers::has(String const& name)
 {
     // The has(name) method steps are:
-    auto name = name_string.bytes();
 
     // 1. If name is not a header name, then throw a TypeError.
-    if (!Infrastructure::is_header_name(name))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid header name"sv };
+    if (!HTTP::is_header_name(name))
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid header name"_utf16 };
 
     // 2. Return true if this’s header list contains name; otherwise false.
     return m_header_list->contains(name);
 }
 
 // https://fetch.spec.whatwg.org/#dom-headers-set
-WebIDL::ExceptionOr<void> Headers::set(String const& name_string, String const& value_string)
+WebIDL::ExceptionOr<void> Headers::set(String const& name, String const& value)
 {
     // The set(name, value) method steps are:
-    auto name = name_string.bytes();
-    auto value = value_string.bytes();
 
     // 1. Normalize value.
-    auto normalized_value = Infrastructure::normalize_header_value(value);
+    auto normalized_value = HTTP::normalize_header_value(value);
 
-    auto header = Infrastructure::Header::from_string_pair(name, normalized_value);
+    auto header = HTTP::Header::isomorphic_encode(name, normalized_value);
 
     // 2. If validating (name, value) for headers returns false, then return.
     if (!TRY(validate(header)))
@@ -192,7 +180,7 @@ JS::ThrowCompletionOr<void> Headers::for_each(ForEachCallback callback)
         auto const& pair = pairs[i];
 
         // 2. Invoke idlCallback with « pair’s value, pair’s key, idlObject » and with thisArg as the callback this value.
-        TRY(callback(Infra::isomorphic_decode(pair.name), Infra::isomorphic_decode(pair.value)));
+        TRY(callback(TextCodec::isomorphic_decode(pair.name), TextCodec::isomorphic_decode(pair.value)));
 
         // 3. Set pairs to idlObject’s current list of value pairs to iterate over. (It might have changed.)
         pairs = value_pairs_to_iterate_over();
@@ -205,27 +193,27 @@ JS::ThrowCompletionOr<void> Headers::for_each(ForEachCallback callback)
 }
 
 // https://fetch.spec.whatwg.org/#headers-validate
-WebIDL::ExceptionOr<bool> Headers::validate(Infrastructure::Header const& header) const
+WebIDL::ExceptionOr<bool> Headers::validate(HTTP::Header const& header) const
 {
     // To validate a header (name, value) for a Headers object headers:
     auto const& [name, value] = header;
 
     // 1. If name is not a header name or value is not a header value, then throw a TypeError.
-    if (!Infrastructure::is_header_name(name))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid header name"sv };
-    if (!Infrastructure::is_header_value(value))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid header value"sv };
+    if (!HTTP::is_header_name(name))
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid header name"_utf16 };
+    if (!HTTP::is_header_value(value))
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid header value"_utf16 };
 
     // 2. If headers’s guard is "immutable", then throw a TypeError.
     if (m_guard == Guard::Immutable)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Headers object is immutable"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Headers object is immutable"_utf16 };
 
     // 3. If headers’s guard is "request" and (name, value) is a forbidden request-header, then return false.
-    if (m_guard == Guard::Request && Infrastructure::is_forbidden_request_header(header))
+    if (m_guard == Guard::Request && HTTP::is_forbidden_request_header(header))
         return false;
 
     // 4. If headers’s guard is "response" and name is a forbidden response-header name, then return false.
-    if (m_guard == Guard::Response && Infrastructure::is_forbidden_response_header_name(name))
+    if (m_guard == Guard::Response && HTTP::is_forbidden_response_header_name(name))
         return false;
 
     // 5. Return true.
@@ -233,13 +221,13 @@ WebIDL::ExceptionOr<bool> Headers::validate(Infrastructure::Header const& header
 }
 
 // https://fetch.spec.whatwg.org/#concept-headers-append
-WebIDL::ExceptionOr<void> Headers::append(Infrastructure::Header header)
+WebIDL::ExceptionOr<void> Headers::append(HTTP::Header header)
 {
     // To append a header (name, value) to a Headers object headers, run these steps:
     auto& [name, value] = header;
 
     // 1. Normalize value.
-    value = Infrastructure::normalize_header_value(value);
+    value = HTTP::normalize_header_value(value);
 
     // 2. If validating (name, value) for headers returns false, then return.
     if (!TRY(validate(header)))
@@ -252,17 +240,15 @@ WebIDL::ExceptionOr<void> Headers::append(Infrastructure::Header header)
 
         // 2. If temporaryValue is null, then set temporaryValue to value.
         if (!temporary_value.has_value()) {
-            temporary_value = MUST(ByteBuffer::copy(value));
+            temporary_value = value;
         }
         // 3. Otherwise, set temporaryValue to temporaryValue, followed by 0x2C 0x20, followed by value.
         else {
-            temporary_value->append(0x2c);
-            temporary_value->append(0x20);
-            temporary_value->append(value);
+            temporary_value = ByteString::formatted("{}, {}", *temporary_value, value);
         }
 
-        auto temporary_header = Infrastructure::Header {
-            .name = MUST(ByteBuffer::copy(name)),
+        auto temporary_header = HTTP::Header {
+            .name = name,
             .value = temporary_value.release_value(),
         };
 
@@ -291,10 +277,10 @@ WebIDL::ExceptionOr<void> Headers::fill(HeadersInit const& object)
             for (auto const& entry : object) {
                 // 1. If header's size is not 2, then throw a TypeError.
                 if (entry.size() != 2)
-                    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Array must contain header key/value pair"sv };
+                    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Array must contain header key/value pair"_utf16 };
 
                 // 2. Append (header[0], header[1]) to headers.
-                auto header = Infrastructure::Header::from_string_pair(entry[0], entry[1]);
+                auto header = HTTP::Header::isomorphic_encode(entry[0], entry[1]);
                 TRY(append(move(header)));
             }
             return {};
@@ -302,7 +288,7 @@ WebIDL::ExceptionOr<void> Headers::fill(HeadersInit const& object)
         // 2. Otherwise, object is a record, then for each key → value of object, append (key, value) to headers.
         [&](OrderedHashMap<String, String> const& object) -> WebIDL::ExceptionOr<void> {
             for (auto const& entry : object) {
-                auto header = Infrastructure::Header::from_string_pair(entry.key, entry.value);
+                auto header = HTTP::Header::isomorphic_encode(entry.key, entry.value);
                 TRY(append(move(header)));
             }
             return {};
@@ -321,7 +307,7 @@ void Headers::remove_privileged_no_cors_request_headers()
     // 1. For each headerName of privileged no-CORS request-header names:
     for (auto const& header_name : privileged_no_cors_request_header_names) {
         // 1. Delete headerName from headers’s header list.
-        m_header_list->delete_(header_name.bytes());
+        m_header_list->delete_(header_name);
     }
 }
 

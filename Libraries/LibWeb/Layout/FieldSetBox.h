@@ -6,24 +6,25 @@
 
 #pragma once
 
+#include <LibWeb/DOM/Element.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Layout/BlockContainer.h>
+#include <LibWeb/Layout/LegendBox.h>
 #include <LibWeb/Painting/FieldSetPaintable.h>
 namespace Web::Layout {
 
 class FieldSetBox final : public BlockContainer {
-    GC_CELL(FieldSetBox, BlockContainer);
-    GC_DECLARE_ALLOCATOR(FieldSetBox);
+    LAYOUT_NODE(FieldSetBox, BlockContainer);
 
 public:
-    FieldSetBox(DOM::Document&, DOM::Element&, GC::Ref<CSS::ComputedProperties>);
+    FieldSetBox(DOM::Document&, DOM::Element&, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~FieldSetBox() override;
 
     DOM::Element& dom_node() { return static_cast<DOM::Element&>(*BlockContainer::dom_node()); }
     DOM::Element const& dom_node() const { return static_cast<DOM::Element const&>(*BlockContainer::dom_node()); }
 
-    bool has_rendered_legend() const;
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    GC::Ptr<LegendBox const> rendered_legend() const;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
 private:
     virtual bool is_fieldset_box() const final

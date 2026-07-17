@@ -105,7 +105,7 @@ static ErrorOr<void> decode_avif_image(AVIFLoadingContext& context)
     avifRGBImage rgb;
     while (avifDecoderNextImage(context.decoder) == AVIF_RESULT_OK) {
         auto bitmap_format = context.has_alpha ? BitmapFormat::BGRA8888 : BitmapFormat::BGRx8888;
-        auto bitmap = TRY(Bitmap::create(bitmap_format, context.size.value()));
+        auto bitmap = TRY(Bitmap::create(bitmap_format, AlphaType::Unpremultiplied, context.size.value()));
 
         avifRGBImageSetDefaults(&rgb, context.decoder->image);
         rgb.pixels = bitmap->scanline_u8(0);
@@ -184,6 +184,13 @@ ErrorOr<ImageFrameDescriptor> AVIFImageDecoderPlugin::frame(size_t index, Option
     if (index >= m_context->frame_descriptors.size())
         return Error::from_string_literal("AVIFImageDecoderPlugin: Invalid frame index");
     return m_context->frame_descriptors[index];
+}
+
+int AVIFImageDecoderPlugin::frame_duration(size_t index)
+{
+    if (index >= m_context->frame_descriptors.size())
+        return 0;
+    return m_context->frame_descriptors[index].duration;
 }
 
 ErrorOr<Optional<ReadonlyBytes>> AVIFImageDecoderPlugin::icc_data()

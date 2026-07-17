@@ -12,18 +12,23 @@
 
 namespace Web::Layout {
 
-class SVGClipBox : public SVGBox {
-    GC_CELL(SVGClipBox, SVGBox);
-    GC_DECLARE_ALLOCATOR(SVGClipBox);
+class SVGClipBox final : public SVGBox {
+    LAYOUT_NODE(SVGClipBox, SVGBox);
 
 public:
-    SVGClipBox(DOM::Document&, SVG::SVGClipPathElement&, GC::Ref<CSS::ComputedProperties>);
+    SVGClipBox(DOM::Document&, SVG::SVGClipPathElement&, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~SVGClipBox() override = default;
 
     SVG::SVGClipPathElement& dom_node() { return as<SVG::SVGClipPathElement>(SVGBox::dom_node()); }
     SVG::SVGClipPathElement const& dom_node() const { return as<SVG::SVGClipPathElement>(SVGBox::dom_node()); }
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
+
+private:
+    virtual bool is_svg_clip_box() const final { return true; }
 };
+
+template<>
+inline bool Node::fast_is<SVGClipBox>() const { return is_svg_clip_box(); }
 
 }

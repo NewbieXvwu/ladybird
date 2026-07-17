@@ -37,10 +37,10 @@ void ArrayIterator::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_array);
 }
 
-BuiltinIterator* ArrayIterator::as_builtin_iterator_if_next_is_not_redefined(IteratorRecord const& iterator_record)
+BuiltinIterator* ArrayIterator::as_builtin_iterator_if_next_is_not_redefined(Value next_method)
 {
-    if (iterator_record.next_method.is_object()) {
-        auto const& next_function = iterator_record.next_method.as_object();
+    if (next_method.is_object()) {
+        auto const& next_function = next_method.as_object();
         if (next_function.is_native_function()) {
             auto const& native_function = static_cast<NativeFunction const&>(next_function);
             if (native_function.is_array_prototype_next_builtin())
@@ -126,8 +126,8 @@ ThrowCompletionOr<void> ArrayIterator::next(VM& vm, bool& done, Value& value)
         // b. Let elementValue be ? Get(array, elementKey).
         auto element_value = TRY([&]() -> ThrowCompletionOr<Value> {
             // OPTIMIZATION: For objects that don't interfere with indexed property access, we try looking directly at storage.
-            if (!array.may_interfere_with_indexed_property_access() && array.indexed_properties().has_index(index)) {
-                if (auto value = array.indexed_properties().get(index)->value; !value.is_accessor())
+            if (!array.may_interfere_with_indexed_property_access() && array.indexed_has(index)) {
+                if (auto value = array.indexed_get(index)->value; !value.is_accessor())
                     return value;
             }
 

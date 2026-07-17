@@ -9,66 +9,47 @@
 
 #include <AK/Optional.h>
 #include <AK/StringView.h>
-#include <LibTextCodec/Encoder.h>
+#include <AK/Utf16View.h>
+#include <LibTextCodec/Forward.h>
 #include <LibURL/URL.h>
 
 namespace URL {
 
-#define ENUMERATE_STATES                 \
-    STATE(SchemeStart)                   \
-    STATE(Scheme)                        \
-    STATE(NoScheme)                      \
-    STATE(SpecialRelativeOrAuthority)    \
-    STATE(PathOrAuthority)               \
-    STATE(Relative)                      \
-    STATE(RelativeSlash)                 \
-    STATE(SpecialAuthoritySlashes)       \
-    STATE(SpecialAuthorityIgnoreSlashes) \
-    STATE(Authority)                     \
-    STATE(Host)                          \
-    STATE(Hostname)                      \
-    STATE(Port)                          \
-    STATE(File)                          \
-    STATE(FileSlash)                     \
-    STATE(FileHost)                      \
-    STATE(PathStart)                     \
-    STATE(Path)                          \
-    STATE(OpaquePath)                    \
-    STATE(Query)                         \
-    STATE(Fragment)
-
 class Parser {
 public:
     enum class State {
-#define STATE(state) state,
-        ENUMERATE_STATES
-#undef STATE
+        SchemeStart,
+        Scheme,
+        NoScheme,
+        SpecialRelativeOrAuthority,
+        PathOrAuthority,
+        Relative,
+        RelativeSlash,
+        SpecialAuthoritySlashes,
+        SpecialAuthorityIgnoreSlashes,
+        Authority,
+        Host,
+        Hostname,
+        Port,
+        File,
+        FileSlash,
+        FileHost,
+        PathStart,
+        Path,
+        OpaquePath,
+        Query,
+        Fragment,
     };
-
-    static char const* state_name(State const& state)
-    {
-        switch (state) {
-#define STATE(state)   \
-    case State::state: \
-        return #state;
-            ENUMERATE_STATES
-#undef STATE
-        }
-        VERIFY_NOT_REACHED();
-    }
 
     // https://url.spec.whatwg.org/#concept-basic-url-parser
     static Optional<URL> basic_parse(StringView input, Optional<URL const&> base_url = {}, URL* url = nullptr, Optional<State> state_override = {}, Optional<StringView> encoding = {});
+    static Optional<URL> basic_parse(Utf16View input, Optional<URL const&> base_url = {}, URL* url = nullptr, Optional<State> state_override = {}, Optional<StringView> encoding = {});
 
     // https://url.spec.whatwg.org/#string-percent-encode-after-encoding
     static String percent_encode_after_encoding(TextCodec::Encoder&, StringView input, PercentEncodeSet percent_encode_set, bool space_as_plus = false);
 
-    // https://url.spec.whatwg.org/#shorten-a-urls-path
-    static void shorten_urls_path(URL&);
-
     static Optional<Host> parse_host(StringView input, bool is_opaque = false);
+    static Optional<Host> parse_host(Utf16View input, bool is_opaque = false);
 };
-
-#undef ENUMERATE_STATES
 
 }

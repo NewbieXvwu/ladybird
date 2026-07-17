@@ -6,7 +6,7 @@
  */
 
 #include <LibJS/Runtime/TypedArray.h>
-#include <LibWeb/Bindings/DOMMatrixPrototype.h>
+#include <LibWeb/Bindings/DOMMatrix.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Geometry/DOMMatrix.h>
 #include <LibWeb/HTML/Window.h>
@@ -18,10 +18,8 @@ namespace Web::Geometry {
 GC_DEFINE_ALLOCATOR(DOMMatrix);
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrix-dommatrix
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::construct_impl(JS::Realm& realm, Optional<Variant<String, Vector<double>>> const& init)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::construct_impl(JS::Realm& realm, Optional<Variant<Utf16String, Vector<double>>> const& init)
 {
-    auto& vm = realm.vm();
-
     // -> If init is omitted
     if (!init.has_value()) {
         // Return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with the sequence [1, 0, 0, 1, 0, 0].
@@ -31,13 +29,13 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::construct_impl(JS::Realm& rea
     auto const& init_value = init.value();
 
     // -> If init is a DOMString
-    if (init_value.has<String>()) {
+    if (init_value.has<Utf16String>()) {
         // 1. If current global object is not a Window object, then throw a TypeError exception.
         if (!is<HTML::Window>(realm.global_object()))
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "This can only be used in a Window context"_string };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "This can only be used in a Window context"_utf16 };
 
         // 2. Parse init into an abstract matrix, and let matrix and 2dTransform be the result. If the result is failure, then throw a "SyntaxError" DOMException.
-        auto result = TRY(parse_dom_matrix_init_string(realm, init_value.get<String>()));
+        auto result = TRY(parse_dom_matrix_init_string(realm, init_value.get<Utf16String>()));
         auto& m = result.matrix;
 
         // If 2dTransform is true
@@ -73,11 +71,11 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::construct_impl(JS::Realm& rea
     }
 
     // -> Otherwise, throw a TypeError exception.
-    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, TRY_OR_THROW_OOM(vm, String::formatted("Sequence must contain exactly 6 or 16 elements, got {} element(s)", double_sequence.size())) };
+    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Sequence must contain exactly 6 or 16 elements, got {} element(s)", double_sequence.size()) };
 }
 
 // https://drafts.fxtf.org/geometry/#create-a-dommatrix-from-the-2d-dictionary
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::create_from_dom_matrix_2d_init(JS::Realm& realm, DOMMatrix2DInit& init)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::create_from_dom_matrix_2d_init(JS::Realm& realm, Bindings::DOMMatrix2DInit& init)
 {
     // 1. Validate and fixup (2D) other.
     TRY(validate_and_fixup_dom_matrix_2d_init(init));
@@ -96,7 +94,7 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::create_from_dom_matrix_2d_ini
 }
 
 // https://drafts.fxtf.org/geometry/#create-a-dommatrix-from-the-dictionary
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::create_from_dom_matrix_init(JS::Realm& realm, DOMMatrixInit& init)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::create_from_dom_matrix_init(JS::Realm& realm, Bindings::DOMMatrixInit& init)
 {
     // 1. Validate and fixup other.
     TRY(validate_and_fixup_dom_matrix_init(init));
@@ -153,59 +151,65 @@ void DOMMatrix::initialize(JS::Realm& realm)
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrix-frommatrix
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::from_matrix(JS::VM& vm, DOMMatrixInit other)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::from_matrix(JS::VM& vm, Bindings::DOMMatrixInit other)
 {
     return create_from_dom_matrix_init(*vm.current_realm(), other);
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrix-fromfloat32array
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::from_float32_array(JS::VM& vm, GC::Root<WebIDL::BufferSource> const& array32)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::from_float32_array(JS::VM& vm, GC::Ref<JS::Float32Array> array)
 {
-    if (!is<JS::Float32Array>(*array32->raw_object()))
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "Float32Array");
-
     auto& realm = *vm.current_realm();
-    auto& float32_array = static_cast<JS::Float32Array&>(*array32->raw_object());
-    ReadonlySpan<float> elements = float32_array.data();
+    auto record = JS::make_typed_array_with_buffer_witness_record(*array, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(record))
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float32Array argument with 6 or 16 elements"_utf16 };
 
-    // If array32 has 6 elements, return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array32 in the provided order.
-    if (elements.size() == 6)
-        return realm.create<DOMMatrix>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3), elements.at(4), elements.at(5));
+    auto element_count = JS::typed_array_length(record);
+    if (element_count != 6 && element_count != 16)
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float32Array argument with 6 or 16 elements"_utf16 };
 
-    // If array32 has 16 elements, return the result of invoking create a 3d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array32 in the provided order.
-    if (elements.size() == 16)
+    return array->viewed_array_buffer()->with_readonly_bytes(array->byte_offset(), element_count * sizeof(float), [&](ReadonlyBytes bytes) -> WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> {
+        auto elements = bytes.reinterpret<float const>();
+
+        // If array32 has 6 elements, return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array32 in the provided order.
+        if (element_count == 6)
+            return realm.create<DOMMatrix>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3), elements.at(4), elements.at(5));
+
+        // If array32 has 16 elements, return the result of invoking create a 3d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array32 in the provided order.
+        VERIFY(element_count == 16);
         return realm.create<DOMMatrix>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3),
             elements.at(4), elements.at(5), elements.at(6), elements.at(7),
             elements.at(8), elements.at(9), elements.at(10), elements.at(11),
             elements.at(12), elements.at(13), elements.at(14), elements.at(15));
-
-    // Otherwise, throw a TypeError exception.
-    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float32Array argument with 6 or 16 elements"_string };
+    });
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrix-fromfloat64array
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::from_float64_array(JS::VM& vm, GC::Root<WebIDL::BufferSource> const& array64)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::from_float64_array(JS::VM& vm, GC::Ref<JS::Float64Array> array)
 {
-    if (!is<JS::Float64Array>(*array64->raw_object()))
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "Float64Array");
-
     auto& realm = *vm.current_realm();
-    auto& float64_array = static_cast<JS::Float64Array&>(*array64->raw_object());
-    ReadonlySpan<double> elements = float64_array.data();
+    auto record = JS::make_typed_array_with_buffer_witness_record(*array, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(record))
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float64Array argument with 6 or 16 elements"_utf16 };
 
-    // If array64 has 6 elements, return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array64 in the provided order.
-    if (elements.size() == 6)
-        return realm.create<DOMMatrix>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3), elements.at(4), elements.at(5));
+    auto element_count = JS::typed_array_length(record);
+    if (element_count != 6 && element_count != 16)
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float64Array argument with 6 or 16 elements"_utf16 };
 
-    // If array64 has 16 elements, return the result of invoking create a 3d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array64 in the provided order.
-    if (elements.size() == 16)
+    return array->viewed_array_buffer()->with_readonly_bytes(array->byte_offset(), element_count * sizeof(double), [&](ReadonlyBytes bytes) -> WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> {
+        auto elements = bytes.reinterpret<double const>();
+
+        // If array64 has 6 elements, return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array64 in the provided order.
+        if (element_count == 6)
+            return realm.create<DOMMatrix>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3), elements.at(4), elements.at(5));
+
+        // If array64 has 16 elements, return the result of invoking create a 3d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array64 in the provided order.
+        VERIFY(element_count == 16);
         return realm.create<DOMMatrix>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3),
             elements.at(4), elements.at(5), elements.at(6), elements.at(7),
             elements.at(8), elements.at(9), elements.at(10), elements.at(11),
             elements.at(12), elements.at(13), elements.at(14), elements.at(15));
-
-    // Otherwise, throw a TypeError exception.
-    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float64Array argument with 6 or 16 elements"_string };
+    });
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-m11
@@ -383,7 +387,7 @@ void DOMMatrix::set_f(double value)
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrix-multiplyself
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::multiply_self(DOMMatrixInit other)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::multiply_self(Bindings::DOMMatrixInit other)
 {
     // 1. Let otherObject be the result of invoking create a DOMMatrix from the dictionary other.
     auto other_object = TRY(DOMMatrix::create_from_dom_matrix_init(realm(), other));
@@ -399,8 +403,16 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::multiply_self(DOMMatrixInit o
     return GC::Ref<DOMMatrix>(*this);
 }
 
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::multiply_self(GC::Ref<DOMMatrix> other)
+{
+    m_matrix = m_matrix * other->m_matrix;
+    if (!other->m_is_2d)
+        m_is_2d = false;
+    return GC::Ref<DOMMatrix>(*this);
+}
+
 // https://drafts.fxtf.org/geometry/#dom-dommatrix-premultiplyself
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::pre_multiply_self(DOMMatrixInit other)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::pre_multiply_self(Bindings::DOMMatrixInit other)
 {
     // 1. Let otherObject be the result of invoking create a DOMMatrix from the dictionary other.
     auto other_object = TRY(DOMMatrix::create_from_dom_matrix_init(realm(), other));
@@ -423,7 +435,7 @@ GC::Ref<DOMMatrix> DOMMatrix::translate_self(Optional<double> tx, Optional<doubl
     m_matrix = m_matrix * Gfx::translation_matrix(Vector3<double> { tx.value_or(0), ty.value_or(0), tz.value_or(0) });
 
     // 2. If tz is specified and not 0 or -0, set is 2D of the current matrix to false.
-    if (tz.has_value() && (tz != 0 || tz != -0))
+    if (tz.has_value() && (tz != 0 && tz != -0))
         m_is_2d = false;
 
     // 3. Return the current matrix.
@@ -494,7 +506,7 @@ GC::Ref<DOMMatrix> DOMMatrix::rotate_self(Optional<double> rot_x, Optional<doubl
         rot_z = 0;
 
     // 4. If rotX or rotY are not 0 or -0, set is 2D of the current matrix to false.
-    if (rot_x != 0 || rot_x != -0 || rot_y != 0 || rot_y != -0)
+    if ((rot_x != 0 && rot_x != -0) || (rot_y != 0 && rot_y != -0))
         m_is_2d = false;
 
     // 5. Post-multiply a rotation transformation on the current matrix around the vector 0, 0, 1 by the specified rotation rotZ in degrees. The 3D rotation matrix is described in CSS Transforms with alpha = rotZ in degrees. [CSS3-TRANSFORMS]
@@ -526,10 +538,14 @@ GC::Ref<DOMMatrix> DOMMatrix::rotate_from_vector_self(Optional<double> x, Option
 GC::Ref<DOMMatrix> DOMMatrix::rotate_axis_angle_self(Optional<double> x, Optional<double> y, Optional<double> z, Optional<double> angle)
 {
     // 1. Post-multiply a rotation transformation on the current matrix around the specified vector x, y, z by the specified rotation angle in degrees. The 3D rotation matrix is described in CSS Transforms with alpha = angle in degrees. [CSS3-TRANSFORMS]
-    m_matrix = m_matrix * Gfx::rotation_matrix<double>(Vector3<double> { x.value_or(0), y.value_or(0), z.value_or(0) }.normalized(), AK::to_radians(angle.value()));
+    auto axis = Vector3<double> { x.value_or(0), y.value_or(0), z.value_or(0) };
+    // https://drafts.csswg.org/css-transforms-2/#funcdef-rotate3d
+    // "A direction vector that cannot be normalized, such as [0,0,0], will cause the rotation to not be applied."
+    if (axis.length() != 0)
+        m_matrix = m_matrix * Gfx::rotation_matrix<double>(axis.normalized(), AK::to_radians(angle.value()));
 
     // 2. If x or y are not 0 or -0, set is 2D of the current matrix to false.
-    if (x != 0 || x != -0 || y != 0 || y != -0)
+    if ((x != 0 && x != -0) || (y != 0 && y != -0))
         m_is_2d = false;
 
     // 3. Return the current matrix.
@@ -591,7 +607,7 @@ GC::Ref<DOMMatrix> DOMMatrix::invert_self()
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrix-setmatrixvalue
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::set_matrix_value(String const& transform_list)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrix::set_matrix_value(Utf16String const& transform_list)
 {
     // 1. Parse transformList into an abstract matrix, and let matrix and 2dTransform be the result. If the result is failure, then throw a "SyntaxError" DOMException.
     auto result = TRY(parse_dom_matrix_init_string(realm(), transform_list));

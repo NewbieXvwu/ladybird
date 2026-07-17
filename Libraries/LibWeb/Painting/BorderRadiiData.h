@@ -7,26 +7,17 @@
 
 #pragma once
 
+#include <LibGfx/CornerRadii.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/Export.h>
 
 namespace Web::Painting {
 
-struct CornerRadius {
-    int horizontal_radius { 0 };
-    int vertical_radius { 0 };
-
-    inline operator bool() const
-    {
-        return horizontal_radius > 0 && vertical_radius > 0;
-    }
-};
-
 struct WEB_API BorderRadiusData {
     CSSPixels horizontal_radius { 0 };
     CSSPixels vertical_radius { 0 };
 
-    CornerRadius as_corner(DevicePixelConverter const& device_pixel_converter) const;
+    Gfx::CornerRadius as_corner(DevicePixelConverter const& device_pixel_converter) const;
 
     inline operator bool() const
     {
@@ -39,24 +30,6 @@ struct WEB_API BorderRadiusData {
             horizontal_radius = max(CSSPixels(0), horizontal_radius - horizontal);
         if (vertical_radius != 0)
             vertical_radius = max(CSSPixels(0), vertical_radius - vertical);
-    }
-
-    inline void union_max_radii(BorderRadiusData const& other)
-    {
-        horizontal_radius = max(horizontal_radius, other.horizontal_radius);
-        vertical_radius = max(vertical_radius, other.vertical_radius);
-    }
-};
-
-struct CornerRadii {
-    CornerRadius top_left;
-    CornerRadius top_right;
-    CornerRadius bottom_right;
-    CornerRadius bottom_left;
-
-    inline bool has_any_radius() const
-    {
-        return top_left || top_right || bottom_right || bottom_left;
     }
 };
 
@@ -71,12 +44,49 @@ struct BorderRadiiData {
         return top_left || top_right || bottom_right || bottom_left;
     }
 
-    inline void union_max_radii(BorderRadiiData const& other)
+    bool contains(CSSPixelPoint point, CSSPixelRect const& rect) const
     {
-        top_left.union_max_radii(other.top_left);
-        top_right.union_max_radii(other.top_right);
-        bottom_right.union_max_radii(other.bottom_right);
-        bottom_left.union_max_radii(other.bottom_left);
+        if (!rect.contains(point))
+            return false;
+
+        if (!has_any_radius())
+            return true;
+
+        auto outside_ellipse = [&](BorderRadiusData const& radius, CSSPixels center_x, CSSPixels center_y) {
+            auto dx = (point.x() - center_x).to_double() / radius.horizontal_radius.to_double();
+            auto dy = (point.y() - center_y).to_double() / radius.vertical_radius.to_double();
+            return dx * dx + dy * dy > 1.0;
+        };
+
+        if (top_left) {
+            auto center_x = rect.left() + top_left.horizontal_radius;
+            auto center_y = rect.top() + top_left.vertical_radius;
+            if (point.x() < center_x && point.y() < center_y && outside_ellipse(top_left, center_x, center_y))
+                return false;
+        }
+
+        if (top_right) {
+            auto center_x = rect.right() - top_right.horizontal_radius;
+            auto center_y = rect.top() + top_right.vertical_radius;
+            if (point.x() > center_x && point.y() < center_y && outside_ellipse(top_right, center_x, center_y))
+                return false;
+        }
+
+        if (bottom_right) {
+            auto center_x = rect.right() - bottom_right.horizontal_radius;
+            auto center_y = rect.bottom() - bottom_right.vertical_radius;
+            if (point.x() > center_x && point.y() > center_y && outside_ellipse(bottom_right, center_x, center_y))
+                return false;
+        }
+
+        if (bottom_left) {
+            auto center_x = rect.left() + bottom_left.horizontal_radius;
+            auto center_y = rect.bottom() - bottom_left.vertical_radius;
+            if (point.x() < center_x && point.y() > center_y && outside_ellipse(bottom_left, center_x, center_y))
+                return false;
+        }
+
+        return true;
     }
 
     inline void shrink(CSSPixels top, CSSPixels right, CSSPixels bottom, CSSPixels left)
@@ -92,11 +102,11 @@ struct BorderRadiiData {
         shrink(-top, -right, -bottom, -left);
     }
 
-    inline CornerRadii as_corners(DevicePixelConverter const& device_pixel_converter) const
+    inline Gfx::CornerRadii as_corners(DevicePixelConverter const& device_pixel_converter) const
     {
         if (!has_any_radius())
             return {};
-        return CornerRadii {
+        return Gfx::CornerRadii {
             top_left.as_corner(device_pixel_converter),
             top_right.as_corner(device_pixel_converter),
             bottom_right.as_corner(device_pixel_converter),

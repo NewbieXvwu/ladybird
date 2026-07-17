@@ -11,37 +11,24 @@
 
 namespace Web {
 
-float CSSPixels::to_float() const
-{
-    return static_cast<float>(m_value) / fixed_point_denominator;
-}
-
-double CSSPixels::to_double() const
-{
-    return static_cast<double>(m_value) / fixed_point_denominator;
-}
-
-int CSSPixels::to_int() const
-{
-    return m_value / fixed_point_denominator;
-}
-
 }
 
 namespace IPC {
 
 template<>
-ErrorOr<void> encode(Encoder& encoder, Web::DevicePixels const& value)
+ErrorOr<void> encode(Encoder& encoder, Web::CSSPixelPoint const& value)
 {
-    TRY(encoder.encode(value.value()));
+    TRY(encoder.encode(value.x().raw_value()));
+    TRY(encoder.encode(value.y().raw_value()));
     return {};
 }
 
 template<>
-ErrorOr<Web::DevicePixels> decode(Decoder& decoder)
+ErrorOr<Web::CSSPixelPoint> decode(Decoder& decoder)
 {
-    auto value = TRY(decoder.decode<int>());
-    return Web::DevicePixels(value);
+    auto x = TRY(decoder.decode<i32>());
+    auto y = TRY(decoder.decode<i32>());
+    return Web::CSSPixelPoint { Web::CSSPixels::from_raw(x), Web::CSSPixels::from_raw(y) };
 }
 
 template<>

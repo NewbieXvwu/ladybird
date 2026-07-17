@@ -1,22 +1,19 @@
-#import <FileAPI/FileList.idl>
-#import <HTML/DataTransferItemList.idl>
-
 // https://html.spec.whatwg.org/multipage/dnd.html#datatransfer
 [Exposed=Window]
 interface DataTransfer {
     constructor();
 
-    attribute DOMString dropEffect;
-    attribute DOMString effectAllowed;
+    attribute [Utf16FlyString] Utf16DOMString dropEffect;
+    attribute [Utf16FlyString] Utf16DOMString effectAllowed;
 
     [SameObject] readonly attribute DataTransferItemList items;
 
     [FIXME] undefined setDragImage(Element image, long x, long y);
 
     // old interface
-    [CachedAttribute] readonly attribute FrozenArray<DOMString> types;
-    DOMString getData(DOMString format);
-    [FIXME] undefined setData(DOMString format, DOMString data);
-    undefined clearData(optional DOMString format);
+    [CachedAttribute] readonly attribute FrozenArray<Utf16DOMString> types;
+    Utf16DOMString getData(Utf16DOMString format);
+    undefined setData(Utf16DOMString format, Utf16DOMString data);
+    undefined clearData(optional Utf16DOMString format);
     [SameObject] readonly attribute FileList files;
 };

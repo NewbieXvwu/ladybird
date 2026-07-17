@@ -10,17 +10,44 @@
 
 namespace Wasm::Constants {
 
-// Value
+// Number types
 static constexpr auto i32_tag = 0x7f;
 static constexpr auto i64_tag = 0x7e;
 static constexpr auto f32_tag = 0x7d;
 static constexpr auto f64_tag = 0x7c;
-static constexpr auto v128_tag = 0x7b;
-static constexpr auto function_reference_tag = 0x70;
-static constexpr auto extern_reference_tag = 0x6f;
 
-// Function
+// Vector types
+static constexpr auto v128_tag = 0x7b;
+
+// Heap types
+static constexpr auto exn_reference_tag = 0x69;
+static constexpr auto array_reference_tag = 0x6a;
+static constexpr auto struct_reference_tag = 0x6b;
+static constexpr auto i31_reference_tag = 0x6c;
+static constexpr auto eq_reference_tag = 0x6d;
+static constexpr auto any_reference_tag = 0x6e;
+static constexpr auto extern_reference_tag = 0x6f;
+static constexpr auto function_reference_tag = 0x70;
+static constexpr auto none_reference_tag = 0x71;
+static constexpr auto noextern_reference_tag = 0x72;
+static constexpr auto nofunc_reference_tag = 0x73;
+static constexpr auto noexn_reference_tag = 0x74;
+
+// Reference types
+static constexpr auto nullable_reference_tag_tag = 0x63;
+static constexpr auto non_nullable_reference_tag_tag = 0x64;
+
+// Composite types
+static constexpr auto array_tag = 0x5e;
+static constexpr auto struct_tag = 0x5f;
 static constexpr auto function_signature_tag = 0x60;
+static constexpr auto i16_tag = 0x77;
+static constexpr auto i8_tag = 0x78;
+
+// Recursive types
+static constexpr auto rec_group_tag = 0x4e;
+static constexpr auto sub_final_type_tag = 0x4f;
+static constexpr auto sub_type_tag = 0x50;
 
 // Global
 static constexpr auto const_tag = 0x00;
@@ -34,14 +61,23 @@ static constexpr auto extern_function_tag = 0x00;
 static constexpr auto extern_table_tag = 0x01;
 static constexpr auto extern_memory_tag = 0x02;
 static constexpr auto extern_global_tag = 0x03;
+static constexpr auto extern_tag_tag = 0x04; // Proposal "exception-handling"
 
 static constexpr auto page_size = 64 * KiB;
+static constexpr u64 wasm32_max_pages = 1ull << 16;
+// FIXME: The compiled memory access path currently narrows memory64 addresses
+//        to i32 before adding the memarg offset. Keep memory64 memories within
+//        the currently supported address width until 64-bit memory accesses are
+//        implemented there.
+static constexpr u64 wasm64_max_pages = wasm32_max_pages;
+static constexpr auto wasm32_default_memory_reservation_size = 16 * MiB;
 
 // Implementation-defined limits
 // These are not concretely defined by the spec, so the values are only defined by us.
 static constexpr auto minimum_stack_space_to_keep_free = 256 * KiB; // Note: Value is arbitrary and chosen by testing with ASAN
 static constexpr auto max_allowed_executed_instructions_per_call = 256 * 1024 * 1024;
 static constexpr auto max_allowed_vector_size = 500 * MiB;
+static constexpr auto max_allowed_table_size = 1024 * 1024;
 static constexpr auto max_allowed_function_locals_per_type = 42069; // Note: VERY arbitrary.
 
 // Messages used by the host

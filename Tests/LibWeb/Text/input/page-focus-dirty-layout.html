@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<script src="include.js"></script>
+<div id="target"></div>
+<script>
+    test(() => {
+        internals.dumpDisplayList();
+
+        target.appendChild(document.createElement("div"));
+        internals.setPageFocus(false);
+
+        // Restore page focus — so later tests reusing this process don't inherit has_focus=false.
+        internals.setPageFocus(true);
+
+        println("PASS");
+    });
+</script>

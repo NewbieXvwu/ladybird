@@ -17,21 +17,19 @@ class HTMLAudioElement final : public HTMLMediaElement {
 public:
     virtual ~HTMLAudioElement() override;
 
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder& style) override;
+
     Layout::AudioBox* layout_node();
     Layout::AudioBox const* layout_node() const;
+
+    bool should_paint() const;
 
 private:
     HTMLAudioElement(DOM::Document&, DOM::QualifiedName);
 
     virtual void initialize(JS::Realm&) override;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
-
-    virtual void on_playing() override;
-    virtual void on_paused() override;
-    virtual void on_seek(double, MediaSeekMode) override;
-    virtual void on_volume_change() override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
 };
 
 }

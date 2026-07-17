@@ -12,7 +12,6 @@
 #include <AK/MemoryStream.h>
 #include <AK/StringBuilder.h>
 #include <AK/Utf16String.h>
-#include <AK/Utf32View.h>
 
 static_assert(AK::Concepts::HashCompatible<Utf16String, Utf16View>);
 static_assert(AK::Concepts::HashCompatible<Utf16View, Utf16String>);
@@ -22,6 +21,18 @@ static Utf16String make_copy(Utf16String const& string)
     return string.has_ascii_storage()
         ? Utf16String::from_utf8(string.ascii_view())
         : Utf16String::from_utf16(string.utf16_view());
+}
+
+TEST_CASE(short_ascii_literal_is_constexpr)
+{
+    // The _utf16 UDL folds short ASCII literals to compile-time constants,
+    // both for char and char16_t inputs.
+    static constexpr Utf16String from_char = "foo"_utf16;
+    static constexpr Utf16String from_char16 = u"bar"_utf16;
+    EXPECT_EQ(from_char, "foo"sv);
+    EXPECT_EQ(from_char16, "bar"sv);
+    EXPECT_EQ(from_char.length_in_code_units(), 3u);
+    EXPECT_EQ(from_char16.length_in_code_units(), 3u);
 }
 
 TEST_CASE(empty_string)
@@ -175,81 +186,6 @@ TEST_CASE(from_utf16)
     }
     {
         auto string = Utf16String::from_utf16(u"hello \xdc00!"sv);
-        EXPECT(!string.is_empty());
-        EXPECT(!string.is_ascii());
-        EXPECT(!string.has_long_ascii_storage());
-        EXPECT(!string.has_short_ascii_storage());
-        EXPECT_EQ(string.length_in_code_units(), 8uz);
-        EXPECT_EQ(string.length_in_code_points(), 8uz);
-        EXPECT_EQ(string.utf16_view(), u"hello \xdc00!"sv);
-    }
-}
-
-TEST_CASE(from_utf32)
-{
-    auto strlen32 = [](char32_t const* string) {
-        auto const* start = string;
-        while (*start)
-            ++start;
-        return static_cast<size_t>(start - string);
-    };
-
-    auto to_utf32_view = [&](char32_t const* string) {
-        return Utf32View { reinterpret_cast<u32 const*>(string), strlen32(string) };
-    };
-
-    {
-        auto string = Utf16String::from_utf32(to_utf32_view(U"hello!"));
-        EXPECT(!string.is_empty());
-        EXPECT(string.is_ascii());
-        EXPECT(!string.has_long_ascii_storage());
-        EXPECT(string.has_short_ascii_storage());
-        EXPECT_EQ(string.length_in_code_units(), 6uz);
-        EXPECT_EQ(string.length_in_code_points(), 6uz);
-        EXPECT_EQ(string.ascii_view(), "hello!"sv);
-    }
-    {
-        auto string = Utf16String::from_utf32(to_utf32_view(U"hello there!"));
-        EXPECT(!string.is_empty());
-        EXPECT(string.is_ascii());
-        EXPECT(string.has_long_ascii_storage());
-        EXPECT(!string.has_short_ascii_storage());
-        EXPECT_EQ(string.length_in_code_units(), 12uz);
-        EXPECT_EQ(string.length_in_code_points(), 12uz);
-        EXPECT_EQ(string.ascii_view(), "hello there!"sv);
-    }
-    {
-        auto string = Utf16String::from_utf32(to_utf32_view(U"😀"));
-        EXPECT(!string.is_empty());
-        EXPECT(!string.is_ascii());
-        EXPECT(!string.has_long_ascii_storage());
-        EXPECT(!string.has_short_ascii_storage());
-        EXPECT_EQ(string.length_in_code_units(), 2uz);
-        EXPECT_EQ(string.length_in_code_points(), 1uz);
-        EXPECT_EQ(string.utf16_view(), u"😀"sv);
-    }
-    {
-        auto string = Utf16String::from_utf32(to_utf32_view(U"hello 😀 there!"));
-        EXPECT(!string.is_empty());
-        EXPECT(!string.is_ascii());
-        EXPECT(!string.has_long_ascii_storage());
-        EXPECT(!string.has_short_ascii_storage());
-        EXPECT_EQ(string.length_in_code_units(), 15uz);
-        EXPECT_EQ(string.length_in_code_points(), 14uz);
-        EXPECT_EQ(string.utf16_view(), u"hello 😀 there!"sv);
-    }
-    {
-        auto string = Utf16String::from_utf32(to_utf32_view(U"hello \xd800!"));
-        EXPECT(!string.is_empty());
-        EXPECT(!string.is_ascii());
-        EXPECT(!string.has_long_ascii_storage());
-        EXPECT(!string.has_short_ascii_storage());
-        EXPECT_EQ(string.length_in_code_units(), 8uz);
-        EXPECT_EQ(string.length_in_code_points(), 8uz);
-        EXPECT_EQ(string.utf16_view(), u"hello \xd800!"sv);
-    }
-    {
-        auto string = Utf16String::from_utf32(to_utf32_view(U"hello \xdc00!"));
         EXPECT(!string.is_empty());
         EXPECT(!string.is_ascii());
         EXPECT(!string.has_long_ascii_storage());
@@ -418,7 +354,7 @@ TEST_CASE(repeated)
 
 TEST_CASE(from_string_builder)
 {
-    StringBuilder builder(StringBuilder::Mode::UTF16);
+    Utf16StringBuilder builder;
     builder.append_code_point('a');
     builder.append_code_point('b');
     builder.append_code_point(0x1f600);
@@ -427,10 +363,29 @@ TEST_CASE(from_string_builder)
     builder.append_code_point('c');
     builder.append_code_point('d');
 
-    auto string = builder.to_utf16_string();
+    auto string = builder.to_string();
     EXPECT_EQ(string.length_in_code_units(), 10uz);
     EXPECT_EQ(string.length_in_code_points(), 7uz);
     EXPECT_EQ(string, "ab😀𐀀🍕cd"sv);
+}
+
+TEST_CASE(from_string_builder_alignment)
+{
+    Utf16StringBuilder builder;
+    builder.append(Utf16String::from_utf8_without_validation("\u00a0"sv));
+    builder.append(R"~~(
+<script>
+    const containsValidURL = input => {
+        return input.value.length !== 0 && input.checkValidity();
+    };
+</script>
+)~~"sv);
+
+    auto string1 = builder.to_string();
+    auto string2 = string1.to_utf8();
+
+    EXPECT_EQ(string1.code_unit_at(0), 0x00a0);
+    EXPECT_EQ(string2.bytes_as_string_view().substring_view(0, 2), "\u00a0"sv);
 }
 
 TEST_CASE(from_ipc_stream)
@@ -460,10 +415,7 @@ TEST_CASE(from_ipc_stream)
     {
         auto data = u"hello 😀 there!"sv;
 
-        StringBuilder builder(StringBuilder::Mode::UTF16);
-        builder.append(data);
-
-        auto buffer = MUST(builder.to_byte_buffer());
+        auto buffer = MUST(ByteBuffer::copy({ reinterpret_cast<u8 const*>(data.utf16_span().data()), data.length_in_code_units() * sizeof(char16_t) }));
         FixedMemoryStream stream { buffer.bytes() };
 
         auto string = TRY_OR_FAIL(Utf16String::from_ipc_stream(stream, data.length_in_code_units(), false));
@@ -483,10 +435,7 @@ TEST_CASE(from_ipc_stream)
     {
         auto data = u"😀"sv;
 
-        StringBuilder builder(StringBuilder::Mode::UTF16);
-        builder.append(data);
-
-        auto buffer = MUST(builder.to_byte_buffer());
+        auto buffer = MUST(ByteBuffer::copy({ reinterpret_cast<u8 const*>(data.utf16_span().data()), data.length_in_code_units() * sizeof(char16_t) }));
         FixedMemoryStream stream { buffer.bytes() };
 
         auto result = Utf16String::from_ipc_stream(stream, data.length_in_code_units(), true);
@@ -495,10 +444,7 @@ TEST_CASE(from_ipc_stream)
     {
         auto data = u"hello 😀 there!"sv;
 
-        StringBuilder builder(StringBuilder::Mode::UTF16);
-        builder.append(data);
-
-        auto buffer = MUST(builder.to_byte_buffer());
+        auto buffer = MUST(ByteBuffer::copy({ reinterpret_cast<u8 const*>(data.utf16_span().data()), data.length_in_code_units() * sizeof(char16_t) }));
         FixedMemoryStream stream { buffer.bytes() };
 
         auto result = Utf16String::from_ipc_stream(stream, data.length_in_code_units(), true);
@@ -1294,4 +1240,29 @@ TEST_CASE(optional)
     released = string.release_value();
     EXPECT(!string.has_value());
     EXPECT_EQ(released, u"well 😀 hello"sv);
+}
+
+TEST_CASE(utf16_string_builder_clear_resets_ascii_flag)
+{
+    // Regression test: Utf16StringBuilder must reset its ASCII state on clear().
+    // Without this, a builder that previously held non-ASCII content stores
+    // subsequent ASCII as char16_t, corrupting the first code unit when adopted.
+    Utf16StringBuilder builder;
+
+    // 1. Append a non-ASCII code point to force UTF-16 storage.
+    builder.append_code_point(0x00D7); // U+00D7 MULTIPLICATION SIGN (×)
+    auto first = builder.to_string();
+    EXPECT_EQ(first.length_in_code_units(), 1u);
+    EXPECT_EQ(first.code_unit_at(0), 0x00D7);
+
+    // 2. Clear and reuse for ASCII content.
+    builder.clear();
+    builder.append_code_point('\n');
+    for (int i = 0; i < 100; ++i)
+        builder.append_code_point(' ');
+
+    auto second = builder.to_string();
+    EXPECT_EQ(second.length_in_code_units(), 101u);
+    EXPECT_EQ(second.code_unit_at(0), 0x000A); // Must be newline, not null.
+    EXPECT_EQ(second.code_unit_at(1), 0x0020);
 }

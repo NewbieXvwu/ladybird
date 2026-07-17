@@ -5,16 +5,17 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ManagedSourceBufferPrototype.h>
+#include <LibWeb/Bindings/ManagedSourceBuffer.h>
 #include <LibWeb/MediaSourceExtensions/EventNames.h>
+#include <LibWeb/MediaSourceExtensions/ManagedMediaSource.h>
 #include <LibWeb/MediaSourceExtensions/ManagedSourceBuffer.h>
 
 namespace Web::MediaSourceExtensions {
 
 GC_DEFINE_ALLOCATOR(ManagedSourceBuffer);
 
-ManagedSourceBuffer::ManagedSourceBuffer(JS::Realm& realm)
-    : SourceBuffer(realm)
+ManagedSourceBuffer::ManagedSourceBuffer(JS::Realm& realm, ManagedMediaSource& media_source)
+    : SourceBuffer(realm, media_source)
 {
 }
 

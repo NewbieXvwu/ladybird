@@ -8,14 +8,15 @@
  */
 
 #include "LinearGradientStyleValue.h"
+#include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 
 namespace Web::CSS {
 
-String LinearGradientStyleValue::to_string(SerializationMode mode) const
+void LinearGradientStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    StringBuilder builder;
     auto side_or_corner_to_string = [](SideOrCorner value) {
         switch (value) {
         case SideOrCorner::Top:
@@ -41,7 +42,7 @@ String LinearGradientStyleValue::to_string(SerializationMode mode) const
 
     auto default_direction = m_properties.gradient_type == GradientType::WebKit ? SideOrCorner::Top : SideOrCorner::Bottom;
     bool has_direction = m_properties.direction != default_direction;
-    bool has_color_space = m_properties.interpolation_method.has_value() && m_properties.interpolation_method.value().color_space != InterpolationMethod::default_color_space(m_properties.color_syntax);
+    bool has_color_space = m_properties.color_interpolation_method && m_properties.color_interpolation_method->as_color_interpolation_method().color_interpolation_method() != ColorInterpolationMethodStyleValue::default_color_interpolation_method(m_properties.color_syntax);
 
     if (m_properties.gradient_type == GradientType::WebKit)
         builder.append("-webkit-"sv);
@@ -53,8 +54,8 @@ String LinearGradientStyleValue::to_string(SerializationMode mode) const
             [&](SideOrCorner side_or_corner) {
                 builder.appendff("{}{}", m_properties.gradient_type == GradientType::Standard ? "to "sv : ""sv, side_or_corner_to_string(side_or_corner));
             },
-            [&](Angle const& angle) {
-                builder.append(angle.to_string());
+            [&](NonnullRefPtr<StyleValue const> const& angle) {
+                angle->serialize(builder, mode);
             });
 
         if (has_color_space)
@@ -62,14 +63,26 @@ String LinearGradientStyleValue::to_string(SerializationMode mode) const
     }
 
     if (has_color_space)
-        builder.append(m_properties.interpolation_method.value().to_string());
+        m_properties.color_interpolation_method->serialize(builder, mode);
 
     if (has_direction || has_color_space)
         builder.append(", "sv);
 
     serialize_color_stop_list(builder, m_properties.color_stop_list, mode);
     builder.append(")"sv);
-    return MUST(builder.to_string());
+}
+
+ValueComparingNonnullRefPtr<StyleValue const> LinearGradientStyleValue::absolutized(ComputationContext const& context) const
+{
+    Vector<ColorStopListElement> absolutized_color_stops;
+    absolutized_color_stops.ensure_capacity(m_properties.color_stop_list.size());
+    for (auto const& color_stop : m_properties.color_stop_list) {
+        absolutized_color_stops.unchecked_append(color_stop.absolutized(context));
+    }
+
+    auto absolutized_color_interpolation_method = m_properties.color_interpolation_method ? ValueComparingRefPtr<StyleValue const> { m_properties.color_interpolation_method->absolutized(context) } : nullptr;
+
+    return create(m_properties.direction, move(absolutized_color_stops), m_properties.gradient_type, m_properties.repeating, move(absolutized_color_interpolation_method));
 }
 
 bool LinearGradientStyleValue::equals(StyleValue const& other_) const
@@ -114,24 +127,25 @@ float LinearGradientStyleValue::angle_degrees(CSSPixelSize gradient_size) const
                 return angle + 180.0;
             return angle;
         },
-        [&](Angle const& angle) {
-            return angle.to_degrees();
+        [&](NonnullRefPtr<StyleValue const> const& style_value) {
+            auto angle = Angle::from_style_value(style_value, {}).to_degrees();
+            // Note: With -webkit-linear-gradient, 0deg points to the right instead of top,
+            // and the direction is reversed (counter-clockwise instead of clockwise)
+            if (m_properties.gradient_type == GradientType::WebKit)
+                return 90.0 - angle;
+            return angle;
         });
 }
 
 void LinearGradientStyleValue::resolve_for_size(Layout::NodeWithStyle const& node, CSSPixelSize size) const
 {
-    ResolvedDataCacheKey cache_key {
-        .length_resolution_context = Length::ResolutionContext::for_layout_node(node),
-        .size = size,
-    };
-    if (m_resolved_data_cache_key != cache_key) {
-        m_resolved_data_cache_key = move(cache_key);
+    if (m_resolved_size != size) {
+        m_resolved_size = move(size);
         m_resolved = Painting::resolve_linear_gradient_data(node, size, *this);
     }
 }
 
-void LinearGradientStyleValue::paint(DisplayListRecordingContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
+void LinearGradientStyleValue::paint(DisplayListRecordingContext& context, DOM::Document const&, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
 {
     VERIFY(m_resolved.has_value());
     context.display_list_recorder().fill_rect_with_linear_gradient(dest_rect.to_type<int>(), m_resolved.value());

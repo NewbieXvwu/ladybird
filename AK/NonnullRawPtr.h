@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, the Ladybird developers.
+ * Copyright (c) 2024-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -50,6 +50,7 @@ private:
 template<typename T>
 struct Traits<NonnullRawPtr<T>> : public DefaultTraits<NonnullRawPtr<T>> {
     static unsigned hash(NonnullRawPtr<T> const& handle) { return Traits<T>::hash(handle); }
+    static constexpr bool may_have_slow_equality_check() { return false; }
 };
 
 namespace Detail {

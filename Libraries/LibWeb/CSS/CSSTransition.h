@@ -9,11 +9,7 @@
 
 #include <LibWeb/Animations/Animation.h>
 #include <LibWeb/CSS/Interpolation.h>
-#include <LibWeb/CSS/PropertyID.h>
-#include <LibWeb/CSS/PseudoElement.h>
-#include <LibWeb/CSS/StyleValues/EasingStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
-#include <LibWeb/CSS/Time.h>
 
 namespace Web::CSS {
 
@@ -22,14 +18,22 @@ class CSSTransition : public Animations::Animation {
     GC_DECLARE_ALLOCATOR(CSSTransition);
 
 public:
-    static GC::Ref<CSSTransition> start_a_transition(DOM::AbstractElement, PropertyID,
-        size_t transition_generation, double delay, double start_time, double end_time, NonnullRefPtr<StyleValue const> start_value,
-        NonnullRefPtr<StyleValue const> end_value, NonnullRefPtr<StyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor);
+    static GC::Ref<CSSTransition> start_a_transition(
+        DOM::AbstractElement,
+        PropertyID,
+        size_t transition_generation,
+        double delay,
+        double start_time,
+        double end_time,
+        NonnullRefPtr<StyleValue const> start_value,
+        NonnullRefPtr<StyleValue const> end_value,
+        NonnullRefPtr<StyleValue const> reversing_adjusted_start_value,
+        double reversing_shortening_factor);
 
-    StringView transition_property() const { return string_from_property_id(m_transition_property); }
+    Utf16FlyString const& transition_property() const;
 
     virtual Animations::AnimationClass animation_class() const override;
-    virtual Optional<int> class_specific_composite_order(GC::Ref<Animations::Animation> other) const override;
+    virtual int class_specific_composite_order(GC::Ref<Animations::Animation> other) const override;
 
     double transition_start_time() const { return m_start_time; }
     double transition_end_time() const { return m_end_time; }
@@ -52,9 +56,18 @@ public:
     void set_previous_phase(Phase phase) { m_previous_phase = phase; }
 
 private:
-    CSSTransition(JS::Realm&, DOM::AbstractElement, PropertyID, size_t transition_generation,
-        double delay, double start_time, double end_time, NonnullRefPtr<StyleValue const> start_value, NonnullRefPtr<StyleValue const> end_value,
-        NonnullRefPtr<StyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor);
+    CSSTransition(
+        JS::Realm&,
+        DOM::AbstractElement,
+        PropertyID,
+        size_t transition_generation,
+        double delay,
+        double start_time,
+        double end_time,
+        NonnullRefPtr<StyleValue const> start_value,
+        NonnullRefPtr<StyleValue const> end_value,
+        NonnullRefPtr<StyleValue const> reversing_adjusted_start_value,
+        double reversing_shortening_factor);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;

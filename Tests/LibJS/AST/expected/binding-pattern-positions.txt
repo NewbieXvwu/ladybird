@@ -1,0 +1,95 @@
+Program (script) @6:1
+├─ VariableDeclaration (let) @6:1
+│  └─ VariableDeclarator @6:1
+│     ├─ BindingPattern (object)
+│     │  ├─ entry
+│     │  │  └─ name
+│     │  │     └─ Identifier "foo" [global] (let) @6:7
+│     │  └─ entry
+│     │     └─ name
+│     │        └─ Identifier "bar" [global] (let) @6:12
+│     └─ ObjectExpression @6:20
+├─ VariableDeclaration (let) @7:1
+│  └─ VariableDeclarator @7:1
+│     ├─ BindingPattern (object)
+│     │  ├─ entry
+│     │  │  ├─ name
+│     │  │  │  └─ Identifier "x" [global] @7:7
+│     │  │  └─ alias
+│     │  │     └─ Identifier "aliased" [global] (let) @7:10
+│     │  └─ entry
+│     │     ├─ name
+│     │     │  └─ Identifier "y" [global] @7:19
+│     │     └─ alias
+│     │        └─ Identifier "also" [global] (let) @7:22
+│     └─ ObjectExpression @7:31
+├─ VariableDeclaration (let) @8:1
+│  └─ VariableDeclarator @8:1
+│     ├─ BindingPattern (array)
+│     │  ├─ entry
+│     │  │  └─ alias
+│     │  │     └─ Identifier "first" [global] (let) @8:7
+│     │  ├─ Elision
+│     │  └─ entry
+│     │     └─ alias
+│     │        └─ Identifier "third" [global] (let) @8:16
+│     └─ ArrayExpression @8:26
+├─ VariableDeclaration (let) @9:1
+│  └─ VariableDeclarator @9:1
+│     ├─ BindingPattern (object)
+│     │  ├─ entry
+│     │  │  ├─ name
+│     │  │  │  └─ Identifier "nested" [global] @9:7
+│     │  │  └─ alias
+│     │  │     └─ BindingPattern (object)
+│     │  │        └─ entry
+│     │  │           └─ name
+│     │  │              └─ Identifier "inner" [global] (let) @9:17
+│     │  └─ entry (rest)
+│     │     └─ name
+│     │        └─ Identifier "rest" [global] (let) @9:29
+│     └─ ObjectExpression @9:38
+├─ VariableDeclaration (let) @10:1
+│  └─ VariableDeclarator @10:1
+│     ├─ BindingPattern (array)
+│     │  ├─ entry
+│     │  │  └─ alias
+│     │  │     └─ Identifier "a" [global] (let) @10:7
+│     │  └─ entry
+│     │     └─ alias
+│     │        └─ BindingPattern (array)
+│     │           ├─ entry
+│     │           │  └─ alias
+│     │           │     └─ Identifier "b" [global] (let) @10:12
+│     │           └─ entry
+│     │              └─ alias
+│     │                 └─ Identifier "c" [global] (let) @10:15
+│     └─ ArrayExpression @10:23
+└─ FunctionDeclaration "destructured" @12:1
+   ├─ parameters
+   │  ├─ BindingPattern (object)
+   │  │  ├─ entry
+   │  │  │  └─ name
+   │  │  │     └─ Identifier "p" [variable:0] @12:25
+   │  │  └─ entry
+   │  │     ├─ name
+   │  │     │  └─ Identifier "q" [global] @12:28
+   │  │     └─ alias
+   │  │        └─ Identifier "r" [variable:1] @12:31
+   │  └─ BindingPattern (array)
+   │     ├─ entry
+   │     │  └─ alias
+   │     │     └─ Identifier "s" [variable:2] @12:38
+   │     └─ entry
+   │        └─ alias
+   │           └─ Identifier "t" [variable:3] @12:41
+   └─ body
+      └─ FunctionBody @13:5
+         └─ ReturnStatement @13:5
+            └─ BinaryExpression (+) @13:22
+               ├─ BinaryExpression (+) @13:18
+               │  ├─ BinaryExpression (+) @13:14
+               │  │  ├─ Identifier "p" [variable:0] @13:12
+               │  │  └─ Identifier "r" [variable:1] @13:16
+               │  └─ Identifier "s" [variable:2] @13:20
+               └─ Identifier "t" [variable:3] @13:24

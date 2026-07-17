@@ -4,12 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/ByteReader.h>
 #include <AK/CountingStream.h>
 #include <AK/MemoryStream.h>
 #include <AK/Stream.h>
 #include <AK/UFixedBigInt.h>
-#include <LibCore/DateTime.h>
 #include <LibDNS/Message.h>
 
 namespace DNS::Messages {
@@ -103,11 +101,6 @@ ErrorOr<Message> Message::from_raw(ParseContext& ctx)
 
 ErrorOr<size_t> Message::to_raw(ByteBuffer& out) const
 {
-    // NOTE: This is minimally implemented to allow for sending queries,
-    //       server-side responses are not implemented yet.
-    VERIFY(header.answer_count == 0);
-    VERIFY(header.authority_count == 0);
-
     auto start_size = out.size();
 
     auto header_bytes = TRY(out.get_bytes_for_writing(sizeof(Header)));
@@ -115,6 +108,12 @@ ErrorOr<size_t> Message::to_raw(ByteBuffer& out) const
 
     for (size_t i = 0; i < header.question_count; i++)
         TRY(questions[i].to_raw(out));
+
+    for (size_t i = 0; i < header.answer_count; i++)
+        TRY(answers[i].to_raw(out));
+
+    for (size_t i = 0; i < header.authority_count; i++)
+        TRY(authorities[i].to_raw(out));
 
     for (size_t i = 0; i < header.additional_count; i++)
         TRY(additional_records[i].to_raw(out));
@@ -680,6 +679,11 @@ ErrorOr<DomainName> DomainName::from_raw(ParseContext& ctx)
             return Error::from_string_literal("Invalid domain name pointer in label");
         }
 
+        // A normal label is at most 63 octets. Lengths whose top two bits are 0b01 or 0b10 are reserved (RFC 1035,
+        // 4.1.4) and would produce a label that can no longer be re-encoded, so reject them here.
+        if (length > 63)
+            return Error::from_string_literal("Domain name label exceeds 63 octets");
+
         ByteBuffer content;
         TRY(ctx.stream.read_until_filled(TRY(content.get_bytes_for_writing(length))));
         name.labels.append(ByteString::copy(content));
@@ -693,7 +697,8 @@ ErrorOr<DomainName> DomainName::from_raw(ParseContext& ctx)
 ErrorOr<void> DomainName::to_raw(ByteBuffer& out) const
 {
     for (auto& label : labels) {
-        VERIFY(label.length() <= 63);
+        if (label.length() > 63)
+            return Error::from_string_literal("Domain name label exceeds 63 octets");
         auto size_bytes = TRY(out.get_bytes_for_writing(1));
         u8 size = static_cast<u8>(label.length());
         memcpy(size_bytes.data(), &size, 1);
@@ -1237,8 +1242,8 @@ ErrorOr<String> Records::SIG::to_string() const
     builder.appendff("Algorithm: {}, ", DNSSEC::to_string(algorithm));
     builder.appendff("Labels: {}, ", label_count);
     builder.appendff("Original TTL: {}, ", original_ttl);
-    builder.appendff("Signature expiration: {}, ", Core::DateTime::from_timestamp(expiration.truncated_seconds_since_epoch()));
-    builder.appendff("Signature inception: {}, ", Core::DateTime::from_timestamp(inception.truncated_seconds_since_epoch()));
+    builder.appendff("Signature expiration: {}, ", expiration);
+    builder.appendff("Signature inception: {}, ", inception);
     builder.appendff("Key tag: {}, ", key_tag);
     builder.appendff("Signer's name: '{}', ", signers_name.to_string());
     builder.appendff("Signature: {}", TRY(encode_base64(signature)));

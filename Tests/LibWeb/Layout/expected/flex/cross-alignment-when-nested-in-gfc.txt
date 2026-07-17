@@ -1,4 +1,4 @@
-Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-inline
+Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children: not-inline
   BlockContainer <html> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children: not-inline
     BlockContainer <body> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-inline
       Box <div#Main> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [GFC] children: not-inline
@@ -8,9 +8,9 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-
 ViewportPaintable (Viewport<#document>) [0,0 800x600]
   PaintableWithLines (BlockContainer<HTML>) [0,0 800x600]
     PaintableWithLines (BlockContainer<BODY>) [0,0 800x600]
-      PaintableBox (Box<DIV>#Main) [0,0 800x600]
-        PaintableBox (Box<DIV>#MiddleColumn) [0,0 800x600]
+      Paintable (Box<DIV>#Main) [0,0 800x600]
+        Paintable (Box<DIV>#MiddleColumn) [0,0 800x600]
           PaintableWithLines (BlockContainer<DIV>.MiddleHeader) [0,0 100x100]
 
-SC for Viewport<#document> [0,0 800x600] [children: 1] (z-index: auto)
- SC for BlockContainer<HTML> [0,0 800x600] [children: 0] (z-index: auto)
+SC for Viewport<#document> [0,0 800x600] (z-index: auto)
+ SC for BlockContainer<HTML> [0,0 800x600] (z-index: auto)

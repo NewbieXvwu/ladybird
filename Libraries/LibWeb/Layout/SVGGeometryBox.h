@@ -13,17 +13,16 @@
 namespace Web::Layout {
 
 class SVGGeometryBox final : public SVGGraphicsBox {
-    GC_CELL(SVGGeometryBox, SVGGraphicsBox);
-    GC_DECLARE_ALLOCATOR(SVGGeometryBox);
+    LAYOUT_NODE(SVGGeometryBox, SVGGraphicsBox);
 
 public:
-    SVGGeometryBox(DOM::Document&, SVG::SVGGeometryElement&, GC::Ref<CSS::ComputedProperties>);
+    SVGGeometryBox(DOM::Document&, SVG::SVGGeometryElement&, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~SVGGeometryBox() override = default;
 
     SVG::SVGGeometryElement& dom_node() { return static_cast<SVG::SVGGeometryElement&>(SVGGraphicsBox::dom_node()); }
     SVG::SVGGeometryElement const& dom_node() const { return static_cast<SVG::SVGGeometryElement const&>(SVGGraphicsBox::dom_node()); }
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
 private:
     virtual bool is_svg_geometry_box() const final { return true; }

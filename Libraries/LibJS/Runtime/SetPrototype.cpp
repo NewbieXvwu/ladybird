@@ -129,16 +129,21 @@ JS_DEFINE_NATIVE_FUNCTION(SetPrototype::difference)
         // a. Let thisSize be the number of elements in O.[[SetData]].
         // b. Let index be 0.
         // c. Repeat, while index < thisSize,
-        for (auto const& element : *set) {
+        GC::RootVector<Value> keys;
+        keys.ensure_capacity(result->set_size());
+        for (auto key : *result)
+            keys.unchecked_append(key);
+
+        for (auto const& key : keys) {
             // i. Let e be resultSetData[index].
             // ii. If e is not EMPTY, then
             //     1. Let inOther be ToBoolean(? Call(otherRec.[[Has]], otherRec.[[SetObject]], « e »)).
-            auto in_other = TRY(call(vm, *other_record.has, other_record.set_object, element.key)).to_boolean();
+            auto in_other = TRY(call(vm, *other_record.has, other_record.set_object, key)).to_boolean();
 
             //     2. If inOther is true, then
             if (in_other) {
                 // a. Set resultSetData[index] to EMPTY.
-                result->set_remove(element.key);
+                result->set_remove(key);
             }
 
             // iii. Set index to index + 1.
@@ -203,20 +208,20 @@ JS_DEFINE_NATIVE_FUNCTION(SetPrototype::for_each)
 
     // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
     if (!callback_fn.is_function())
-        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, vm.argument(0).to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, vm.argument(0));
 
     // 4. Let entries be S.[[SetData]].
     // 5. Let numEntries be the number of elements in entries.
     // 6. Let index be 0.
     // 7. Repeat, while index < numEntries,
-    for (auto& entry : *set) {
+    for (auto value : *set) {
         // a. Let e be entries[index].
         // b. Set index to index + 1.
         // c. If e is not empty, then
         // NOTE: This is handled in Map::IteratorImpl.
 
         // i. Perform ? Call(callbackfn, thisArg, « e, e, S »).
-        TRY(call(vm, callback_fn.as_function(), this_arg, entry.key, entry.key, set));
+        TRY(call(vm, callback_fn.as_function(), this_arg, value, value, set));
 
         // ii. NOTE: The number of elements in entries may have increased during execution of callbackfn.
         // iii. Set numEntries to the number of elements in entries.
@@ -265,20 +270,21 @@ JS_DEFINE_NATIVE_FUNCTION(SetPrototype::intersection)
         // a. Let thisSize be the number of elements in O.[[SetData]].
         // b. Let index be 0.
         // c. Repeat, while index < thisSize,
-        for (auto const& element : *set) {
+        for (auto e : *set) {
             // i. Let e be O.[[SetData]][index].
+
             // ii. Set index to index + 1.
             // iii. If e is not empty, then
             //     1. Let inOther be ToBoolean(? Call(otherRec.[[Has]], otherRec.[[SetObject]], « e »)).
-            auto in_other = TRY(call(vm, *other_record.has, other_record.set_object, element.key)).to_boolean();
+            auto in_other = TRY(call(vm, *other_record.has, other_record.set_object, e)).to_boolean();
 
             //     2. If inOther is true, then
             if (in_other) {
                 // a. NOTE: It is possible for earlier calls to otherRec.[[Has]] to remove and re-add an element of O.[[SetData]], which can cause the same element to be visited twice during this iteration.
                 // b. If SetDataHas(resultSetData, e) is false, then
-                if (!set_data_has(result, element.key)) {
+                if (!set_data_has(result, e)) {
                     // i. Append e to resultSetData.
-                    result->set_add(element.key);
+                    result->set_add(e);
                 }
             }
 
@@ -343,12 +349,12 @@ JS_DEFINE_NATIVE_FUNCTION(SetPrototype::is_disjoint_from)
         // a. Let thisSize be the number of elements in O.[[SetData]].
         // b. Let index be 0.
         // c. Repeat, while index < thisSize,
-        for (auto const& element : *set) {
+        for (auto e : *set) {
             // i. Let e be O.[[SetData]][index].
             // ii. Set index to index + 1.
             // iii. If e is not empty, then
             //     1. Let inOther be ToBoolean(? Call(otherRec.[[Has]], otherRec.[[SetObject]], « e »)).
-            auto in_other = TRY(call(vm, *other_record.has, other_record.set_object, element.key)).to_boolean();
+            auto in_other = TRY(call(vm, *other_record.has, other_record.set_object, e)).to_boolean();
 
             //     2. If inOther is true, return false.
             if (in_other)
@@ -406,12 +412,12 @@ JS_DEFINE_NATIVE_FUNCTION(SetPrototype::is_subset_of)
     // 5. Let thisSize be the number of elements in O.[[SetData]].
     // 6. Let index be 0.
     // 7. Repeat, while index < thisSize,
-    for (auto const& element : *set) {
+    for (auto e : *set) {
         // a. Let e be O.[[SetData]][index].
         // b. Set index to index + 1.
         // c. If e is not empty, then
         //     i. Let inOther be ToBoolean(? Call(otherRec.[[Has]], otherRec.[[SetObject]], « e »)).
-        auto in_other = TRY(call(vm, *other_record.has, other_record.set_object, element.key)).to_boolean();
+        auto in_other = TRY(call(vm, *other_record.has, other_record.set_object, e)).to_boolean();
 
         //     ii. If inOther is false, return false.
         if (!in_other)

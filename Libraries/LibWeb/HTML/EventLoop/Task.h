@@ -7,6 +7,8 @@
 #pragma once
 
 #include <AK/DistinctNumeric.h>
+#include <AK/IntrusiveList.h>
+#include <AK/RefCounted.h>
 #include <LibGC/CellAllocator.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibWeb/Export.h>
@@ -84,6 +86,18 @@ public:
         // https://w3c.github.io/gamepad/#dfn-gamepad-task-source
         Gamepad,
 
+        // https://registry.khronos.org/webgl/specs/latest/1.0/#5.15
+        WebGL,
+
+        // https://www.w3.org/TR/webcrypto-2/#dfn-crypto-task-source
+        Crypto,
+
+        // https://w3c.github.io/web-locks/#web-locks-tasks-source
+        WebLocks,
+
+        // https://storage.spec.whatwg.org/#task-source
+        Storage,
+
         // !!! IMPORTANT: Keep this field last!
         // This serves as the base value of all unique task sources.
         // Some elements, such as the HTMLMediaElement, must have a unique task source per instance.
@@ -101,6 +115,7 @@ public:
     DOM::Document const* document() const;
 
     bool is_runnable() const;
+    bool is_permanently_unrunnable() const;
 
 private:
     Task(Source, GC::Ptr<DOM::Document const>, GC::Ref<GC::Function<void()>> steps);
@@ -111,6 +126,11 @@ private:
     Source m_source { Source::Unspecified };
     GC::Ref<GC::Function<void()>> m_steps;
     GC::Ptr<DOM::Document const> m_document;
+
+    IntrusiveListNode<Task> m_task_queue_node;
+
+public:
+    using Queue = IntrusiveList<&Task::m_task_queue_node>;
 };
 
 struct WEB_API UniqueTaskSource {

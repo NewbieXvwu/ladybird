@@ -7,12 +7,15 @@
 #pragma once
 
 #include <AK/Function.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/HTML/CORSSettingAttribute.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/Scripting/ImportMapParseResult.h>
 #include <LibWeb/HTML/Scripting/Script.h>
 #include <LibWeb/ReferrerPolicy/ReferrerPolicy.h>
+#include <LibWeb/TrustedTypes/TrustedScript.h>
+#include <LibWeb/TrustedTypes/TrustedScriptURL.h>
 
 namespace Web::HTML {
 
@@ -27,29 +30,25 @@ public:
     bool is_ready_to_be_parser_executed() const { return m_ready_to_be_parser_executed; }
     bool failed_to_load() const { return m_failed_to_load; }
 
-    template<OneOf<XMLDocumentBuilder, HTMLParser> T>
-    void set_parser_document(Badge<T>, DOM::Document& document) { m_parser_document = &document; }
+    void set_parser_document(Badge<XMLDocumentBuilder, HTMLParser>, DOM::Document& document) { m_parser_document = &document; }
 
-    template<OneOf<XMLDocumentBuilder, HTMLParser> T>
-    void set_force_async(Badge<T>, bool b) { m_force_async = b; }
+    void set_force_async(Badge<XMLDocumentBuilder, HTMLParser>, bool b) { m_force_async = b; }
 
-    template<OneOf<XMLDocumentBuilder, HTMLParser> T>
-    void set_already_started(Badge<T>, bool b) { m_already_started = b; }
+    void set_already_started(Badge<XMLDocumentBuilder, HTMLParser>, bool b) { m_already_started = b; }
 
-    template<OneOf<XMLDocumentBuilder, HTMLParser> T>
-    void prepare_script(Badge<T>) { prepare_script(); }
+    void prepare_script(Badge<XMLDocumentBuilder, HTMLParser>) { prepare_script(); }
 
     void execute_script();
 
     bool is_parser_inserted() const { return !!m_parser_document; }
 
-    virtual void children_changed(ChildrenChangedMetadata const*) override;
+    virtual void children_changed(ChildrenChangedMetadata const&) override;
     virtual void post_connection() override;
 
     // https://html.spec.whatwg.org/multipage/scripting.html#dom-script-supports
-    static bool supports(JS::VM&, StringView type)
+    static bool supports(JS::VM&, Utf16View type)
     {
-        return type.is_one_of("classic"sv, "module"sv, "importmap"sv);
+        return type.is_one_of(u"classic"sv, u"module"sv, u"importmap"sv);
     }
 
     void set_source_line_number(Badge<HTMLParser>, size_t source_line_number) { m_source_line_number = source_line_number; }
@@ -57,13 +56,24 @@ public:
     void unmark_as_already_started(Badge<DOM::Range>);
     void unmark_as_parser_inserted(Badge<DOM::Range>);
 
-    Utf16String text() { return child_text_content(); }
-    void set_text(Utf16String const& text) { string_replace_all(text); }
+    TrustedTypes::TrustedScriptOrString text() const { return child_text_content(); }
+    WebIDL::ExceptionOr<void> set_text(TrustedTypes::TrustedScriptOrString);
+
+    TrustedTypes::TrustedScriptURLOrString src() const;
+    WebIDL::ExceptionOr<void> set_src(TrustedTypes::TrustedScriptURLOrString);
+
+    Variant<GC::Ref<TrustedTypes::TrustedScript>, Utf16String, Empty> text_content() const;
+    WebIDL::ExceptionOr<void> set_text_content(TrustedTypes::NullableTrustedScriptOrString);
+
+    TrustedTypes::TrustedScriptOrString inner_text();
+    WebIDL::ExceptionOr<void> set_inner_text(TrustedTypes::TrustedScriptOrString);
 
     [[nodiscard]] bool async() const;
     void set_async(bool);
 
     virtual WebIDL::ExceptionOr<void> cloned(Node&, bool) const override;
+
+    void set_string_text(Utf16View value) { m_script_text = Utf16String::from_utf16(value); }
 
 protected:
     // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#implicitly-potentially-render-blocking
@@ -76,8 +86,12 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual void adopted_from(DOM::Document&) override;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
+
+    // https://www.w3.org/TR/trusted-types/#prepare-script-text
+    WebIDL::ExceptionOr<void> prepare_script_text();
 
     // https://html.spec.whatwg.org/multipage/scripting.html#prepare-the-script-element
     void prepare_script();
@@ -142,6 +156,9 @@ private:
     Optional<DOM::DocumentLoadEventDelayer> m_document_load_event_delayer;
 
     size_t m_source_line_number { 1 };
+
+    // https://www.w3.org/TR/trusted-types/#htmlscriptelement-script-text
+    Utf16String m_script_text;
 };
 
 }

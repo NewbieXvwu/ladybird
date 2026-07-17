@@ -14,9 +14,10 @@ namespace Web::DOM {
 
 GC_DEFINE_ALLOCATOR(Position);
 
-Position::Position(GC::Ref<Node> node, unsigned offset)
+Position::Position(GC::Ref<Node> node, unsigned offset, TextAffinity affinity)
     : m_node(node)
     , m_offset(offset)
+    , m_affinity(affinity)
 {
 }
 
@@ -26,9 +27,9 @@ void Position::visit_edges(Visitor& visitor)
     visitor.visit(m_node);
 }
 
-ErrorOr<String> Position::to_string() const
+ErrorOr<Utf16String> Position::to_string() const
 {
-    return String::formatted("DOM::Position({} ({})), {})", node()->node_name(), node().ptr(), offset());
+    return Utf16String::formatted("DOM::Position({} ({})), {})", node()->node_name(), node().ptr(), offset());
 }
 
 }

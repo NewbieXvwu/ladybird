@@ -4,13 +4,21 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16String.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
+#include <LibWeb/CSS/CSSStyleRule.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
+#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Layout/Node.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/ViewTransition/ViewTransition.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/Promise.h>
@@ -22,13 +30,13 @@ GC_DEFINE_ALLOCATOR(ReplacedNamedViewTransitionPseudoElement);
 GC_DEFINE_ALLOCATOR(CapturedElement);
 GC_DEFINE_ALLOCATOR(ViewTransition);
 
-NamedViewTransitionPseudoElement::NamedViewTransitionPseudoElement(CSS::PseudoElement type, FlyString view_transition_name)
+NamedViewTransitionPseudoElement::NamedViewTransitionPseudoElement(CSS::PseudoElement type, Utf16FlyString view_transition_name)
     : m_type(type)
     , m_view_transition_name(view_transition_name)
 {
 }
 
-ReplacedNamedViewTransitionPseudoElement::ReplacedNamedViewTransitionPseudoElement(CSS::PseudoElement type, FlyString view_transition_name, RefPtr<Gfx::ImmutableBitmap> content = {})
+ReplacedNamedViewTransitionPseudoElement::ReplacedNamedViewTransitionPseudoElement(CSS::PseudoElement type, Utf16FlyString view_transition_name, Optional<Gfx::DecodedImageFrame> content = {})
     : NamedViewTransitionPseudoElement(type, view_transition_name)
 {
     m_content = content;
@@ -46,15 +54,15 @@ ViewTransition::ViewTransition(JS::Realm& realm, GC::Ref<WebIDL::Promise> ready_
     , m_ready_promise(ready_promise)
     , m_update_callback_done_promise(update_callback_done_promise)
     , m_finished_promise(finished_promise)
-    , m_transition_root_pseudo_element(heap().allocate<DOM::PseudoElementTreeNode>())
+    , m_transition_root_pseudo_element(heap().allocate<DOM::SyntheticPseudoElementTreeNode>())
 
 {
 }
 
 void ViewTransition::initialize(JS::Realm& realm)
 {
-    Base::initialize(realm);
     WEB_SET_PROTOTYPE_FOR_INTERFACE(ViewTransition);
+    Base::initialize(realm);
 }
 
 void ViewTransition::visit_edges(Cell::Visitor& visitor)
@@ -217,11 +225,13 @@ ErrorOr<void> ViewTransition::capture_the_old_state()
     // 1. Let document be transition’s relevant global object’s associated document.
     auto& document = as<HTML::Window>(HTML::relevant_global_object(*this)).associated_document();
 
+    document.update_layout(DOM::UpdateLayoutReason::ViewTransitionCapture);
+
     // 2. Let namedElements be transition’s named elements.
     auto& named_elements = m_named_elements;
 
     // 3. Let usedTransitionNames be a new set of strings.
-    auto used_transition_names = AK::OrderedHashTable<FlyString>();
+    auto used_transition_names = AK::OrderedHashTable<Utf16FlyString>();
 
     // 4. Let captureElements be a new list of elements.
     auto capture_elements = AK::Vector<DOM::Element&>();
@@ -243,11 +253,16 @@ ErrorOr<void> ViewTransition::capture_the_old_state()
         // 2. If element has more than one box fragment, then continue.
         // FIXME: Implement this once we have fragments.
 
+        // OPTIMIZATION: Continue early if the element is not rendered, so we don't have to ensure the computed
+        //               properties are up to date.
+        if (element.not_rendered())
+            return TraversalDecision::Continue;
+
         // 3. Let transitionName be the element’s document-scoped view transition name.
         auto transition_name = element.document_scoped_view_transition_name();
 
         // 4. If transitionName is none, or element is not rendered, then continue.
-        if (!transition_name.has_value() || element.not_rendered())
+        if (!transition_name.has_value())
             return TraversalDecision::Continue;
 
         // 5. If usedTransitionNames contains transitionName, then:
@@ -300,7 +315,11 @@ ErrorOr<void> ViewTransition::capture_the_old_state()
         // 6. Set capture’s old transform to a <transform-function> that would map element’s border box from the
         //    snapshot containing block origin to its current visual position.
         // FIXME: Actually compute the right transform here.
-        capture->old_transform = CSS::Transformation(CSS::TransformFunction::Translate, Vector<CSS::TransformValue>({ CSS::TransformValue(CSS::Length(0, CSS::LengthUnit::Px)), CSS::TransformValue(CSS::Length(0, CSS::LengthUnit::Px)) }));
+        capture->old_transform = CSS::TransformationStyleValue::create(CSS::PropertyID::Transform, CSS::TransformFunction::Translate,
+            CSS::StyleValueVector {
+                CSS::LengthStyleValue::create(CSS::Length(0, CSS::LengthUnit::Px)),
+                CSS::LengthStyleValue::create(CSS::Length(0, CSS::LengthUnit::Px)),
+            });
 
         // 7. Set capture’s old writing-mode to the computed value of writing-mode on element.
         capture->old_writing_mode = element.layout_node()->computed_values().writing_mode();
@@ -344,11 +363,13 @@ ErrorOr<void> ViewTransition::capture_the_new_state()
     // 1. Let document be transition’s relevant global object’s associated document.
     auto& document = as<HTML::Window>(HTML::relevant_global_object(*this)).associated_document();
 
+    document.update_layout(DOM::UpdateLayoutReason::ViewTransitionCapture);
+
     // 2. Let namedElements be transition’s named elements.
     // NOTE: We just use m_named_elements
 
     // 3. Let usedTransitionNames be a new set of strings.
-    auto used_transition_names = AK::OrderedHashTable<FlyString>();
+    auto used_transition_names = AK::OrderedHashTable<Utf16FlyString>();
 
     // 4. For each element of every element that is connected, and has a node document equal to document, in paint
     //    order:
@@ -356,11 +377,16 @@ ErrorOr<void> ViewTransition::capture_the_new_state()
     auto result = document.document_element()->for_each_in_inclusive_subtree_of_type<DOM::Element>([&](auto& element) {
         // NOTE: Step 1 is handled at the end of this function.
 
+        // OPTIMIZATION: Continue early if the element is not rendered, so we don't have to ensure the computed
+        //               properties are up to date.
+        if (element.not_rendered())
+            return TraversalDecision::Continue;
+
         // 2. Let transitionName be the element’s document-scoped view transition name.
         auto transition_name = element.document_scoped_view_transition_name();
 
         // 3. If transitionName is none, or element is not rendered, then continue.
-        if (!transition_name.has_value() || element.not_rendered())
+        if (!transition_name.has_value())
             return TraversalDecision::Continue;
 
         // 4. If element has more than one box fragment, then continue.
@@ -423,7 +449,7 @@ void ViewTransition::setup_transition_pseudo_elements()
         group->append_child(image_pair);
 
         // 5. If capturedElement’s old image is not null, then:
-        if (captured_element->old_image) {
+        if (captured_element->old_image.has_value()) {
             // 1. Let old be a new '::view-transition-old()', with its view transition name set to transitionName,
             //    displaying capturedElement’s old image as its replaced content.
             auto old = heap().allocate<ReplacedNamedViewTransitionPseudoElement>(CSS::PseudoElement::ViewTransitionOld, transition_name, captured_element->old_image);
@@ -443,7 +469,7 @@ void ViewTransition::setup_transition_pseudo_elements()
         }
 
         // 7. If capturedElement’s old image is null, then:
-        if (!captured_element->old_image) {
+        if (!captured_element->old_image.has_value()) {
             // 1. Assert: capturedElement’s new element is not null.
             VERIFY(captured_element->new_element);
 
@@ -453,12 +479,12 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       animation-name: -ua-view-transition-fade-in;
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            unsigned index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            unsigned index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-new({}) {{
                     animation-name: -ua-view-transition-fade-in;
                 }}
             )",
-                                                              transition_name)),
+                                                              transition_name),
                 stylesheet->rules().length()));
             captured_element->image_animation_name_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
         }
@@ -466,7 +492,7 @@ void ViewTransition::setup_transition_pseudo_elements()
         // 8. If capturedElement’s new element is null, then:
         if (!captured_element->new_element) {
             // 1. Assert: capturedElement’s old image is not null.
-            VERIFY(captured_element->old_image);
+            VERIFY(captured_element->old_image.has_value());
 
             // 2. Set capturedElement’s image animation name rule to a new CSSStyleRule representing the
             //    following CSS, and append it to document’s dynamic view transition style sheet:
@@ -474,18 +500,18 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       animation-name: -ua-view-transition-fade-out;
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            unsigned index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            unsigned index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-old({}) {{
                     animation-name: -ua-view-transition-fade-out;
                 }}
             )",
-                                                              transition_name)),
+                                                              transition_name),
                 stylesheet->rules().length()));
             captured_element->image_animation_name_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
         }
 
         // 9. If both of capturedElement’s old image and new element are not null, then:
-        if (captured_element->old_image && captured_element->new_element) {
+        if (captured_element->old_image.has_value() && captured_element->new_element) {
             // 1. Let transform be capturedElement’s old transform.
             auto& transform = captured_element->old_transform;
             // FIXME: Remove this once tranform gets used in step 5 below.
@@ -513,7 +539,7 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       }
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            unsigned index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            unsigned index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 @keyframes -ua-view-transition-group-anim-{} {{
                     from {{
                         transform: {};
@@ -523,7 +549,7 @@ void ViewTransition::setup_transition_pseudo_elements()
                     }}
                 }}
             )",
-                                                              transition_name, "transform", width, height, "backdrop_filter")),
+                                                              transition_name, "transform", width, height, "backdrop_filter"),
                 stylesheet->rules().length()));
             // FIXME: all the strings above should be the identically named variables, serialized somehow.
             captured_element->group_keyframes = as<CSS::CSSKeyframesRule>(stylesheet->css_rules()->item(index));
@@ -534,12 +560,12 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       animation-name: -ua-view-transition-group-anim-transitionName;
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-group({0}) {{
                     animation-name: -ua-view-transition-group-anim-{0};
                 }}
             )",
-                                                     transition_name)),
+                                                     transition_name),
                 stylesheet->rules().length()));
             captured_element->group_animation_name_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
 
@@ -549,12 +575,12 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       isolation: isolate;
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-image-pair({}) {{
                     isolation: isolate;
                 }}
             )",
-                                                     transition_name)),
+                                                     transition_name),
                 stylesheet->rules().length()));
             captured_element->image_pair_isolation_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
 
@@ -572,7 +598,7 @@ void ViewTransition::setup_transition_pseudo_elements()
             //    cross-fade.
             // AD-HOC: We can't use the given CSS exactly since it is two rules, not one.
             //         Instead we turn it into one rule, with both of them nested inside.
-            index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root {{
                     &::view-transition-old({0}) {{
                         animation-name: -ua-view-transition-fade-out, -ua-mix-blend-mode-plus-lighter;
@@ -582,7 +608,7 @@ void ViewTransition::setup_transition_pseudo_elements()
                     }}
                 }}
             )",
-                                                     transition_name)),
+                                                     transition_name),
                 stylesheet->rules().length()));
             captured_element->image_animation_name_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
         }
@@ -602,6 +628,8 @@ void ViewTransition::call_the_update_callback()
     if (m_phase != Phase::Done)
         m_phase = Phase::UpdateCallbackCalled;
 
+    HTML::TemporaryExecutionContext execution_context(realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes);
+
     // 3. Let callbackPromise be null.
     WebIDL::Promise* callback_promise;
 
@@ -615,24 +643,12 @@ void ViewTransition::call_the_update_callback()
 
     // 5. Otherwise, set callbackPromise to the result of invoking transition’s update callback.
     else {
-        auto promise = MUST(WebIDL::invoke_callback(*m_update_callback, {}, {}));
-        // FIXME: since WebIDL::invoke_callback does not yet convert the value for us,
-        // We need to do it here manually.
-        // https://webidl.spec.whatwg.org/#js-promise
-
-        // 1. Let promiseCapability be ? NewPromiseCapability(%Promise%).
-        auto promise_capability = WebIDL::create_promise(realm);
-        // 2. Perform ? Call(promiseCapability.[[Resolve]], undefined, « V »).
-        // FIXME: We should not need to push an incumbent realm here, but http://wpt.live/css/css-view-transitions/update-callback-timeout.html crashes without it.
-        HTML::main_thread_event_loop().push_onto_backup_incumbent_realm_stack(realm);
-        MUST(JS::call(realm.vm(), *promise_capability->resolve(), JS::js_undefined(), promise));
-        HTML::main_thread_event_loop().pop_backup_incumbent_realm_stack();
-        // 3. Return promiseCapability.
-        callback_promise = GC::make_root(promise_capability);
+        callback_promise = GC::make_root(WebIDL::invoke_promise_callback(*m_update_callback, {}, {}));
     }
 
     // 6. Let fulfillSteps be to following steps:
     auto fulfill_steps = GC::create_function(realm.heap(), [this, &realm](JS::Value) -> WebIDL::ExceptionOr<JS::Value> {
+        HTML::TemporaryExecutionContext context(realm);
         // 1. Resolve transition’s update callback done promise with undefined.
         WebIDL::resolve_promise(realm, m_update_callback_done_promise, JS::js_undefined());
 
@@ -644,6 +660,7 @@ void ViewTransition::call_the_update_callback()
 
     // 7. Let rejectSteps be the following steps given reason:
     auto reject_steps = GC::create_function(realm.heap(), [this, &realm](JS::Value reason) -> WebIDL::ExceptionOr<JS::Value> {
+        HTML::TemporaryExecutionContext context(realm);
         // 1. Reject transition’s update callback done promise with reason.
         WebIDL::reject_promise(realm, m_update_callback_done_promise, reason);
 
@@ -664,12 +681,7 @@ void ViewTransition::call_the_update_callback()
     });
 
     // 8. React to callbackPromise with fulfillSteps and rejectSteps.
-    // AD-HOC: This can cause an assertion failure when the reaction algorithm ends up accessing the incumbent realm, which may not exist here.
-    //         For now, lets just manually push something onto the incumbent realm stack here as a hack.
-    //         A spec bug for this has been filed at https://github.com/w3c/csswg-drafts/issues/11990
-    HTML::main_thread_event_loop().push_onto_backup_incumbent_realm_stack(realm);
     WebIDL::react_to_promise(*callback_promise, fulfill_steps, reject_steps);
-    HTML::main_thread_event_loop().pop_backup_incumbent_realm_stack();
 
     // 9. To skip a transition after a timeout, the user agent may perform the following steps in parallel:
     // FIXME: Figure out if we want to do this.
@@ -724,16 +736,12 @@ void ViewTransition::skip_the_view_transition(JS::Value reason)
     m_phase = Phase::Done;
 
     // 7. Reject transition’s ready promise with reason.
+    HTML::TemporaryExecutionContext context(realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes);
     WebIDL::reject_promise(realm, m_ready_promise, reason);
 
     // 8. Resolve transition’s finished promise with the result of reacting to transition’s update callback done promise:
     //    - If the promise was fulfilled, then return undefined.
-    // AD-HOC: This can cause an assertion failure when the reaction algorithm ends up accessing the incumbent realm, which may not exist here.
-    //         For now, lets just manually push something onto the incumbent realm stack here as a hack.
-    //         A spec bug for this has been filed at https://github.com/w3c/csswg-drafts/issues/11990
-    HTML::main_thread_event_loop().push_onto_backup_incumbent_realm_stack(realm);
     WebIDL::resolve_promise(realm, m_finished_promise, WebIDL::react_to_promise(m_update_callback_done_promise, GC::create_function(realm.heap(), [](JS::Value) -> WebIDL::ExceptionOr<JS::Value> { return JS::js_undefined(); }), nullptr)->promise());
-    HTML::main_thread_event_loop().pop_backup_incumbent_realm_stack();
 }
 
 // https://drafts.csswg.org/css-view-transitions-1/#handle-transition-frame
@@ -749,7 +757,7 @@ void ViewTransition::handle_transition_frame()
     bool has_active_animations = false;
 
     // 3. For each element of transition’s transition root pseudo-element’s inclusive descendants:
-    m_transition_root_pseudo_element->for_each_in_inclusive_subtree([&](DOM::PseudoElementTreeNode&) {
+    m_transition_root_pseudo_element->for_each_in_inclusive_subtree([&](DOM::SyntheticPseudoElementTreeNode&) {
         // For each animation whose timeline is a document timeline associated with document, and contains at
         // least one associated effect whose effect target is element, set hasActiveAnimations to true if any of the
         // following conditions are true:
@@ -813,7 +821,7 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
         //    colorScheme be null.
         Optional<CSSPixels> width = {};
         Optional<CSSPixels> height = {};
-        Optional<CSS::Transformation> transform = {};
+        RefPtr<CSS::TransformationStyleValue const> transform = {};
         Optional<CSS::WritingMode> writing_mode = {};
         Optional<CSS::Direction> direction = {};
         // FIXME: Implement this once we have text-orientation.
@@ -856,7 +864,7 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
             // 1. Return failure if any of the following conditions is true:
 
             //    - capturedElement’s new element has a flat tree ancestor that skips its contents.
-            for (auto ancestor = captured_element->new_element->parent_element(); ancestor; ancestor = ancestor->parent_element()) {
+            for (auto ancestor = captured_element->new_element->flat_tree_parent_element(); ancestor; ancestor = ancestor->flat_tree_parent_element()) {
                 if (ancestor->skips_its_contents())
                     return Error::from_string_literal("capturedElement’s new element has a flat tree ancestor that skips its contents.");
             }
@@ -886,7 +894,11 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
             // 5. Set transform to a transform that would map newRect from the snapshot containing block origin
             //    to its current visual position.
             auto offset = new_rect.location() - captured_element->new_element->navigable()->snapshot_containing_block().location();
-            transform = CSS::Transformation(CSS::TransformFunction::Translate, Vector<CSS::TransformValue>({ CSS::TransformValue(CSS::Length::make_px(offset.x())), CSS::TransformValue(CSS::Length::make_px(offset.y())) }));
+            transform = CSS::TransformationStyleValue::create(CSS::PropertyID::Transform, CSS::TransformFunction::Translate,
+                CSS::StyleValueVector {
+                    CSS::LengthStyleValue::create(CSS::Length::make_px(offset.x())),
+                    CSS::LengthStyleValue::create(CSS::Length::make_px(offset.y())),
+                });
 
             // 6. Set writingMode to the computed value of writing-mode on capturedElement’s new element.
             writing_mode = captured_element->new_element->layout_node()->computed_values().writing_mode();
@@ -926,7 +938,7 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
             // }
             // NOTE: The above code example contains variables to be replaced.
             auto stylesheet = as<HTML::Window>(HTML::relevant_global_object(*this)).associated_document().dynamic_view_transition_style_sheet();
-            unsigned index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            unsigned index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-group({}) {{
                     width: {};
                     height: {};
@@ -939,7 +951,7 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
                     color-scheme: {};
                 }}
             )",
-                                                              transition_name, width, height, "transform", "writing_mode", "direction", "text_orientation", "mix_blend_mode", "backdrop_filter", "color_scheme")),
+                                                              transition_name, width, height, "transform", "writing_mode", "direction", "text_orientation", "mix_blend_mode", "backdrop_filter", "color_scheme"),
                 stylesheet->rules().length()));
             // FIXME: all the strings above should be the identically named variables, serialized somehow.
             captured_element->group_styles_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
@@ -958,20 +970,7 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
         // }
         // NOTE: The above code example contains variables to be replaced.
         else {
-            captured_element->group_styles_rule->set_selector_text(MUST(String::formatted(":root::view-transition-group({0})", transition_name)));
-            captured_element->group_styles_rule->set_css_text(MUST(String::formatted(R"(
-                width: {};
-                height: {};
-                transform: {};
-                writing-mode: {};
-                direction: {};
-                text-orientation: {};
-                mix-blend-mode: {};
-                backdrop-filter: {};
-                color-scheme: {};
-            )",
-                width, height, "transform", "writing_mode", "direction", "text_orientation", "mix_blend_mode", "backdrop_filter", "color_scheme")));
-            // FIXME: all the strings above should be the identically named variables, serialized somehow.
+            captured_element->group_styles_rule->set_selector_text(Utf16String::formatted(":root::view-transition-group({0})", transition_name));
         }
 
         // 5. If capturedElement’s new element is not null, then:

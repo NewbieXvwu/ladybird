@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/DOMQuadPrototype.h>
+#include <LibWeb/Bindings/DOMQuad.h>
+#include <LibWeb/Bindings/DOMRectReadOnly.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Geometry/DOMQuad.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
@@ -13,7 +14,7 @@ namespace Web::Geometry {
 
 GC_DEFINE_ALLOCATOR(DOMQuad);
 
-GC::Ref<DOMQuad> DOMQuad::construct_impl(JS::Realm& realm, DOMPointInit const& p1, DOMPointInit const& p2, DOMPointInit const& p3, DOMPointInit const& p4)
+GC::Ref<DOMQuad> DOMQuad::construct_impl(JS::Realm& realm, Bindings::DOMPointInit const& p1, Bindings::DOMPointInit const& p2, Bindings::DOMPointInit const& p3, Bindings::DOMPointInit const& p4)
 {
     return realm.create<DOMQuad>(realm, p1, p2, p3, p4);
 }
@@ -23,7 +24,7 @@ GC::Ref<DOMQuad> DOMQuad::create(JS::Realm& realm)
     return realm.create<DOMQuad>(realm);
 }
 
-DOMQuad::DOMQuad(JS::Realm& realm, DOMPointInit const& p1, DOMPointInit const& p2, DOMPointInit const& p3, DOMPointInit const& p4)
+DOMQuad::DOMQuad(JS::Realm& realm, Bindings::DOMPointInit const& p1, Bindings::DOMPointInit const& p2, Bindings::DOMPointInit const& p3, Bindings::DOMPointInit const& p4)
     : PlatformObject(realm)
     , m_p1(DOMPoint::from_point(realm.vm(), p1))
     , m_p2(DOMPoint::from_point(realm.vm(), p2))
@@ -44,20 +45,32 @@ DOMQuad::DOMQuad(JS::Realm& realm)
 DOMQuad::~DOMQuad() = default;
 
 // https://drafts.fxtf.org/geometry/#dom-domquad-fromrect
-GC::Ref<DOMQuad> DOMQuad::from_rect(JS::VM& vm, DOMRectInit const& other)
+GC::Ref<DOMQuad> DOMQuad::from_rect(JS::VM& vm, Bindings::DOMRectInit const& other)
 {
     // The fromRect(other) static method on DOMQuad must create a DOMQuad from the DOMRectInit dictionary other.
-    return construct_impl(*vm.current_realm(), { other.x, other.y },
-        { other.x + other.width, other.y },
-        { other.x + other.width, other.y + other.height },
-        { other.x, other.y + other.height });
+    auto make_point = [](double x, double y) {
+        Bindings::DOMPointInit point {};
+        point.x = x;
+        point.y = y;
+        return point;
+    };
+
+    return construct_impl(*vm.current_realm(),
+        make_point(other.x, other.y),
+        make_point(other.x + other.width, other.y),
+        make_point(other.x + other.width, other.y + other.height),
+        make_point(other.x, other.y + other.height));
 }
 
 // https://drafts.fxtf.org/geometry/#dom-domquad-fromquad
-GC::Ref<DOMQuad> DOMQuad::from_quad(JS::VM& vm, DOMQuadInit const& other)
+GC::Ref<DOMQuad> DOMQuad::from_quad(JS::VM& vm, Bindings::DOMQuadInit const& other)
 {
     // The fromQuad(other) static method on DOMQuad must create a DOMQuad from the DOMQuadInit dictionary other.
-    return construct_impl(*vm.current_realm(), other.p1, other.p2, other.p3, other.p4);
+    return construct_impl(*vm.current_realm(),
+        other.p1.value_or(Bindings::DOMPointInit {}),
+        other.p2.value_or(Bindings::DOMPointInit {}),
+        other.p3.value_or(Bindings::DOMPointInit {}),
+        other.p4.value_or(Bindings::DOMPointInit {}));
 }
 
 // https://drafts.fxtf.org/geometry/#dom-domquad-getbounds
@@ -103,34 +116,33 @@ GC::Ref<DOMRect> DOMQuad::get_bounds() const
 }
 
 // https://drafts.fxtf.org/geometry/#structured-serialization
-WebIDL::ExceptionOr<void> DOMQuad::serialization_steps(HTML::TransferDataEncoder& serialized, bool for_storage, HTML::SerializationMemory& memory)
+WebIDL::ExceptionOr<void> DOMQuad::serialization_steps(HTML::StructuredSerializeWriter& serialized, bool for_storage, HTML::SerializationMemory& memory)
 {
     auto& vm = this->vm();
 
     // 1. Set serialized.[[P1]] to the sub-serialization of value’s point 1.
-    serialized.append(TRY(HTML::structured_serialize_internal(vm, m_p1, for_storage, memory)));
+    TRY(HTML::structured_serialize_internal(vm, serialized, m_p1, for_storage, memory));
 
     // 2. Set serialized.[[P2]] to the sub-serialization of value’s point 2.
-    serialized.append(TRY(HTML::structured_serialize_internal(vm, m_p2, for_storage, memory)));
+    TRY(HTML::structured_serialize_internal(vm, serialized, m_p2, for_storage, memory));
 
     // 3. Set serialized.[[P3]] to the sub-serialization of value’s point 3.
-    serialized.append(TRY(HTML::structured_serialize_internal(vm, m_p3, for_storage, memory)));
+    TRY(HTML::structured_serialize_internal(vm, serialized, m_p3, for_storage, memory));
 
     // 4. Set serialized.[[P4]] to the sub-serialization of value’s point 4.
-    serialized.append(TRY(HTML::structured_serialize_internal(vm, m_p4, for_storage, memory)));
+    TRY(HTML::structured_serialize_internal(vm, serialized, m_p4, for_storage, memory));
 
     return {};
 }
 
 // https://drafts.fxtf.org/geometry/#structured-serialization
-WebIDL::ExceptionOr<void> DOMQuad::deserialization_steps(HTML::TransferDataDecoder& serialized, HTML::DeserializationMemory& memory)
+WebIDL::ExceptionOr<void> DOMQuad::deserialization_steps(HTML::StructuredSerializeReader& serialized, HTML::DeserializationMemory& memory)
 {
     auto& vm = this->vm();
     auto& realm = this->realm();
 
     auto deserialize_dom_point = [&](GC::Ref<DOMPoint>& storage) -> WebIDL::ExceptionOr<void> {
-        auto deserialized = TRY(HTML::structured_deserialize_internal(vm, serialized, realm, memory));
-        storage = as<DOMPoint>(deserialized.as_object());
+        storage = TRY(HTML::deserialize_nested_as<DOMPoint>(vm, serialized, realm, memory));
         return {};
     };
 

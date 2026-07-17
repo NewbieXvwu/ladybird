@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibCrypto/BigInt/UnsignedBigInteger.h>
 
 namespace Crypto {
@@ -42,8 +43,11 @@ public:
     [[nodiscard]] Bytes export_data(Bytes) const;
 
     [[nodiscard]] static ErrorOr<SignedBigInteger> from_base(u16 N, StringView str);
+    [[nodiscard]] static ErrorOr<SignedBigInteger> from_base(u16 N, Utf16View str);
     [[nodiscard]] ErrorOr<String> to_base(u16 N) const;
+    [[nodiscard]] ErrorOr<Utf16String> to_base_utf16(u16 N) const;
 
+    [[nodiscard]] i64 to_i64() const;
     [[nodiscard]] u64 to_u64() const;
     [[nodiscard]] double to_double(UnsignedBigInteger::RoundingMode rounding_mode = UnsignedBigInteger::RoundingMode::IEEERoundAndTiesToEvenMantissa) const;
 
@@ -58,6 +62,7 @@ public:
     void set_to(SignedBigInteger const& other);
 
     [[nodiscard]] size_t byte_length() const;
+    [[nodiscard]] size_t external_memory_size() const { return m_mp.alloc * sizeof(mp_digit); }
 
     [[nodiscard]] SignedBigInteger plus(SignedBigInteger const& other) const;
     [[nodiscard]] SignedBigInteger minus(SignedBigInteger const& other) const;
@@ -115,5 +120,5 @@ struct AK::Formatter<Crypto::SignedBigInteger> : AK::Formatter<Crypto::UnsignedB
 inline Crypto::SignedBigInteger
 operator""_sbigint(char const* string, size_t length)
 {
-    return MUST(Crypto::SignedBigInteger::from_base(10, { string, length }));
+    return MUST(Crypto::SignedBigInteger::from_base(10, StringView { string, length }));
 }

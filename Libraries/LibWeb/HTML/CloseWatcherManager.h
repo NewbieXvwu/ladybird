@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, the Ladybird developers.
+ * Copyright (c) 2024-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -13,7 +13,7 @@ namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/interaction.html#close-watcher-manager
 class CloseWatcherManager final : public Bindings::PlatformObject {
-    WEB_PLATFORM_OBJECT(CloseWatcherManager, Bindings::PlatformObject);
+    WEB_NON_IDL_PLATFORM_OBJECT(CloseWatcherManager, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(CloseWatcherManager);
 
 public:

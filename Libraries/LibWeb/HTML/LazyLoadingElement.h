@@ -36,7 +36,7 @@ public:
         auto& element = static_cast<T const&>(*this);
 
         auto value = element.attribute(HTML::AttributeNames::loading);
-        if (value.has_value() && value->equals_ignoring_ascii_case("lazy"sv))
+        if (value.has_value() && value->equals_ignoring_ascii_case(u"lazy"sv))
             return LazyLoading::Lazy;
         return LazyLoading::Eager;
     }
@@ -58,6 +58,8 @@ public:
         // 3. Return false.
         return lazy_loading_attribute() == LazyLoading::Lazy;
     }
+
+    [[nodiscard]] bool has_lazy_load_resumption_steps() const { return m_lazy_load_resumption_steps; }
 
     void set_lazy_load_resumption_steps(Function<void()> steps)
     {

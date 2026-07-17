@@ -26,7 +26,7 @@ void SegmenterPrototype::initialize(Realm& realm)
     auto& vm = this->vm();
 
     // 19.3.4 Intl.Segmenter.prototype [ %Symbol.toStringTag% ], https://tc39.es/ecma402/#sec-intl.segmenter.prototype-%symbol.tostringtag%
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Intl.Segmenter"_string), Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Intl.Segmenter"_utf16_fly_string), Attribute::Configurable);
 
     u8 attr = Attribute::Writable | Attribute::Configurable;
     define_native_function(realm, vm.names.resolvedOptions, resolved_options, 0, attr);
@@ -45,7 +45,7 @@ JS_DEFINE_NATIVE_FUNCTION(SegmenterPrototype::resolved_options)
     // 3. Let options be OrdinaryObjectCreate(%Object.prototype%).
     auto options = Object::create(realm, realm.intrinsics().object_prototype());
 
-    // 4. For each row of Table 32, except the header row, in table order, do
+    // 4. For each row of Table 34, except the header row, in table order, do
     //     a. Let p be the Property value of the current row.
     //     b. Let v be the value of segmenter's internal slot whose name is the Internal Slot value of the current row.
     //     c. Assert: v is not undefined.
@@ -67,10 +67,10 @@ JS_DEFINE_NATIVE_FUNCTION(SegmenterPrototype::segment)
     auto segmenter = TRY(typed_this_object(vm));
 
     // 3. Let string be ? ToString(string).
-    auto string = TRY(vm.argument(0).to_utf16_string(vm));
+    auto string = TRY(vm.argument(0).to_primitive_string(vm));
 
     // 4. Return ! CreateSegmentsObject(segmenter, string).
-    return Segments::create(realm, segmenter->segmenter(), move(string));
+    return Segments::create(realm, segmenter->segmenter(), string);
 }
 
 }

@@ -6,7 +6,8 @@
  */
 
 #include <LibURL/Origin.h>
-#include <LibWeb/Bindings/DOMImplementationPrototype.h>
+#include <LibWeb/Bindings/DOMImplementation.h>
+#include <LibWeb/Bindings/Document.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/DOM/DOMImplementation.h>
@@ -48,7 +49,7 @@ void DOMImplementation::visit_edges(Cell::Visitor& visitor)
 }
 
 // https://dom.spec.whatwg.org/#dom-domimplementation-createdocument
-WebIDL::ExceptionOr<GC::Ref<XMLDocument>> DOMImplementation::create_document(Optional<FlyString> const& namespace_, String const& qualified_name, GC::Ptr<DocumentType> doctype) const
+WebIDL::ExceptionOr<GC::Ref<XMLDocument>> DOMImplementation::create_document(Optional<Utf16FlyString> namespace_, Utf16FlyString const& qualified_name, GC::Ptr<DocumentType> doctype) const
 {
     // 1. Let document be a new XMLDocument
     auto xml_document = XMLDocument::create(realm());
@@ -60,7 +61,7 @@ WebIDL::ExceptionOr<GC::Ref<XMLDocument>> DOMImplementation::create_document(Opt
 
     // 3. If qualifiedName is not the empty string, then set element to the result of running the internal createElementNS steps, given document, namespace, qualifiedName, and an empty dictionary.
     if (!qualified_name.is_empty())
-        element = TRY(xml_document->create_element_ns(namespace_, qualified_name, ElementCreationOptions {}));
+        element = TRY(xml_document->create_element_ns(namespace_, qualified_name, Bindings::ElementCreationOptions {}));
 
     // 4. If doctype is non-null, append doctype to document.
     if (doctype)
@@ -76,13 +77,13 @@ WebIDL::ExceptionOr<GC::Ref<XMLDocument>> DOMImplementation::create_document(Opt
     // 7. document’s content type is determined by namespace:
     if (namespace_ == Namespace::HTML) {
         // -> HTML namespace
-        xml_document->set_content_type("application/xhtml+xml"_string);
+        xml_document->set_content_type("application/xhtml+xml"_utf16_fly_string);
     } else if (namespace_ == Namespace::SVG) {
         // -> SVG namespace
-        xml_document->set_content_type("image/svg+xml"_string);
+        xml_document->set_content_type("image/svg+xml"_utf16_fly_string);
     } else {
         // -> Any other namespace
-        xml_document->set_content_type("application/xml"_string);
+        xml_document->set_content_type("application/xml"_utf16_fly_string);
     }
 
     // 8. Return document.
@@ -96,14 +97,14 @@ GC::Ref<Document> DOMImplementation::create_html_document(Optional<Utf16String> 
     auto html_document = HTML::HTMLDocument::create(realm());
 
     // 2. Set doc’s content type to "text/html".
-    html_document->set_content_type("text/html"_string);
+    html_document->set_content_type("text/html"_utf16_fly_string);
     html_document->set_document_type(DOM::Document::Type::HTML);
 
     html_document->set_ready_for_post_load_tasks(true);
 
     // 3. Append a new doctype, with "html" as its name and with its node document set to doc, to doc.
     auto doctype = realm().create<DocumentType>(html_document);
-    doctype->set_name("html"_string);
+    doctype->set_name(HTML::TagNames::html);
     MUST(html_document->append_child(*doctype));
 
     // 4. Append the result of creating an element given doc, "html", and the HTML namespace, to doc.
@@ -137,11 +138,11 @@ GC::Ref<Document> DOMImplementation::create_html_document(Optional<Utf16String> 
 }
 
 // https://dom.spec.whatwg.org/#dom-domimplementation-createdocumenttype
-WebIDL::ExceptionOr<GC::Ref<DocumentType>> DOMImplementation::create_document_type(String const& name, String const& public_id, String const& system_id)
+WebIDL::ExceptionOr<GC::Ref<DocumentType>> DOMImplementation::create_document_type(Utf16FlyString const& name, Utf16View public_id, Utf16View system_id)
 {
 
     // 1. If name is not a valid doctype name, then throw an "InvalidCharacterError" DOMException.
-    if (!is_valid_doctype_name(name))
+    if (!is_valid_doctype_name(name.view()))
         return WebIDL::InvalidCharacterError::create(realm(), "Invalid doctype name"_utf16);
 
     // 2. Return a new doctype, with name as its name, publicId as its public ID, and systemId as its system ID, and with its node document set to the associated document of this.

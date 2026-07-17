@@ -1050,7 +1050,7 @@ static ErrorOr<void> uncompress_bmp_rle_data(BMPLoadingContext& context, ByteBuf
     // Decoding the RLE data on-the-fly might actually be faster, and avoids this topic entirely.
     u32 buffer_size;
     if (compression == Compression::RLE24) {
-        buffer_size = total_rows * round_up_to_power_of_two(total_columns, 4) * 4;
+        buffer_size = total_rows * round_up_to_power_of_two(total_columns, 4) * 3;
     } else {
         buffer_size = total_rows * round_up_to_power_of_two(total_columns, 4);
     }
@@ -1101,11 +1101,13 @@ static ErrorOr<void> uncompress_bmp_rle_data(BMPLoadingContext& context, ByteBuf
                 row++;
             }
             auto index = get_buffer_index();
-            if (index + 3 >= buffer.size()) {
+            if (index + 2 >= buffer.size()) {
                 dbgln("BMP has badly-formatted RLE data");
                 return Error::from_string_literal("BMP has badly-formatted RLE data");
             }
-            ((u32&)buffer[index]) = color;
+            buffer[index] = color & 0xff;
+            buffer[index + 1] = (color >> 8) & 0xff;
+            buffer[index + 2] = (color >> 16) & 0xff;
             column++;
             return {};
         };
@@ -1295,10 +1297,11 @@ static ErrorOr<void> decode_bmp_pixel_data(BMPLoadingContext& context)
         return Error::from_string_literal("BMP has invalid bpp");
     }
 
-    u32 const width = abs(context.dib.core.width);
-    u32 const height = !context.is_included_in_ico ? abs(context.dib.core.height) : (abs(context.dib.core.height) / 2);
+    u32 const width = static_cast<u32>(abs(static_cast<i64>(context.dib.core.width)));
+    u32 const absolute_height = static_cast<u32>(abs(static_cast<i64>(context.dib.core.height)));
+    u32 const height = !context.is_included_in_ico ? absolute_height : (absolute_height / 2);
 
-    context.bitmap = TRY(Bitmap::create(format, { static_cast<int>(width), static_cast<int>(height) }));
+    context.bitmap = TRY(Bitmap::create(format, Gfx::AlphaType::Unpremultiplied, { static_cast<int>(width), static_cast<int>(height) }));
 
     ByteBuffer rle_buffer;
     ReadonlyBytes bytes { context.file_bytes + context.data_offset, context.file_size - context.data_offset };
@@ -1568,7 +1571,7 @@ ErrorOr<Optional<ReadonlyBytes>> BMPImageDecoderPlugin::icc_data()
     // FIXME: Do something with v5.intent (which has a GamutMappingIntent value).
 
     u8 header_size = m_context->is_included_in_ico ? 0 : bmp_header_size;
-    if (v5.profile_data + header_size + v5.profile_size > m_context->file_size)
+    if (static_cast<u64>(v5.profile_data) + header_size + v5.profile_size > m_context->file_size)
         return Error::from_string_literal("BMPImageDecoderPlugin: ICC profile data out of bounds");
 
     return ReadonlyBytes { m_context->file_bytes + header_size + v5.profile_data, v5.profile_size };

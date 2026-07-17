@@ -12,6 +12,7 @@
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CrossOrigin/AbstractOperations.h>
 #include <LibWeb/HTML/CrossOrigin/Reporting.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 
 namespace Web::HTML {
 
@@ -31,8 +32,8 @@ void check_if_access_between_two_browsing_contexts_should_be_reported(
         return;
 
     // 2. Assert: accessor's active document and accessed's active document are both fully active.
-    VERIFY(accessor->active_document()->is_fully_active());
-    VERIFY(accessed->active_document()->is_fully_active());
+    if (!accessor->active_document()->is_fully_active() || !accessed->active_document()->is_fully_active())
+        return;
 
     // 3. Let accessorTopDocument be accessor's top-level browsing context's active document.
     auto* accessor_top_document = accessor->top_level_browsing_context()->active_document();
@@ -42,9 +43,7 @@ void check_if_access_between_two_browsing_contexts_should_be_reported(
     auto accessor_inclusive_ancestors = accessor->active_document()->ancestor_navigables();
     accessor_inclusive_ancestor_origins.ensure_capacity(accessor_inclusive_ancestors.size());
     for (auto const& ancestor : accessor_inclusive_ancestors) {
-        VERIFY(ancestor != nullptr);
-        VERIFY(ancestor->active_document() != nullptr);
-        accessor_inclusive_ancestor_origins.append(ancestor->active_document()->origin());
+        accessor_inclusive_ancestor_origins.append(*ancestor->active_document_origin());
     }
 
     // 5. Let accessedTopDocument be accessed's top-level browsing context's active document.
@@ -56,9 +55,7 @@ void check_if_access_between_two_browsing_contexts_should_be_reported(
     auto accessed_inclusive_ancestors = accessed->active_document()->ancestor_navigables();
     accessed_inclusive_ancestor_origins.ensure_capacity(accessed_inclusive_ancestors.size());
     for (auto const& ancestor : accessed_inclusive_ancestors) {
-        VERIFY(ancestor != nullptr);
-        VERIFY(ancestor->active_document() != nullptr);
-        accessed_inclusive_ancestor_origins.append(ancestor->active_document()->origin());
+        accessed_inclusive_ancestor_origins.append(*ancestor->active_document_origin());
     }
 
     // 7. If any of accessorInclusiveAncestorOrigins are not same origin with accessorTopDocument's origin, or if any of accessedInclusiveAncestorOrigins are not same origin with accessedTopDocument's origin, then return.

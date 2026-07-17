@@ -24,32 +24,64 @@
 #include <LibWeb/UIEvents/KeyCode.h>
 #include <LibWeb/UIEvents/MouseButton.h>
 #include <LibWebView/Application.h>
+#include <LibWebView/PlatformColors.h>
+#include <LibWebView/Utilities.h>
 #include <LibWebView/WebContentClient.h>
 #include <UI/Qt/Application.h>
+#ifdef AK_OS_MACOS
+#    include <UI/Qt/MacWindow.h>
+#endif
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/WebContentView.h>
 
 #include <QApplication>
 #include <QCursor>
+#include <QEvent>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QInputDevice>
+#include <QKeySequence>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QNativeGestureEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPalette>
+#include <QPixmap>
 #include <QScrollBar>
+#include <QStyleHints>
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolTip>
+#include <QWheelEvent>
 
 namespace Ladybird {
 
 bool is_using_dark_system_theme(QWidget&);
 
-WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient> parent_client, size_t page_index, WebContentViewInitialState initial_state)
-    : QWidget(window)
+static QWidget* initial_web_content_view_parent([[maybe_unused]] QWidget* window)
 {
+#ifdef AK_OS_MACOS
+    return nullptr;
+#else
+    return window;
+#endif
+}
+
+WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient> parent_client, size_t page_index, WebContentViewInitialState initial_state)
+    : WebContentViewBase(initial_web_content_view_parent(window))
+    , WebView::ViewImplementation(initial_state.is_private)
+{
+#ifdef LADYBIRD_QT_USE_METAL_RHI_WIDGET
+    // Keep the QRhiWidget out of the top-level QWidget backing store. If it is
+    // parented before becoming native, Qt propagates its RHI config to the whole
+    // browser window and uploads the full backing store texture on chrome repaints.
+    setAttribute(Qt::WA_DontCreateNativeAncestors);
+    setAttribute(Qt::WA_NativeWindow);
+    setParent(window);
+    setApi(QRhiWidget::Api::Metal);
+#endif
+
     m_client_state.client = parent_client;
     m_client_state.page_index = page_index;
 
@@ -59,8 +91,15 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
 
     setFocusPolicy(Qt::FocusPolicy::StrongFocus);
 
+#ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
+    create_vulkan_window();
+#endif
+
     m_device_pixel_ratio = devicePixelRatio();
     m_maximum_frames_per_second = initial_state.maximum_frames_per_second;
+    m_display_id = initial_state.display_id;
+
+    set_page_background_color_to_system_canvas(is_using_dark_system_theme(*this));
 
     QObject::connect(qGuiApp, &QGuiApplication::screenRemoved, [this](QScreen*) {
         update_screen_rects();
@@ -68,6 +107,13 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
 
     QObject::connect(qGuiApp, &QGuiApplication::screenAdded, [this](QScreen*) {
         update_screen_rects();
+    });
+
+    QObject::connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this, [this] {
+        QTimer::singleShot(0, this, [this] {
+            update_palette();
+            schedule_repaint();
+        });
     });
 
     m_tooltip_hover_timer.setSingleShot(true);
@@ -83,12 +129,18 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
     initialize_client((parent_client == nullptr) ? CreateNewClient::Yes : CreateNewClient::No);
 
     on_ready_to_paint = [this]() {
-        update();
+        schedule_repaint();
     };
 
     on_cursor_change = [this](auto cursor) {
         update_cursor(cursor);
     };
+
+#ifdef AK_OS_MACOS
+    on_request_dictionary_lookup = [this](auto const& lookup, auto position) {
+        show_appkit_dictionary_lookup(*this, lookup, position);
+    };
+#endif
 
     on_request_tooltip_override = [this](auto position, auto const& tooltip) {
         m_tooltip_override = true;
@@ -137,7 +189,9 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
         m_select_dropdown->setMinimumWidth(minimum_width);
 
         auto add_menu_item = [this](Web::HTML::SelectItemOption const& item_option, bool in_option_group) {
-            QAction* action = new QAction(qstring_from_ak_string(in_option_group ? MUST(String::formatted("    {}", item_option.label)) : item_option.label), this);
+            auto label = in_option_group ? qformatted("    {}", item_option.label) : qstring_from_utf16_string(item_option.label);
+
+            QAction* action = new QAction(label, this);
             action->setCheckable(true);
             action->setChecked(item_option.selected);
             action->setDisabled(item_option.disabled);
@@ -149,7 +203,7 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
         for (auto const& item : items) {
             if (item.has<Web::HTML::SelectItemOptionGroup>()) {
                 auto const& item_option_group = item.get<Web::HTML::SelectItemOptionGroup>();
-                QAction* subtitle = new QAction(qstring_from_ak_string(item_option_group.label), this);
+                QAction* subtitle = new QAction(qstring_from_utf16_string(item_option_group.label), this);
                 subtitle->setDisabled(true);
                 m_select_dropdown->addAction(subtitle);
 
@@ -168,7 +222,34 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
     };
 }
 
-WebContentView::~WebContentView() = default;
+WebContentView::~WebContentView()
+{
+#ifdef AK_OS_MACOS
+    release_metal_resources();
+#elif defined(LADYBIRD_QT_USE_VULKAN_WINDOW)
+    destroy_vulkan_window();
+#endif
+}
+
+void WebContentView::prepare_for_window_move()
+{
+#ifdef LADYBIRD_QT_USE_RHI_WIDGET
+    hide();
+
+    QEvent window_about_to_change_event { QEvent::WindowAboutToChangeInternal };
+    QCoreApplication::sendEvent(this, &window_about_to_change_event);
+
+    destroy();
+#endif
+}
+
+void WebContentView::finish_window_move()
+{
+#ifdef LADYBIRD_QT_USE_RHI_WIDGET
+    create();
+    show();
+#endif
+}
 
 void WebContentView::select_dropdown_action()
 {
@@ -212,27 +293,57 @@ static Web::UIEvents::KeyModifier get_modifiers_from_qt_keyboard_modifiers(Qt::K
     auto result = Web::UIEvents::KeyModifier::Mod_None;
     if (modifiers.testFlag(Qt::AltModifier))
         result |= Web::UIEvents::KeyModifier::Mod_Alt;
-    if (modifiers.testFlag(Qt::ControlModifier))
-        result |= Web::UIEvents::KeyModifier::Mod_Ctrl;
     if (modifiers.testFlag(Qt::ShiftModifier))
         result |= Web::UIEvents::KeyModifier::Mod_Shift;
+#if defined(AK_OS_MACOS)
+    if (modifiers.testFlag(Qt::ControlModifier))
+        result |= Web::UIEvents::KeyModifier::Mod_Super;
+    if (modifiers.testFlag(Qt::MetaModifier))
+        result |= Web::UIEvents::KeyModifier::Mod_Ctrl;
+#else
+    if (modifiers.testFlag(Qt::ControlModifier))
+        result |= Web::UIEvents::KeyModifier::Mod_Ctrl;
+    if (modifiers.testFlag(Qt::MetaModifier))
+        result |= Web::UIEvents::KeyModifier::Mod_Super;
+#endif
     return result;
 }
 
 static Web::UIEvents::KeyModifier get_modifiers_from_qt_key_event(QKeyEvent const& event)
 {
-    auto modifiers = Web::UIEvents::KeyModifier::Mod_None;
-    if (event.modifiers().testFlag(Qt::AltModifier))
-        modifiers |= Web::UIEvents::KeyModifier::Mod_Alt;
-    if (event.modifiers().testFlag(Qt::ControlModifier))
-        modifiers |= Web::UIEvents::KeyModifier::Mod_Ctrl;
-    if (event.modifiers().testFlag(Qt::MetaModifier))
-        modifiers |= Web::UIEvents::KeyModifier::Mod_Super;
-    if (event.modifiers().testFlag(Qt::ShiftModifier))
-        modifiers |= Web::UIEvents::KeyModifier::Mod_Shift;
+    auto modifiers = get_modifiers_from_qt_keyboard_modifiers(event.modifiers());
     if (event.modifiers().testFlag(Qt::KeypadModifier))
         modifiers |= Web::UIEvents::KeyModifier::Mod_Keypad;
     return modifiers;
+}
+
+static QPointF wheel_delta_from_angle_delta(QPoint angle_delta)
+{
+    static constexpr double wheel_delta_units_per_step = static_cast<double>(QWheelEvent::DefaultDeltasPerStep);
+    double delta_x = -static_cast<double>(angle_delta.x()) / wheel_delta_units_per_step;
+    double delta_y = static_cast<double>(angle_delta.y()) / wheel_delta_units_per_step;
+
+    static constexpr double scroll_step_size = 40;
+    auto step_x = delta_x * static_cast<double>(QApplication::wheelScrollLines());
+    auto step_y = delta_y * static_cast<double>(QApplication::wheelScrollLines());
+
+    return { step_x * scroll_step_size, step_y * scroll_step_size };
+}
+
+static QPointF wheel_delta_from_qt_event(QWheelEvent const& wheel_event)
+{
+    auto pixel_delta = -wheel_event.pixelDelta();
+    auto const* pointing_device = wheel_event.pointingDevice();
+    // NB: macOS can report a tiny pixel delta for mouse-wheel ticks. Use it only for touchpads so physical wheels
+    //     continue through the line-step conversion below.
+    if (!pixel_delta.isNull() && pointing_device && pointing_device->type() == QInputDevice::DeviceType::TouchPad)
+        return pixel_delta;
+
+    auto angle_delta = -wheel_event.angleDelta();
+    if (!angle_delta.isNull())
+        return wheel_delta_from_angle_delta(angle_delta);
+
+    return pixel_delta;
 }
 
 static Web::UIEvents::KeyCode get_keycode_from_qt_key_event(QKeyEvent const& event)
@@ -372,40 +483,158 @@ static Web::UIEvents::KeyCode get_keycode_from_qt_key_event(QKeyEvent const& eve
     return Web::UIEvents::Key_Invalid;
 }
 
+static bool is_browser_reserved_shortcut(QKeyEvent const& event)
+{
+    // Browser chrome shortcuts that manage tabs, windows, or focus should not wait for
+    // WebContent to decide whether the page wants to suppress them.
+    if (event.matches(QKeySequence::StandardKey::Close)
+        || event.matches(QKeySequence::StandardKey::New)
+        || event.matches(QKeySequence::StandardKey::Quit))
+        return true;
+
+    auto const modifiers = event.modifiers() & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);
+    auto const key = event.key();
+
+    if (modifiers == Qt::ControlModifier && key == Qt::Key_T)
+        return true;
+    if (modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && key == Qt::Key_T)
+        return true;
+    if (modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && key == Qt::Key_N)
+        return true;
+
+    if (modifiers == Qt::ControlModifier && (key == Qt::Key_L || key == Qt::Key_Tab || key == Qt::Key_PageDown))
+        return true;
+
+    if (modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && (key == Qt::Key_Tab || key == Qt::Key_Backtab))
+        return true;
+
+#if defined(AK_OS_MACOS)
+    if (modifiers == Qt::ControlModifier && key == Qt::Key_H)
+        return true;
+
+    if (modifiers == Qt::MetaModifier && key == Qt::Key_Tab)
+        return true;
+
+    if (modifiers == (Qt::MetaModifier | Qt::ShiftModifier) && (key == Qt::Key_Tab || key == Qt::Key_Backtab))
+        return true;
+
+    if (modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && (key == Qt::Key_BracketLeft || key == Qt::Key_BracketRight))
+        return true;
+#endif
+
+    if (modifiers == Qt::ControlModifier && key == Qt::Key_PageUp)
+        return true;
+
+    return false;
+}
+
 void WebContentView::keyPressEvent(QKeyEvent* event)
 {
+    if (is_node_picker_active()) {
+        if (event->key() == Qt::Key_Escape)
+            node_picker_cancel();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_Escape && event->modifiers() == Qt::NoModifier && is_loading()) {
+        stop_loading();
+        event->accept();
+        return;
+    }
+
     enqueue_native_event(Web::KeyEvent::Type::KeyDown, *event);
 }
 
 void WebContentView::keyReleaseEvent(QKeyEvent* event)
 {
+    if (is_node_picker_active()) {
+        event->accept();
+        return;
+    }
+
     enqueue_native_event(Web::KeyEvent::Type::KeyUp, *event);
 }
 
 void WebContentView::inputMethodEvent(QInputMethodEvent* event)
 {
-    if (!event->commitString().isEmpty()) {
-        QKeyEvent keyEvent(QEvent::KeyPress, 0, Qt::NoModifier, event->commitString());
-        keyPressEvent(&keyEvent);
+    if (is_node_picker_active()) {
+        event->accept();
+        return;
     }
+
+    if (!event->commitString().isEmpty() || event->replacementLength() != 0)
+        commit_text_from_input_method(utf16_string_from_qstring(event->commitString()), event->replacementStart(), event->replacementLength());
+
+    set_marked_text_from_input_method(utf16_string_from_qstring(event->preeditString()));
     event->accept();
 }
 
-QVariant WebContentView::inputMethodQuery(Qt::InputMethodQuery) const
+static Optional<QRectF> input_method_rect_for_caret(Optional<Web::DevicePixelRect> const& caret_rect, double device_pixel_ratio)
 {
-    return QVariant();
+    if (!caret_rect.has_value())
+        return {};
+
+    return QRectF {
+        caret_rect->x().value() / device_pixel_ratio,
+        caret_rect->y().value() / device_pixel_ratio,
+        max(caret_rect->width().value() / device_pixel_ratio, 1.0),
+        max(caret_rect->height().value() / device_pixel_ratio, 1.0),
+    };
+}
+
+QVariant WebContentView::inputMethodQuery(Qt::InputMethodQuery query) const
+{
+    auto const& state = input_method_state();
+
+    switch (query) {
+    case Qt::ImEnabled:
+        return state.is_enabled;
+    case Qt::ImCursorRectangle:
+    case Qt::ImAnchorRectangle:
+        if (auto rect = input_method_rect_for_caret(state.caret_rect, device_pixel_ratio()); rect.has_value())
+            return *rect;
+        return WebContentViewBase::inputMethodQuery(query);
+    case Qt::ImAbsolutePosition:
+    case Qt::ImCursorPosition:
+        return state.cursor_position;
+    case Qt::ImAnchorPosition:
+        return state.anchor_position;
+    case Qt::ImTextBeforeCursor:
+        return qstring_from_utf16_string(state.text_before_cursor);
+    case Qt::ImTextAfterCursor:
+        return qstring_from_utf16_string(state.text_after_cursor);
+    case Qt::ImSurroundingText:
+        return qstring_from_utf16_string(state.text_before_cursor) + qstring_from_utf16_string(state.text_after_cursor);
+    case Qt::ImReadOnly:
+        return !state.is_enabled;
+    default:
+        return WebContentViewBase::inputMethodQuery(query);
+    }
 }
 
 void WebContentView::leaveEvent(QEvent* event)
 {
+    if (is_node_picker_active()) {
+        clear_node_picker();
+        WebContentViewBase::leaveEvent(event);
+        return;
+    }
+
     static QMouseEvent mouse_event { QEvent::Type::Leave, {}, {}, Qt::MouseButton::NoButton, Qt::MouseButton::NoButton, Qt::KeyboardModifier::NoModifier };
     enqueue_native_event(Web::MouseEvent::Type::MouseLeave, mouse_event);
 
-    QWidget::leaveEvent(event);
+    WebContentViewBase::leaveEvent(event);
 }
 
 void WebContentView::mouseMoveEvent(QMouseEvent* event)
 {
+    if (is_node_picker_active()) {
+        node_picker_hover(node_picker_position_for(*event));
+        event->accept();
+        return;
+    }
+
     if (!m_tooltip_override) {
         if (QToolTip::isVisible())
             QToolTip::hideText();
@@ -413,26 +642,61 @@ void WebContentView::mouseMoveEvent(QMouseEvent* event)
     }
 
     enqueue_native_event(Web::MouseEvent::Type::MouseMove, *event);
-    QWidget::mouseMoveEvent(event);
+    WebContentViewBase::mouseMoveEvent(event);
 }
 
 void WebContentView::mousePressEvent(QMouseEvent* event)
 {
+    if (is_node_picker_active()) {
+        if (event->button() == Qt::MouseButton::LeftButton) {
+            auto position = node_picker_position_for(*event);
+            if (event->modifiers().testFlag(Qt::ControlModifier))
+                node_picker_preview(position);
+            else
+                node_picker_pick(position);
+        }
+        event->accept();
+        return;
+    }
+
+    auto elapsed = event->timestamp() - m_last_click_timestamp;
+    auto distance = (event->position() - m_last_click_position).manhattanLength();
+
+    if (elapsed < static_cast<u64>(QApplication::doubleClickInterval()) && distance < QApplication::startDragDistance()) {
+        ++m_click_count;
+        if (m_click_count < 1)
+            m_click_count = 1;
+    } else {
+        m_click_count = 1;
+    }
+    m_last_click_timestamp = event->timestamp();
+    m_last_click_position = event->position();
+
     enqueue_native_event(Web::MouseEvent::Type::MouseDown, *event);
 }
 
 void WebContentView::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (is_node_picker_active()) {
+        event->accept();
+        return;
+    }
+
     enqueue_native_event(Web::MouseEvent::Type::MouseUp, *event);
 
     if (event->button() == Qt::MouseButton::BackButton)
-        traverse_the_history_by_delta(-1);
+        (void)traverse_the_history_by_delta(-1);
     else if (event->button() == Qt::MouseButton::ForwardButton)
-        traverse_the_history_by_delta(1);
+        (void)traverse_the_history_by_delta(1);
 }
 
 void WebContentView::wheelEvent(QWheelEvent* event)
 {
+    if (is_node_picker_active()) {
+        event->accept();
+        return;
+    }
+
     if (event->modifiers().testFlag(Qt::ControlModifier)) {
         event->ignore();
         return;
@@ -443,11 +707,18 @@ void WebContentView::wheelEvent(QWheelEvent* event)
 
 void WebContentView::mouseDoubleClickEvent(QMouseEvent* event)
 {
-    enqueue_native_event(Web::MouseEvent::Type::DoubleClick, *event);
+    // NOTE: Qt calls this instead of mousePressEvent on the 2nd click. Forward to mousePressEvent so our click
+    //       counting logic handles double and triple clicks uniformly.
+    mousePressEvent(event);
 }
 
 void WebContentView::dragEnterEvent(QDragEnterEvent* event)
 {
+    if (is_node_picker_active()) {
+        event->ignore();
+        return;
+    }
+
     if (!event->mimeData()->hasUrls())
         return;
 
@@ -457,12 +728,20 @@ void WebContentView::dragEnterEvent(QDragEnterEvent* event)
 
 void WebContentView::dragMoveEvent(QDragMoveEvent* event)
 {
+    if (is_node_picker_active()) {
+        event->ignore();
+        return;
+    }
+
     enqueue_native_event(Web::DragEvent::Type::DragMove, *event);
     event->acceptProposedAction();
 }
 
 void WebContentView::dragLeaveEvent(QDragLeaveEvent*)
 {
+    if (is_node_picker_active())
+        return;
+
     // QDragLeaveEvent does not contain any mouse position or button information.
     Web::DragEvent event {};
     event.type = Web::DragEvent::Type::DragEnd;
@@ -472,57 +751,141 @@ void WebContentView::dragLeaveEvent(QDragLeaveEvent*)
 
 void WebContentView::dropEvent(QDropEvent* event)
 {
+    if (is_node_picker_active()) {
+        event->ignore();
+        return;
+    }
+
     enqueue_native_event(Web::DragEvent::Type::Drop, *event);
     event->acceptProposedAction();
 }
 
 void WebContentView::focusInEvent(QFocusEvent*)
 {
-    client().async_set_has_focus(m_client_state.page_index, true);
+    update_page_focus();
 }
 
 void WebContentView::focusOutEvent(QFocusEvent*)
 {
-    client().async_set_has_focus(m_client_state.page_index, false);
+    update_page_focus();
 }
 
+void WebContentView::update_page_focus()
+{
+    // Focus can move between this widget, the native window container, and the embedded native window in bursts of
+    // events whose order is not meaningful (e.g. the container reports losing focus after native focus has already
+    // moved to the embedded window). Instead of trusting individual events, evaluate the resulting focus state once
+    // the burst has settled.
+    QTimer::singleShot(0, this, [this] {
+        auto focused = hasFocus();
+#ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
+        if (!focused)
+            focused = vulkan_window_has_native_focus();
+#endif
+        client().async_set_has_focus(m_client_state.page_index, focused);
+    });
+}
+
+Optional<WebContentView::Paintable> WebContentView::current_paintable() const
+{
+    Gfx::SharedImageBuffer const* shared_image_buffer = nullptr;
+    Gfx::IntSize bitmap_size;
+
+    if (m_client_state.has_usable_bitmap) {
+        VERIFY(m_client_state.front_bitmap.shared_image_buffer);
+        shared_image_buffer = m_client_state.front_bitmap.shared_image_buffer.ptr();
+        bitmap_size = m_client_state.front_bitmap.last_painted_size.to_type<int>();
+    } else if (m_backup_shared_image_buffer) {
+        shared_image_buffer = m_backup_shared_image_buffer.ptr();
+        bitmap_size = m_backup_bitmap_size.to_type<int>();
+    }
+
+    if (!shared_image_buffer)
+        return {};
+    return Paintable { shared_image_buffer, bitmap_size };
+}
+
+void WebContentView::schedule_repaint()
+{
+#ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
+    schedule_vulkan_window_update();
+#else
+    update();
+#endif
+}
+
+#ifndef LADYBIRD_QT_USE_RHI_WIDGET
 void WebContentView::paintEvent(QPaintEvent*)
 {
     QPainter painter(this);
     painter.scale(1 / m_device_pixel_ratio, 1 / m_device_pixel_ratio);
 
+    auto paintable = current_paintable();
     Gfx::Bitmap const* bitmap = nullptr;
     Gfx::IntSize bitmap_size;
-
-    if (m_client_state.has_usable_bitmap) {
-        bitmap = m_client_state.front_bitmap.bitmap.ptr();
-        bitmap_size = m_client_state.front_bitmap.last_painted_size.to_type<int>();
-
-    } else {
-        bitmap = m_backup_bitmap.ptr();
-        bitmap_size = m_backup_bitmap_size.to_type<int>();
+    if (paintable.has_value()) {
+        bitmap = paintable->shared_image_buffer->bitmap().ptr();
+        bitmap_size = paintable->bitmap_size;
     }
 
     if (bitmap) {
         QImage q_image(bitmap->scanline_u8(0), bitmap->width(), bitmap->height(), bitmap->pitch(), QImage::Format_RGB32);
         painter.drawImage(QPoint(0, 0), q_image, QRect(0, 0, bitmap_size.width(), bitmap_size.height()));
 
-        if (bitmap_size.width() < width()) {
-            painter.fillRect(bitmap_size.width(), 0, width() - bitmap_size.width(), bitmap->height(), palette().base());
+        auto background_color = page_background_color();
+        auto fallback_color = QColor(background_color.red(), background_color.green(), background_color.blue());
+        if (bitmap_size.width() < m_viewport_size.width()) {
+            painter.fillRect(bitmap_size.width(), 0, m_viewport_size.width() - bitmap_size.width(), bitmap->height(), fallback_color);
         }
-        if (bitmap_size.height() < height()) {
-            painter.fillRect(0, bitmap_size.height(), width(), height() - bitmap_size.height(), palette().base());
+        if (bitmap_size.height() < m_viewport_size.height()) {
+            painter.fillRect(0, bitmap_size.height(), m_viewport_size.width(), m_viewport_size.height() - bitmap_size.height(), fallback_color);
         }
 
         return;
     }
 
-    painter.fillRect(rect(), palette().base());
+    auto background_color = page_background_color();
+    painter.fillRect(QRect(0, 0, m_viewport_size.width(), m_viewport_size.height()), QColor(background_color.red(), background_color.green(), background_color.blue()));
+}
+#endif
+
+Optional<QPixmap> WebContentView::tab_preview_pixmap(QSize const& maximum_size) const
+{
+    auto paintable = current_paintable();
+    if (!paintable.has_value())
+        return {};
+
+    auto const* bitmap = paintable->shared_image_buffer->bitmap().ptr();
+    if (!bitmap)
+        return {};
+
+    auto width = min(bitmap->width(), paintable->bitmap_size.width());
+    auto height = min(bitmap->height(), paintable->bitmap_size.height());
+    if (width <= 0 || height <= 0 || maximum_size.isEmpty())
+        return {};
+
+    QImage image(bitmap->scanline_u8(0), bitmap->width(), bitmap->height(), bitmap->pitch(), QImage::Format_RGB32);
+    auto snapshot = image.copy(0, 0, width, height);
+    if (snapshot.isNull())
+        return {};
+
+    auto preview_size = snapshot.size().scaled(maximum_size, Qt::KeepAspectRatio);
+    if (preview_size.isEmpty())
+        return {};
+
+    auto preview = QPixmap::fromImage(snapshot).scaled(preview_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    if (preview.isNull())
+        return {};
+
+    return preview;
 }
 
 void WebContentView::resizeEvent(QResizeEvent* event)
 {
-    QWidget::resizeEvent(event);
+    WebContentViewBase::resizeEvent(event);
+#ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
+    update_vulkan_window_geometry();
+#endif
     update_viewport_size();
     handle_resize();
 }
@@ -530,21 +893,60 @@ void WebContentView::resizeEvent(QResizeEvent* event)
 void WebContentView::set_viewport_rect(Gfx::IntRect rect)
 {
     m_viewport_size = rect.size();
-    client().async_set_viewport_size(m_client_state.page_index, rect.size().to_type<Web::DevicePixels>());
+    handle_resize();
 }
 
 void WebContentView::set_device_pixel_ratio(double device_pixel_ratio)
 {
     m_device_pixel_ratio = device_pixel_ratio;
-    client().async_set_device_pixels_per_css_pixel(m_client_state.page_index, m_device_pixel_ratio * m_zoom_level);
     update_viewport_size();
     handle_resize();
 }
 
+void WebContentView::set_vertical_tab_overlay_insets([[maybe_unused]] int left, [[maybe_unused]] int right)
+{
+#ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
+    if (m_vertical_tab_overlay_left == left && m_vertical_tab_overlay_right == right)
+        return;
+
+    // While vertical tabs are hover-expanded they overlay this view. On the Vulkan presentation path, the native window
+    // would occlude them, so we clear these left/right strips (in logical pixels) to transparent, letting the tab
+    // column that paints in the widget backing store show through.
+    m_vertical_tab_overlay_left = left;
+    m_vertical_tab_overlay_right = right;
+
+    update_vulkan_window_input_region();
+    schedule_repaint();
+#endif
+}
+
+void WebContentView::set_zoom_level(double zoom_level)
+{
+    m_zoom_level = zoom_level;
+    client().async_set_zoom_level(m_client_state.page_index, m_zoom_level);
+    update_zoom();
+}
+
 void WebContentView::set_maximum_frames_per_second(double maximum_frames_per_second)
 {
+    set_display_metadata(m_display_id, maximum_frames_per_second);
+}
+
+void WebContentView::set_display_metadata(Optional<u64> display_id, double maximum_frames_per_second)
+{
+    m_display_id = display_id;
     m_maximum_frames_per_second = maximum_frames_per_second;
     client().async_set_maximum_frames_per_second(m_client_state.page_index, m_maximum_frames_per_second);
+    update_compositor_display_metadata();
+}
+
+void WebContentView::update_compositor_display_metadata()
+{
+    if (!m_client_state.client)
+        return;
+
+    auto compositor_context_id = client().compositor_context_id_for_page(m_client_state.page_index);
+    WebView::Application::the().update_compositor_display_metadata(compositor_context_id, m_display_id, m_maximum_frames_per_second);
 }
 
 void WebContentView::update_viewport_size()
@@ -564,13 +966,13 @@ void WebContentView::update_zoom()
 
 void WebContentView::showEvent(QShowEvent* event)
 {
-    QWidget::showEvent(event);
+    WebContentViewBase::showEvent(event);
     set_system_visibility_state(Web::HTML::VisibilityState::Visible);
 }
 
 void WebContentView::hideEvent(QHideEvent* event)
 {
-    QWidget::hideEvent(event);
+    WebContentViewBase::hideEvent(event);
     set_system_visibility_state(Web::HTML::VisibilityState::Hidden);
 }
 
@@ -586,7 +988,7 @@ static Core::AnonymousBuffer make_system_theme_from_qt_palette(QWidget& widget, 
     auto palette = Gfx::Palette(move(palette_impl));
 
     auto translate = [&](Gfx::ColorRole gfx_color_role, QPalette::ColorRole qt_color_role) {
-        auto new_color = Gfx::Color::from_argb(qt_palette.color(qt_color_role).rgba());
+        auto new_color = Gfx::Color::from_bgra(qt_palette.color(qt_color_role).rgba());
         palette.set_color(gfx_color_role, new_color);
     };
 
@@ -598,8 +1000,25 @@ static Core::AnonymousBuffer make_system_theme_from_qt_palette(QWidget& widget, 
     translate(Gfx::ColorRole::VisitedLink, QPalette::ColorRole::LinkVisited);
     translate(Gfx::ColorRole::Button, QPalette::ColorRole::Button);
     translate(Gfx::ColorRole::ButtonText, QPalette::ColorRole::ButtonText);
+#ifdef AK_OS_MACOS
+    palette.set_color(Gfx::ColorRole::Selection, WebView::macos_web_selection_color());
+    palette.set_color(Gfx::ColorRole::InactiveSelection, WebView::macos_web_inactive_selection_color());
+    palette.set_color(Gfx::ColorRole::InactiveSelectionText, WebView::macos_web_inactive_selection_text_color());
+#else
     translate(Gfx::ColorRole::Selection, QPalette::ColorRole::Highlight);
-    translate(Gfx::ColorRole::SelectionText, QPalette::ColorRole::HighlightedText);
+
+    auto active_highlight = qt_palette.color(QPalette::Active, QPalette::ColorRole::Highlight);
+    auto inactive_highlight = qt_palette.color(QPalette::Inactive, QPalette::ColorRole::Highlight);
+    if (inactive_highlight != active_highlight) {
+        palette.set_color(Gfx::ColorRole::InactiveSelection, Gfx::Color::from_bgra(inactive_highlight.rgba()));
+        auto inactive_highlighted_text = qt_palette.color(QPalette::Inactive, QPalette::ColorRole::HighlightedText);
+        palette.set_color(Gfx::ColorRole::InactiveSelectionText, Gfx::Color::from_bgra(inactive_highlighted_text.rgba()));
+    } else {
+        // The Qt theme does not differentiate inactive selections; use a neutral gray.
+        auto inactive_selection = is_using_dark_system_theme(widget) ? Gfx::Color(0x60, 0x60, 0x60) : Gfx::Color(0xd4, 0xd4, 0xd4);
+        palette.set_color(Gfx::ColorRole::InactiveSelection, inactive_selection);
+    }
+#endif
 
     palette.set_flag(Gfx::FlagRole::IsDark, is_using_dark_system_theme(widget));
 
@@ -608,6 +1027,7 @@ static Core::AnonymousBuffer make_system_theme_from_qt_palette(QWidget& widget, 
 
 void WebContentView::update_palette(PaletteMode mode)
 {
+    set_page_background_color_to_system_canvas(is_using_dark_system_theme(*this));
     client().async_update_system_theme(m_client_state.page_index, make_system_theme_from_qt_palette(*this, mode));
 }
 
@@ -636,6 +1056,7 @@ void WebContentView::initialize_client(WebView::ViewImplementation::CreateNewCli
 {
     ViewImplementation::initialize_client(create_new_client);
 
+    update_compositor_display_metadata();
     update_palette();
     update_screen_rects();
 }
@@ -645,64 +1066,64 @@ void WebContentView::update_cursor(Gfx::Cursor cursor)
     cursor.visit([this](Gfx::StandardCursor standard_cursor) {
         switch (standard_cursor) {
         case Gfx::StandardCursor::Hidden:
-            setCursor(Qt::BlankCursor);
+            apply_web_content_cursor(Qt::BlankCursor);
             break;
         case Gfx::StandardCursor::Arrow:
-            setCursor(Qt::ArrowCursor);
+            apply_web_content_cursor(Qt::ArrowCursor);
             break;
         case Gfx::StandardCursor::Crosshair:
-            setCursor(Qt::CrossCursor);
+            apply_web_content_cursor(Qt::CrossCursor);
             break;
         case Gfx::StandardCursor::IBeam:
-            setCursor(Qt::IBeamCursor);
+            apply_web_content_cursor(Qt::IBeamCursor);
             break;
         case Gfx::StandardCursor::ResizeHorizontal:
-            setCursor(Qt::SizeHorCursor);
+            apply_web_content_cursor(Qt::SizeHorCursor);
             break;
         case Gfx::StandardCursor::ResizeVertical:
-            setCursor(Qt::SizeVerCursor);
+            apply_web_content_cursor(Qt::SizeVerCursor);
             break;
         case Gfx::StandardCursor::ResizeDiagonalTLBR:
-            setCursor(Qt::SizeFDiagCursor);
+            apply_web_content_cursor(Qt::SizeFDiagCursor);
             break;
         case Gfx::StandardCursor::ResizeDiagonalBLTR:
-            setCursor(Qt::SizeBDiagCursor);
+            apply_web_content_cursor(Qt::SizeBDiagCursor);
             break;
         case Gfx::StandardCursor::ResizeColumn:
-            setCursor(Qt::SplitHCursor);
+            apply_web_content_cursor(Qt::SplitHCursor);
             break;
         case Gfx::StandardCursor::ResizeRow:
-            setCursor(Qt::SplitVCursor);
+            apply_web_content_cursor(Qt::SplitVCursor);
             break;
         case Gfx::StandardCursor::Hand:
-            setCursor(Qt::PointingHandCursor);
+            apply_web_content_cursor(Qt::PointingHandCursor);
             break;
         case Gfx::StandardCursor::Help:
-            setCursor(Qt::WhatsThisCursor);
+            apply_web_content_cursor(Qt::WhatsThisCursor);
             break;
         case Gfx::StandardCursor::OpenHand:
-            setCursor(Qt::OpenHandCursor);
+            apply_web_content_cursor(Qt::OpenHandCursor);
             break;
         case Gfx::StandardCursor::Drag:
-            setCursor(Qt::ClosedHandCursor);
+            apply_web_content_cursor(Qt::ClosedHandCursor);
             break;
         case Gfx::StandardCursor::DragCopy:
-            setCursor(Qt::DragCopyCursor);
+            apply_web_content_cursor(Qt::DragCopyCursor);
             break;
         case Gfx::StandardCursor::Move:
-            setCursor(Qt::DragMoveCursor);
+            apply_web_content_cursor(Qt::DragMoveCursor);
             break;
         case Gfx::StandardCursor::Wait:
-            setCursor(Qt::BusyCursor);
+            apply_web_content_cursor(Qt::BusyCursor);
             break;
         case Gfx::StandardCursor::Disallowed:
-            setCursor(Qt::ForbiddenCursor);
+            apply_web_content_cursor(Qt::ForbiddenCursor);
             break;
         case Gfx::StandardCursor::Eyedropper:
         case Gfx::StandardCursor::Zoom:
             // FIXME: No corresponding Qt cursors, default to Arrow
         default:
-            setCursor(Qt::ArrowCursor);
+            apply_web_content_cursor(Qt::ArrowCursor);
             break;
         } },
         [this](Gfx::ImageCursor const& image_cursor) {
@@ -721,8 +1142,21 @@ void WebContentView::update_cursor(Gfx::Cursor cursor)
                 dbgln("Failed to set cursor: Couldn't create QPixmap from QImage.");
                 return;
             }
-            setCursor(QCursor { qpixmap, image_cursor.hotspot.x(), image_cursor.hotspot.y() });
+            apply_web_content_cursor(QCursor { qpixmap, image_cursor.hotspot.x(), image_cursor.hotspot.y() });
         });
+}
+
+void WebContentView::apply_web_content_cursor(QCursor const& cursor)
+{
+    setCursor(cursor);
+#ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
+    set_vulkan_window_cursor(cursor);
+#endif
+}
+
+Web::DevicePixelPoint WebContentView::node_picker_position_for(QSinglePointEvent const& event) const
+{
+    return { event.position().x() * m_device_pixel_ratio, event.position().y() * m_device_pixel_ratio };
 }
 
 Web::DevicePixelSize WebContentView::viewport_size() const
@@ -758,19 +1192,121 @@ bool WebContentView::event(QEvent* event)
         keyReleaseEvent(static_cast<QKeyEvent*>(event));
         return true;
     }
+    if (event->type() == QEvent::NativeGesture) {
+        auto const& native_gesture_event = *static_cast<QNativeGestureEvent const*>(event);
+        if (native_gesture_event.gestureType() == Qt::ZoomNativeGesture) {
+            Web::PinchEvent pinch_event;
+            auto const local_position = mapFromGlobal(native_gesture_event.globalPosition());
+            pinch_event.position = { local_position.x() * m_device_pixel_ratio, local_position.y() * m_device_pixel_ratio };
+            pinch_event.modifiers = get_modifiers_from_qt_keyboard_modifiers(native_gesture_event.modifiers());
+            pinch_event.scale_delta = native_gesture_event.value();
+            enqueue_input_event(AK::move(pinch_event));
+            return true;
+        }
+    }
 
-    if (event->type() == QEvent::PaletteChange) {
-        update_palette();
-        return QWidget::event(event);
+    if (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::ThemeChange) {
+        QTimer::singleShot(0, this, [this] {
+            update_palette();
+            schedule_repaint();
+        });
+        return WebContentViewBase::event(event);
     }
 
     if (event->type() == QEvent::ShortcutOverride) {
+        auto* key_event = static_cast<QKeyEvent*>(event);
+        if (is_browser_reserved_shortcut(*key_event)) {
+            event->ignore();
+            return false;
+        }
+
         event->accept();
         return true;
     }
 
-    return QWidget::event(event);
+    if (event->type() == QEvent::ActivationChange)
+        update_page_focus();
+
+    return WebContentViewBase::event(event);
 }
+
+#ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
+bool WebContentView::handle_vulkan_window_event(QEvent* event)
+{
+    switch (event->type()) {
+    case QEvent::KeyPress:
+        keyPressEvent(static_cast<QKeyEvent*>(event));
+        return true;
+    case QEvent::KeyRelease:
+        keyReleaseEvent(static_cast<QKeyEvent*>(event));
+        return true;
+    case QEvent::MouseMove:
+        mouseMoveEvent(static_cast<QMouseEvent*>(event));
+        return true;
+    case QEvent::MouseButtonPress:
+        mousePressEvent(static_cast<QMouseEvent*>(event));
+        return true;
+    case QEvent::MouseButtonRelease:
+        mouseReleaseEvent(static_cast<QMouseEvent*>(event));
+        return true;
+    case QEvent::MouseButtonDblClick:
+        mouseDoubleClickEvent(static_cast<QMouseEvent*>(event));
+        return true;
+    case QEvent::Wheel:
+        wheelEvent(static_cast<QWheelEvent*>(event));
+        return true;
+    case QEvent::Leave:
+        leaveEvent(event);
+        return true;
+    case QEvent::FocusIn:
+        focusInEvent(static_cast<QFocusEvent*>(event));
+        return true;
+    case QEvent::FocusOut:
+        focusOutEvent(static_cast<QFocusEvent*>(event));
+        return true;
+    case QEvent::InputMethod:
+        inputMethodEvent(static_cast<QInputMethodEvent*>(event));
+        return true;
+    case QEvent::DragEnter:
+        dragEnterEvent(static_cast<QDragEnterEvent*>(event));
+        return true;
+    case QEvent::DragMove:
+        dragMoveEvent(static_cast<QDragMoveEvent*>(event));
+        return true;
+    case QEvent::DragLeave:
+        dragLeaveEvent(static_cast<QDragLeaveEvent*>(event));
+        return true;
+    case QEvent::Drop:
+        dropEvent(static_cast<QDropEvent*>(event));
+        return true;
+    case QEvent::NativeGesture: {
+        auto const& native_gesture_event = *static_cast<QNativeGestureEvent const*>(event);
+        if (native_gesture_event.gestureType() == Qt::ZoomNativeGesture) {
+            Web::PinchEvent pinch_event;
+            auto const local_position = mapFromGlobal(native_gesture_event.globalPosition());
+            pinch_event.position = { local_position.x() * m_device_pixel_ratio, local_position.y() * m_device_pixel_ratio };
+            pinch_event.modifiers = get_modifiers_from_qt_keyboard_modifiers(native_gesture_event.modifiers());
+            pinch_event.scale_delta = native_gesture_event.value();
+            enqueue_input_event(AK::move(pinch_event));
+            return true;
+        }
+        return false;
+    }
+    case QEvent::ShortcutOverride: {
+        auto* key_event = static_cast<QKeyEvent*>(event);
+        if (is_browser_reserved_shortcut(*key_event)) {
+            event->ignore();
+            return false;
+        }
+
+        event->accept();
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+#endif
 
 void WebContentView::enqueue_native_event(Web::MouseEvent::Type type, QSinglePointEvent const& event)
 {
@@ -787,30 +1323,17 @@ void WebContentView::enqueue_native_event(Web::MouseEvent::Type type, QSinglePoi
         return;
     }
 
-    int wheel_delta_x = 0;
-    int wheel_delta_y = 0;
+    double wheel_delta_x = 0;
+    double wheel_delta_y = 0;
 
     if (type == Web::MouseEvent::Type::MouseWheel) {
         auto const& wheel_event = static_cast<QWheelEvent const&>(event);
-
-        if (auto pixel_delta = -wheel_event.pixelDelta(); !pixel_delta.isNull()) {
-            wheel_delta_x = pixel_delta.x();
-            wheel_delta_y = pixel_delta.y();
-        } else {
-            auto angle_delta = -wheel_event.angleDelta();
-            float delta_x = -static_cast<float>(angle_delta.x()) / 120.0f;
-            float delta_y = static_cast<float>(angle_delta.y()) / 120.0f;
-
-            static constexpr float scroll_step_size = 24;
-            auto step_x = delta_x * static_cast<float>(QApplication::wheelScrollLines()) * m_device_pixel_ratio;
-            auto step_y = delta_y * static_cast<float>(QApplication::wheelScrollLines()) * m_device_pixel_ratio;
-
-            wheel_delta_x = static_cast<int>(step_x * scroll_step_size);
-            wheel_delta_y = static_cast<int>(step_y * scroll_step_size);
-        }
+        auto wheel_delta = wheel_delta_from_qt_event(wheel_event);
+        wheel_delta_x = wheel_delta.x();
+        wheel_delta_y = wheel_delta.y();
     }
 
-    enqueue_input_event(Web::MouseEvent { type, position, screen_position.to_type<Web::DevicePixels>(), button, buttons, modifiers, wheel_delta_x, wheel_delta_y, nullptr });
+    enqueue_input_event(Web::MouseEvent { type, position, screen_position.to_type<Web::DevicePixels>(), button, buttons, modifiers, wheel_delta_x, wheel_delta_y, m_click_count, nullptr });
 }
 
 struct DragData : Web::BrowserInputData {
@@ -842,7 +1365,7 @@ void WebContentView::enqueue_native_event(Web::DragEvent::Type type, QDropEvent 
         for (auto const& url : event.mimeData()->urls()) {
             auto file_path = ak_byte_string_from_qstring(url.toLocalFile());
 
-            if (auto file = Web::HTML::SelectedFile::from_file_path(file_path); file.is_error())
+            if (auto file = WebView::create_selected_file(file_path); file.is_error())
                 warnln("Unable to open file {}: {}", file_path, file.error());
             else
                 files.append(file.release_value());
@@ -879,19 +1402,20 @@ void WebContentView::enqueue_native_event(Web::KeyEvent::Type type, QKeyEvent co
 
     auto text = event.text();
     auto code_point = text.isEmpty() ? 0u : event.text()[0].unicode();
+    auto should_insert_text = type == Web::KeyEvent::Type::KeyDown && !text.isEmpty();
 
     auto to_web_event = [&]() -> Web::KeyEvent {
         if (event.key() == Qt::Key_Backtab) {
             // Qt transforms Shift+Tab into a "Backtab", so we undo that transformation here.
-            return { type, Web::UIEvents::KeyCode::Key_Tab, Web::UIEvents::Mod_Shift, '\t', event.isAutoRepeat(), make<KeyData>(event) };
+            return { type, Web::UIEvents::KeyCode::Key_Tab, Web::UIEvents::Mod_Shift, '\t', event.isAutoRepeat(), false, make<KeyData>(event) };
         }
 
         if (event.key() == Qt::Key_Enter || event.key() == Qt::Key_Return) {
             // This ensures consistent behavior between systems that treat Enter as '\n' and '\r\n'
-            return { type, Web::UIEvents::KeyCode::Key_Return, modifiers, '\n', event.isAutoRepeat(), make<KeyData>(event) };
+            return { type, Web::UIEvents::KeyCode::Key_Return, modifiers, '\n', event.isAutoRepeat(), should_insert_text, make<KeyData>(event) };
         }
 
-        return { type, keycode, modifiers, code_point, event.isAutoRepeat(), make<KeyData>(event) };
+        return { type, keycode, modifiers, code_point, event.isAutoRepeat(), should_insert_text, make<KeyData>(event) };
     };
 
     enqueue_input_event(to_web_event());
@@ -904,10 +1428,10 @@ void WebContentView::finish_handling_key_event(Web::KeyEvent const& key_event)
 
     switch (key_event.type) {
     case Web::KeyEvent::Type::KeyDown:
-        QWidget::keyPressEvent(&event);
+        WebContentViewBase::keyPressEvent(&event);
         break;
     case Web::KeyEvent::Type::KeyUp:
-        QWidget::keyReleaseEvent(&event);
+        WebContentViewBase::keyReleaseEvent(&event);
         break;
     }
 

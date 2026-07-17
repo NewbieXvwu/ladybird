@@ -12,13 +12,15 @@
 #include <AK/JsonValue.h>
 #include <AK/Math.h>
 #include <AK/Utf8View.h>
+#include <LibCore/Timer.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/Page/Page.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/WebDriver/Actions.h>
 #include <LibWeb/WebDriver/Contexts.h>
 #include <LibWeb/WebDriver/ElementReference.h>
@@ -127,9 +129,14 @@ static CSSPixelPoint get_parent_offset(HTML::BrowsingContext const& browsing_con
     auto parent_navigable = navigable->parent();
 
     // 4. If parent navigable is not null:
-    if (parent_navigable && parent_navigable->active_document() && parent_navigable->active_document()->browsing_context()) {
+    if (parent_navigable) {
+        auto& local_parent_navigable = as<HTML::LocalNavigable>(*parent_navigable);
+        auto parent_document = local_parent_navigable.active_document();
+        if (!parent_document || !parent_document->browsing_context())
+            return offset;
+
         // 1. Let parent context be parent navigable's document's browsing context.
-        auto parent_context = parent_navigable->active_document()->browsing_context();
+        auto parent_context = parent_document->browsing_context();
 
         // 2. Let (parentOffsetLeft, parentOffsetTop) be result of get parent offset of parent context.
         auto parent_offset = get_parent_offset(*parent_context);
@@ -139,7 +146,7 @@ static CSSPixelPoint get_parent_offset(HTML::BrowsingContext const& browsing_con
         offset.translate_by(parent_offset);
 
         // 5. Let containerElement be an element which navigable container presents parent navigable.
-        auto container_element = parent_navigable->container();
+        auto container_element = local_parent_navigable.container();
         if (!container_element)
             return offset;
 
@@ -149,7 +156,7 @@ static CSSPixelPoint get_parent_offset(HTML::BrowsingContext const& browsing_con
         CSSPixels border_left_width = 0;
         CSSPixels border_top_width = 0;
 
-        if (auto* paintable_box = container_element->paintable_box()) {
+        if (auto paintable_box = container_element->paintable_box()) {
             // 7. Let borderLeftWidth be the computed border-left-width of containerElement in CSS pixels.
             border_left_width = paintable_box->computed_values().border_left().width;
 
@@ -169,7 +176,7 @@ static CSSPixelPoint get_parent_offset(HTML::BrowsingContext const& browsing_con
 }
 
 // https://w3c.github.io/webdriver/#dfn-get-coordinates-relative-to-an-origin
-static ErrorOr<CSSPixelPoint, WebDriver::Error> get_coordinates_relative_to_origin(PointerInputSource const& source, HTML::BrowsingContext const& browsing_context, CSSPixelPoint offset, CSSPixelRect viewport, ActionObject::Origin const& origin, ActionsOptions const& actions_options)
+static ErrorOr<CSSPixelPoint, WebDriver::Error> get_coordinates_relative_to_origin(PointerInputSource const* source, HTML::BrowsingContext const& browsing_context, CSSPixelPoint offset, CSSPixelRect viewport, ActionObject::Origin const& origin, ActionsOptions const& actions_options)
 {
     // FIXME: Spec-issue: If the browsing context is that of a subframe, we need to get its offset relative to the top
     //        frame, rather than its own frame.
@@ -188,10 +195,13 @@ static ErrorOr<CSSPixelPoint, WebDriver::Error> get_coordinates_relative_to_orig
 
             // "pointer"
             case ActionObject::OriginType::Pointer:
+                // NB: Scroll actions reject a pointer origin at processing time, so source is always non-null here.
+                VERIFY(source);
+
                 // 1. Let start x be equal to the x property of source.
                 // 2. Let start y be equal to the y property of source.
                 // 3. Let x equal start x + x offset and y equal start y + y offset.
-                return source.position.translated(offset);
+                return source->position.translated(offset);
             }
 
             VERIFY_NOT_REACHED();
@@ -204,7 +214,7 @@ static ErrorOr<CSSPixelPoint, WebDriver::Error> get_coordinates_relative_to_orig
             auto element = TRY(actions_options.get_element_origin(browsing_context, origin));
 
             // 3. Let x element and y element be the result of calculating the in-view center point of element.
-            auto position = in_view_center_point(element, viewport);
+            auto position = TRY(in_view_center_point(element, viewport));
 
             // 4. Let x equal x element + x offset, and y equal y element + y offset.
             return position.translated(offset);
@@ -790,6 +800,8 @@ struct KeyCodeData {
 };
 
 // https://w3c.github.io/webdriver/#dfn-code
+// NOTE: The normalised key values (0xE000-0xE05D) are defined in the keyboard actions table:
+//       https://w3c.github.io/webdriver/#keyboard-actions
 static KeyCodeData key_code_data(u32 code_point)
 {
     // The code for key is the value in the last column of the following table on the row with key in either the first
@@ -919,6 +931,7 @@ static bool is_shifted_character(u32 code_point)
 struct KeyEvent {
     u32 code_point { 0 };
     UIEvents::KeyModifier modifiers { UIEvents::KeyModifier::Mod_None };
+    bool should_insert_text { false };
 };
 static KeyEvent key_code_to_page_event(u32 code_point, UIEvents::KeyModifier modifiers, KeyCodeData const& code)
 {
@@ -959,7 +972,11 @@ static KeyEvent key_code_to_page_event(u32 code_point, UIEvents::KeyModifier mod
     if (has_flag(modifiers, UIEvents::KeyModifier::Mod_Shift))
         code_point = code.alternate_key.value_or(code_point);
 
-    return { code_point, modifiers };
+    auto should_insert_text = code_point != 0
+        && code_point < 0xE000
+        && !(modifiers & (UIEvents::KeyModifier::Mod_Ctrl | UIEvents::KeyModifier::Mod_Alt | UIEvents::KeyModifier::Mod_Super));
+
+    return { code_point, modifiers, should_insert_text };
 }
 
 // https://w3c.github.io/webdriver/#dfn-dispatch-a-keydown-action
@@ -1015,7 +1032,7 @@ static ErrorOr<void, WebDriver::Error> dispatch_key_down_action(ActionObject::Ke
     //     keyboard in accordance with the requirements of [UI-EVENTS], and producing the following events, as appropriate,
     //     with the specified properties. This will always produce events including at least a keyDown event.
     auto event = key_code_to_page_event(raw_key, modifiers, code);
-    browsing_context.page().handle_keydown(code.code, event.modifiers, event.code_point, repeat);
+    browsing_context.page().handle_keydown(code.code, event.modifiers, event.code_point, repeat, event.should_insert_text);
 
     // 13. Return success with data null.
     return {};
@@ -1043,28 +1060,31 @@ static ErrorOr<void, WebDriver::Error> dispatch_key_up_action(ActionObject::KeyF
     //    guidelines in [UI-EVENTS].
 
     auto modifiers = global_key_state.modifiers();
+    auto clear_modifier = [](UIEvents::KeyModifier& modifiers, UIEvents::KeyModifier modifier) {
+        modifiers = static_cast<UIEvents::KeyModifier>(to_underlying(modifiers) & ~to_underlying(modifier));
+    };
 
     // 7. If key is "Alt", let source's alt property be false.
     if (key == "Alt"sv) {
-        modifiers &= ~UIEvents::KeyModifier::Mod_Alt;
+        clear_modifier(modifiers, UIEvents::KeyModifier::Mod_Alt);
         source.alt = false;
     }
 
     // 8. If key is "Shift", let source's shift property be false.
     else if (key == "Shift"sv) {
-        modifiers &= ~UIEvents::KeyModifier::Mod_Shift;
+        clear_modifier(modifiers, UIEvents::KeyModifier::Mod_Shift);
         source.shift = false;
     }
 
     // 9. If key is "Control", let source's ctrl property be false.
     else if (key == "Control"sv) {
-        modifiers &= ~UIEvents::KeyModifier::Mod_Ctrl;
+        clear_modifier(modifiers, UIEvents::KeyModifier::Mod_Ctrl);
         source.ctrl = false;
     }
 
     // 10. If key is "Meta", let source's meta property be false.
     else if (key == "Meta"sv) {
-        modifiers &= ~UIEvents::KeyModifier::Mod_Super;
+        clear_modifier(modifiers, UIEvents::KeyModifier::Mod_Super);
         source.meta = false;
     }
 
@@ -1119,9 +1139,10 @@ static ErrorOr<void, WebDriver::Error> dispatch_pointer_down_action(ActionObject
     //     and [POINTER-EVENTS]. set ctrlKey, shiftKey, altKey, and metaKey equal to the corresponding items in global
     //     key state. Type specific properties for the pointer that are not exposed through the webdriver API must be
     //     set to the default value specified for hardware that doesn't support that property.
+    int click_count = 1;
     switch (pointer_type) {
     case PointerInputSource::Subtype::Mouse:
-        browsing_context.page().handle_mousedown(position, position, button, buttons, global_key_state.modifiers());
+        browsing_context.page().handle_mousedown(position, position, button, buttons, global_key_state.modifiers(), click_count);
         break;
     case PointerInputSource::Subtype::Pen:
         return WebDriver::Error::from_code(WebDriver::ErrorCode::UnsupportedOperation, "Pen events not implemented"sv);
@@ -1241,7 +1262,7 @@ static ErrorOr<void, WebDriver::Error> dispatch_pointer_move_action(ActionObject
     // 3. Let origin be equal to the origin property of action object.
     // 4. Let (x, y) be the result of trying to get coordinates relative to an origin with source, x offset, y offset,
     //    origin, browsing context, and actions options.
-    auto coordinates = TRY(get_coordinates_relative_to_origin(source, browsing_context, action_object.position, viewport, action_object.origin, actions_options));
+    auto coordinates = TRY(get_coordinates_relative_to_origin(&source, browsing_context, action_object.position, viewport, action_object.origin, actions_options));
 
     // 5. If x is less than 0 or greater than the width of the viewport in CSS pixels, then return error with error code move target out of bounds.
     if (coordinates.x() < 0 || coordinates.x() > viewport.width())
@@ -1272,6 +1293,50 @@ static ErrorOr<void, WebDriver::Error> dispatch_pointer_move_action(ActionObject
     TRY(perform_pointer_move(action_object, source, global_key_state, browsing_context, duration, coordinates));
 
     // 19. Return success with data null.
+    return {};
+}
+
+// https://w3c.github.io/webdriver/#dfn-dispatch-a-scroll-action
+static ErrorOr<void, WebDriver::Error> dispatch_scroll_action(ActionObject::ScrollFields const& action_object, GlobalKeyState const& global_key_state, AK::Duration tick_duration, HTML::BrowsingContext& browsing_context, ActionsOptions const& actions_options)
+{
+    auto viewport = browsing_context.page().top_level_traversable()->viewport_rect();
+
+    // 1. Let x offset be equal to the x property of action object.
+    // 2. Let y offset be equal to the y property of action object.
+    CSSPixelPoint offset { action_object.x, action_object.y };
+
+    // 3. Let origin be equal to the origin property of action object.
+    // 4. Let (x, y) be the result of trying to get coordinates relative to an origin with source, x offset, y offset,
+    //    origin, browsing context, and actions options.
+    auto coordinates = TRY(get_coordinates_relative_to_origin(nullptr, browsing_context, offset, viewport, action_object.origin, actions_options));
+
+    // 5. If x is less than 0 or greater than the width of the viewport in CSS pixels, then return error with error
+    //    code move target out of bounds.
+    if (coordinates.x() < 0 || coordinates.x() > viewport.width())
+        return WebDriver::Error::from_code(WebDriver::ErrorCode::MoveTargetOutOfBounds, MUST(String::formatted("Coordinates {} are out of bounds", coordinates)));
+
+    // 6. If y is less than 0 or greater than the height of the viewport in CSS pixels, then return error with error
+    //    code move target out of bounds.
+    if (coordinates.y() < 0 || coordinates.y() > viewport.height())
+        return WebDriver::Error::from_code(WebDriver::ErrorCode::MoveTargetOutOfBounds, MUST(String::formatted("Coordinates {} are out of bounds", coordinates)));
+
+    // 7. Let delta x be equal to the deltaX property of action object.
+    // 8. Let delta y be equal to the deltaY property of action object.
+    // 9. Let duration be equal to action object's duration property if it is not undefined, or tick duration otherwise.
+    [[maybe_unused]] auto duration = action_object.duration.value_or(tick_duration);
+
+    // FIXME: 10. If duration is greater than 0 and inside any implementation-defined bounds, asynchronously wait for
+    //            an implementation defined amount of time to pass.
+
+    // 11. Perform implementation-specific action dispatch steps on browsing context equivalent to scrolling by delta x
+    //     and delta y at viewport x coordinate x, viewport y coordinate y. Set ctrlKey, shiftKey, altKey, and metaKey
+    //     equal to the corresponding items in global key state. The scroll may be performed as a series of increments,
+    //     but the total scroll applied at the end of duration milliseconds must be delta x and delta y, and after each
+    //     increment the sum of the applied deltas must not be greater than delta x and delta y.
+    auto position = browsing_context.page().css_to_device_point(coordinates);
+    browsing_context.page().handle_mousewheel(position, position, 0, 0, global_key_state.modifiers(), static_cast<double>(action_object.delta_x), static_cast<double>(action_object.delta_y));
+
+    // 12. Return success with data null.
     return {};
 }
 
@@ -1362,7 +1427,7 @@ GC_DEFINE_ALLOCATOR(ActionExecutor);
 void wait_for_an_action_queue_token(InputState& input_state)
 {
     // 1. Let token be a new unique identifier.
-    auto token = MUST(Crypto::generate_random_uuid());
+    auto token = Crypto::generate_random_uuid();
 
     // 2. Enqueue token in input state's actions queue.
     input_state.actions_queue.append(token);
@@ -1457,7 +1522,8 @@ ErrorOr<void, WebDriver::Error> dispatch_tick_actions(InputState& input_state, R
         case ActionObject::Subtype::PointerCancel:
             return WebDriver::Error::from_code(WebDriver::ErrorCode::UnsupportedOperation, "Pointer cancel events not implemented"sv);
         case ActionObject::Subtype::Scroll:
-            return WebDriver::Error::from_code(WebDriver::ErrorCode::UnsupportedOperation, "Scroll events not implemented"sv);
+            TRY(dispatch_scroll_action(action_object.scroll_fields(), global_key_state, tick_duration, browsing_context, actions_options));
+            break;
         }
 
         // 9. If subtype is "keyDown", append a copy of action object with the subtype property changed to "keyUp" to

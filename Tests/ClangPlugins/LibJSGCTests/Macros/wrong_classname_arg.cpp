@@ -6,7 +6,6 @@
 
 // RUN: %clang++ -Xclang -verify %plugin_opts% -c %s -o %t 2>&1
 
-#include <LibGC/ForeignCell.h>
 #include <LibJS/Runtime/PrototypeObject.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 
@@ -15,11 +14,6 @@
 class TestCellClass : JS::Cell {
     // expected-error@+1 {{Expected first argument of GC_CELL macro invocation to be TestCellClass}}
     GC_CELL(bad, JS::Cell);
-};
-
-class TestForeignCellClass : GC::ForeignCell {
-    // expected-error@+1 {{Expected first argument of FOREIGN_CELL macro invocation to be TestForeignCellClass}}
-    FOREIGN_CELL(bad, GC::ForeignCell);
 };
 
 class TestObjectClass : JS::Object {
@@ -34,7 +28,7 @@ class TestEnvironmentClass : JS::Environment {
 
 class TestPlatformClass : Web::Bindings::PlatformObject {
     // expected-error@+1 {{Expected first argument of WEB_PLATFORM_OBJECT macro invocation to be TestPlatformClass}}
-    WEB_PLATFORM_OBJECT(bad, Web::Bindings::PlatformObject);
+    WEB_NON_IDL_PLATFORM_OBJECT(bad, Web::Bindings::PlatformObject);
 };
 
 struct Outer {

@@ -9,6 +9,8 @@
 #pragma once
 
 #include <AK/Concepts.h>
+#include <AK/NonnullRefPtr.h>
+#include <AK/Vector.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/EventReceiver.h>
 
@@ -29,7 +31,7 @@ public:
     virtual ~Promise() = default;
     static NonnullRefPtr<Promise> construct() { return adopt_ref(*new Promise()); }
 
-    Function<ErrorOr<void>(Result&)> on_resolution;
+    Function<ErrorOr<void, TError>(Result&)> on_resolution;
     Function<void(ErrorType&)> on_rejection;
 
     template<typename U>
@@ -78,9 +80,10 @@ public:
         return promise;
     }
 
-    void resolve(Result&& result)
+    template<typename R = Result>
+    void resolve(R&& result)
     {
-        m_result_or_rejection = move(result);
+        m_result_or_rejection = forward<R>(result);
 
         if (on_resolution) {
             auto handler_result = on_resolution(m_result_or_rejection->value());
@@ -88,9 +91,10 @@ public:
         }
     }
 
-    void reject(ErrorType&& error)
+    template<typename E = ErrorType>
+    void reject(E&& error)
     {
-        m_result_or_rejection = move(error);
+        m_result_or_rejection = forward<E>(error);
         possibly_handle_rejection(*m_result_or_rejection);
     }
 
@@ -168,7 +172,7 @@ public:
 
 private:
     template<typename T>
-    void possibly_handle_rejection(ErrorOr<T>& result)
+    void possibly_handle_rejection(ErrorOr<T, TError>& result)
     {
         if (result.is_error() && on_rejection)
             on_rejection(result.error());

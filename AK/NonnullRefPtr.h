@@ -6,8 +6,6 @@
 
 #pragma once
 
-#define NONNULLREFPTR_SCRUB_BYTE 0xe1
-
 #include <AK/Assertions.h>
 #include <AK/Format.h>
 #include <AK/Traits.h>
@@ -93,11 +91,7 @@ public:
 
     ALWAYS_INLINE ~NonnullRefPtr()
     {
-        auto* ptr = exchange(m_ptr, nullptr);
-        unref_if_not_null(ptr);
-#ifdef SANITIZE_PTRS
-        m_ptr = reinterpret_cast<T*>(explode_byte(NONNULLREFPTR_SCRUB_BYTE));
-#endif
+        unref_if_not_null(m_ptr);
     }
 
     template<typename U>
@@ -276,6 +270,7 @@ struct Traits<NonnullRefPtr<T>> : public DefaultTraits<NonnullRefPtr<T>> {
     using ConstPeekType = T const*;
     static unsigned hash(NonnullRefPtr<T> const& p) { return ptr_hash(p.ptr()); }
     static bool equals(NonnullRefPtr<T> const& a, NonnullRefPtr<T> const& b) { return a.ptr() == b.ptr(); }
+    static constexpr bool may_have_slow_equality_check() { return false; }
 };
 
 }

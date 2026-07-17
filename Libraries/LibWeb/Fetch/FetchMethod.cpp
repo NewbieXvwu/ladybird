@@ -6,6 +6,7 @@
 
 #include <AK/Debug.h>
 #include <AK/TypeCasts.h>
+#include <AK/Utf16String.h>
 #include <LibJS/Runtime/PromiseCapability.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/DOM/AbortSignal.h>
@@ -26,7 +27,7 @@
 namespace Web::Fetch {
 
 // https://fetch.spec.whatwg.org/#dom-global-fetch
-GC::Ref<WebIDL::Promise> fetch(JS::VM& vm, RequestInfo const& input, RequestInit const& init)
+GC::Ref<WebIDL::Promise> fetch(JS::VM& vm, RequestInfo const& input, Bindings::RequestInit const& init)
 {
     auto& realm = *vm.current_realm();
 
@@ -105,7 +106,7 @@ GC::Ref<WebIDL::Promise> fetch(JS::VM& vm, RequestInfo const& input, RequestInit
         // 3. If response is a network error, then reject p with a TypeError and abort these steps.
         if (response->is_network_error()) {
             auto message = response->network_error_message().value_or("Response is a network error"_string);
-            WebIDL::reject_promise(relevant_realm, promise_capability, JS::TypeError::create(relevant_realm, message));
+            WebIDL::reject_promise(relevant_realm, promise_capability, JS::TypeError::create(relevant_realm, Utf16String::from_utf8(message)));
             return;
         }
 
@@ -116,7 +117,7 @@ GC::Ref<WebIDL::Promise> fetch(JS::VM& vm, RequestInfo const& input, RequestInit
         // 5. Resolve p with responseObject.
         WebIDL::resolve_promise(relevant_realm, promise_capability, response_object);
     };
-    controller_holder->set_controller(MUST(Fetching::fetch(
+    controller_holder->set_controller(Fetching::fetch(
         realm,
         request,
         Infrastructure::FetchAlgorithms::create(vm,
@@ -127,7 +128,7 @@ GC::Ref<WebIDL::Promise> fetch(JS::VM& vm, RequestInfo const& input, RequestInit
                 .process_response = move(process_response),
                 .process_response_end_of_body = {},
                 .process_response_consume_body = {},
-            }))));
+            })));
 
     // 11. Add the following abort steps to requestObject’s signal:
     (void)request_object->signal()->add_abort_algorithm([locally_aborted, request, controller_holder, promise_capability, request_object, response_object, &relevant_realm] {

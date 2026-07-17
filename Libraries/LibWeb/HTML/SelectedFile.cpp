@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/LexicalPath.h>
 #include <LibCore/File.h>
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
@@ -12,24 +11,13 @@
 
 namespace Web::HTML {
 
-ErrorOr<SelectedFile> SelectedFile::from_file_path(ByteString const& file_path)
-{
-    // https://html.spec.whatwg.org/multipage/input.html#file-upload-state-(type=file):concept-input-file-path
-    // Filenames must not contain path components, even in the case that a user has selected an entire directory
-    // hierarchy or multiple files with the same name from different directories.
-    auto name = LexicalPath::basename(file_path);
-
-    auto file = TRY(Core::File::open(file_path, Core::File::OpenMode::Read));
-    return SelectedFile { move(name), IPC::File::adopt_file(move(file)) };
-}
-
-SelectedFile::SelectedFile(ByteString name, ByteBuffer contents)
+SelectedFile::SelectedFile(Utf16String name, ByteBuffer contents)
     : m_name(move(name))
     , m_file_or_contents(move(contents))
 {
 }
 
-SelectedFile::SelectedFile(ByteString name, IPC::File file)
+SelectedFile::SelectedFile(Utf16String name, IPC::File file)
     : m_name(move(name))
     , m_file_or_contents(move(file))
 {
@@ -54,7 +42,7 @@ ErrorOr<void> IPC::encode(Encoder& encoder, Web::HTML::SelectedFile const& file)
 template<>
 ErrorOr<Web::HTML::SelectedFile> IPC::decode(Decoder& decoder)
 {
-    auto name = TRY(decoder.decode<ByteString>());
+    auto name = TRY(decoder.decode<Utf16String>());
     auto file_or_contents = TRY((decoder.decode<Variant<IPC::File, ByteBuffer>>()));
 
     ByteBuffer contents;

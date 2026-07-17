@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/SVGFEMergeNodeElementPrototype.h>
+#include <LibWeb/Bindings/SVGFEMergeNodeElement.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/SVGFEMergeNodeElement.h>
 
@@ -32,7 +32,7 @@ void SVGFEMergeNodeElement::visit_edges(Cell::Visitor& visitor)
 GC::Ref<SVGAnimatedString> SVGFEMergeNodeElement::in1()
 {
     if (!m_in1)
-        m_in1 = SVGAnimatedString::create(realm(), *this, AttributeNames::in);
+        m_in1 = SVGAnimatedString::create(realm(), *this, DOM::QualifiedName { AttributeNames::in, OptionalNone {}, OptionalNone {} });
 
     return *m_in1;
 }

@@ -4,16 +4,23 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGC/Weak.h>
 #include <LibGfx/Bitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Statuses.h>
 #include <LibWeb/HTML/AnimatedBitmapDecodedImageData.h>
+#include <LibWeb/HTML/BitmapDecodedImageData.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
+#include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/ImageCodecPlugin.h>
 #include <LibWeb/SVG/SVGDecodedImageData.h>
@@ -22,13 +29,17 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(SharedResourceRequest);
 
+static u64 s_next_memory_cache_touch_serial;
+
 GC::Ref<SharedResourceRequest> SharedResourceRequest::get_or_create(JS::Realm& realm, GC::Ref<Page> page, URL::URL const& url)
 {
     auto document = Bindings::principal_host_defined_environment_settings_object(realm).responsible_document();
     VERIFY(document);
     auto& shared_resource_requests = document->shared_resource_requests();
-    if (auto it = shared_resource_requests.find(url); it != shared_resource_requests.end())
+    if (auto it = shared_resource_requests.find(url); it != shared_resource_requests.end()) {
+        it->value->touch_memory_cache_entry();
         return *it->value;
+    }
     auto request = realm.create<SharedResourceRequest>(page, url, *document);
     shared_resource_requests.set(url, request);
     return request;
@@ -39,6 +50,7 @@ SharedResourceRequest::SharedResourceRequest(GC::Ref<Page> page, URL::URL url, G
     , m_url(move(url))
     , m_document(document)
 {
+    touch_memory_cache_entry();
 }
 
 SharedResourceRequest::~SharedResourceRequest() = default;
@@ -46,8 +58,19 @@ SharedResourceRequest::~SharedResourceRequest() = default;
 void SharedResourceRequest::finalize()
 {
     Base::finalize();
-    auto& shared_resource_requests = m_document->shared_resource_requests();
-    shared_resource_requests.remove(m_url);
+
+    m_callbacks.clear();
+    m_load_event_delayer.clear();
+    m_image_data = nullptr;
+    m_fetch_controller = nullptr;
+
+    if (m_document) {
+        auto& shared_resource_requests = m_document->shared_resource_requests();
+        if (auto it = shared_resource_requests.find(m_url);
+            it != shared_resource_requests.end() && it->value.ptr() == this)
+            shared_resource_requests.remove(it);
+        m_document = nullptr;
+    }
 }
 
 void SharedResourceRequest::visit_edges(JS::Cell::Visitor& visitor)
@@ -68,6 +91,19 @@ GC::Ptr<DecodedImageData> SharedResourceRequest::image_data() const
     return m_image_data;
 }
 
+bool SharedResourceRequest::can_be_pruned_from_memory_cache() const
+{
+    // NB: Pruning an image that still has clients (e.g. a live element displaying it) frees no memory, since the
+    //     clients keep the decoded data alive, but it forces a refetch if script recreates an element with the
+    //     same URL, e.g. when a framework re-renders the page.
+    return m_image_data && !m_image_data->has_clients();
+}
+
+void SharedResourceRequest::touch_memory_cache_entry()
+{
+    m_cache_touch_serial = ++s_next_memory_cache_touch_serial;
+}
+
 GC::Ptr<Fetch::Infrastructure::FetchController> SharedResourceRequest::fetch_controller()
 {
     return m_fetch_controller.ptr();
@@ -80,24 +116,48 @@ void SharedResourceRequest::set_fetch_controller(GC::Ptr<Fetch::Infrastructure::
 
 void SharedResourceRequest::fetch_resource(JS::Realm& realm, GC::Ref<Fetch::Infrastructure::Request> request)
 {
+    VERIFY(needs_fetching());
+
+    if (!ResourceLoader::is_initialized()) {
+        handle_failed_fetch();
+        return;
+    }
+
+    GC::Weak weak_this { *this };
     Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
-    fetch_algorithms_input.process_response = [this, &realm, request](GC::Ref<Fetch::Infrastructure::Response> response) {
+    fetch_algorithms_input.process_response = [weak_this, &realm, request](GC::Ref<Fetch::Infrastructure::Response> response) {
+        auto self = weak_this.ptr();
+        if (!self)
+            return;
+
+        auto image_data_is_cors_cross_origin = response->is_cors_cross_origin();
+
         // FIXME: If the response is CORS cross-origin, we must use its internal response to query any of its data. See:
         //        https://github.com/whatwg/html/issues/9355
         response = response->unsafe_response();
 
-        auto process_body = GC::create_function(heap(), [this, request, response](ByteBuffer data) {
-            auto extracted_mime_type = response->header_list()->extract_mime_type();
-            auto mime_type = extracted_mime_type.has_value() ? extracted_mime_type.value().essence().bytes_as_string_view() : StringView {};
-            handle_successful_fetch(request->url(), mime_type, move(data));
+        auto process_body = GC::create_function(self->heap(), [weak_this, request, response, image_data_is_cors_cross_origin](ByteBuffer data) {
+            auto self = weak_this.ptr();
+            if (!self)
+                return;
+
+            auto extracted_mime_type = Fetch::Infrastructure::extract_mime_type(response->header_list());
+            auto const is_svg_image = extracted_mime_type.has_value()
+                ? extracted_mime_type.value().essence() == "image/svg+xml"sv
+                : request->url().basename().ends_with(".svg"sv);
+            self->handle_successful_fetch(request->url(), is_svg_image ? IsSVGImage::Yes : IsSVGImage::No, move(data), image_data_is_cors_cross_origin);
         });
-        auto process_body_error = GC::create_function(heap(), [this](JS::Value) {
-            handle_failed_fetch();
+        auto process_body_error = GC::create_function(self->heap(), [weak_this](JS::Value) {
+            auto self = weak_this.ptr();
+            if (!self)
+                return;
+
+            self->handle_failed_fetch();
         });
 
         // Check for failed fetch response
         if (!Fetch::Infrastructure::is_ok_status(response->status()) || !response->body()) {
-            handle_failed_fetch();
+            self->handle_failed_fetch();
             return;
         }
 
@@ -105,12 +165,12 @@ void SharedResourceRequest::fetch_resource(JS::Realm& realm, GC::Ref<Fetch::Infr
     };
 
     m_state = State::Fetching;
+    m_load_event_delayer.emplace(*m_document);
 
     auto fetch_controller = Fetch::Fetching::fetch(
         realm,
         request,
-        Fetch::Infrastructure::FetchAlgorithms::create(realm.vm(), move(fetch_algorithms_input)))
-                                .release_value_but_fixme_should_propagate_errors();
+        Fetch::Infrastructure::FetchAlgorithms::create(realm.vm(), move(fetch_algorithms_input)));
 
     set_fetch_controller(fetch_controller);
 }
@@ -138,33 +198,51 @@ void SharedResourceRequest::add_callbacks(Function<void()> on_finish, Function<v
     m_callbacks.append(move(callbacks));
 }
 
-void SharedResourceRequest::handle_successful_fetch(URL::URL const& url_string, StringView mime_type, ByteBuffer data)
+void SharedResourceRequest::handle_successful_fetch(URL::URL const& url_string, IsSVGImage is_svg_image, ByteBuffer data, bool image_data_is_cors_cross_origin)
 {
     // AD-HOC: At this point, things gets very ad-hoc.
     // FIXME: Bring this closer to spec.
 
-    bool const is_svg_image = mime_type == "image/svg+xml"sv || url_string.basename().ends_with(".svg"sv);
-
-    if (is_svg_image) {
+    if (is_svg_image == IsSVGImage::Yes) {
         auto result = SVG::SVGDecodedImageData::create(m_document->realm(), m_page, url_string, data);
         if (result.is_error()) {
             handle_failed_fetch();
         } else {
             m_image_data = result.release_value();
+            m_image_data->set_is_cors_cross_origin(image_data_is_cors_cross_origin);
             handle_successful_resource_load();
         }
         return;
     }
 
-    auto handle_successful_bitmap_decode = [strong_this = GC::Root(*this)](Web::Platform::DecodedImage& result) -> ErrorOr<void> {
-        Vector<AnimatedBitmapDecodedImageData::Frame> frames;
-        for (auto& frame : result.frames) {
-            frames.append(AnimatedBitmapDecodedImageData::Frame {
-                .bitmap = Gfx::ImmutableBitmap::create(*frame.bitmap, Gfx::AlphaType::Premultiplied, result.color_space),
-                .duration = static_cast<int>(frame.duration),
-            });
+    auto handle_successful_bitmap_decode = [strong_this = GC::Root(*this), image_data_is_cors_cross_origin](Web::Platform::DecodedImage& result) -> ErrorOr<void> {
+        if (result.session_id != 0) {
+            // Streaming animated decode: create AnimatedBitmapDecodedImageData.
+            Vector<NonnullRefPtr<Gfx::Bitmap>> initial_bitmaps;
+            initial_bitmaps.ensure_capacity(result.frames.size());
+            for (auto& frame : result.frames)
+                initial_bitmaps.unchecked_append(*frame.bitmap);
+
+            auto first_bitmap = result.frames.first().bitmap;
+            auto size = first_bitmap->size();
+
+            strong_this->m_image_data = AnimatedBitmapDecodedImageData::create(
+                strong_this->m_document->realm(),
+                *strong_this->m_document,
+                result.session_id,
+                result.frame_count,
+                result.loop_count,
+                size,
+                move(result.color_space),
+                move(result.all_durations),
+                move(initial_bitmaps));
+        } else {
+            // Non animated decode: create a single framed BitmapDecodedImageData.
+            VERIFY(result.frames.size() == 1);
+
+            strong_this->m_image_data = BitmapDecodedImageData::create(strong_this->m_document->realm(), { *result.frames[0].bitmap, result.color_space });
         }
-        strong_this->m_image_data = AnimatedBitmapDecodedImageData::create(strong_this->m_document->realm(), move(frames), result.loop_count, result.is_animated).release_value_but_fixme_should_propagate_errors();
+        strong_this->m_image_data->set_is_cors_cross_origin(image_data_is_cors_cross_origin);
         strong_this->handle_successful_resource_load();
         return {};
     };
@@ -179,6 +257,8 @@ void SharedResourceRequest::handle_successful_fetch(URL::URL const& url_string, 
 void SharedResourceRequest::handle_failed_fetch()
 {
     m_state = State::Failed;
+    m_load_event_delayer.clear();
+    m_fetch_controller = nullptr;
     for (auto& callback : m_callbacks) {
         if (callback.on_fail)
             callback.on_fail->function()();
@@ -189,11 +269,14 @@ void SharedResourceRequest::handle_failed_fetch()
 void SharedResourceRequest::handle_successful_resource_load()
 {
     m_state = State::Finished;
+    m_load_event_delayer.clear();
+    m_fetch_controller = nullptr;
     for (auto& callback : m_callbacks) {
         if (callback.on_finish)
             callback.on_finish->function()();
     }
     m_callbacks.clear();
+    m_document->prune_image_resource_caches();
 }
 
 bool SharedResourceRequest::needs_fetching() const

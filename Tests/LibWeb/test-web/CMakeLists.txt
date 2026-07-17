@@ -1,38 +1,51 @@
 set(SOURCES
     Application.cpp
+    CaptureFile.cpp
+    Collection.cpp
+    Debug.cpp
+    Display.cpp
     Fixture.cpp
     Fuzzy.cpp
+    TestRunCapture.cpp
     TestWebView.cpp
+    Variants.cpp
     main.cpp
 )
 
 add_executable(test-web ${SOURCES})
-add_dependencies(test-web ladybird_build_resource_files ImageDecoder RequestServer WebContent WebWorker)
-target_link_libraries(test-web PRIVATE AK LibCore LibDiff LibFileSystem LibGfx LibImageDecoderClient LibIPC LibJS LibMain LibRequests LibURL LibWeb LibWebView)
-lagom_copy_runtime_dlls(test-web)
+add_dependencies(test-web ladybird_build_resource_files ${ladybird_helper_processes})
+target_link_libraries(test-web PRIVATE AK LibCore LibDiff LibFileSystem LibGfx LibImageDecoders LibImageDecoderClient LibIPC LibJS LibMain LibRequests LibURL LibWeb LibWebView)
 
 if (APPLE)
     target_compile_definitions(test-web PRIVATE LADYBIRD_BINARY_PATH="$<TARGET_FILE_DIR:ladybird>")
 elseif (WIN32)
     target_link_libraries(test-web PRIVATE LibDevTools)
-    find_package(pthread REQUIRED)
     target_include_directories(test-web PRIVATE $<BUILD_INTERFACE:${PTHREAD_INCLUDE_DIR}>)
+    ladybird_windows_bin(test-web CONSOLE)
 endif()
 
-# FIXME: Increase support for building targets on Windows
-if (WIN32 AND ENABLE_WINDOWS_CI)
+# FIXME: Add support for running test-web on Windows
+if (WIN32)
     return()
 endif()
 
 if (BUILD_TESTING)
-    find_package(Python3 REQUIRED)
-
     add_test(
         NAME LibWeb
-        COMMAND $<TARGET_FILE:test-web> --python-executable ${Python3_EXECUTABLE} --dump-failed-ref-tests --per-test-timeout 120 --verbose
+        COMMAND $<TARGET_FILE:test-web> --python-executable ${Python3_EXECUTABLE} --per-test-timeout 120 -v -v
+    )
+
+    add_test(
+        NAME LibWebUIProcessSessionHistory
+        COMMAND $<TARGET_FILE:test-web> --python-executable ${Python3_EXECUTABLE} --per-test-timeout 120
+            --force-new-process --run-ui-process-session-history-tests -f "Text/input/navigation/*"
+            --results-dir test-dumps/ui-process-session-history-results
     )
 
     set_tests_properties(LibWeb PROPERTIES
-        ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_PROJECT_ROOT}
+        ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR}
+        TIMEOUT_SIGNAL_NAME SIGTERM)
+    set_tests_properties(LibWebUIProcessSessionHistory PROPERTIES
+        ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR}
         TIMEOUT_SIGNAL_NAME SIGTERM)
 endif()

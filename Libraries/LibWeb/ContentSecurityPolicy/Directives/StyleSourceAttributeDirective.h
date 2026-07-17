@@ -18,10 +18,10 @@ class StyleSourceAttributeDirective final : public Directive {
 public:
     virtual ~StyleSourceAttributeDirective() = default;
 
-    virtual Result inline_check(GC::Heap&, GC::Ptr<DOM::Element const>, InlineType, GC::Ref<Policy const>, String const&) const override;
+    virtual Result inline_check(GC::Heap&, GC::Ptr<DOM::Element const>, InlineType, GC::Ref<Policy const>, Utf16View) const override;
 
 private:
-    StyleSourceAttributeDirective(String name, Vector<String> value);
+    StyleSourceAttributeDirective(Utf16FlyString name, Vector<Utf16String> value);
 };
 
 }

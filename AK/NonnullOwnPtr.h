@@ -13,8 +13,6 @@
 #include <AK/Traits.h>
 #include <AK/Types.h>
 
-#define NONNULLOWNPTR_SCRUB_BYTE 0xf1
-
 namespace AK {
 
 template<typename T>
@@ -47,10 +45,7 @@ public:
     }
     ~NonnullOwnPtr()
     {
-        clear();
-#ifdef SANITIZE_PTRS
-        m_ptr = (T*)(explode_byte(NONNULLOWNPTR_SCRUB_BYTE));
-#endif
+        delete m_ptr;
     }
 
     NonnullOwnPtr(NonnullOwnPtr const&) = delete;
@@ -169,6 +164,7 @@ struct Traits<NonnullOwnPtr<T>> : public DefaultTraits<NonnullOwnPtr<T>> {
     using ConstPeekType = T const*;
     static unsigned hash(NonnullOwnPtr<T> const& p) { return ptr_hash(p.ptr()); }
     static bool equals(NonnullOwnPtr<T> const& a, NonnullOwnPtr<T> const& b) { return a.ptr() == b.ptr(); }
+    static constexpr bool may_have_slow_equality_check() { return false; }
 };
 
 template<typename T, typename U>

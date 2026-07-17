@@ -17,7 +17,7 @@ class CSSMathInvert final : public CSSMathValue {
 
 public:
     [[nodiscard]] static GC::Ref<CSSMathInvert> create(JS::Realm&, NumericType, GC::Ref<CSSNumericValue>);
-    static WebIDL::ExceptionOr<GC::Ref<CSSMathInvert>> construct_impl(JS::Realm&, CSSNumberish);
+    static GC::Ref<CSSMathInvert> construct_impl(JS::Realm&, CSSNumberish);
 
     virtual ~CSSMathInvert() override;
 
@@ -26,9 +26,11 @@ public:
 
     GC::Ref<CSSNumericValue> value() const;
 
-    virtual String serialize_math_value(Nested, Parens) const override;
+    virtual void serialize_math_value(Utf16StringBuilder&, Nested, Parens) const override;
     virtual bool is_equal_numeric_value(GC::Ref<CSSNumericValue> other) const override;
     virtual Optional<SumValue> create_a_sum_value() const override;
+
+    virtual WebIDL::ExceptionOr<NonnullRefPtr<CalculationNode const>> create_calculation_node(CalculationContext const&) const override;
 
 private:
     CSSMathInvert(JS::Realm&, NumericType, GC::Ref<CSSNumericValue>);

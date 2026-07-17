@@ -7,11 +7,13 @@
  */
 
 #include <AK/TypeCasts.h>
-#include <LibWeb/Bindings/EventPrototype.h>
+#include <LibWeb/Bindings/Event.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/ShadowRoot.h>
+#include <LibWeb/HTML/Window.h>
+#include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 
 namespace Web::DOM {
@@ -19,7 +21,7 @@ namespace Web::DOM {
 GC_DEFINE_ALLOCATOR(Event);
 
 // https://dom.spec.whatwg.org/#concept-event-create
-GC::Ref<Event> Event::create(JS::Realm& realm, FlyString const& event_name, EventInit const& event_init)
+GC::Ref<Event> Event::create(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::EventInit const& event_init)
 {
     auto event = realm.create<Event>(realm, event_name, event_init);
     // 4. Initialize event’s isTrusted attribute to true.
@@ -27,13 +29,13 @@ GC::Ref<Event> Event::create(JS::Realm& realm, FlyString const& event_name, Even
     return event;
 }
 
-WebIDL::ExceptionOr<GC::Ref<Event>> Event::construct_impl(JS::Realm& realm, FlyString const& event_name, EventInit const& event_init)
+WebIDL::ExceptionOr<GC::Ref<Event>> Event::construct_impl(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::EventInit const& event_init)
 {
     return realm.create<Event>(realm, event_name, event_init);
 }
 
 // https://dom.spec.whatwg.org/#inner-event-creation-steps
-Event::Event(JS::Realm& realm, FlyString const& type)
+Event::Event(JS::Realm& realm, Utf16FlyString const& type)
     : PlatformObject(realm)
     , m_type(type)
     , m_initialized(true)
@@ -42,7 +44,7 @@ Event::Event(JS::Realm& realm, FlyString const& type)
 }
 
 // https://dom.spec.whatwg.org/#inner-event-creation-steps
-Event::Event(JS::Realm& realm, FlyString const& type, EventInit const& event_init)
+Event::Event(JS::Realm& realm, Utf16FlyString const& type, Bindings::EventInit const& event_init)
     : PlatformObject(realm)
     , m_type(type)
     , m_bubbles(event_init.bubbles)
@@ -109,7 +111,7 @@ void Event::set_cancelled_flag()
 }
 
 // https://dom.spec.whatwg.org/#concept-event-initialize
-void Event::initialize_event(String const& type, bool bubbles, bool cancelable)
+void Event::initialize_event(Utf16FlyString const& type, bool bubbles, bool cancelable)
 {
     // 1. Set event’s initialized flag.
     m_initialized = true;
@@ -136,7 +138,7 @@ void Event::initialize_event(String const& type, bool bubbles, bool cancelable)
 }
 
 // https://dom.spec.whatwg.org/#dom-event-initevent
-void Event::init_event(String const& type, bool bubbles, bool cancelable)
+void Event::init_event(Utf16FlyString const& type, bool bubbles, bool cancelable)
 {
     // 1. If this’s dispatch flag is set, then return.
     if (m_dispatch)
@@ -261,6 +263,15 @@ Vector<GC::Root<EventTarget>> Event::composed_path() const
 
     // 17. Return composedPath.
     return composed_path;
+}
+
+// AD-HOC: Needed to return a WindowProxy when the current target is a Window,
+// ensuring that JavaScript sees the correct global object instead of the internal Window.
+GC::Ptr<EventTarget> Event::current_target_for_bindings() const
+{
+    if (auto* window = as_if<HTML::Window>(m_current_target.ptr()))
+        return window->window();
+    return m_current_target;
 }
 
 }

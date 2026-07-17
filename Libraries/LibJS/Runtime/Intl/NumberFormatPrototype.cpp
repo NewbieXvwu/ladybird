@@ -28,7 +28,7 @@ void NumberFormatPrototype::initialize(Realm& realm)
     auto& vm = this->vm();
 
     // 16.3.7 Intl.NumberFormat.prototype [ %Symbol.toStringTag% ], https://tc39.es/ecma402/#sec-intl.numberformat.prototype-%symbol.tostringtag%
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Intl.NumberFormat"_string), Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Intl.NumberFormat"_utf16_fly_string), Attribute::Configurable);
 
     define_native_accessor(realm, vm.names.format, format, nullptr, Attribute::Configurable);
 
@@ -53,7 +53,7 @@ JS_DEFINE_NATIVE_FUNCTION(NumberFormatPrototype::resolved_options)
     // 4. Let options be OrdinaryObjectCreate(%Object.prototype%).
     auto options = Object::create(realm, realm.intrinsics().object_prototype());
 
-    // 5. For each row of Table 26, except the header row, in table order, do
+    // 5. For each row of Table 28, except the header row, in table order, do
     //     a. Let p be the Property value of the current row.
     //     b. Let v be the value of nf's internal slot whose name is the Internal Slot value of the current row.
     //     c. If v is not undefined, then

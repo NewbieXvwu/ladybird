@@ -10,9 +10,7 @@
 #include <AK/ByteBuffer.h>
 #include <AK/ByteString.h>
 #include <AK/Noncopyable.h>
-#include <AK/Optional.h>
-#include <LibCore/Forward.h>
-#include <LibHTTP/HeaderMap.h>
+#include <LibHTTP/HeaderList.h>
 #include <LibURL/URL.h>
 
 namespace HTTP {
@@ -38,9 +36,10 @@ public:
             return "Out of memory"sv;
         case ParseError::UnsupportedMethod:
             return "Unsupported method"sv;
-        default:
-            VERIFY_NOT_REACHED();
+        case ParseError::InvalidURL:
+            return "Invalid URL"sv;
         }
+        VERIFY_NOT_REACHED();
     }
 
     enum Method {
@@ -56,18 +55,13 @@ public:
         PUT,
     };
 
-    struct BasicAuthenticationCredentials {
-        ByteString username;
-        ByteString password;
-    };
-
-    HttpRequest() = default;
+    explicit HttpRequest(NonnullRefPtr<HeaderList>);
     ~HttpRequest() = default;
 
     AK_MAKE_DEFAULT_MOVABLE(HttpRequest);
 
     ByteString const& resource() const { return m_resource; }
-    HeaderMap const& headers() const { return m_headers; }
+    HeaderList const& headers() const { return m_headers; }
 
     URL::URL const& url() const { return m_url; }
     void set_url(URL::URL const& url) { m_url = url; }
@@ -81,17 +75,13 @@ public:
     StringView method_name() const;
     ErrorOr<ByteBuffer> to_raw_request() const;
 
-    void set_headers(HeaderMap);
-
     static ErrorOr<HttpRequest, HttpRequest::ParseError> from_raw_request(ReadonlyBytes);
-    static Optional<Header> get_http_basic_authentication_header(URL::URL const&);
-    static Optional<BasicAuthenticationCredentials> parse_http_basic_authentication_header(ByteString const&);
 
 private:
     URL::URL m_url;
     ByteString m_resource;
     Method m_method { GET };
-    HeaderMap m_headers;
+    NonnullRefPtr<HeaderList> m_headers;
     ByteBuffer m_body;
 };
 

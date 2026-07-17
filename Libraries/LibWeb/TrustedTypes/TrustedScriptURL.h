@@ -8,9 +8,11 @@
 
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/Bindings/TrustedScriptURLPrototype.h>
+#include <LibWeb/Bindings/TrustedScriptURL.h>
 
 namespace Web::TrustedTypes {
+
+using TrustedScriptURLOrString = Variant<GC::Ref<TrustedScriptURL>, Utf16String>;
 
 class TrustedScriptURL final : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(TrustedScriptURL, Bindings::PlatformObject);

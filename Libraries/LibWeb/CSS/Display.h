@@ -10,6 +10,7 @@
 #include <AK/Assertions.h>
 #include <AK/String.h>
 #include <LibWeb/CSS/Enums.h>
+#include <LibWeb/Forward.h>
 
 namespace Web::CSS {
 
@@ -37,12 +38,12 @@ public:
         VERIFY_NOT_REACHED();
     }
 
-    enum class ListItem {
+    enum class ListItem : u8 {
         No,
         Yes,
     };
 
-    enum class Type {
+    enum class Type : u8 {
         OutsideAndInside,
         Internal,
         Box,
@@ -54,6 +55,7 @@ public:
         VERIFY(is_internal());
         return m_value.internal;
     }
+
     bool is_table_column() const { return is_internal() && internal() == DisplayInternal::TableColumn; }
     bool is_table_row_group() const { return is_internal() && internal() == DisplayInternal::TableRowGroup; }
     bool is_table_header_group() const { return is_internal() && internal() == DisplayInternal::TableHeaderGroup; }
@@ -62,10 +64,18 @@ public:
     bool is_table_cell() const { return is_internal() && internal() == DisplayInternal::TableCell; }
     bool is_table_column_group() const { return is_internal() && internal() == DisplayInternal::TableColumnGroup; }
     bool is_table_caption() const { return is_internal() && internal() == DisplayInternal::TableCaption; }
+
     // https://drafts.csswg.org/css-display-3/#internal-table-element
     bool is_internal_table() const
     {
-        return is_internal() && (internal() == DisplayInternal::TableRowGroup || internal() == DisplayInternal::TableHeaderGroup || internal() == DisplayInternal::TableFooterGroup || internal() == DisplayInternal::TableRow || internal() == DisplayInternal::TableCell || internal() == DisplayInternal::TableColumnGroup || internal() == DisplayInternal::TableColumn);
+        return is_internal()
+            && (internal() == DisplayInternal::TableRowGroup
+                || internal() == DisplayInternal::TableHeaderGroup
+                || internal() == DisplayInternal::TableFooterGroup
+                || internal() == DisplayInternal::TableRow
+                || internal() == DisplayInternal::TableCell
+                || internal() == DisplayInternal::TableColumnGroup
+                || internal() == DisplayInternal::TableColumn);
     }
 
     bool is_none() const { return m_type == Type::Box && m_value.box == DisplayBox::None; }
@@ -128,51 +138,9 @@ public:
         Math,
     };
 
-    static Display from_short(Short short_)
-    {
-        switch (short_) {
-        case Short::None:
-            return Display { DisplayBox::None };
-        case Short::Contents:
-            return Display { DisplayBox::Contents };
-        case Short::Block:
-            return Display { DisplayOutside::Block, DisplayInside::Flow };
-        case Short::Inline:
-            return Display { DisplayOutside::Inline, DisplayInside::Flow };
-        case Short::Flow:
-            return Display { DisplayOutside::Block, DisplayInside::Flow };
-        case Short::FlowRoot:
-            return Display { DisplayOutside::Block, DisplayInside::FlowRoot };
-        case Short::InlineBlock:
-            return Display { DisplayOutside::Inline, DisplayInside::FlowRoot };
-        case Short::RunIn:
-            return Display { DisplayOutside::RunIn, DisplayInside::Flow };
-        case Short::ListItem:
-            return Display { DisplayOutside::Block, DisplayInside::Flow, ListItem::Yes };
-        case Short::InlineListItem:
-            return Display { DisplayOutside::Inline, DisplayInside::Flow, ListItem::Yes };
-        case Short::Flex:
-            return Display { DisplayOutside::Block, DisplayInside::Flex };
-        case Short::InlineFlex:
-            return Display { DisplayOutside::Inline, DisplayInside::Flex };
-        case Short::Grid:
-            return Display { DisplayOutside::Block, DisplayInside::Grid };
-        case Short::InlineGrid:
-            return Display { DisplayOutside::Inline, DisplayInside::Grid };
-        case Short::Ruby:
-            return Display { DisplayOutside::Inline, DisplayInside::Ruby };
-        case Short::Table:
-            return Display { DisplayOutside::Block, DisplayInside::Table };
-        case Short::InlineTable:
-            return Display { DisplayOutside::Inline, DisplayInside::Table };
-        case Short::Math:
-            // NOTE: The spec ( https://w3c.github.io/mathml-core/#new-display-math-value ) does not
-            //       mention what the outside value for `display: math` should be.
-            //       The UA stylesheet does `* { display: block math; }` so let's go with that.
-            return Display { DisplayOutside::Block, DisplayInside::Math };
-        }
-        VERIFY_NOT_REACHED();
-    }
+    static Display from_keyword(Keyword);
+    static Display from_short(Short short_);
+    Optional<Keyword> to_keyword() const;
 
     Display(DisplayOutside outside, DisplayInside inside)
         : m_type(Type::OutsideAndInside)

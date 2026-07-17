@@ -2,6 +2,7 @@
 <html>
     <head>
         <title>Task Manager</title>
+        <link rel="icon" type="image/png" href="resource://icons/48x48/app-browser.png" />
         <style>
             @media (prefers-color-scheme: dark) {
                 :root {
@@ -24,6 +25,24 @@
 
                 font-family: Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
                 font-size: 10pt;
+            }
+
+            header {
+                display: flex;
+                align-items: center;
+
+                margin-bottom: 20px;
+            }
+
+            header img {
+                width: 48px;
+                height: 48px;
+                margin-right: 10px;
+            }
+
+            header h1 {
+                font-size: 20px;
+                margin: 0;
             }
 
             table {
@@ -62,9 +81,22 @@
             tbody tr:hover {
                 background-color: var(--table-row-hover);
             }
+
+            td.process-name {
+                --process-depth: 0;
+                padding-left: calc(4px + var(--process-depth) * 20px);
+            }
         </style>
     </head>
     <body>
+        <header>
+            <picture>
+                <source srcset="resource://icons/128x128/app-browser.png" media="(prefers-color-scheme: dark)" />
+                <img src="resource://icons/128x128/app-browser-dark.png" />
+            </picture>
+            <h1>Ladybird Processes</h1>
+        </header>
+
         <table>
             <thead>
                 <tr>
@@ -76,18 +108,16 @@
             </thead>
             <tbody id="process-table"></tbody>
         </table>
-
-        <script type="text/javascript">
-            const cpuFormatter = new Intl.NumberFormat([], {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
+        <script type="module">
+            import { getByteFormatter } from "resource://ladybird/utils.js";
+            const memoryFormatter = getByteFormatter(() => {
+                return {
+                    unitDisplay: "narrow",
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                };
             });
-
-            const memoryFormatter = new Intl.NumberFormat([], {
-                style: "unit",
-                unit: "byte",
-                notation: "compact",
-                unitDisplay: "narrow",
+            const cpuFormatter = new Intl.NumberFormat([], {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,
             });
@@ -115,7 +145,7 @@
 
                 const multiplier = window.sortDirection === Direction.ascending ? 1 : -1;
 
-                window.processes.sort((lhs, rhs) => {
+                const compareProcesses = (lhs, rhs) => {
                     const lhsValue = lhs[window.sortKey];
                     const rhsValue = rhs[window.sortKey];
 
@@ -124,24 +154,64 @@
                     }
 
                     return multiplier * (lhsValue - rhsValue);
-                });
+                };
 
                 let oldTable = document.getElementById("process-table");
 
                 let newTable = document.createElement("tbody");
                 newTable.setAttribute("id", "process-table");
 
-                const insertColumn = (row, value) => {
+                const insertColumn = (row, value, className) => {
                     let column = row.insertCell();
+                    if (className) {
+                        column.className = className;
+                    }
                     column.innerText = value;
+                    return column;
                 };
 
+                const processesByPID = new Map();
                 window.processes.forEach(process => {
+                    processesByPID.set(process.pid, process);
+                });
+
+                const childProcessesByEmbedderPID = new Map();
+                const rootProcesses = [];
+                window.processes.forEach(process => {
+                    if (process.embedderPID !== undefined && processesByPID.has(process.embedderPID)) {
+                        let childProcesses = childProcessesByEmbedderPID.get(process.embedderPID);
+                        if (!childProcesses) {
+                            childProcesses = [];
+                            childProcessesByEmbedderPID.set(process.embedderPID, childProcesses);
+                        }
+                        childProcesses.push(process);
+                    } else {
+                        rootProcesses.push(process);
+                    }
+                });
+
+                const insertProcess = (process, depth) => {
                     let row = newTable.insertRow();
-                    insertColumn(row, process.name);
+                    let nameColumn = insertColumn(row, process.name, "process-name");
+                    nameColumn.style.setProperty("--process-depth", depth);
                     insertColumn(row, process.pid);
                     insertColumn(row, cpuFormatter.format(process.cpu));
-                    insertColumn(row, memoryFormatter.format(process.memory));
+                    insertColumn(row, memoryFormatter.formatBytes(process.memory));
+
+                    const childProcesses = childProcessesByEmbedderPID.get(process.pid);
+                    if (!childProcesses) {
+                        return;
+                    }
+
+                    childProcesses.sort(compareProcesses);
+                    childProcesses.forEach(childProcess => {
+                        insertProcess(childProcess, depth + 1);
+                    });
+                };
+
+                rootProcesses.sort(compareProcesses);
+                rootProcesses.forEach(process => {
+                    insertProcess(process, 0);
                 });
 
                 oldTable.parentNode.replaceChild(newTable, oldTable);

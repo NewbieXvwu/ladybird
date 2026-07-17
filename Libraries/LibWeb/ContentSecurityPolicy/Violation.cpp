@@ -26,15 +26,15 @@ namespace Web::ContentSecurityPolicy {
 
 GC_DEFINE_ALLOCATOR(Violation);
 
-Violation::Violation(GC::Ptr<JS::Object> global_object, GC::Ref<Policy const> policy, String directive)
+Violation::Violation(GC::Ptr<JS::Object> global_object, GC::Ref<Policy const> policy, Utf16View directive)
     : m_global_object(global_object)
     , m_policy(policy)
-    , m_effective_directive(directive)
+    , m_effective_directive(Utf16String::from_utf16(directive))
 {
 }
 
 // https://w3c.github.io/webappsec-csp/#create-violation-for-global
-GC::Ref<Violation> Violation::create_a_violation_object_for_global_policy_and_directive(JS::Realm& realm, GC::Ptr<JS::Object> global_object, GC::Ref<Policy const> policy, String directive)
+GC::Ref<Violation> Violation::create_a_violation_object_for_global_policy_and_directive(JS::Realm& realm, GC::Ptr<JS::Object> global_object, GC::Ref<Policy const> policy, Utf16View directive)
 {
     // 1. Let violation be a new violation whose global object is global, policy is policy, effective directive is
     //    directive, and resource is null.
@@ -47,7 +47,7 @@ GC::Ref<Violation> Violation::create_a_violation_object_for_global_policy_and_di
 
     // 3. If global is a Window object, set violation’s referrer to global’s document's referrer.
     if (auto* window = as_if<HTML::Window>(global_object.ptr())) {
-        violation->m_referrer = URL::Parser::basic_parse(window->associated_document().referrer());
+        violation->m_referrer = URL::Parser::basic_parse(window->associated_document().referrer().utf16_view());
     }
 
     // FIXME: 4. Set violation’s status to the HTTP status code for the resource associated with violation’s global object.
@@ -69,7 +69,7 @@ GC::Ref<Violation> Violation::create_a_violation_object_for_request_and_policy(J
 
     // 2. Let violation be the result of executing § 2.4.1 Create a violation object for global, policy, and directive
     //      on request’s client’s global object, policy, and directive.
-    auto violation = create_a_violation_object_for_global_policy_and_directive(realm, request->client()->global_object(), policy, directive->to_string());
+    auto violation = create_a_violation_object_for_global_policy_and_directive(realm, request->client()->global_object(), policy, *directive);
 
     // 3. Set violation’s resource to request’s url.
     // Spec Note: We use request’s url, and not its current url, as the latter might contain information about redirect
@@ -98,15 +98,14 @@ URL::URL Violation::url() const
         return URL::URL {};
     }
 
-    // FIXME: File a spec issue about what to do for ShadowRealms here.
     auto& universal_scope = as<HTML::UniversalGlobalScopeMixin>(*m_global_object);
-    auto& principal_global = HTML::relevant_principal_global_object(universal_scope.this_impl());
+    auto& global = HTML::relevant_global_object(universal_scope.this_impl());
 
-    if (auto* window = as_if<HTML::Window>(principal_global)) {
+    if (auto* window = as_if<HTML::Window>(global)) {
         return window->associated_document().url();
     }
 
-    if (auto* worker = as_if<HTML::WorkerGlobalScope>(principal_global)) {
+    if (auto* worker = as_if<HTML::WorkerGlobalScope>(global)) {
         return worker->url();
     }
 
@@ -197,11 +196,11 @@ ByteBuffer Violation::obtain_the_deprecated_serialization(JS::Realm& realm) cons
 
     // "effective-directive"
     //    violation's effective directive
-    body.value.set("effective-directive"_string, Infra::JSONValue { m_effective_directive });
+    body.value.set("effective-directive"_string, Infra::JSONValue { m_effective_directive.to_utf8() });
 
     // "violated-directive"
     //    violation's effective directive
-    body.value.set("violated-directive"_string, Infra::JSONValue { m_effective_directive });
+    body.value.set("violated-directive"_string, Infra::JSONValue { m_effective_directive.to_utf8() });
 
     // "original-policy"
     //    The serialization of violation's policy
@@ -222,7 +221,7 @@ ByteBuffer Violation::obtain_the_deprecated_serialization(JS::Realm& realm) cons
     //            contain samples for non-script violations, like stylesheets. The data contained in a
     //            SecurityPolicyViolationEvent object, and in reports generated via the new report-to directive, is
     //            named in a more encompassing fashion: sample.
-    body.value.set("script-sample"_string, Infra::JSONValue { m_sample });
+    body.value.set("script-sample"_string, Infra::JSONValue { m_sample.to_utf8() });
 
     // 2. If violation’s source file is not null:
     if (m_source_file.has_value()) {
@@ -239,7 +238,9 @@ ByteBuffer Violation::obtain_the_deprecated_serialization(JS::Realm& realm) cons
 
     // 3. Assert: If body["blocked-uri"] is not "inline", then body["sample"] is the empty string.
     // FIXME: File spec issue that body["sample"] should be body["script-sample"]
-    if (m_resource.has<Resource>() && m_resource.get<Resource>() != Resource::Inline) {
+    // FIXME: This is not a valid assertion, since Eval, TrustedTypesSink and TrustedTypesPolicy provide a sample. https://github.com/w3c/webappsec-csp/issues/788
+    if (auto* maybe_resource = m_resource.get_pointer<Resource>();
+        !maybe_resource || (*maybe_resource != Resource::Inline && *maybe_resource != Resource::Eval && *maybe_resource != Resource::TrustedTypesSink && *maybe_resource != Resource::TrustedTypesPolicy)) {
         VERIFY(m_sample.is_empty());
     }
 
@@ -315,7 +316,7 @@ void Violation::report_a_violation(JS::Realm& realm)
         if (is<DOM::EventTarget>(target_as_object.ptr())) {
             auto& event_target = static_cast<DOM::EventTarget&>(*target_as_object.ptr());
 
-            SecurityPolicyViolationEventInit event_init {};
+            Bindings::SecurityPolicyViolationEventInit event_init {};
 
             // bubbles
             //    true
@@ -330,17 +331,17 @@ void Violation::report_a_violation(JS::Realm& realm)
 
             // documentURI
             //    The result of executing § 5.4 Strip URL for use in reports on violation's url.
-            event_init.document_uri = strip_url_for_use_in_reports(url());
+            event_init.document_uri = Utf16String::from_utf8(strip_url_for_use_in_reports(url()));
 
             // referrer
             //    The result of executing § 5.4 Strip URL for use in reports on violation's referrer.
             // FIXME: File spec issue for referrer being potentially null.
-            event_init.referrer = m_referrer.has_value() ? strip_url_for_use_in_reports(m_referrer.value()) : String {};
+            event_init.referrer = m_referrer.has_value() ? Utf16String::from_utf8(strip_url_for_use_in_reports(m_referrer.value())) : Utf16String {};
 
             // blockedURI
             //    The result of executing § 5.2 Obtain the blockedURI of a violation's resource on violation’s
             //    resource.
-            event_init.blocked_uri = obtain_the_blocked_uri_of_resource();
+            event_init.blocked_uri = Utf16String::from_utf8(obtain_the_blocked_uri_of_resource());
 
             // effectiveDirective
             //    violation's effective directive
@@ -354,7 +355,7 @@ void Violation::report_a_violation(JS::Realm& realm)
 
             // originalPolicy
             //    The serialization of violation's policy
-            event_init.original_policy = m_policy->pre_parsed_policy_string({});
+            event_init.original_policy = Utf16String::from_utf8(m_policy->pre_parsed_policy_string({}));
 
             // disposition
             //    violation's disposition
@@ -363,7 +364,7 @@ void Violation::report_a_violation(JS::Realm& realm)
             // sourceFile
             //    The result of executing § 5.4 Strip URL for use in reports on violation’s source file, if
             //    violation's source file is not null, or null otherwise.
-            event_init.source_file = m_source_file.has_value() ? strip_url_for_use_in_reports(m_source_file.value()) : String {};
+            event_init.source_file = m_source_file.has_value() ? Utf16String::from_utf8(strip_url_for_use_in_reports(m_source_file.value())) : Utf16String {};
 
             // statusCode
             //    violation's status
@@ -404,7 +405,7 @@ void Violation::report_a_violation(JS::Realm& realm)
 
                         // method
                         //    "POST"
-                        request->set_method(MUST(ByteBuffer::copy("POST"sv.bytes())));
+                        request->set_method("POST"sv);
 
                         // url
                         //    violation’s url
@@ -413,9 +414,8 @@ void Violation::report_a_violation(JS::Realm& realm)
 
                         // origin
                         //    violation's global object's relevant settings object's origin
-                        // FIXME: File spec issue that global object can be null, so we use the realm to get the ESO
-                        //        instead, and cross ShadowRealm boundaries with the principal realm.
-                        auto& environment_settings_object = Bindings::principal_host_defined_environment_settings_object(HTML::principal_realm(realm));
+                        // FIXME: File spec issue that global object can be null, so we use the realm to get the ESO instead.
+                        auto& environment_settings_object = Bindings::principal_host_defined_environment_settings_object(realm);
                         request->set_origin(environment_settings_object.origin());
 
                         // traversable for user prompts
@@ -445,10 +445,9 @@ void Violation::report_a_violation(JS::Realm& realm)
                         // header list
                         //    A header list containing a single header whose name is "Content-Type", and value is
                         //    "application/csp-report"
-                        auto header_list = Fetch::Infrastructure::HeaderList::create(vm);
-                        auto content_type_header = Fetch::Infrastructure::Header::from_string_pair("Content-Type"sv, "application/csp-report"sv);
-                        header_list->append(move(content_type_header));
-                        request->set_header_list(header_list);
+                        auto header_list = HTTP::HeaderList::create();
+                        header_list->append({ "Content-Type"sv, "application/csp-report"sv });
+                        request->set_header_list(move(header_list));
 
                         // body
                         //    The result of executing § 5.3 Obtain the deprecated serialization of violation on

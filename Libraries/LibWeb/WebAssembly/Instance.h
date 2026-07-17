@@ -23,20 +23,20 @@ class Instance : public Bindings::PlatformObject {
     GC_DECLARE_ALLOCATOR(Instance);
 
 public:
-    static WebIDL::ExceptionOr<GC::Ref<Instance>> construct_impl(JS::Realm&, Module& module, Optional<GC::Root<JS::Object>>& import_object);
+    static WebIDL::ExceptionOr<GC::Ref<Instance>> construct_impl(JS::Realm&, Module& module, GC::Ptr<JS::Object> import_object);
 
     Object const* exports() const { return m_exports.ptr(); }
+    Wasm::ModuleInstance const* module_instance() const { return m_module_instance.ptr(); }
 
 private:
-    Instance(JS::Realm&, NonnullOwnPtr<Wasm::ModuleInstance>);
+    Instance(JS::Realm&, NonnullRefPtr<Wasm::ModuleInstance>);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Visitor&) override;
 
     GC::Ref<Object> m_exports;
-    NonnullOwnPtr<Wasm::ModuleInstance> m_module_instance;
+    NonnullRefPtr<Wasm::ModuleInstance> m_module_instance;
     HashMap<Wasm::FunctionAddress, GC::Ptr<JS::FunctionObject>> m_function_instances;
-    HashMap<Wasm::TableAddress, GC::Ptr<WebAssembly::Table>> m_table_instances;
 };
 
 }

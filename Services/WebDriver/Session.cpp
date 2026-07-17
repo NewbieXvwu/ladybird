@@ -10,15 +10,26 @@
 
 #include <AK/HashMap.h>
 #include <AK/JsonObject.h>
-#include <LibCore/LocalServer.h>
-#include <LibCore/StandardPaths.h>
+#include <AK/NumericLimits.h>
+#include <AK/Vector.h>
+#if !defined(AK_OS_MACOS)
+#    include <LibCore/LocalServer.h>
+#    include <LibCore/Socket.h>
+#    include <LibCore/StandardPaths.h>
+#else
+#    include <LibIPC/TransportBootstrapMach.h>
+#    include <LibWebView/Utilities.h>
+#endif
+#include <LibCore/Process.h>
 #include <LibCore/System.h>
+#include <LibCore/Timer.h>
+#include <LibFileSystem/FileSystem.h>
+#include <LibIPC/Transport.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/WebDriver/Proxy.h>
 #include <LibWeb/WebDriver/TimeoutsConfiguration.h>
 #include <LibWeb/WebDriver/UserPrompt.h>
 #include <WebDriver/Session.h>
-#include <unistd.h>
 
 namespace WebDriver {
 
@@ -29,7 +40,7 @@ static HashMap<String, NonnullRefPtr<Session>> s_http_sessions;
 ErrorOr<NonnullRefPtr<Session>> Session::create(NonnullRefPtr<Client> client, JsonObject& capabilities, Web::WebDriver::SessionFlags flags)
 {
     // 1. Let session id be the result of generating a UUID.
-    auto session_id = MUST(Web::Crypto::generate_random_uuid());
+    auto session_id = Web::Crypto::generate_random_uuid();
 
     // 2. Let session be a new session with session ID session id, and HTTP flag flags contains "http".
     auto session = adopt_ref(*new Session(client, capabilities, move(session_id), flags));
@@ -122,6 +133,7 @@ Session::Session(NonnullRefPtr<Client> client, JsonObject const& capabilities, S
     , m_options(capabilities)
     , m_session_id(move(session_id))
     , m_session_flags(flags)
+    , m_event_loop(Core::EventLoop::current())
 {
 }
 
@@ -133,7 +145,7 @@ ErrorOr<NonnullRefPtr<Session>, Web::WebDriver::Error> Session::find_session(Str
 
     if (auto session = sessions.get(session_id); session.has_value()) {
         if (allow_invalid_window_handle == AllowInvalidWindowHandle::No)
-            TRY(session.value()->ensure_current_window_handle_is_valid());
+            TRY(session.value()->wait_for_current_window_to_have_web_content_connection());
 
         return *session.release_value();
     }
@@ -146,6 +158,18 @@ size_t Session::session_count(Web::WebDriver::SessionFlags session_flags)
     if (has_flag(session_flags, Web::WebDriver::SessionFlags::Http))
         return s_http_sessions.size();
     return s_sessions.size();
+}
+
+void Session::close_all()
+{
+    // close() unregisters each session as it runs, so snapshot first. s_sessions holds every
+    // session (HTTP ones are also in s_http_sessions), so iterating it alone covers all of them.
+    Vector<NonnullRefPtr<Session>> sessions;
+    sessions.ensure_capacity(s_sessions.size());
+    for (auto& session : s_sessions)
+        sessions.unchecked_append(session.value);
+    for (auto& session : sessions)
+        session->close();
 }
 
 // https://w3c.github.io/webdriver/#dfn-close-the-session
@@ -174,90 +198,273 @@ void Session::close()
         Web::WebDriver::reset_has_proxy_configuration();
 
         // 5. Optionally, close all top-level browsing contexts, without prompting to unload.
-        for (auto& it : m_windows)
+        for (auto& it : m_windows) {
+            if (!it.value.web_content_connection)
+                continue;
+
+            it.value.web_content_connection->on_close = nullptr;
+            it.value.web_content_connection->on_driver_execution_complete = nullptr;
+            it.value.web_content_connection->on_did_set_window_handle = nullptr;
+            it.value.web_content_connection->on_did_start_window_replacement = nullptr;
+            it.value.web_content_connection->on_did_close_window = nullptr;
             it.value.web_content_connection->close_session();
+        }
     }
     // -> Remote end is an intermediary node
     //     1. Close the associated session. If this causes an error to occur, complete the remainder of this algorithm
     //        before returning the error.
 
     // 4. Perform any implementation-specific cleanup steps.
-    if (m_browser_process.has_value())
-        MUST(Core::System::kill(m_browser_process->pid(), SIGTERM));
-
-    if (m_web_content_socket_path.has_value()) {
-        MUST(Core::System::unlink(*m_web_content_socket_path));
-        m_web_content_socket_path = {};
+    for (auto& [_, connection] : m_pending_connections) {
+        connection->on_close = nullptr;
+        connection->on_driver_execution_complete = nullptr;
+        connection->on_did_set_window_handle = nullptr;
+        connection->on_did_start_window_replacement = nullptr;
+        connection->on_did_close_window = nullptr;
     }
+    m_pending_connections.clear();
+
+    if (m_browser_process.has_value())
+        MUST(Core::Process::terminate_process(m_browser_process->pid(), Core::Process::TerminationMode::Graceful));
+
+#if defined(AK_OS_MACOS)
+    m_web_content_mach_port_server = nullptr;
+#else
+    if (!m_web_content_endpoint.is_empty())
+        MUST(FileSystem::remove(m_web_content_endpoint, FileSystem::RecursionMode::Disallowed));
+#endif
+    m_web_content_endpoint = {};
 
     // 5. If an error has occurred in any of the steps above, return the error, otherwise return success with data null.
 }
 
-ErrorOr<NonnullRefPtr<Core::LocalServer>> Session::create_server(NonnullRefPtr<ServerPromise> promise)
+ErrorOr<void> Session::accept_web_content_transport(NonnullOwnPtr<IPC::Transport> transport, NonnullRefPtr<ServerPromise> promise)
 {
-    static_assert(IsSame<IPC::Transport, IPC::TransportSocket>, "Need to handle other IPC transports here");
+    auto web_content_connection = TRY(adopt_nonnull_ref_or_enomem(new (nothrow) WebContentConnection(move(transport))));
+    dbgln("WebDriver is connected to WebContent");
 
-    dbgln("Listening for WebDriver connection on {}", *m_web_content_socket_path);
+    auto connection_id = m_next_pending_connection_id++;
+    // Publish the connection before the initial did_set_window_handle message can race in.
+    m_pending_connections.set(connection_id, web_content_connection);
 
-    (void)Core::System::unlink(*m_web_content_socket_path);
+    web_content_connection->on_close = [this, promise, connection_id]() {
+        if (m_pending_connections.remove(connection_id)) {
+            dbgln_if(WEBDRIVER_DEBUG, "Pending connection {} closed before sending its handle", connection_id);
+            promise->reject(Error::from_string_literal("Window was closed before sending its handle"));
+        }
+    };
 
-    auto server = Core::LocalServer::construct();
-    server->listen(*m_web_content_socket_path);
-
-    server->on_accept = [this, promise](auto client_socket) {
-        auto maybe_connection = adopt_nonnull_ref_or_enomem(new (nothrow) WebContentConnection(make<IPC::Transport>(move(client_socket))));
-        if (maybe_connection.is_error()) {
-            promise->resolve(maybe_connection.release_error());
+    web_content_connection->on_did_set_window_handle = [this, promise, connection_id, connection = web_content_connection.ptr()](String window_handle) {
+        auto maybe_pending_connection = m_pending_connections.take(connection_id);
+        if (!maybe_pending_connection.has_value()) {
+            did_update_window_handle(move(window_handle), *connection);
             return;
         }
 
-        dbgln("WebDriver is connected to WebContent socket");
-        auto web_content_connection = maybe_connection.release_value();
+        auto pending_connection = maybe_pending_connection.value();
 
-        auto maybe_window_handle = web_content_connection->get_window_handle();
-        if (maybe_window_handle.is_error()) {
-            promise->reject(Error::from_string_literal("Window was closed immediately"));
-            return;
-        }
+        dbgln_if(WEBDRIVER_DEBUG, "Window {} registered with WebDriver.", window_handle);
 
-        auto const& window_handle = maybe_window_handle.value().as_string();
-
-        web_content_connection->on_close = [this, window_handle]() {
-            dbgln_if(WEBDRIVER_DEBUG, "Window {} was closed remotely.", window_handle);
-            m_windows.remove(window_handle);
-            if (m_windows.is_empty())
-                close();
+        pending_connection->on_close = [this, connection]() {
+            dbgln_if(WEBDRIVER_DEBUG, "WebContent connection closed remotely.");
+            web_content_connection_closed(*connection);
+        };
+        pending_connection->on_did_start_window_replacement = [this, connection](String replaced_window_handle) {
+            did_start_window_replacement(replaced_window_handle, *connection);
+        };
+        pending_connection->on_did_close_window = [this, connection](String closed_window_handle) {
+            did_close_window(closed_window_handle, *connection);
         };
 
-        web_content_connection->async_set_page_load_strategy(m_page_load_strategy);
-        web_content_connection->async_set_strict_file_interactability(m_strict_file_interactiblity);
-        web_content_connection->async_set_user_prompt_handler(Web::WebDriver::user_prompt_handler());
+        pending_connection->async_set_page_load_strategy(m_page_load_strategy);
+        pending_connection->async_set_strict_file_interactability(m_strict_file_interactiblity);
+        pending_connection->async_set_user_prompt_handler(Web::WebDriver::user_prompt_handler());
         if (m_timeouts_configuration.has_value())
-            web_content_connection->async_set_timeouts(*m_timeouts_configuration);
+            pending_connection->async_set_timeouts(*m_timeouts_configuration);
 
-        m_windows.set(window_handle, Session::Window { window_handle, move(web_content_connection) });
+        if (auto window = m_windows.find(window_handle); window != m_windows.end()) {
+            window->value.web_content_connection = move(pending_connection);
+            window->value.is_awaiting_replacement = false;
+        } else {
+            m_windows.set(window_handle, Session::Window { window_handle, move(pending_connection) });
+        }
 
         if (m_current_window_handle.is_empty())
             m_current_window_handle = window_handle;
 
         promise->resolve({});
     };
+    return {};
+}
+
+void Session::web_content_connection_closed(WebContentConnection const& connection)
+{
+    Optional<String> closed_window_handle;
+    for (auto& window : m_windows) {
+        if (window.value.web_content_connection.ptr() != &connection)
+            continue;
+
+        if (window.value.is_awaiting_replacement) {
+            window.value.web_content_connection = nullptr;
+            return;
+        }
+
+        closed_window_handle = window.key;
+        break;
+    }
+
+    if (closed_window_handle.has_value())
+        remove_window(*closed_window_handle);
+}
+
+void Session::did_update_window_handle(String window_handle, WebContentConnection const& connection)
+{
+    Optional<String> previous_window_handle;
+    for (auto const& window : m_windows) {
+        if (window.value.web_content_connection.ptr() == &connection) {
+            previous_window_handle = window.key;
+            break;
+        }
+    }
+
+    if (!previous_window_handle.has_value() || *previous_window_handle == window_handle)
+        return;
+
+    auto maybe_window = m_windows.take(*previous_window_handle);
+    if (!maybe_window.has_value())
+        return;
+
+    auto window = maybe_window.release_value();
+    window.handle = window_handle;
+    window.is_awaiting_replacement = false;
+
+    if (auto existing_window = m_windows.find(window_handle); existing_window != m_windows.end()) {
+        existing_window->value.web_content_connection = move(window.web_content_connection);
+        existing_window->value.is_awaiting_replacement = false;
+    } else {
+        m_windows.set(window_handle, move(window));
+    }
+
+    if (m_current_window_handle == *previous_window_handle)
+        m_current_window_handle = move(window_handle);
+}
+
+void Session::did_start_window_replacement(String const& window_handle, WebContentConnection const& connection)
+{
+    auto window = m_windows.find(window_handle);
+    if (window == m_windows.end() || window->value.web_content_connection.ptr() != &connection)
+        return;
+
+    window->value.is_awaiting_replacement = true;
+    window->value.web_content_connection = nullptr;
+}
+
+void Session::mark_current_window_as_awaiting_replacement(WebContentConnection const& connection)
+{
+    auto window = m_windows.find(m_current_window_handle);
+    if (window == m_windows.end() || window->value.web_content_connection.ptr() != &connection)
+        return;
+
+    window->value.is_awaiting_replacement = true;
+    window->value.web_content_connection = nullptr;
+}
+
+void Session::did_close_window(String const& window_handle, WebContentConnection const& connection)
+{
+    auto window = m_windows.find(window_handle);
+    if (window == m_windows.end() || window->value.web_content_connection.ptr() != &connection)
+        return;
+
+    remove_window(window_handle);
+}
+
+void Session::remove_window(StringView window_handle)
+{
+    m_windows.remove(window_handle);
+
+    if (m_current_window_handle == window_handle)
+        m_current_window_handle = "NoSuchWindowPleaseSelectANewOne"_string;
+
+    if (m_windows.is_empty())
+        close();
+}
+
+ErrorOr<void> Session::create_server(NonnullRefPtr<ServerPromise> promise)
+{
+#if defined(AK_OS_WINDOWS)
+    static_assert(IsSame<IPC::Transport, IPC::TransportSocketWindows>, "Need to handle other IPC transports here");
+#elif defined(AK_OS_MACOS)
+    static_assert(IsSame<IPC::Transport, IPC::TransportMachPort>, "Need to handle other IPC transports here");
+#else
+    static_assert(IsSame<IPC::Transport, IPC::TransportSocket>, "Need to handle other IPC transports here");
+#endif
+
+    dbgln("Listening for WebDriver connection on {}", m_web_content_endpoint);
+
+#if defined(AK_OS_MACOS)
+    m_web_content_mach_port_server = make<IPC::MachBootstrapListener>(m_web_content_endpoint);
+    if (!m_web_content_mach_port_server->is_initialized())
+        return Error::from_string_literal("Failed to initialize Mach port server for WebDriver");
+
+    m_web_content_mach_port_server->on_bootstrap_request = [this, promise](auto request) {
+        auto result = m_transport_bootstrap_server.handle_bootstrap_request(request.pid, move(request.reply_port));
+        if (result.is_error()) {
+            m_event_loop.deferred_invoke([promise, error = result.release_error()]() mutable {
+                promise->resolve(move(error));
+            });
+            return;
+        }
+
+        result.release_value().visit(
+            [](IPC::TransportBootstrapMachServer::ChildTransportHandled) {
+                VERIFY_NOT_REACHED();
+            },
+            [this, promise](IPC::TransportBootstrapMachServer::OnDemandTransport& transport) {
+                m_event_loop.deferred_invoke([this, promise, transport = move(transport.ports)]() mutable {
+                    if (auto result = accept_web_content_transport(make<IPC::Transport>(move(transport.receive_right), move(transport.send_right)), promise); result.is_error())
+                        promise->resolve(result.release_error());
+                });
+            });
+    };
+
+    return {};
+#else
+    (void)FileSystem::remove(m_web_content_endpoint, FileSystem::RecursionMode::Disallowed);
+
+    auto server = Core::LocalServer::construct();
+    server->listen(m_web_content_endpoint);
+
+    server->on_accept = [this, promise](auto client_socket) {
+        auto maybe_transport = IPC::Transport::from_socket(move(client_socket));
+        if (maybe_transport.is_error()) {
+            promise->resolve(maybe_transport.release_error());
+            return;
+        }
+        if (auto result = accept_web_content_transport(maybe_transport.release_value(), promise); result.is_error())
+            promise->resolve(result.release_error());
+    };
 
     server->on_accept_error = [promise](auto error) {
         promise->resolve(move(error));
     };
 
-    return server;
+    m_web_content_server = server;
+    return {};
+#endif
 }
 
 ErrorOr<void> Session::start(LaunchBrowserCallback const& launch_browser_callback)
 {
     auto promise = ServerPromise::construct();
 
-    m_web_content_socket_path = ByteString::formatted("{}/webdriver/session_{}_{}", TRY(Core::StandardPaths::runtime_directory()), getpid(), m_session_id);
-    m_web_content_server = TRY(create_server(promise));
+#if defined(AK_OS_MACOS)
+    m_web_content_endpoint = ByteString::formatted("{}.{}", WebView::mach_server_name_for_process("WebDriver"sv, Core::System::getpid()), m_session_id);
+#else
+    m_web_content_endpoint = ByteString::formatted("{}/webdriver/session_{}_{}", TRY(Core::StandardPaths::runtime_directory()), Core::System::getpid(), m_session_id);
+#endif
+    TRY(create_server(promise));
 
-    m_browser_process = TRY(launch_browser_callback(*m_web_content_socket_path, m_options.headless));
+    m_browser_process = TRY(launch_browser_callback(m_web_content_endpoint, m_options.headless));
 
     // FIXME: Allow this to be more asynchronous. For now, this at least allows us to propagate
     //        errors received while accepting the Browser and WebContent sockets.
@@ -280,14 +487,9 @@ Web::WebDriver::Response Session::close_window()
         return connection.close_window();
     }));
 
-    {
-        // Defer removing the window handle from this session until after we know we are done with its connection.
-        ScopeGuard guard { [this] { m_windows.remove(m_current_window_handle); m_current_window_handle = "NoSuchWindowPleaseSelectANewOne"_string; } };
-
-        // 4. If there are no more open top-level browsing contexts, then close the session.
-        if (m_windows.size() == 1)
-            close();
-    }
+    // 4. If there are no more open top-level browsing contexts, then close the session.
+    auto closed_window_handle = m_current_window_handle;
+    remove_window(closed_window_handle);
 
     // 5. Return the result of running the remote end steps for the Get Window Handles command.
     return get_window_handles();
@@ -299,10 +501,14 @@ Web::WebDriver::Response Session::switch_to_window(StringView handle)
     // 4. If handle is equal to the associated window handle for some top-level browsing context, let context be the that
     //    browsing context, and set the current top-level browsing context with session and context.
     //    Otherwise, return error with error code no such window.
-    if (auto it = m_windows.find(handle); it != m_windows.end())
+    if (auto it = m_windows.find(handle); it != m_windows.end()) {
+        if (!it->value.web_content_connection)
+            return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, "Window is waiting for a replacement WebContent process"sv);
+
         m_current_window_handle = it->key;
-    else
+    } else {
         return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, "Window not found"sv);
+    }
 
     // 5. Update any implementation-specific state that would result from the user selecting the current
     //    browsing context for interaction, without altering OS-level focus.
@@ -329,9 +535,60 @@ Web::WebDriver::Response Session::get_window_handles() const
 
 ErrorOr<void, Web::WebDriver::Error> Session::ensure_current_window_handle_is_valid() const
 {
-    if (auto current_window = m_windows.get(m_current_window_handle); current_window.has_value())
-        return {};
-    return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, "Window not found"sv);
+    auto current_window = m_windows.get(m_current_window_handle);
+    if (!current_window.has_value())
+        return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, "Window not found"sv);
+
+    if (!current_window->web_content_connection)
+        return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, "Window is waiting for a replacement WebContent process"sv);
+
+    return {};
+}
+
+ErrorOr<bool, Web::WebDriver::Error> Session::wait_for_current_window_to_have_web_content_connection()
+{
+    m_event_loop.pump(Core::EventLoop::WaitMode::PollForEvents);
+
+    auto current_window = m_windows.get(m_current_window_handle);
+    if (!current_window.has_value())
+        return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, "Window not found"sv);
+
+    if (current_window->web_content_connection)
+        return false;
+
+    Optional<u64> page_load_timeout = Web::WebDriver::TimeoutsConfiguration {}.page_load_timeout;
+    if (m_timeouts_configuration.has_value() && m_timeouts_configuration->is_object()) {
+        if (auto value = m_timeouts_configuration->as_object().get("pageLoad"sv); value.has_value()) {
+            if (value->is_null())
+                page_load_timeout = {};
+            else
+                page_load_timeout = value->get_integer<u64>().value_or(*page_load_timeout);
+        }
+    }
+
+    bool timed_out = false;
+    RefPtr<Core::Timer> timer;
+    if (page_load_timeout.has_value()) {
+        auto timer_interval = *page_load_timeout > NumericLimits<int>::max() ? NumericLimits<int>::max() : static_cast<int>(*page_load_timeout);
+        timer = Core::Timer::create_single_shot(timer_interval, [&timed_out] {
+            timed_out = true;
+        });
+        timer->start();
+    }
+
+    Core::EventLoop::current().spin_until([this, &timed_out] {
+        auto current_window = m_windows.get(m_current_window_handle);
+        return !current_window.has_value() || current_window->web_content_connection || timed_out;
+    });
+
+    if (timer)
+        timer->stop();
+
+    if (timed_out)
+        return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::Timeout, "Timed out waiting for replacement WebContent process"sv);
+
+    TRY(ensure_current_window_handle_is_valid());
+    return true;
 }
 
 }

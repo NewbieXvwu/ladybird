@@ -1,0 +1,37 @@
+$c7fd0018 logical-or-in-if-condition.js:12:1
+  Registers: 7
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+    [1] = Bool(false)
+
+block0:
+  [   0] GetGlobal dst:reg6, `blocked`
+  [  10] Call dst:reg5, callee:reg6, this_value:Undefined, blocked, arguments:[Bool(false)]
+  [  38] End value:reg5
+
+
+blocked$f2600453 logical-or-in-if-condition.js:7:9
+  Registers: 6
+  Blocks:    6
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] Mov dst:reg5, src:arg0
+  [  10] JumpIf condition:arg0, true_target:block3, false_target:block2
+
+block1:
+  [  20] End value:Undefined
+
+block2:
+  [  28] Mov dst:reg5, src:arg0
+
+block3:
+  [  38] JumpFalse condition:reg5, target:block5
+
+block4:
+  [  48] Jump target:block0
+
+block5:
+  [  50] Jump target:block1

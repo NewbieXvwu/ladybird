@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/RefPtr.h>
 #include <AK/Stream.h>
 #include <AK/TypedTransfer.h>
+#include <AK/Utf16StringBuilder.h>
 #include <AK/Utf16StringData.h>
-#include <AK/Utf32View.h>
 #include <AK/Utf8View.h>
 
 #include <simdutf.h>
@@ -19,11 +20,9 @@ namespace AK::Detail {
 
 NonnullRefPtr<Utf16StringData> Utf16StringData::create_uninitialized(StorageType storage_type, size_t code_unit_length)
 {
-    auto allocation_size = storage_type == Utf16StringData::StorageType::ASCII
-        ? sizeof(Utf16StringData) + (sizeof(char) * code_unit_length)
-        : sizeof(Utf16StringData) + (sizeof(char16_t) * code_unit_length);
+    auto allocation_size = allocation_size_for_string_data(storage_type == Utf16StringData::StorageType::ASCII, code_unit_length);
 
-    void* slot = malloc(allocation_size);
+    void* slot = kmalloc(HeapPartition::String, allocation_size);
     VERIFY(slot);
 
     return adopt_ref(*new (slot) Utf16StringData(storage_type, code_unit_length));
@@ -53,6 +52,23 @@ NonnullRefPtr<Utf16StringData> Utf16StringData::create_from_code_point_iterable(
         });
     }
 
+    return string;
+}
+
+NonnullRefPtr<Utf16StringData> Utf16StringData::from_ascii(ReadonlyBytes ascii_string)
+{
+    VERIFY_UTF16_LENGTH(ascii_string.size());
+    auto string = create_uninitialized(StorageType::ASCII, ascii_string.size());
+    TypedTransfer<char>::copy(string->m_ascii_data, reinterpret_cast<char const*>(ascii_string.data()), ascii_string.size());
+    return string;
+}
+
+NonnullRefPtr<Utf16StringData> Utf16StringData::create_uninitialized_ascii(size_t length_in_code_units, Bytes& buffer)
+{
+    VERIFY_UTF16_LENGTH(length_in_code_units);
+
+    auto string = create_uninitialized(StorageType::ASCII, length_in_code_units);
+    buffer = { string->m_ascii_data, length_in_code_units };
     return string;
 }
 
@@ -103,39 +119,9 @@ NonnullRefPtr<Utf16StringData> Utf16StringData::from_utf16(Utf16View const& utf1
     return string.release_nonnull();
 }
 
-NonnullRefPtr<Utf16StringData> Utf16StringData::from_utf32(Utf32View const& utf32_string)
+NonnullRefPtr<Utf16StringData> Utf16StringData::from_string_builder(Utf16StringBuilder& builder)
 {
-    RefPtr<Utf16StringData> string;
-
-    auto const* utf32_data = reinterpret_cast<char32_t const*>(utf32_string.code_points());
-    auto utf32_length = utf32_string.length();
-
-    if (utf32_string.is_ascii()) {
-        VERIFY_UTF16_LENGTH(utf32_length);
-
-        string = create_uninitialized(StorageType::ASCII, utf32_length);
-
-        auto result = simdutf::convert_utf32_to_utf8(utf32_data, utf32_length, string->m_ascii_data);
-        VERIFY(result == utf32_length);
-    } else if (simdutf::validate_utf32(utf32_data, utf32_length)) {
-        auto code_unit_length = simdutf::utf16_length_from_utf32(utf32_data, utf32_length);
-        VERIFY_UTF16_LENGTH(code_unit_length);
-
-        string = create_uninitialized(StorageType::UTF16, code_unit_length);
-        string->m_length_in_code_points = utf32_length;
-
-        auto result = simdutf::convert_utf32_to_utf16(utf32_data, utf32_length, string->m_utf16_data);
-        VERIFY(result == code_unit_length);
-    } else {
-        string = create_from_code_point_iterable(utf32_string);
-    }
-
-    return string.release_nonnull();
-}
-
-NonnullRefPtr<Utf16StringData> Utf16StringData::from_string_builder(StringBuilder& builder)
-{
-    auto view = builder.utf16_string_view();
+    auto view = builder.view();
 
     auto code_unit_length = view.length_in_code_units();
     VERIFY_UTF16_LENGTH(code_unit_length);

@@ -11,18 +11,14 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(CheckBox);
-
-CheckBox::CheckBox(DOM::Document& document, HTML::HTMLInputElement& element, GC::Ref<CSS::ComputedProperties> style)
-    : FormAssociatedLabelableNode(document, element, move(style))
+CheckBox::CheckBox(DOM::Document& document, HTML::HTMLInputElement& element, NonnullRefPtr<CSS::ComputedValues const> style)
+    : ReplacedBox(document, element, style)
 {
-    set_natural_width(13);
-    set_natural_height(13);
 }
 
 CheckBox::~CheckBox() = default;
 
-GC::Ptr<Painting::Paintable> CheckBox::create_paintable() const
+RefPtr<Painting::Paintable> CheckBox::create_paintable() const
 {
     return Painting::CheckBoxPaintable::create(*this);
 }

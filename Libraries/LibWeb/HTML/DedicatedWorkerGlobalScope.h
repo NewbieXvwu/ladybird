@@ -6,8 +6,8 @@
 
 #pragma once
 
-#include <LibWeb/Bindings/DedicatedWorkerGlobalScopeGlobalMixin.h>
-#include <LibWeb/Bindings/WorkerGlobalScopePrototype.h>
+#include <LibWeb/Bindings/DedicatedWorkerGlobalScope.h>
+#include <LibWeb/Bindings/WorkerGlobalScope.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/WorkerGlobalScope.h>
 
@@ -20,10 +20,12 @@ class WEB_API DedicatedWorkerGlobalScope
     GC_DECLARE_ALLOCATOR(DedicatedWorkerGlobalScope);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~DedicatedWorkerGlobalScope() override;
 
-    WebIDL::ExceptionOr<void> post_message(JS::Value message, StructuredSerializeOptions const&);
-    WebIDL::ExceptionOr<void> post_message(JS::Value message, Vector<GC::Root<JS::Object>> const& transfer);
+    WebIDL::ExceptionOr<void> post_message(JS::Value message, Bindings::StructuredSerializeOptions const&);
+    WebIDL::ExceptionOr<void> post_message(JS::Value message, GC::RootVector<GC::Ref<JS::Object>> const& transfer);
 
     void close();
 

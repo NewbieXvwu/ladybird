@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/Optional.h>
+#include <AK/Utf16String.h>
 #include <LibGC/CellAllocator.h>
 #include <LibGC/Ptr.h>
 #include <LibURL/Origin.h>
@@ -17,15 +18,10 @@
 #include <LibWeb/HTML/CrossOrigin/OpenerPolicyEnforcementResult.h>
 #include <LibWeb/HTML/PolicyContainers.h>
 #include <LibWeb/HTML/SandboxingFlagSet.h>
+#include <LibWeb/HTML/UserNavigationInvolvement.h>
+#include <LibWeb/ReferrerPolicy/ReferrerPolicy.h>
 
 namespace Web::HTML {
-
-// https://html.spec.whatwg.org/multipage/browsing-the-web.html#user-navigation-involvement
-enum class UserNavigationInvolvement {
-    BrowserUI,
-    Activation,
-    None,
-};
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#navigation-params
 struct NavigationParams : GC::Cell {
@@ -33,10 +29,10 @@ struct NavigationParams : GC::Cell {
     GC_DECLARE_ALLOCATOR(NavigationParams);
 
     // null or a navigation ID
-    Optional<String> id;
+    Optional<Utf16String> id;
 
     // the navigable to be navigated
-    GC::Ptr<Navigable> navigable;
+    GC::Ptr<LocalNavigable> navigable;
 
     // null or a request that started the navigation
     GC::Ptr<Fetch::Infrastructure::Request> request;
@@ -48,7 +44,7 @@ struct NavigationParams : GC::Cell {
     GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller { nullptr };
 
     // null or an algorithm accepting a Document, once it has been created
-    Function<void(DOM::Document&)> commit_early_hints { nullptr };
+    GC::Ptr<GC::Function<void(DOM::Document&)>> commit_early_hints { nullptr };
 
     // an opener policy enforcement result, used for reporting and potentially for causing a browsing context group switch
     OpenerPolicyEnforcementResult coop_enforcement_result;
@@ -65,6 +61,9 @@ struct NavigationParams : GC::Cell {
     // a sandboxing flag set to impose on the new Document
     SandboxingFlagSet final_sandboxing_flag_set = {};
 
+    // a referrer policy, used in the internal ancestor origin objects list creation steps
+    ReferrerPolicy::ReferrerPolicy iframe_element_referrer_policy { ReferrerPolicy::ReferrerPolicy::EmptyString };
+
     // an opener policy to use for the new Document
     OpenerPolicy opener_policy;
 
@@ -80,17 +79,18 @@ protected:
     void visit_edges(Visitor& visitor) override;
 
     NavigationParams(
-        Optional<String> id,
-        GC::Ptr<Navigable> navigable,
+        Optional<Utf16String> id,
+        GC::Ptr<LocalNavigable> navigable,
         GC::Ptr<Fetch::Infrastructure::Request> request,
         GC::Ptr<Fetch::Infrastructure::Response> response,
         GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller,
-        Function<void(DOM::Document&)> commit_early_hints,
+        GC::Ptr<GC::Function<void(DOM::Document&)>> commit_early_hints,
         OpenerPolicyEnforcementResult coop_enforcement_result,
         Fetch::Infrastructure::Request::ReservedClientType reserved_environment,
         URL::Origin origin,
         GC::Ptr<PolicyContainer> policy_container,
         SandboxingFlagSet final_sandboxing_flag_set,
+        ReferrerPolicy::ReferrerPolicy iframe_element_referrer_policy,
         OpenerPolicy opener_policy,
         Optional<URL::URL> about_base_url,
         UserNavigationInvolvement user_involvement)
@@ -99,12 +99,13 @@ protected:
         , request(request)
         , response(response)
         , fetch_controller(fetch_controller)
-        , commit_early_hints(move(commit_early_hints))
+        , commit_early_hints(commit_early_hints)
         , coop_enforcement_result(move(coop_enforcement_result))
         , reserved_environment(reserved_environment)
         , origin(move(origin))
         , policy_container(policy_container)
         , final_sandboxing_flag_set(final_sandboxing_flag_set)
+        , iframe_element_referrer_policy(iframe_element_referrer_policy)
         , opener_policy(opener_policy)
         , about_base_url(move(about_base_url))
         , user_involvement(user_involvement)
@@ -118,10 +119,10 @@ struct NonFetchSchemeNavigationParams : JS::Cell {
     GC_DECLARE_ALLOCATOR(NonFetchSchemeNavigationParams);
 
     // null or a navigation ID
-    Optional<String> id;
+    Optional<Utf16String> id;
 
     // the navigable to be navigated
-    GC::Ptr<Navigable> navigable;
+    GC::Ptr<LocalNavigable> navigable;
 
     // a URL
     URL::URL url;
@@ -142,8 +143,8 @@ struct NonFetchSchemeNavigationParams : JS::Cell {
 
 protected:
     NonFetchSchemeNavigationParams(
-        Optional<String> id,
-        GC::Ptr<Navigable> navigable,
+        Optional<Utf16String> id,
+        GC::Ptr<LocalNavigable> navigable,
         URL::URL url,
         SandboxingFlagSet target_snapshot_sandboxing_flags,
         bool source_snapshot_has_transient_activation,
@@ -162,6 +163,6 @@ protected:
     void visit_edges(Visitor& visitor) override;
 };
 
-bool check_a_navigation_responses_adherence_to_x_frame_options(GC::Ptr<Fetch::Infrastructure::Response> response, Navigable* navigable, GC::Ref<ContentSecurityPolicy::PolicyList const> csp_list, URL::Origin destination_origin);
+bool check_a_navigation_responses_adherence_to_x_frame_options(GC::Ptr<Fetch::Infrastructure::Response> response, LocalNavigable* navigable, GC::Ref<ContentSecurityPolicy::PolicyList const> csp_list, URL::Origin destination_origin);
 
 }

@@ -1,8 +1,4 @@
-#import <SVG/SVGAnimatedEnumeration.idl>
-#import <SVG/SVGAnimatedString.idl>
-#import <SVG/SVGFilterPrimitiveStandardAttributes.idl>
-
-// https://www.w3.org/TR/filter-effects-1/#InterfaceSVGFEBlendElement
+// https://drafts.csswg.org/filter-effects-1/#InterfaceSVGFEBlendElement
 [Exposed=Window]
 interface SVGFEBlendElement : SVGElement {
 

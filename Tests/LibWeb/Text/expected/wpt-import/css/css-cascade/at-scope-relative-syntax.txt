@@ -1,0 +1,13 @@
+Harness status: OK
+
+Found 8 tests
+
+8 Pass
+Pass	> .foo in @scope,.nest created by string valid
+Pass	> .foo in .nest,@scope created by string valid
+Pass	> .foo in @scope,.nest,@media screen created by string valid
+Pass	> .foo in .nest,@scope,@media screen created by string valid
+Pass	> .foo in @scope,.nest created by insertRule valid
+Pass	> .foo in .nest,@scope created by insertRule valid
+Pass	> .foo in @scope,.nest,@media screen created by insertRule valid
+Pass	> .foo in .nest,@scope,@media screen created by insertRule valid

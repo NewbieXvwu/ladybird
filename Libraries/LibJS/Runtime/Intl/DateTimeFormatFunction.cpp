@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2021-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -17,7 +17,7 @@ namespace JS::Intl {
 GC_DEFINE_ALLOCATOR(DateTimeFormatFunction);
 
 // 11.5.4 DateTime Format Functions, https://tc39.es/ecma402/#sec-datetime-format-functions
-// 15.9.3 DateTime Format Functions, https://tc39.es/proposal-temporal/#sec-datetime-format-functions
+// 15.6.3 DateTime Format Functions, https://tc39.es/proposal-temporal/#sec-datetime-format-functions
 GC::Ref<DateTimeFormatFunction> DateTimeFormatFunction::create(Realm& realm, DateTimeFormat& date_time_format)
 {
     return realm.create<DateTimeFormatFunction>(date_time_format, realm.intrinsics().function_prototype());
@@ -35,7 +35,7 @@ void DateTimeFormatFunction::initialize(Realm& realm)
 
     Base::initialize(realm);
     define_direct_property(vm.names.length, Value(1), Attribute::Configurable);
-    define_direct_property(vm.names.name, PrimitiveString::create(vm, String {}), Attribute::Configurable);
+    define_direct_property(vm.names.name, PrimitiveString::create(vm, Utf16String {}), Attribute::Configurable);
 }
 
 ThrowCompletionOr<Value> DateTimeFormatFunction::call()

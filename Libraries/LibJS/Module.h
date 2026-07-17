@@ -65,6 +65,7 @@ struct GraphLoadingState : public Cell {
 public:
     struct HostDefined : Cell {
         GC_CELL(HostDefined, Cell);
+        GC_DECLARE_ALLOCATOR(HostDefined);
 
     public:
         virtual ~HostDefined() = default;
@@ -86,6 +87,7 @@ private:
     {
     }
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 };
 
 // 16.2.1.4 Abstract Module Records, https://tc39.es/ecma262/#sec-abstract-module-records
@@ -108,15 +110,15 @@ public:
     GC::Ref<Object> get_module_namespace(VM& vm);
 
     virtual ThrowCompletionOr<void> link(VM& vm) = 0;
-    virtual ThrowCompletionOr<GC::Ref<Promise>> evaluate(VM& vm) = 0;
+    virtual ThrowCompletionOr<GC::Ref<PromiseCapability>> evaluate(VM& vm) = 0;
 
     Vector<Utf16FlyString> get_exported_names(VM& vm);
-    virtual Vector<Utf16FlyString> get_exported_names(VM& vm, HashTable<Module const*>& export_star_set) = 0;
+    virtual Vector<Utf16FlyString> get_exported_names(VM& vm, GC::RootHashTable<GC::Ref<Module const>>& export_star_set) = 0;
 
     virtual ResolvedBinding resolve_export(VM& vm, Utf16FlyString const& export_name, Vector<ResolvedBinding> resolve_set = {}) = 0;
 
-    virtual ThrowCompletionOr<u32> inner_module_linking(VM& vm, Vector<Module*>& stack, u32 index);
-    virtual ThrowCompletionOr<u32> inner_module_evaluation(VM& vm, Vector<Module*>& stack, u32 index);
+    virtual ThrowCompletionOr<u32> inner_module_linking(VM& vm, GC::RootVector<GC::Ref<Module>>& stack, u32 index);
+    virtual ThrowCompletionOr<u32> inner_module_evaluation(VM& vm, GC::RootVector<GC::Ref<Module>>& stack, u32 index);
 
     virtual PromiseCapability& load_requested_modules(GC::Ptr<GraphLoadingState::HostDefined>) = 0;
 
@@ -124,6 +126,7 @@ protected:
     Module(Realm&, ByteString filename, Script::HostDefined* host_defined = nullptr);
 
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     void set_environment(GC::Ref<ModuleEnvironment> environment)
     {

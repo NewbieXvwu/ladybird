@@ -5,34 +5,47 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/CSSStylePropertiesPrototype.h>
+#include <AK/Utf16StringBuilder.h>
+#include <LibJS/Runtime/ExternalMemory.h>
+#include <LibWeb/Bindings/CSSStyleProperties.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/CSSRule.h>
 #include <LibWeb/CSS/CSSStyleProperties.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/CSS/StyleComputer.h>
-#include <LibWeb/CSS/StyleValues/FitContentStyleValue.h>
+#include <LibWeb/CSS/StyleSheetInvalidation.h>
+#include <LibWeb/CSS/StyleValues/ColorFunctionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FilterStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FunctionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
+#include <LibWeb/CSS/StyleValues/PendingSubstitutionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShorthandStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
+#include <LibWeb/CSS/StyleValues/TimeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/TransformationStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Layout/Node.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/BoxModelMetrics.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 
 namespace Web::CSS {
 
 GC_DEFINE_ALLOCATOR(CSSStyleProperties);
 
-GC::Ref<CSSStyleProperties> CSSStyleProperties::create(JS::Realm& realm, Vector<StyleProperty> properties, HashMap<FlyString, StyleProperty> custom_properties)
+GC::Ref<CSSStyleProperties> CSSStyleProperties::create(JS::Realm& realm, Vector<StyleProperty> properties, OrderedHashMap<Utf16FlyString, StyleProperty> custom_properties)
 {
     // https://drafts.csswg.org/cssom/#dom-cssstylerule-style
     // The style attribute must return a CSSStyleProperties object for the style rule, with the following properties:
@@ -54,10 +67,10 @@ GC::Ref<CSSStyleProperties> CSSStyleProperties::create_resolved_style(JS::Realm&
     //     parent CSS rule: Null.
     //     owner node: obj.
     // AD-HOC: Rather than instantiate with a list of decls, they're generated on demand.
-    return realm.create<CSSStyleProperties>(realm, Computed::Yes, Readonly::Yes, Vector<StyleProperty> {}, HashMap<FlyString, StyleProperty> {}, move(element_reference));
+    return realm.create<CSSStyleProperties>(realm, Computed::Yes, Readonly::Yes, Vector<StyleProperty> {}, OrderedHashMap<Utf16FlyString, StyleProperty> {}, move(element_reference));
 }
 
-GC::Ref<CSSStyleProperties> CSSStyleProperties::create_element_inline_style(DOM::AbstractElement element_reference, Vector<StyleProperty> properties, HashMap<FlyString, StyleProperty> custom_properties)
+GC::Ref<CSSStyleProperties> CSSStyleProperties::create_element_inline_style(DOM::AbstractElement element_reference, Vector<StyleProperty> properties, OrderedHashMap<Utf16FlyString, StyleProperty> custom_properties)
 {
     // https://drafts.csswg.org/cssom/#dom-elementcssinlinestyle-style
     // The style attribute must return a CSS declaration block object whose readonly flag is unset, whose parent CSS
@@ -66,7 +79,7 @@ GC::Ref<CSSStyleProperties> CSSStyleProperties::create_element_inline_style(DOM:
     return realm.create<CSSStyleProperties>(realm, Computed::No, Readonly::No, convert_declarations_to_specified_order(properties), move(custom_properties), move(element_reference));
 }
 
-CSSStyleProperties::CSSStyleProperties(JS::Realm& realm, Computed computed, Readonly readonly, Vector<StyleProperty> properties, HashMap<FlyString, StyleProperty> custom_properties, Optional<DOM::AbstractElement> owner_node)
+CSSStyleProperties::CSSStyleProperties(JS::Realm& realm, Computed computed, Readonly readonly, Vector<StyleProperty> properties, OrderedHashMap<Utf16FlyString, StyleProperty> custom_properties, Optional<DOM::AbstractElement> owner_node)
     : CSSStyleDeclaration(realm, computed, readonly)
     , m_properties(move(properties))
     , m_custom_properties(move(custom_properties))
@@ -111,98 +124,53 @@ void CSSStyleProperties::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void CSSStyleProperties::visit_edges(Visitor& visitor)
+size_t CSSStyleProperties::external_memory_size() const
 {
-    Base::visit_edges(visitor);
-    for (auto& property : m_properties) {
-        property.value->visit_edges(visitor);
-    }
+    auto size = Base::external_memory_size();
+    size = JS::saturating_add_external_memory_size(size, JS::vector_external_memory_size(m_properties));
+    size = JS::saturating_add_external_memory_size(size, JS::hash_map_external_memory_size(m_custom_properties));
+    return size;
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-length
 size_t CSSStyleProperties::length() const
 {
     // The length attribute must return the number of CSS declarations in the declarations.
-    // FIXME: Include the number of custom properties.
-
     if (is_computed()) {
         if (!owner_node().has_value())
             return 0;
         return number_of_longhand_properties;
     }
 
-    return m_properties.size();
+    return m_properties.size() + m_custom_properties.size();
 }
 
-String CSSStyleProperties::item(size_t index) const
+Utf16String CSSStyleProperties::item(size_t index) const
 {
     // The item(index) method must return the property name of the CSS declaration at position index.
     // If there is no indexth object in the collection, then the method must return the empty string.
-    // FIXME: Include custom properties.
+    auto custom_properties_count = m_custom_properties.size();
 
     if (index >= length())
         return {};
 
     if (is_computed()) {
         auto property_id = static_cast<PropertyID>(index + to_underlying(first_longhand_property_id));
-        return string_from_property_id(property_id).to_string();
+        return string_from_property_id(property_id).to_utf16_string();
     }
 
-    return CSS::string_from_property_id(m_properties[index].property_id).to_string();
+    if (index < custom_properties_count)
+        return m_custom_properties.keys()[index].to_utf16_string();
+
+    return string_from_property_id(m_properties[index - custom_properties_count].property_id).to_utf16_string();
 }
 
-Optional<StyleProperty> CSSStyleProperties::property(PropertyID property_id) const
+Optional<StyleProperty> CSSStyleProperties::get_property(PropertyID property_id) const
 {
-    if (is_computed()) {
-        if (!owner_node().has_value())
-            return {};
-
-        auto abstract_element = *owner_node();
-
-        // https://www.w3.org/TR/cssom-1/#dom-window-getcomputedstyle
-        // NB: This is a partial enforcement of step 5 ("If elt is connected, ...")
-        if (!abstract_element.element().is_connected())
-            return {};
-
-        Layout::NodeWithStyle* layout_node = abstract_element.layout_node();
-
-        // FIXME: Be smarter about updating layout if there's no layout node.
-        //        We may legitimately have no layout node if we're not visible, but this protects against situations
-        //        where we're requesting the computed style before layout has happened.
-        if (!layout_node || property_needs_layout_for_getcomputedstyle(property_id)) {
-            abstract_element.document().update_layout(DOM::UpdateLayoutReason::ResolvedCSSStyleDeclarationProperty);
-            layout_node = abstract_element.layout_node();
-        } else {
-            // FIXME: If we had a way to update style for a single element, this would be a good place to use it.
-            abstract_element.document().update_style();
-        }
-
-        if (!layout_node) {
-            auto style = abstract_element.document().style_computer().compute_style(abstract_element);
-
-            return StyleProperty {
-                .property_id = property_id,
-                .value = style->property(property_id),
-            };
-        }
-
-        auto value = style_value_for_computed_property(*layout_node, property_id);
-        if (!value)
-            return {};
-        return StyleProperty {
-            .property_id = property_id,
-            .value = *value,
-        };
-    }
-
-    for (auto& property : m_properties) {
-        if (property.property_id == property_id)
-            return property;
-    }
-    return {};
+    return get_property_internal(PropertyNameAndID::from_id(property_id));
 }
 
-Optional<StyleProperty const&> CSSStyleProperties::custom_property(FlyString const& custom_property_name) const
+Optional<StyleProperty const&> CSSStyleProperties::custom_property(Utf16FlyString const& custom_property_name) const
 {
     if (is_computed()) {
         if (!owner_node().has_value())
@@ -211,15 +179,14 @@ Optional<StyleProperty const&> CSSStyleProperties::custom_property(FlyString con
         auto& element = owner_node()->element();
         auto pseudo_element = owner_node()->pseudo_element();
 
-        element.document().update_style();
+        element.document().update_style_for_element(*owner_node());
 
-        auto const* element_to_check = &element;
-        while (element_to_check) {
-            if (auto property = element_to_check->custom_properties(pseudo_element).get(custom_property_name); property.has_value())
-                return *property;
+        auto data = element.custom_property_data(pseudo_element);
+        if (!data)
+            return {};
 
-            element_to_check = element_to_check->parent_element();
-        }
+        if (auto const* property = data->get(custom_property_name))
+            return *property;
 
         return {};
     }
@@ -228,36 +195,44 @@ Optional<StyleProperty const&> CSSStyleProperties::custom_property(FlyString con
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-setproperty
-WebIDL::ExceptionOr<void> CSSStyleProperties::set_property(StringView property_name, StringView value, StringView priority)
+WebIDL::ExceptionOr<void> CSSStyleProperties::set_property(Utf16FlyString const& property_name, Utf16View value, Utf16View priority)
 {
     // 1. If the computed flag is set, then throw a NoModificationAllowedError exception.
     if (is_computed())
         return WebIDL::NoModificationAllowedError::create(realm(), "Cannot modify properties in result of getComputedStyle()"_utf16);
 
-    // FIXME: 2. If property is not a custom property, follow these substeps:
-    // FIXME:    1. Let property be property converted to ASCII lowercase.
-    // FIXME:    2. If property is not a case-sensitive match for a supported CSS property, then return.
-    // NB: This must be handled before we've turned the property string into a PropertyID.
-
-    auto maybe_property_id = property_id_from_string(property_name);
-    if (!maybe_property_id.has_value())
+    // 2. If property is not a custom property, follow these substeps:
+    //    1. Let property be property converted to ASCII lowercase.
+    //    2. If property is not a case-sensitive match for a supported CSS property, then return.
+    // NB: This is handled inside PropertyNameAndID::from_string().
+    auto property = PropertyNameAndID::from_name(property_name);
+    if (!property.has_value())
         return {};
-    auto property_id = maybe_property_id.value();
+
+    // NB: The remaining steps are implemented in set_property_internal().
+    return set_property_internal(property.release_value(), value, priority);
+}
+
+// https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-setproperty
+WebIDL::ExceptionOr<void> CSSStyleProperties::set_property_internal(PropertyNameAndID const& property, Utf16View value, Utf16View priority)
+{
+    // NB: Steps 1 and 2 only apply to the IDL method that invokes this.
 
     // 3. If value is the empty string, invoke removeProperty() with property as argument and return.
     if (value.is_empty()) {
-        MUST(remove_property(property_name));
+        auto removed_value = MUST(remove_property_internal(property));
+        (void)removed_value;
         return {};
     }
 
     // 4. If priority is not the empty string and is not an ASCII case-insensitive match for the string "important", then return.
-    if (!priority.is_empty() && !priority.equals_ignoring_ascii_case("important"sv))
+    if (!priority.is_empty() && !priority.equals_ignoring_ascii_case(u"important"sv))
         return {};
 
     // 5. Let component value list be the result of parsing value for property property.
     auto component_value_list = owner_node().has_value()
-        ? parse_css_value(CSS::Parser::ParsingParams { owner_node()->element().document() }, value, property_id)
-        : parse_css_value(CSS::Parser::ParsingParams {}, value, property_id);
+        ? parse_css_value(Parser::ParsingParams { owner_node()->element().document() }, value, property.id())
+        : parse_css_value(Parser::ParsingParams {}, value, property.id());
 
     // 6. If component value list is null, then return.
     if (!component_value_list)
@@ -267,9 +242,9 @@ WebIDL::ExceptionOr<void> CSSStyleProperties::set_property(StringView property_n
     bool updated = false;
 
     // 8. If property is a shorthand property,
-    if (property_is_shorthand(property_id)) {
+    if (property_is_shorthand(property.id())) {
         // then for each longhand property longhand that property maps to, in canonical order, follow these substeps:
-        StyleComputer::for_each_property_expanding_shorthands(property_id, *component_value_list, [this, &updated, priority](PropertyID longhand_property_id, StyleValue const& longhand_value) {
+        StyleComputer::for_each_property_expanding_shorthands(property.id(), *component_value_list, [this, &updated, priority](PropertyID longhand_property_id, StyleValue const& longhand_value) {
             // 1. Let longhand result be the result of set the CSS declaration longhand with the appropriate value(s) from component value list,
             //    with the important flag set if priority is not the empty string, and unset otherwise, and with the list of declarations being the declarations.
             // 2. If longhand result is true, let updated be true.
@@ -278,21 +253,26 @@ WebIDL::ExceptionOr<void> CSSStyleProperties::set_property(StringView property_n
     }
     // 9. Otherwise,
     else {
-        if (property_id == PropertyID::Custom) {
-            auto custom_name = FlyString::from_utf8_without_validation(property_name.bytes());
+        if (property.is_custom_property()) {
+            auto important = !priority.is_empty() ? Important::Yes : Important::No;
             StyleProperty style_property {
-                .important = !priority.is_empty() ? Important::Yes : Important::No,
-                .property_id = property_id,
+                .important = important,
+                .property_id = property.id(),
                 .value = component_value_list.release_nonnull(),
-                .custom_name = custom_name,
             };
-            m_custom_properties.set(custom_name, style_property);
-            updated = true;
+            if (auto existing_property = custom_property(property.name()); existing_property.has_value()
+                && existing_property->important == important
+                && *existing_property->value == *style_property.value) {
+                updated = false;
+            } else {
+                m_custom_properties.set(property.name(), style_property);
+                updated = true;
+            }
         } else {
             // let updated be the result of set the CSS declaration property with value component value list,
             // with the important flag set if priority is not the empty string, and unset otherwise,
             // and with the list of declarations being the declarations.
-            updated = set_a_css_declaration(property_id, *component_value_list, !priority.is_empty() ? Important::Yes : Important::No);
+            updated = set_a_css_declaration(property.id(), *component_value_list, !priority.is_empty() ? Important::Yes : Important::No);
         }
     }
 
@@ -307,9 +287,14 @@ WebIDL::ExceptionOr<void> CSSStyleProperties::set_property(StringView property_n
     return {};
 }
 
-WebIDL::ExceptionOr<void> CSSStyleProperties::set_property(PropertyID property_id, StringView css_text, StringView priority)
+WebIDL::ExceptionOr<void> CSSStyleProperties::set_property(PropertyID property_id, Utf16View css_text, Utf16View priority)
 {
-    return set_property(string_from_property_id(property_id), css_text, priority);
+    return set_property_internal(PropertyNameAndID::from_id(property_id), css_text, priority);
+}
+
+static NonnullRefPtr<StyleValue const> style_value_for_css_pixels(CSSPixels css_pixels)
+{
+    return LengthStyleValue::create(Length::make_px(css_pixels));
 }
 
 static NonnullRefPtr<StyleValue const> style_value_for_length_percentage(LengthPercentage const& length_percentage)
@@ -350,24 +335,25 @@ static NonnullRefPtr<StyleValue const> style_value_for_size(Size const& size)
         return KeywordStyleValue::create(Keyword::MaxContent);
     if (size.is_fit_content()) {
         if (auto available_space = size.fit_content_available_space(); available_space.has_value())
-            return FitContentStyleValue::create(available_space.release_value());
-        return FitContentStyleValue::create();
+            return FunctionStyleValue::create("fit-content"_utf16_fly_string, style_value_for_length_percentage(available_space.release_value()));
+        return KeywordStyleValue::create(Keyword::FitContent);
     }
     TODO();
 }
 
-static RefPtr<StyleValue const> style_value_for_shadow(Vector<ShadowData> const& shadow_data)
+static RefPtr<StyleValue const> style_value_for_shadow(ShadowStyleValue::ShadowType shadow_type, Vector<ShadowData> const& shadow_data)
 {
     if (shadow_data.is_empty())
         return KeywordStyleValue::create(Keyword::None);
 
-    auto make_shadow_style_value = [](ShadowData const& shadow) {
+    auto make_shadow_style_value = [shadow_type](ShadowData const& shadow) {
         return ShadowStyleValue::create(
+            shadow_type,
             ColorStyleValue::create_from_color(shadow.color, ColorSyntax::Modern),
-            style_value_for_length_percentage(shadow.offset_x),
-            style_value_for_length_percentage(shadow.offset_y),
-            style_value_for_length_percentage(shadow.blur_radius),
-            style_value_for_length_percentage(shadow.spread_distance),
+            style_value_for_css_pixels(shadow.offset_x),
+            style_value_for_css_pixels(shadow.offset_y),
+            style_value_for_css_pixels(shadow.blur_radius),
+            style_value_for_css_pixels(shadow.spread_distance),
             shadow.placement);
     };
 
@@ -383,116 +369,400 @@ static RefPtr<StyleValue const> style_value_for_shadow(Vector<ShadowData> const&
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-getpropertyvalue
-String CSSStyleProperties::get_property_value(StringView property_name) const
+Utf16String CSSStyleProperties::get_property_value(Utf16FlyString const& property_name) const
 {
-    auto property_id = property_id_from_string(property_name);
-    if (!property_id.has_value())
-        return {};
-
-    if (property_id.value() == PropertyID::Custom) {
-        auto maybe_custom_property = custom_property(FlyString::from_utf8_without_validation(property_name.bytes()));
-        if (maybe_custom_property.has_value()) {
-            return maybe_custom_property.value().value->to_string(
-                is_computed() ? SerializationMode::ResolvedValue
-                              : SerializationMode::Normal);
-        }
-        return {};
+    if (auto property = PropertyNameAndID::from_name(property_name); property.has_value()) {
+        if (auto style_property = get_property_internal(*property); style_property.has_value())
+            return style_property->value->to_utf16_string(is_computed() ? SerializationMode::ResolvedValue : SerializationMode::Normal);
     }
 
-    auto maybe_property = get_property_internal(property_id.value());
-    if (!maybe_property.has_value())
-        return {};
-    return maybe_property->value->to_string(
-        is_computed() ? SerializationMode::ResolvedValue
-                      : SerializationMode::Normal);
+    return {};
 }
-
 // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-getpropertypriority
-StringView CSSStyleProperties::get_property_priority(StringView property_name) const
+Utf16String CSSStyleProperties::get_property_priority(Utf16FlyString const& property_name) const
 {
-    auto property_id = property_id_from_string(property_name);
-    if (!property_id.has_value())
+    auto property = PropertyNameAndID::from_name(property_name);
+    if (!property.has_value())
         return {};
-    if (property_id.value() == PropertyID::Custom) {
-        auto maybe_custom_property = custom_property(FlyString::from_utf8_without_validation(property_name.bytes()));
+    if (property->is_custom_property()) {
+        auto maybe_custom_property = custom_property(property_name);
         if (!maybe_custom_property.has_value())
             return {};
-        return maybe_custom_property.value().important == Important::Yes ? "important"sv : ""sv;
+        return maybe_custom_property.value().important == Important::Yes ? "important"_utf16 : Utf16String {};
     }
-    auto maybe_property = property(property_id.value());
+    auto maybe_property = get_property(property->id());
     if (!maybe_property.has_value())
         return {};
-    return maybe_property->important == Important::Yes ? "important"sv : ""sv;
+    return maybe_property->important == Important::Yes ? "important"_utf16 : Utf16String {};
 }
 
-bool CSSStyleProperties::has_property(StringView property_name) const
+bool CSSStyleProperties::has_property(PropertyNameAndID const& property) const
 {
-    auto property_id = property_id_from_string(property_name);
-    if (!property_id.has_value())
-        return false;
-    return get_property_internal(*property_id).has_value();
+    return get_property_internal(property).has_value();
 }
 
-RefPtr<StyleValue const> CSSStyleProperties::get_property_style_value(StringView property_name) const
+bool CSSStyleProperties::has_property(PropertyID property_id) const
 {
-    auto property_id = property_id_from_string(property_name);
-    if (!property_id.has_value())
-        return nullptr;
-    if (auto style_property = get_property_internal(*property_id); style_property.has_value())
+    return has_property(PropertyNameAndID::from_id(property_id));
+}
+
+RefPtr<StyleValue const> CSSStyleProperties::get_property_style_value(PropertyNameAndID const& property) const
+{
+    if (auto style_property = get_property_internal(property); style_property.has_value())
         return style_property->value;
     return nullptr;
 }
 
-// https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-getpropertyvalue
-Optional<StyleProperty> CSSStyleProperties::get_property_internal(PropertyID property_id) const
+RefPtr<StyleValue const> CSSStyleProperties::get_property_style_value(PropertyID property_id) const
 {
-    // 2. If property is a shorthand property, then follow these substeps:
-    if (property_is_shorthand(property_id)) {
-        // 1. Let list be a new empty array.
-        Vector<ValueComparingNonnullRefPtr<StyleValue const>> list;
-        Optional<Important> last_important_flag;
-
-        // 2. For each longhand property longhand that property maps to, in canonical order, follow these substeps:
-        Vector<PropertyID> longhand_ids = longhands_for_shorthand(property_id);
-        for (auto longhand_property_id : longhand_ids) {
-            // 1. If longhand is a case-sensitive match for a property name of a CSS declaration in the declarations,
-            //    let declaration be that CSS declaration, or null otherwise.
-            auto declaration = get_property_internal(longhand_property_id);
-
-            // 2. If declaration is null, then return the empty string.
-            if (!declaration.has_value())
-                return {};
-
-            // 3. Append the declaration to list.
-            list.append(declaration->value);
-
-            if (last_important_flag.has_value() && declaration->important != *last_important_flag)
-                return {};
-            last_important_flag = declaration->important;
-        }
-
-        // 3. If important flags of all declarations in list are same, then return the serialization of list.
-        // NOTE: Currently we implement property-specific shorthand serialization in ShorthandStyleValue::to_string().
-        return StyleProperty {
-            .important = last_important_flag.value(),
-            .property_id = property_id,
-            .value = ShorthandStyleValue::create(property_id, longhand_ids, list),
-        };
-
-        // 4. Return the empty string.
-        // NOTE: This is handled by the loop.
-    }
-
-    return property(property_id);
+    return get_property_style_value(PropertyNameAndID::from_id(property_id));
 }
 
-static RefPtr<StyleValue const> resolve_color_style_value(StyleValue const& style_value, Color computed_color)
+WebIDL::ExceptionOr<void> CSSStyleProperties::set_property_style_value(PropertyNameAndID const& property, NonnullRefPtr<StyleValue const> style_value)
 {
-    if (style_value.is_color_function())
+    if (is_computed()) {
+        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot modify properties in result of getComputedStyle()"_utf16);
+    }
+
+    if (property.is_custom_property()) {
+        if (auto existing_property = custom_property(property.name()); existing_property.has_value()
+            && existing_property->important == Important::No
+            && *existing_property->value == *style_value) {
+            return {};
+        }
+
+        m_custom_properties.set(property.name(),
+            StyleProperty {
+                Important::No,
+                PropertyID::Custom,
+                style_value });
+
+        update_style_attribute();
+        invalidate_owners(DOM::StyleInvalidationReason::CSSStylePropertiesSetPropertyStyleValue);
+
+        return {};
+    }
+
+    // FIXME: This should have been rejected earlier, but property_accepts_type() is too basic for what we need.
+    if (property_is_positional_value_list_shorthand(property.id())
+        && !style_value->is_shorthand()
+        && !style_value->is_unresolved()
+        && !style_value->is_pending_substitution()
+        && !style_value->is_guaranteed_invalid()
+        && !style_value->is_css_wide_keyword()) {
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Setting {} to '{}' is not allowed.", property.name(), style_value->to_string(SerializationMode::Normal)) };
+    }
+
+    if (first_is_one_of(property.id(), PropertyID::BackdropFilter, PropertyID::Filter)
+        && style_value->is_value_list()
+        && !is_filter_style_value_list(*style_value)) {
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Setting {} to '{}' is not allowed.", property.name(), style_value->to_string(SerializationMode::Normal)) };
+    }
+
+    StyleComputer::for_each_property_expanding_shorthands(property.id(), style_value, [this](PropertyID longhand_id, StyleValue const& longhand_value) {
+        m_properties.remove_first_matching([longhand_id](StyleProperty const& style_property) {
+            return style_property.property_id == longhand_id;
+        });
+        m_properties.append(StyleProperty {
+            .important = Important::No,
+            .property_id = longhand_id,
+            .value = longhand_value,
+        });
+    });
+
+    update_style_attribute();
+    invalidate_owners(DOM::StyleInvalidationReason::CSSStylePropertiesSetPropertyStyleValue);
+
+    return {};
+}
+
+// https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-getpropertyvalue
+Optional<StyleProperty> CSSStyleProperties::get_property_internal(PropertyNameAndID const& property) const
+{
+    // NB: This is our own method to get a StyleProperty, but following the algorithm for getPropertyValue() which
+    //     returns a String. (This way, we can use the same logic in other places.) That's why the spec steps talk
+    //     about strings and then we do something different.
+
+    // 1. If property is not a custom property, follow these substeps:
+    if (!property.is_custom_property()) {
+        // 1. Let property be property converted to ASCII lowercase.
+        // NB: Done already by PropertyNameAndID.
+
+        // 2. If property is a shorthand property, then follow these substeps:
+        if (property_is_shorthand(property.id())) {
+            // 1. Let list be a new empty array.
+            Vector<ValueComparingNonnullRefPtr<StyleValue const>> list;
+            Optional<Important> last_important_flag;
+
+            // 2. For each longhand property longhand that property maps to, in canonical order, follow these substeps:
+            Vector<PropertyID> longhand_ids = longhands_for_shorthand(property.id());
+            for (auto longhand_property_id : longhand_ids) {
+                // 1. If longhand is a case-sensitive match for a property name of a CSS declaration in the declarations,
+                //    let declaration be that CSS declaration, or null otherwise.
+                auto declaration = get_property_internal(PropertyNameAndID::from_id(longhand_property_id));
+
+                // 2. If declaration is null, then return the empty string.
+                if (!declaration.has_value())
+                    return {};
+
+                // 3. Append the declaration to list.
+                list.append(declaration->value);
+
+                if (last_important_flag.has_value() && declaration->important != *last_important_flag)
+                    return {};
+                last_important_flag = declaration->important;
+            }
+
+            // https://drafts.csswg.org/css-values-5/#pending-substitution-value
+            // If all of the component longhand properties for a given shorthand are pending-substitution values from
+            // the same original shorthand value, the shorthand property must serialize to that original
+            // (arbitrary substitution function-containing) value.
+            // Otherwise, if any of the component longhand properties for a given shorthand are pending-substitution
+            // values, or contain arbitrary substitution functions of their own that have not yet been substituted, the
+            // shorthand property must serialize to the empty string.
+            if (list.first()->is_pending_substitution()) {
+                auto const& original_shorthand_value = list.first()->as_pending_substitution().original_shorthand_value();
+                auto all_from_same_original = all_of(list, [&](auto const& value) {
+                    return value->is_pending_substitution()
+                        && &value->as_pending_substitution().original_shorthand_value() == &original_shorthand_value;
+                });
+                if (all_from_same_original) {
+                    return StyleProperty {
+                        .important = last_important_flag.value(),
+                        .property_id = property.id(),
+                        .value = original_shorthand_value,
+                    };
+                }
+            }
+            if (any_of(list, [](auto const& value) { return value->is_pending_substitution() || value->is_unresolved(); }))
+                return {};
+
+            // 3. If important flags of all declarations in list are same, then return the serialization of list.
+            // NOTE: Currently we implement property-specific shorthand serialization in ShorthandStyleValue::to_string().
+            return StyleProperty {
+                .important = last_important_flag.value(),
+                .property_id = property.id(),
+                .value = ShorthandStyleValue::create(property.id(), longhand_ids, list),
+            };
+
+            // 4. Return the empty string.
+            // NOTE: This is handled by the loop.
+        }
+    }
+
+    // 2. If property is a case-sensitive match for a property name of a CSS declaration in the declarations, then
+    //    return the result of invoking serialize a CSS value of that declaration.
+    // 3. Return the empty string.
+    return get_direct_property(property);
+}
+
+static void ensure_pseudo_element_style_for_cssom(DOM::AbstractElement abstract_element)
+{
+    auto pseudo_element = abstract_element.pseudo_element();
+    if (!pseudo_element.has_value())
+        return;
+    if (!is_synthetic_pseudo_element(*pseudo_element))
+        return;
+    if (*pseudo_element != PseudoElement::Backdrop && abstract_element.computed_values())
+        return;
+    auto& style_computer = abstract_element.document().style_computer();
+    style_computer.reset_has_result_cache();
+
+    auto const* first_ancestor = &abstract_element.element();
+    for (auto* ancestor = first_ancestor; ancestor; ancestor = ancestor->parent_or_shadow_host_element())
+        style_computer.push_ancestor(*ancestor);
+
+    ScopeGuard pop_ancestors = [&] {
+        for (auto* ancestor = first_ancestor; ancestor; ancestor = ancestor->parent_or_shadow_host_element())
+            style_computer.pop_ancestor(*ancestor);
+    };
+
+    bool did_change_custom_properties = false;
+    auto style = style_computer.compute_pseudo_element_style_if_needed(abstract_element, did_change_custom_properties);
+    if (style)
+        abstract_element.element().set_computed_style(*pseudo_element, move(style));
+    else
+        abstract_element.element().set_computed_style(*pseudo_element, nullptr);
+}
+
+Optional<StyleProperty> CSSStyleProperties::get_direct_property(PropertyNameAndID const& property_name_and_id) const
+{
+    auto const property_id = property_name_and_id.id();
+
+    if (is_computed()) {
+        if (!owner_node().has_value())
+            return {};
+
+        auto abstract_element = *owner_node();
+
+        // https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle
+        // NB: This is a partial enforcement of step 5:
+        // If [...] elt is connected, part of the flat tree, and its shadow-including root has a browsing context which
+        // either doesn't have a browsing context container, or whose browsing context container is being rendered.
+        auto& element = abstract_element.element();
+        if (!element.is_connected())
+            return {};
+        auto browsing_context = element.shadow_including_root().document().browsing_context();
+        if (!browsing_context)
+            return {};
+        // FIXME: Check if the element is part of the flat tree.
+        // FIXME: Check that the browsing context either doesn't have a browsing context container, or that its
+        //        browsing context container is being rendered.
+
+        // NB: We grab the layout node before deciding whether update_layout() is needed.
+        //     For properties that don't need layout or a layout node (the else branch below),
+        //     we skip update_layout() entirely and use whatever layout node already exists.
+        //     For the other paths, we call update_layout() and re-fetch below.
+        Layout::NodeWithStyle* layout_node = abstract_element.unsafe_layout_node();
+
+        // Determine what work is needed for this property:
+        // 1. Properties that need layout computation (used values) - always run update_layout()
+        // 2. Properties that need a layout node for special resolution - ensure layout node exists
+        // 3. Everything else - just update_style() and return computed value
+        bool const needs_layout = property_needs_layout_for_getcomputedstyle(property_id);
+        bool const needs_layout_node = property_needs_layout_node_for_resolved_value(property_id);
+
+        if (needs_layout || needs_layout_node) {
+            // Properties that need layout computation or layout node for special resolution
+            // always need update_layout() to ensure both style and layout tree are up to date.
+            abstract_element.document().update_layout(DOM::UpdateLayoutReason::ResolvedCSSStyleDeclarationProperty);
+            layout_node = abstract_element.layout_node();
+        }
+        // Ensure styles are up to date. update_layout()/update_style() skip display:none subtrees,
+        // so the leaf and its inheritance ancestors may still be stale at this point.
+        bool const style_is_in_display_none_subtree = !layout_node
+            && abstract_element.computed_values()
+            && abstract_element.computed_values()->in_display_none_subtree();
+        if (style_is_in_display_none_subtree || abstract_element.document().element_needs_style_update(abstract_element))
+            abstract_element.document().update_style_for_element(abstract_element);
+        ensure_pseudo_element_style_for_cssom(abstract_element);
+
+        // Container queries and container-relative units need layout to resolve. Avoid forcing layout for every
+        // getComputedStyle() call; only elements that actually depend on a query container need the post-layout style.
+        bool const needs_layout_for_container_queries = abstract_element.element().style_depends_on_size_container_query()
+            && !abstract_element.document().layout_is_up_to_date();
+        if (needs_layout_for_container_queries) {
+            abstract_element.document().update_layout(DOM::UpdateLayoutReason::ResolvedCSSStyleDeclarationProperty);
+            layout_node = abstract_element.layout_node();
+        }
+
+        if (auto pseudo_element = abstract_element.pseudo_element(); layout_node && pseudo_element.has_value()) {
+            if (auto pseudo_style = abstract_element.element().computed_values(*pseudo_element); pseudo_style && pseudo_style->display().is_contents())
+                layout_node = nullptr;
+        }
+
+        // FIXME: Somehow get custom properties if there's no layout node.
+        if (property_name_and_id.is_custom_property()) {
+            if (auto maybe_value = abstract_element.get_custom_property(property_name_and_id.name())) {
+                return StyleProperty {
+                    .property_id = property_id,
+                    .value = maybe_value.release_nonnull(),
+                };
+            }
+            // Pseudo-elements may have no own custom-property data if the matching rule targeted the originating
+            // element rather than the pseudo-element itself (for example `::slotted(...)`).
+            // In that case, getComputedStyle(..., "::before") still needs to expose inherited custom properties from
+            // the originating element.
+            if (abstract_element.pseudo_element().has_value()) {
+                if (auto inherit_from = abstract_element.element_to_inherit_style_from(); inherit_from.has_value()) {
+                    if (auto maybe_value = inherit_from->get_custom_property(property_name_and_id.name())) {
+                        return StyleProperty {
+                            .property_id = property_id,
+                            .value = maybe_value.release_nonnull(),
+                        };
+                    }
+                }
+            }
+            // FIXME: Currently, to get the initial value for a registered custom property we have to look at the document.
+            //        These should be cascaded like other properties.
+            if (auto maybe_value = abstract_element.document().get_registered_custom_property(property_name_and_id.name()); maybe_value.has_value() && maybe_value->initial_value) {
+                return StyleProperty {
+                    .property_id = property_id,
+                    .value = *maybe_value->initial_value,
+                };
+            }
+
+            return {};
+        }
+
+        if (!layout_node) {
+            auto computed_values = abstract_element.computed_values();
+            RefPtr<ComputedValues const> transient_style;
+            if (!computed_values) {
+                // A synthetic pseudo-element without matching rules has no durable style. Seed the ancestor chain
+                // before this one-off computation so ancestor-dependent selectors still match.
+                transient_style = abstract_element.document().style_computer().compute_style_with_seeded_ancestors(abstract_element);
+                computed_values = transient_style;
+            }
+
+            auto computed_value_for_property = [&](PropertyID computed_property_id) -> NonnullRefPtr<StyleValue const> {
+                if (property_is_logical_alias(computed_property_id))
+                    computed_property_id = map_logical_alias_to_physical_property(computed_property_id, LogicalAliasMappingContext { computed_values->writing_mode(), computed_values->direction() });
+                if (computed_property_id == PropertyID::BackgroundColor) {
+                    if (auto style_value = computed_values->background_color_style_value(); style_value && !style_value->depends_on_current_color())
+                        return style_value.release_nonnull();
+                }
+                auto computed_value = computed_values->computed_style_value(computed_property_id).release_nonnull();
+                return computed_value;
+            };
+
+            if (property_is_shorthand(property_id)) {
+                auto longhand_ids = longhands_for_shorthand(property_id);
+                StyleValueVector longhand_values;
+                longhand_values.ensure_capacity(longhand_ids.size());
+                for (auto longhand_id : longhand_ids)
+                    longhand_values.append(computed_value_for_property(longhand_id));
+                return StyleProperty {
+                    .property_id = property_id,
+                    .value = ShorthandStyleValue::create(property_id, move(longhand_ids), move(longhand_values)),
+                };
+            }
+
+            return StyleProperty {
+                .property_id = property_id,
+                .value = computed_value_for_property(property_id),
+            };
+        }
+
+        auto value = style_value_for_computed_property(*layout_node, property_id);
+        if (!value)
+            return {};
+        return StyleProperty {
+            .property_id = property_id,
+            .value = *value,
+        };
+    }
+
+    if (property_name_and_id.is_custom_property())
+        return custom_property(property_name_and_id.name()).copy();
+
+    for (auto const& property : m_properties) {
+        if (property.property_id == property_id)
+            return property;
+    }
+    return {};
+}
+
+static RefPtr<StyleValue const> resolve_color_style_value(StyleValue const& style_value, Color computed_color, Layout::NodeWithStyle const* layout_node = nullptr)
+{
+    if (layout_node && style_value.is_color_function()) {
+        auto const& color_function = as<ColorFunctionStyleValue>(style_value);
+        if (color_function.origin_color() && color_function.color_type().has_value()) {
+            auto color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*layout_node);
+            auto resolved = color_function.resolve_relative_form(color_resolution_context);
+            if (!resolved)
+                return style_value;
+
+            return as<ColorFunctionStyleValue>(*resolved).computed_value_form();
+        }
+    }
+
+    if (style_value.is_color_function() && as<ColorFunctionStyleValue>(style_value).serializes_as_color_function())
         return style_value;
     if (style_value.is_color()) {
         auto& color_style_value = static_cast<ColorStyleValue const&>(style_value);
-        if (first_is_one_of(color_style_value.color_type(), ColorStyleValue::ColorType::Lab, ColorStyleValue::ColorType::OKLab, ColorStyleValue::ColorType::LCH, ColorStyleValue::ColorType::OKLCH))
+        if (auto color_type = color_style_value.color_type();
+            color_type.has_value() && first_is_one_of(*color_type, ColorStyleValue::ColorType::Lab, ColorStyleValue::ColorType::OKLab, ColorStyleValue::ColorType::LCH, ColorStyleValue::ColorType::OKLCH))
             return style_value;
     }
 
@@ -506,20 +776,30 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         return nullptr;
     }
 
-    auto used_value_for_property = [&layout_node, property_id](Function<CSSPixels(Painting::PaintableBox const&)>&& used_value_getter) -> Optional<CSSPixels> {
+    auto used_value_for_property = [&layout_node, property_id](Function<CSSPixels(Painting::Paintable const&)>&& used_value_getter) -> Optional<CSSPixels> {
         auto const& display = layout_node.computed_values().display();
-        if (!display.is_none() && !display.is_contents() && layout_node.first_paintable()) {
-            if (auto const* paintable_box = as_if<Painting::PaintableBox>(layout_node.first_paintable()))
+        if (!display.is_none() && !display.is_contents()) {
+            auto paintable = layout_node.paintable();
+            if (auto const* paintable_box = paintable.ptr())
                 return used_value_getter(*paintable_box);
-            dbgln("FIXME: Support getting used value for property `{}` on {}", string_from_property_id(property_id), layout_node.debug_description());
+            if (paintable)
+                dbgln("FIXME: Support getting used value for property `{}` on {}", string_from_property_id(property_id), layout_node.debug_description());
         }
         return {};
+    };
+
+    auto used_size_for_property = [&layout_node, &used_value_for_property]<typename ContentBoxGetter, typename BorderBoxGetter>(ContentBoxGetter content_box_getter, BorderBoxGetter border_box_getter) -> Optional<CSSPixels> {
+        return used_value_for_property([&layout_node, content_box_getter, border_box_getter](Painting::Paintable const& paintable_box) {
+            if (layout_node.computed_values().box_sizing() == BoxSizing::BorderBox)
+                return border_box_getter(paintable_box);
+            return content_box_getter(paintable_box);
+        });
     };
 
     auto& element = owner_node()->element();
     auto pseudo_element = owner_node()->pseudo_element();
 
-    auto used_value_for_inset = [&layout_node, used_value_for_property](LengthPercentageOrAuto const& start_side, LengthPercentageOrAuto const& end_side, Function<CSSPixels(Painting::PaintableBox const&)>&& used_value_getter) -> Optional<CSSPixels> {
+    auto used_value_for_inset = [&layout_node, used_value_for_property](LengthPercentageOrAuto const& start_side, LengthPercentageOrAuto const& end_side, Function<CSSPixels(Painting::Paintable const&)>&& used_value_getter) -> Optional<CSSPixels> {
         if (!layout_node.is_positioned())
             return {};
 
@@ -533,15 +813,15 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         return used_value_for_property(move(used_value_getter));
     };
 
-    auto get_computed_value = [&element, pseudo_element](PropertyID property_id) -> auto const& {
-        return element.computed_properties(pseudo_element)->property(property_id);
+    auto get_computed_value = [&element, pseudo_element](PropertyID property_id) -> NonnullRefPtr<StyleValue const> {
+        return element.computed_values(pseudo_element)->computed_style_value(property_id).release_nonnull();
     };
 
     if (property_is_logical_alias(property_id)) {
-        auto computed_properties = element.computed_properties(pseudo_element);
+        auto computed_values = element.computed_values(pseudo_element);
         return style_value_for_computed_property(
             layout_node,
-            map_logical_alias_to_physical_property(property_id, LogicalAliasMappingContext { computed_properties->writing_mode(), computed_properties->direction() }));
+            map_logical_alias_to_physical_property(property_id, LogicalAliasMappingContext { computed_values->writing_mode(), computed_values->direction() }));
     }
 
     // A limited number of properties have special rules for producing their "resolved value".
@@ -568,34 +848,37 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         // -> A resolved value special case property like color defined in another specification
         //    The resolved value is the used value.
     case PropertyID::BackgroundColor:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().background_color());
+        return resolve_color_style_value(
+            *layout_node.computed_values().background_color_style_value(),
+            layout_node.computed_values().background_color(),
+            &layout_node);
     case PropertyID::BorderBottomColor:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().border_bottom().color);
+        return resolve_color_style_value(*get_computed_value(property_id), layout_node.computed_values().border_bottom().color, &layout_node);
     case PropertyID::BorderLeftColor:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().border_left().color);
+        return resolve_color_style_value(*get_computed_value(property_id), layout_node.computed_values().border_left().color, &layout_node);
     case PropertyID::BorderRightColor:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().border_right().color);
+        return resolve_color_style_value(*get_computed_value(property_id), layout_node.computed_values().border_right().color, &layout_node);
     case PropertyID::BorderTopColor:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().border_top().color);
+        return resolve_color_style_value(*get_computed_value(property_id), layout_node.computed_values().border_top().color, &layout_node);
     case PropertyID::BoxShadow:
-        return style_value_for_shadow(layout_node.computed_values().box_shadow());
+        return style_value_for_shadow(ShadowStyleValue::ShadowType::Normal, layout_node.computed_values().box_shadow());
     case PropertyID::CaretColor:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().caret_color());
+        return resolve_color_style_value(*get_computed_value(property_id), layout_node.computed_values().caret_color(), &layout_node);
     case PropertyID::Color:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().color());
+        return resolve_color_style_value(*get_computed_value(property_id), layout_node.computed_values().color(), &layout_node);
     case PropertyID::OutlineColor:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().outline_color());
+        return resolve_color_style_value(*get_computed_value(property_id), layout_node.computed_values().outline_color(), &layout_node);
     case PropertyID::TextDecorationColor:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().text_decoration_color());
+        return resolve_color_style_value(*get_computed_value(property_id), layout_node.computed_values().text_decoration_color(), &layout_node);
         // NB: text-shadow isn't listed, but is computed the same as box-shadow.
     case PropertyID::TextShadow:
-        return style_value_for_shadow(layout_node.computed_values().text_shadow());
+        return style_value_for_shadow(ShadowStyleValue::ShadowType::Text, layout_node.computed_values().text_shadow());
 
         // -> line-height
         //    The resolved value is normal if the computed value is normal, or the used value otherwise.
     case PropertyID::LineHeight: {
-        auto const& line_height = get_computed_value(property_id);
-        if (line_height.is_keyword() && line_height.to_keyword() == Keyword::Normal)
+        auto line_height = get_computed_value(property_id);
+        if (line_height->is_keyword() && line_height->to_keyword() == Keyword::Normal)
             return line_height;
         return LengthStyleValue::create(Length::make_px(layout_node.computed_values().line_height()));
     }
@@ -624,7 +907,9 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         // display property is not none or contents, then the resolved value is the used value.
         // Otherwise the resolved value is the computed value.
     case PropertyID::Height: {
-        auto maybe_used_height = used_value_for_property([](auto const& paintable_box) { return paintable_box.content_height(); });
+        auto maybe_used_height = used_size_for_property(
+            [](auto const& paintable_box) { return paintable_box.content_height(); },
+            [](auto const& paintable_box) { return paintable_box.absolute_border_box_rect().height(); });
         if (maybe_used_height.has_value())
             return style_value_for_size(Size::make_px(maybe_used_height.release_value()));
         return style_value_for_size(layout_node.computed_values().height());
@@ -662,7 +947,9 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
             return LengthStyleValue::create(Length::make_px(maybe_used_value.release_value()));
         return style_value_for_length_percentage_or_auto(layout_node.computed_values().padding().top());
     case PropertyID::Width: {
-        auto maybe_used_width = used_value_for_property([](auto const& paintable_box) { return paintable_box.content_width(); });
+        auto maybe_used_width = used_size_for_property(
+            [](auto const& paintable_box) { return paintable_box.content_width(); },
+            [](auto const& paintable_box) { return paintable_box.absolute_border_box_rect().width(); });
         if (maybe_used_width.has_value())
             return style_value_for_size(Size::make_px(maybe_used_width.release_value()));
         return style_value_for_size(layout_node.computed_values().width());
@@ -723,10 +1010,11 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         auto transform = FloatMatrix4x4::identity();
 
         // 2. Post-multiply all <transform-function>s in <transform-list> to transform.
-        VERIFY(layout_node.first_paintable());
-        auto const& paintable_box = as<Painting::PaintableBox const>(*layout_node.first_paintable());
-        for (auto transformation : transformations) {
-            transform = transform * transformation.to_matrix(paintable_box).release_value();
+        auto paintable = layout_node.paintable();
+        VERIFY(paintable);
+        auto const& paintable_box = *paintable;
+        for (auto const& transformation : transformations) {
+            transform = transform * transformation->to_matrix(paintable_box);
         }
 
         // https://drafts.csswg.org/css-transforms-1/#2d-matrix
@@ -736,18 +1024,19 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
             // and m33, m44 are equal to 1.
             // NB: We only care about 4x4 matrices here.
             // NB: Our elements are 0-indexed not 1-indexed, and in the opposite order.
-            if (matrix[0, 2] != 0     // m31
-                || matrix[1, 2] != 0  // m32
-                || matrix[2, 0] != 0  // m13
-                || matrix[2, 1] != 0  // m23
-                || matrix[2, 3] != 0  // m43
-                || matrix[3, 0] != 0  // m14
-                || matrix[3, 1] != 0  // m24
-                || matrix[3, 2] != 0) // m34
+            // NB: We use epsilon comparisons here to account for inaccuracies when doing trigonometric calculations.
+            if (abs(matrix[0, 2]) > AK::NumericLimits<float>::epsilon()     // m31
+                || abs(matrix[1, 2]) > AK::NumericLimits<float>::epsilon()  // m32
+                || abs(matrix[2, 0]) > AK::NumericLimits<float>::epsilon()  // m13
+                || abs(matrix[2, 1]) > AK::NumericLimits<float>::epsilon()  // m23
+                || abs(matrix[2, 3]) > AK::NumericLimits<float>::epsilon()  // m43
+                || abs(matrix[3, 0]) > AK::NumericLimits<float>::epsilon()  // m14
+                || abs(matrix[3, 1]) > AK::NumericLimits<float>::epsilon()  // m24
+                || abs(matrix[3, 2]) > AK::NumericLimits<float>::epsilon()) // m34
                 return false;
 
-            if (matrix[2, 2] != 1     // m33
-                || matrix[3, 3] != 1) // m44
+            if (abs(matrix[2, 2]) - 1 > AK::NumericLimits<float>::epsilon()     // m33
+                || abs(matrix[3, 3]) - 1 > AK::NumericLimits<float>::epsilon()) // m44
                 return false;
 
             return true;
@@ -791,10 +1080,44 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
             return TransformationStyleValue::create(PropertyID::Transform, TransformFunction::Matrix3d, move(parameters));
         }
     }
+    case PropertyID::AnimationDuration: {
+        // https://drafts.csswg.org/css-animations-2/#animation-duration
+        // For backwards-compatibility with Level 1, when the computed value of animation-timeline is auto (i.e. only
+        // one list value, and that value being auto), the resolved value of auto for animation-duration is 0s whenever
+        // its used value would also be 0s.
+        auto animation_timeline_computed_value = get_computed_value(PropertyID::AnimationTimeline);
+        auto animation_duration_computed_value = get_computed_value(PropertyID::AnimationDuration);
+
+        if (animation_timeline_computed_value->as_value_list().size() == 1 && animation_timeline_computed_value->as_value_list().values()[0]->to_keyword() == Keyword::Auto) {
+            StyleValueVector resolved_durations;
+
+            for (auto const& duration : animation_duration_computed_value->as_value_list().values()) {
+                if (duration->to_keyword() == Keyword::Auto) {
+                    resolved_durations.append(TimeStyleValue::create(Time::make_seconds(0)));
+                } else {
+                    resolved_durations.append(duration);
+                }
+            }
+
+            return StyleValueList::create(move(resolved_durations), StyleValueList::Separator::Comma);
+        }
+
+        return animation_duration_computed_value;
+    }
+        // If the border-style corresponding to a given border-width is none or hidden, then the used width is 0.
+        // https://drafts.csswg.org/css-backgrounds/#border-width
+        // NB: We do this adjustment when assigning to ComputedValues, so read from there.
+    case PropertyID::BorderBottomWidth:
+        return style_value_for_size(Size::make_px(layout_node.computed_values().border_bottom().width));
+    case PropertyID::BorderLeftWidth:
+        return style_value_for_size(Size::make_px(layout_node.computed_values().border_left().width));
+    case PropertyID::BorderRightWidth:
+        return style_value_for_size(Size::make_px(layout_node.computed_values().border_right().width));
+    case PropertyID::BorderTopWidth:
+        return style_value_for_size(Size::make_px(layout_node.computed_values().border_top().width));
 
         // -> Any other property
         //    The resolved value is the computed value.
-        //    NOTE: This is handled inside the `default` case.
     case PropertyID::Contain: {
         auto const& contain = layout_node.computed_values().contain();
         if (contain.layout_containment && contain.style_containment && contain.paint_containment) {
@@ -807,7 +1130,7 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         return get_computed_value(property_id);
     }
     case PropertyID::WebkitTextFillColor:
-        return resolve_color_style_value(get_computed_value(property_id), layout_node.computed_values().webkit_text_fill_color());
+        return resolve_color_style_value(*get_computed_value(property_id), layout_node.computed_values().webkit_text_fill_color(), &layout_node);
     case PropertyID::LetterSpacing: {
         // https://drafts.csswg.org/css-text-4/#letter-spacing-property
         // For legacy reasons, a computed letter-spacing of zero yields a resolved value (getComputedStyle() return value) of normal.
@@ -815,8 +1138,6 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
             return KeywordStyleValue::create(Keyword::Normal);
         return get_computed_value(property_id);
     }
-    case PropertyID::Invalid:
-        return KeywordStyleValue::create(Keyword::Invalid);
     case PropertyID::Custom:
         dbgln_if(LIBWEB_CSS_DEBUG, "Computed style for custom properties was requested (?)");
         return nullptr;
@@ -824,27 +1145,20 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         // For grid-template-columns and grid-template-rows the resolved value is the used value.
         // https://www.w3.org/TR/css-grid-2/#resolved-track-list-standalone
         if (property_id == PropertyID::GridTemplateColumns) {
-            if (layout_node.first_paintable() && layout_node.first_paintable()->is_paintable_box()) {
-                auto const& paintable_box = as<Painting::PaintableBox const>(*layout_node.first_paintable());
-                if (auto used_values_for_grid_template_columns = paintable_box.used_values_for_grid_template_columns()) {
+            if (auto paintable = layout_node.paintable(); auto const* paintable_box = paintable.ptr()) {
+                if (auto used_values_for_grid_template_columns = paintable_box->used_values_for_grid_template_columns())
                     return used_values_for_grid_template_columns;
-                }
             }
         } else if (property_id == PropertyID::GridTemplateRows) {
-            if (layout_node.first_paintable() && layout_node.first_paintable()->is_paintable_box()) {
-                auto const& paintable_box = as<Painting::PaintableBox const>(*layout_node.first_paintable());
-                if (auto used_values_for_grid_template_rows = paintable_box.used_values_for_grid_template_rows()) {
+            if (auto paintable = layout_node.paintable(); auto const* paintable_box = paintable.ptr()) {
+                if (auto used_values_for_grid_template_rows = paintable_box->used_values_for_grid_template_rows())
                     return used_values_for_grid_template_rows;
-                }
-            }
-        } else if (property_id == PropertyID::ZIndex) {
-            if (auto z_index = layout_node.computed_values().z_index(); z_index.has_value()) {
-                return NumberStyleValue::create(z_index.value());
             }
         }
 
-        if (!property_is_shorthand(property_id))
+        if (!property_is_shorthand(property_id)) {
             return get_computed_value(property_id);
+        }
 
         // Handle shorthands in a generic way
         auto longhand_ids = longhands_for_shorthand(property_id);
@@ -857,84 +1171,91 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-removeproperty
-WebIDL::ExceptionOr<String> CSSStyleProperties::remove_property(StringView property_name)
+WebIDL::ExceptionOr<Utf16String> CSSStyleProperties::remove_property(Utf16FlyString const& property_name)
+{
+    return remove_property_internal(PropertyNameAndID::from_name(property_name));
+}
+
+// https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-removeproperty
+WebIDL::ExceptionOr<Utf16String> CSSStyleProperties::remove_property_internal(Optional<PropertyNameAndID> const& property)
 {
     // 1. If the readonly flag is set, then throw a NoModificationAllowedError exception.
     if (is_readonly())
         return WebIDL::NoModificationAllowedError::create(realm(), "Cannot remove property: CSSStyleProperties is read-only."_utf16);
 
-    auto property_id = property_id_from_string(property_name);
-    if (!property_id.has_value())
-        return String {};
-
     // 2. If property is not a custom property, let property be property converted to ASCII lowercase.
-    // NB: We've already converted it to a PropertyID enum value.
+    // NB: Already done by creating a PropertyNameAndID.
 
-    // 3. Let value be the return value of invoking getPropertyValue() with property as argument.
-    auto value = get_property_value(property_name);
+    // NB: The spec doesn't reject invalid property names, it just lets them pass through.
+    //     Attempting to remove a non-existent property is a no-op, so we can just skip over this section.
+    Utf16String value;
+    if (property.has_value()) {
+        // 3. Let value be the return value of invoking getPropertyValue() with property as argument.
+        // FIXME: Add an overload that takes PropertyNameAndID?
+        value = get_property_value(property->name());
 
-    Function<bool(PropertyID)> remove_declaration = [&](auto property_id) {
-        // 4. Let removed be false.
-        bool removed = false;
+        Function<bool(PropertyNameAndID const&)> remove_declaration = [&](PropertyNameAndID const& property_to_remove) {
+            // 4. Let removed be false.
+            bool removed = false;
 
-        // 5. If property is a shorthand property, for each longhand property longhand that property maps to:
-        if (property_is_shorthand(property_id)) {
-            for (auto longhand_property_id : longhands_for_shorthand(property_id)) {
-                // 1. If longhand is not a property name of a CSS declaration in the declarations, continue.
-                // 2. Remove that CSS declaration and let removed be true.
-                removed |= remove_declaration(longhand_property_id);
-            }
-        } else {
-            // 6. Otherwise, if property is a case-sensitive match for a property name of a CSS declaration in the declarations, remove that CSS declaration and let removed be true.
-            if (property_id == PropertyID::Custom) {
-                auto custom_name = FlyString::from_utf8_without_validation(property_name.bytes());
-                removed = m_custom_properties.remove(custom_name);
+            // 5. If property is a shorthand property, for each longhand property longhand that property maps to:
+            if (property_is_shorthand(property_to_remove.id())) {
+                for (auto longhand_property_id : longhands_for_shorthand(property_to_remove.id())) {
+                    // 1. If longhand is not a property name of a CSS declaration in the declarations, continue.
+                    // 2. Remove that CSS declaration and let removed be true.
+                    removed |= remove_declaration(PropertyNameAndID::from_id(longhand_property_id));
+                }
             } else {
-                removed = m_properties.remove_first_matching([&](auto& entry) { return entry.property_id == property_id; });
+                // 6. Otherwise, if property is a case-sensitive match for a property name of a CSS declaration in the declarations, remove that CSS declaration and let removed be true.
+                if (property_to_remove.is_custom_property()) {
+                    removed = m_custom_properties.remove(property_to_remove.name());
+                } else {
+                    removed = m_properties.remove_first_matching([&](auto& entry) { return entry.property_id == property_to_remove.id(); });
+                }
             }
+
+            return removed;
+        };
+
+        auto removed = remove_declaration(property.value());
+
+        // 7. If removed is true, Update style attribute for the CSS declaration block.
+        if (removed) {
+            update_style_attribute();
+
+            // Non-standard: Invalidate style for the owners of our containing sheet, if any.
+            invalidate_owners(DOM::StyleInvalidationReason::CSSStylePropertiesRemoveProperty);
         }
-
-        return removed;
-    };
-
-    auto removed = remove_declaration(property_id.value());
-
-    // 7. If removed is true, Update style attribute for the CSS declaration block.
-    if (removed) {
-        update_style_attribute();
-
-        // Non-standard: Invalidate style for the owners of our containing sheet, if any.
-        invalidate_owners(DOM::StyleInvalidationReason::CSSStylePropertiesRemoveProperty);
     }
 
     // 8. Return value.
     return value;
 }
 
-WebIDL::ExceptionOr<String> CSSStyleProperties::remove_property(PropertyID property_name)
+WebIDL::ExceptionOr<Utf16String> CSSStyleProperties::remove_property(PropertyID property_name)
 {
-    return remove_property(string_from_property_id(property_name));
+    return remove_property_internal(PropertyNameAndID::from_id(property_name));
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstyleproperties-cssfloat
-String CSSStyleProperties::css_float() const
+Utf16String CSSStyleProperties::css_float() const
 {
     // The cssFloat attribute, on getting, must return the result of invoking getPropertyValue() with float as argument.
-    return get_property_value("float"sv);
+    return get_property_value("float"_utf16_fly_string);
 }
 
-WebIDL::ExceptionOr<void> CSSStyleProperties::set_css_float(StringView value)
+WebIDL::ExceptionOr<void> CSSStyleProperties::set_css_float(Utf16View value)
 {
     // On setting, the attribute must invoke setProperty() with float as first argument, as second argument the given value,
     // and no third argument. Any exceptions thrown must be re-thrown.
-    return set_property("float"sv, value, ""sv);
+    return set_property(PropertyID::Float, value, u""sv);
 }
 
 // https://www.w3.org/TR/cssom/#serialize-a-css-declaration-block
-String CSSStyleProperties::serialized() const
+Utf16String CSSStyleProperties::serialized() const
 {
     // 1. Let list be an empty array.
-    Vector<String> list;
+    Vector<Utf16String> list;
 
     // 2. Let already serialized be an empty array.
     HashTable<PropertyID> already_serialized;
@@ -957,7 +1278,7 @@ String CSSStyleProperties::serialized() const
     // NB: The spec treats custom properties the same as any other property, and expects the above loop to handle them.
     //       However, our implementation separates them from regular properties, so we need to handle them separately here.
     // FIXME: Is the relative order of custom properties and regular properties supposed to be preserved?
-    for (auto& declaration : m_custom_properties) {
+    for (auto const& declaration : m_custom_properties) {
         // 1. Let property be declaration’s property name.
         auto const& property = declaration.key;
 
@@ -971,12 +1292,11 @@ String CSSStyleProperties::serialized() const
         // NB: There are no shorthands for custom properties.
 
         // 5. Let value be the result of invoking serialize a CSS value of declaration.
-        auto value = declaration.value.value->to_string(Web::CSS::SerializationMode::Normal);
+        auto value = declaration.value.value->to_utf16_string(Web::CSS::SerializationMode::Normal);
 
         // 6. Let serialized declaration be the result of invoking serialize a CSS declaration with property name property, value value,
         //    and the important flag set if declaration has its important flag set.
-        // NB: We have to inline this here as the actual implementation does not accept custom properties.
-        String serialized_declaration = serialize_a_css_declaration(property, value, declaration.value.important);
+        auto serialized_declaration = serialize_a_css_declaration_to_utf16(property, value, declaration.value.important);
 
         // 7. Append serialized declaration to list.
         list.append(move(serialized_declaration));
@@ -1072,7 +1392,7 @@ String CSSStyleProperties::serialized() const
                     continue;
 
                 // 7. Let value be the result of invoking serialize a CSS value with current longhands.
-                auto value = serialize_a_css_value(current_longhands);
+                auto value = serialize_a_css_value_to_utf16(current_longhands);
 
                 // 8. If value is the empty string, continue with the steps labeled shorthand loop.
                 if (value.is_empty())
@@ -1081,7 +1401,7 @@ String CSSStyleProperties::serialized() const
                 // 9. Let serialized declaration be the result of invoking serialize a CSS declaration with property
                 //    name shorthand, value value, and the important flag set if the CSS declarations in current
                 //    longhands have their important flag set.
-                auto serialized_declaration = serialize_a_css_declaration(string_from_property_id(shorthand), move(value), current_longhands.first().important);
+                auto serialized_declaration = serialize_a_css_declaration_to_utf16(string_from_property_id(shorthand), value, current_longhands.first().important);
 
                 // 10. Append serialized declaration to list.
                 list.append(move(serialized_declaration));
@@ -1097,11 +1417,11 @@ String CSSStyleProperties::serialized() const
         // FIXME: File spec issue that this should only be run if we haven't serialized this declaration in the above shorthand loop.
         if (!already_serialized.contains(declaration.property_id)) {
             // 5. Let value be the result of invoking serialize a CSS value of declaration.
-            auto value = serialize_a_css_value(declaration);
+            auto value = serialize_a_css_value_to_utf16(declaration);
 
             // 6. Let serialized declaration be the result of invoking serialize a CSS declaration with property name property, value value,
             //    and the important flag set if declaration has its important flag set.
-            auto serialized_declaration = serialize_a_css_declaration(string_from_property_id(property), move(value), declaration.important);
+            auto serialized_declaration = serialize_a_css_declaration_to_utf16(string_from_property_id(property), value, declaration.important);
 
             // 7. Append serialized declaration to list.
             list.append(move(serialized_declaration));
@@ -1112,13 +1432,17 @@ String CSSStyleProperties::serialized() const
     }
 
     // 4. Return list joined with " " (U+0020).
-    StringBuilder builder;
-    builder.join(' ', list);
-    return MUST(builder.to_string());
+    Utf16StringBuilder builder;
+    for (size_t i = 0; i < list.size(); ++i) {
+        if (i != 0)
+            builder.append_ascii(' ');
+        builder.append(list[i]);
+    }
+    return builder.to_string();
 }
 
 // https://www.w3.org/TR/cssom/#serialize-a-css-value
-String CSSStyleProperties::serialize_a_css_value(StyleProperty const& declaration) const
+Utf16String CSSStyleProperties::serialize_a_css_value_to_utf16(StyleProperty const& declaration) const
 {
     // 1. If If this algorithm is invoked with a list list:
     // NOTE: This is handled in other other overload of this method
@@ -1142,14 +1466,14 @@ String CSSStyleProperties::serialize_a_css_value(StyleProperty const& declaratio
     //    unless the second item is a "," (U+002C COMMA) Return the result.
 
     // AD-HOC: As the spec is vague we don't follow it exactly here.
-    return declaration.value->to_string(Web::CSS::SerializationMode::Normal);
+    return declaration.value->to_utf16_string(Web::CSS::SerializationMode::Normal);
 }
 
 // https://www.w3.org/TR/cssom/#serialize-a-css-value
-String CSSStyleProperties::serialize_a_css_value(Vector<StyleProperty> list) const
+Utf16String CSSStyleProperties::serialize_a_css_value_to_utf16(Vector<StyleProperty> list) const
 {
     if (list.is_empty())
-        return String {};
+        return {};
 
     // 1. Let shorthand be the first shorthand property, in preferred order, that exactly maps to all of the longhand properties in list.
     Optional<PropertyID> shorthand = shorthands_for_longhand(list.first().property_id).first_matching([&](PropertyID shorthand) {
@@ -1166,7 +1490,7 @@ String CSSStyleProperties::serialize_a_css_value(Vector<StyleProperty> list) con
 
     // 2. If there is no such shorthand or shorthand cannot exactly represent the values of all the properties in list, return the empty string.
     if (!shorthand.has_value())
-        return String {};
+        return {};
 
     // 3. Otherwise, serialize a CSS value from a hypothetical declaration of the property shorthand with its value representing the combined values of the declarations in list.
     Function<ValueComparingNonnullRefPtr<ShorthandStyleValue const>(PropertyID)> make_shorthand_value = [&](PropertyID shorthand_id) {
@@ -1183,12 +1507,11 @@ String CSSStyleProperties::serialize_a_css_value(Vector<StyleProperty> list) con
         return ShorthandStyleValue::create(shorthand_id, longhand_ids, longhand_values);
     };
 
-    // FIXME: Not all shorthands are represented by ShorthandStyleValue, we still need to add support for those that don't.
-    return make_shorthand_value(shorthand.value())->to_string(SerializationMode::Normal);
+    return make_shorthand_value(shorthand.value())->to_utf16_string(SerializationMode::Normal);
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-csstext
-WebIDL::ExceptionOr<void> CSSStyleProperties::set_css_text(StringView css_text)
+WebIDL::ExceptionOr<void> CSSStyleProperties::set_css_text(Utf16View css_text)
 {
     // 1. If the readonly flag is set, then throw a NoModificationAllowedError exception.
     if (is_readonly()) {
@@ -1212,6 +1535,11 @@ void CSSStyleProperties::invalidate_owners(DOM::StyleInvalidationReason reason)
 {
     if (auto rule = parent_rule()) {
         if (auto sheet = rule->parent_style_sheet()) {
+            if (rule->type() == CSSRule::Type::Style || rule->type() == CSSRule::Type::NestedDeclarations) {
+                invalidate_style_for_style_sheet_owners(*sheet, reason, ShouldInvalidateRuleCache::No);
+                return;
+            }
+
             sheet->invalidate_owners(reason);
         }
     }
@@ -1308,13 +1636,13 @@ void CSSStyleProperties::empty_the_declarations()
     m_custom_properties.clear();
 }
 
-void CSSStyleProperties::set_the_declarations(Vector<StyleProperty> properties, HashMap<FlyString, StyleProperty> custom_properties)
+void CSSStyleProperties::set_the_declarations(Vector<StyleProperty> properties, OrderedHashMap<Utf16FlyString, StyleProperty> custom_properties)
 {
     m_properties = convert_declarations_to_specified_order(properties);
     m_custom_properties = move(custom_properties);
 }
 
-void CSSStyleProperties::set_declarations_from_text(StringView css_text)
+void CSSStyleProperties::set_declarations_from_text(Utf16View css_text)
 {
     empty_the_declarations();
     auto parsing_params = owner_node().has_value()

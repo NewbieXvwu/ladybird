@@ -19,12 +19,10 @@ jobs:
       options: --privileged
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.0
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: Ladybird.flatpak
           manifest-path: Meta/CMake/flatpak/org.ladybird.Ladybird.json
-          cache: 'true'
           arch: ${{ inputs.arch }}
           # Note: default cache key is 'flatpak-builder-${arch}-${sha256(manifestPath)}'
-          upload-artifact: 'true'

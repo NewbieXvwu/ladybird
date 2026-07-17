@@ -1,5 +1,3 @@
-#import <Crypto/SubtleCrypto.idl>
-
 // https://w3c.github.io/webcrypto/#crypto-interface
 [Exposed=(Window,Worker)]
 interface Crypto {
@@ -7,5 +5,5 @@ interface Crypto {
 
     ArrayBufferView getRandomValues(ArrayBufferView array);
 
-    [SecureContext] DOMString randomUUID();
+    [SecureContext] Utf16DOMString randomUUID();
 };

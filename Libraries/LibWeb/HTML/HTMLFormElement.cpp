@@ -6,11 +6,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/GenericLexer.h>
 #include <AK/QuickSort.h>
 #include <AK/StringBuilder.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
-#include <LibWeb/Bindings/HTMLFormElementPrototype.h>
+#include <LibWeb/Bindings/HTMLFormElement.h>
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
@@ -30,9 +32,11 @@
 #include <LibWeb/HTML/HTMLOutputElement.h>
 #include <LibWeb/HTML/HTMLSelectElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/RadioNodeList.h>
 #include <LibWeb/HTML/SubmitEvent.h>
 #include <LibWeb/Infra/CharacterTypes.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Page/Page.h>
 
@@ -66,6 +70,7 @@ void HTMLFormElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_associated_elements);
     visitor.visit(m_planned_navigation);
     visitor.visit(m_rel_list);
+    visitor.visit(m_past_names_map);
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#implicit-submission
@@ -94,16 +99,6 @@ WebIDL::ExceptionOr<void> HTMLFormElement::implicitly_submit_form()
     TRY(submit_form(*this, { .user_involvement = UserNavigationInvolvement::Activation }));
 
     return {};
-}
-
-// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-fs-novalidate
-static bool novalidate_state(HTMLElement const& element)
-{
-    // The no-validate state of an element is true if the element is a submit button and the element's formnovalidate
-    // attribute is present, or if the element's form owner's novalidate attribute is present, and false otherwise.
-    if (auto const* form_associated_element = as_if<FormAssociatedElement>(element))
-        return form_associated_element->novalidate_state();
-    return false;
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-form-submit
@@ -152,7 +147,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
         // 4. If the submitter element's no-validate state is false, then interactively validate the constraints
         //    of form and examine the result. If the result is negative (i.e., the constraint validation concluded
         //    that there were invalid fields and probably informed the user of this), then:
-        if (!novalidate_state(submitter)) {
+        if (!submitter->novalidate_state()) {
             auto validation_result = interactively_validate_constraints();
             if (!validation_result) {
                 // 1. Set form's firing submission events to false.
@@ -171,7 +166,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
         // 6. Let shouldContinue be the result of firing an event named submit at form using SubmitEvent, with the
         //    submitter attribute initialized to submitterButton, the bubbles attribute initialized to true, and the
         //    cancelable attribute initialized to true.
-        SubmitEventInit event_init {};
+        Bindings::SubmitEventInit event_init {};
         event_init.submitter = submitter_button;
         auto submit_event = SubmitEvent::create(realm, EventNames::submit, event_init);
         submit_event->set_bubbles(true);
@@ -219,7 +214,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
             return {};
 
         // 3. Let result be null.
-        Optional<String> result;
+        Optional<Utf16String> result;
 
         // 4. If submitter is an input element whose type attribute is in the Image Button state, then:
         if (is<HTMLInputElement>(*submitter)) {
@@ -230,7 +225,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
                 auto [x, y] = input_element.selected_coordinate();
 
                 // 2. Set result to the concatenation of x, ",", and y.
-                result = MUST(String::formatted("{},{}", x, y));
+                result = Utf16String::formatted("{},{}", x, y);
             }
         }
 
@@ -251,7 +246,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
 
     // 13. If action is the empty string, let action be the URL of the form document.
     if (action.is_empty())
-        action = form_document->url_string();
+        action = form_document->url_string_for_bindings();
 
     // 14. Let parsed action be the result of encoding-parsing a URL given action, relative to submitter's node document.
     auto parsed_action = submitter->document().encoding_parse_url(action);
@@ -269,7 +264,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
     auto encoding_type = encoding_type_state_from_form_element(submitter);
 
     // 18. Let formTarget be null.
-    Optional<String> form_target;
+    Optional<Utf16String> form_target;
 
     // 19. If the submitter element is a submit button and it has a formtarget attribute, then set formTarget to the
     //     formtarget attribute value.
@@ -362,7 +357,7 @@ void HTMLFormElement::reset_form()
 
     // 2. If reset is true, then invoke the reset algorithm of each resettable element whose form owner is form.
     if (reset) {
-        GC::RootVector<GC::Ref<HTMLElement>> associated_elements_copy(heap(), m_associated_elements);
+        GC::RootVector<GC::Ref<HTMLElement>> associated_elements_copy { m_associated_elements };
         for (auto element : associated_elements_copy) {
             auto& form_associated_element = as<FormAssociatedElement>(*element);
             if (form_associated_element.is_resettable())
@@ -384,7 +379,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::request_submit(GC::Ptr<Element> submi
         // 1. If submitter is not a submit button, then throw a TypeError.
         auto* form_associated_element = as_if<FormAssociatedElement>(*submitter);
         if (!form_associated_element || !form_associated_element->is_submit_button())
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "The submitter is not a submit button"sv };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "The submitter is not a submit button"_utf16 };
 
         // 2. If submitter's form owner is not this form element, then throw a "NotFoundError" DOMException.
         if (form_associated_element->form() != this)
@@ -430,7 +425,7 @@ void HTMLFormElement::remove_associated_element(Badge<FormAssociatedElement>, HT
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-fs-action
-String HTMLFormElement::action_from_form_element(GC::Ref<HTMLElement> element) const
+Utf16String HTMLFormElement::action_from_form_element(GC::Ref<HTMLElement> element) const
 {
     // The action of an element is the value of the element's formaction attribute, if the element is a submit button
     // and has such an attribute, or the value of its form owner's action attribute, if it has one, or else the empty
@@ -444,14 +439,14 @@ String HTMLFormElement::action_from_form_element(GC::Ref<HTMLElement> element) c
     if (auto maybe_attribute = attribute(AttributeNames::action); maybe_attribute.has_value())
         return maybe_attribute.release_value();
 
-    return String {};
+    return {};
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-attributes:attr-fs-method-2
-static HTMLFormElement::MethodAttributeState method_attribute_to_method_state(StringView method)
+static HTMLFormElement::MethodAttributeState method_attribute_to_method_state(Utf16View method)
 {
 #define __ENUMERATE_FORM_METHOD_ATTRIBUTE(keyword, state) \
-    if (#keyword##sv.equals_ignoring_ascii_case(method))  \
+    if (method.equals_ignoring_ascii_case(#keyword##sv))  \
         return HTMLFormElement::MethodAttributeState::state;
     ENUMERATE_FORM_METHOD_ATTRIBUTES
 #undef __ENUMERATE_FORM_METHOD_ATTRIBUTE
@@ -470,22 +465,21 @@ HTMLFormElement::MethodAttributeState HTMLFormElement::method_state_from_form_el
         if (auto maybe_formmethod = element->attribute(AttributeNames::formmethod); maybe_formmethod.has_value()) {
             // NOTE: `formmethod` is the same as `method`, except that it has no missing value default.
             //       This is handled by not calling `method_attribute_to_method_state` in the first place if there is no `formmethod` attribute.
-            return method_attribute_to_method_state(maybe_formmethod.value());
+            return method_attribute_to_method_state(*maybe_formmethod);
         }
     }
 
-    if (auto maybe_method = attribute(AttributeNames::method); maybe_method.has_value()) {
-        return method_attribute_to_method_state(maybe_method.value());
-    }
+    if (auto maybe_method = attribute(AttributeNames::method); maybe_method.has_value())
+        return method_attribute_to_method_state(*maybe_method);
 
     return MethodAttributeState::GET;
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-attributes:attr-fs-enctype-2
-static HTMLFormElement::EncodingTypeAttributeState encoding_type_attribute_to_encoding_type_state(StringView encoding_type)
+static HTMLFormElement::EncodingTypeAttributeState encoding_type_attribute_to_encoding_type_state(Utf16View encoding_type)
 {
 #define __ENUMERATE_FORM_METHOD_ENCODING_TYPE(keyword, state)  \
-    if (keyword##sv.equals_ignoring_ascii_case(encoding_type)) \
+    if (encoding_type.equals_ignoring_ascii_case(keyword##sv)) \
         return HTMLFormElement::EncodingTypeAttributeState::state;
     ENUMERATE_FORM_METHOD_ENCODING_TYPES
 #undef __ENUMERATE_FORM_METHOD_ENCODING_TYPE
@@ -505,36 +499,27 @@ HTMLFormElement::EncodingTypeAttributeState HTMLFormElement::encoding_type_state
             // NOTE: `formenctype` is the same as `enctype`, except that it has nomissing value default.
             //       This is handled by not calling `encoding_type_attribute_to_encoding_type_state` in the first place if there is no
             //       `formenctype` attribute.
-            return encoding_type_attribute_to_encoding_type_state(formenctype.value());
+            return encoding_type_attribute_to_encoding_type_state(*formenctype);
         }
     }
 
     if (auto maybe_enctype = attribute(AttributeNames::enctype); maybe_enctype.has_value())
-        return encoding_type_attribute_to_encoding_type_state(maybe_enctype.value());
+        return encoding_type_attribute_to_encoding_type_state(*maybe_enctype);
 
     return EncodingTypeAttributeState::FormUrlEncoded;
 }
 
-// https://html.spec.whatwg.org/multipage/forms.html#category-listed
-static bool is_listed_element(DOM::Element const& element)
+static bool has_link_type(Utf16View input, Utf16View link_type)
 {
-    // Denotes elements that are listed in the form.elements and fieldset.elements APIs.
-    // These elements also have a form content attribute, and a matching form IDL attribute,
-    // that allow authors to specify an explicit form owner.
-    // => button, fieldset, input, object, output, select, textarea, form-associated custom elements
+    size_t start = 0;
+    for (size_t i = 0; i <= input.length_in_code_units(); ++i) {
+        if (i != input.length_in_code_units() && !Infra::is_ascii_whitespace(input.code_unit_at(i)))
+            continue;
 
-    if (is<HTMLButtonElement>(element)
-        || is<HTMLFieldSetElement>(element)
-        || is<HTMLInputElement>(element)
-        || is<HTMLObjectElement>(element)
-        || is<HTMLOutputElement>(element)
-        || is<HTMLSelectElement>(element)
-        || is<HTMLTextAreaElement>(element)) {
-        return true;
+        if (i > start && input.substring_view(start, i - start).equals_ignoring_ascii_case(link_type))
+            return true;
+        start = i + 1;
     }
-
-    // FIXME: Form-associated custom elements return also true
-
     return false;
 }
 
@@ -545,16 +530,19 @@ static bool is_form_control(DOM::Element const& element, HTMLFormElement const& 
     // with the exception of input elements whose type attribute is in the Image Button state, which must,
     // for historical reasons, be excluded from this particular collection.
 
-    if (!is_listed_element(element))
-        return false;
-
     if (is<HTMLInputElement>(element)
         && static_cast<HTMLInputElement const&>(element).type_state() == HTMLInputElement::TypeAttributeState::ImageButton) {
         return false;
     }
 
-    auto const& form_associated_element = as<FormAssociatedElement>(element);
-    if (form_associated_element.form() != &form)
+    auto const* form_associated_element = as_if<FormAssociatedElement>(element);
+    if (!form_associated_element)
+        return false;
+
+    if (form_associated_element->form() != &form)
+        return false;
+
+    if (!form_associated_element->is_listed())
         return false;
 
     return true;
@@ -585,7 +573,7 @@ HTMLFormElement::StaticValidationResult HTMLFormElement::statically_validate_con
     // 1. Let controls be a list of all the submittable elements whose form owner is form, in tree order.
     auto controls = get_submittable_elements();
     // 2. Let invalid controls be an initially empty list of elements.
-    GC::RootVector<GC::Ref<DOM::Element>> invalid_controls(realm().heap());
+    GC::RootVector<GC::Ref<DOM::Element>> invalid_controls;
     // 3. For each element field in controls, in tree order:
     for (auto& element : controls) {
         auto& field = as<FormAssociatedElement>(*element);
@@ -602,7 +590,7 @@ HTMLFormElement::StaticValidationResult HTMLFormElement::statically_validate_con
     if (invalid_controls.is_empty())
         return { true, invalid_controls };
     // 5. Let unhandled invalid controls be an initially empty list of elements.
-    GC::RootVector<GC::Ref<DOM::Element>> unhandled_invalid_controls(realm().heap());
+    GC::RootVector<GC::Ref<DOM::Element>> unhandled_invalid_controls;
     // 6. For each element field in invalid controls, if any, in tree order:
     for (auto& field : invalid_controls) {
         // 1. Let notCanceled be the result of firing an event named invalid at field, with the cancelable attribute
@@ -641,7 +629,7 @@ bool HTMLFormElement::interactively_validate_constraints()
     if (first_invalid_control.has_value()) {
         auto control = first_invalid_control.release_value();
         run_focusing_steps(control);
-        DOM::ScrollIntoViewOptions scroll_options;
+        Bindings::ScrollIntoViewOptions scroll_options;
         scroll_options.block = Bindings::ScrollLogicalPosition::Nearest;
         scroll_options.inline_ = Bindings::ScrollLogicalPosition::Nearest;
         scroll_options.behavior = Bindings::ScrollBehavior::Instant;
@@ -691,46 +679,53 @@ GC::Ref<DOM::DOMTokenList> HTMLFormElement::rel_list()
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-fs-method
-WebIDL::ExceptionOr<void> HTMLFormElement::set_method(String const& method)
+void HTMLFormElement::set_method(Utf16View method)
 {
     // The method and enctype IDL attributes must reflect the respective content attributes of the same name, limited to only known values.
-    return set_attribute(AttributeNames::method, method);
+    set_attribute_value(AttributeNames::method, method);
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-fs-action
-String HTMLFormElement::action() const
+Utf16String HTMLFormElement::action() const
 {
     // The action IDL attribute must reflect the content attribute of the same name, except that on getting, when the
     // content attribute is missing or its value is the empty string, the element's node document's URL must be returned
     // instead.
     auto form_action_attribute = attribute(AttributeNames::action);
     if (!form_action_attribute.has_value() || form_action_attribute.value().is_empty()) {
-        return document().url_string();
+        return document().url_string_for_bindings();
     }
 
-    if (auto maybe_url = document().base_url().complete_url(form_action_attribute.value()); maybe_url.has_value())
-        return maybe_url->to_string();
+    if (auto maybe_url = document().encoding_parse_url(form_action_attribute.value()); maybe_url.has_value())
+        return utf16_string_from_url_ascii(maybe_url->to_string());
     return {};
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-fs-action
-WebIDL::ExceptionOr<void> HTMLFormElement::set_action(String const& value)
+void HTMLFormElement::set_action(Utf16View value)
 {
-    return set_attribute(AttributeNames::action, value);
+    set_attribute_value(AttributeNames::action, value);
 }
 
-void HTMLFormElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLFormElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
     if (name == HTML::AttributeNames::rel) {
         if (m_rel_list)
-            m_rel_list->associated_attribute_changed(value.value_or(String {}));
+            m_rel_list->associated_attribute_changed(value.has_value() ? value->utf16_view() : u""sv);
     }
 }
 
+static StringView form_encoding_label_for_byte_serialization(Utf16String const& encoding)
+{
+    auto standardized_encoding = TextCodec::get_standardized_encoding(encoding);
+    VERIFY(standardized_encoding.has_value());
+    return TextCodec::get_output_encoding(*standardized_encoding);
+}
+
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#picking-an-encoding-for-the-form
-ErrorOr<String> HTMLFormElement::pick_an_encoding() const
+ErrorOr<Utf16String> HTMLFormElement::pick_an_encoding() const
 {
     // 1. Let encoding be the document's character encoding.
     auto encoding = document().encoding_or_default();
@@ -741,7 +736,17 @@ ErrorOr<String> HTMLFormElement::pick_an_encoding() const
         auto input = maybe_input.release_value();
 
         // 2. Let candidate encoding labels be the result of splitting input on ASCII whitespace.
-        auto candidate_encoding_labels = input.bytes_as_string_view().split_view_if(Infra::is_ascii_whitespace);
+        auto is_ascii_whitespace = [](char16_t code_unit) {
+            return Infra::is_ascii_whitespace(code_unit);
+        };
+        Utf16GenericLexer lexer { input };
+        Vector<Utf16View> candidate_encoding_labels;
+        while (!lexer.is_eof()) {
+            lexer.ignore_while(is_ascii_whitespace);
+            auto token = lexer.consume_until(is_ascii_whitespace);
+            if (!token.is_empty())
+                TRY(candidate_encoding_labels.try_append(token));
+        }
 
         // 3. Let candidate encodings be an empty list of character encodings.
         Vector<StringView> candidate_encodings;
@@ -757,18 +762,18 @@ ErrorOr<String> HTMLFormElement::pick_an_encoding() const
 
         // 5. If candidate encodings is empty, return UTF-8.
         if (candidate_encodings.is_empty())
-            return "UTF-8"_string;
+            return "UTF-8"_utf16;
 
         // 6. Return the first encoding in candidate encodings.
-        return String::from_utf8(candidate_encodings.first());
+        return Utf16String::from_ascii_without_validation(candidate_encodings.first().bytes());
     }
 
     // 3. Return the result of getting an output encoding from encoding.
-    return MUST(String::from_utf8(TextCodec::get_output_encoding(encoding)));
+    return Utf16String::from_ascii_without_validation(form_encoding_label_for_byte_serialization(encoding).bytes());
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#convert-to-a-list-of-name-value-pairs
-static ErrorOr<Vector<DOMURL::QueryParam>> convert_to_list_of_name_value_pairs(Vector<XHR::FormDataEntry> const& entry_list)
+static ErrorOr<Vector<DOMURL::QueryParam>> convert_to_list_of_name_value_pairs(GC::ConservativeVector<XHR::FormDataEntry> const& entry_list)
 {
     // 1. Let list be an empty list of name-value pairs.
     Vector<DOMURL::QueryParam> list;
@@ -777,24 +782,26 @@ static ErrorOr<Vector<DOMURL::QueryParam>> convert_to_list_of_name_value_pairs(V
     for (auto const& entry : entry_list) {
         // 1. Let name be entry's name, with every occurrence of U+000D (CR) not followed by U+000A (LF), and every occurrence of U+000A (LF)
         //    not preceded by U+000D (CR), replaced by a string consisting of U+000D (CR) and U+000A (LF).
-        auto name = TRY(normalize_line_breaks(entry.name));
+        auto name = TRY(normalize_line_breaks(entry.name.utf16_view()));
 
         // 2. If entry's value is a File object, then let value be entry's value's name. Otherwise, let value be entry's value.
-        String value;
+        Utf16String value;
         entry.value.visit(
-            [&value](GC::Root<FileAPI::File> const& file) {
+            [&value](GC::Ref<FileAPI::File> file) {
                 value = file->name();
             },
-            [&value](String const& string) {
+            [&value](Utf16String const& string) {
                 value = string;
             });
 
         // 3. Replace every occurrence of U+000D (CR) not followed by U+000A (LF), and every occurrence of
         //    U+000A (LF) not preceded by U+000D (CR), in value, by a string consisting of U+000D (CR) and U+000A (LF).
-        auto normalized_value = TRY(normalize_line_breaks(value));
+        auto normalized_value = TRY(normalize_line_breaks(value.utf16_view()));
 
         // 4. Append to list a new name-value pair whose name is name and whose value is value.
-        TRY(list.try_append(DOMURL::QueryParam { .name = move(name), .value = move(normalized_value) }));
+        TRY(list.try_append(DOMURL::QueryParam {
+            .name = move(name),
+            .value = move(normalized_value) }));
     }
 
     // 3. Return list.
@@ -802,24 +809,24 @@ static ErrorOr<Vector<DOMURL::QueryParam>> convert_to_list_of_name_value_pairs(V
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#text/plain-encoding-algorithm
-static ErrorOr<String> plain_text_encode(Vector<DOMURL::QueryParam> const& pairs)
+static ErrorOr<Utf16String> plain_text_encode(Vector<DOMURL::QueryParam> const& pairs)
 {
     // 1. Let result be the empty string.
-    StringBuilder result;
+    Utf16StringBuilder result;
 
     // 2. For each pair in pairs:
     for (auto const& pair : pairs) {
         // 1. Append pair's name to result.
-        TRY(result.try_append(pair.name));
+        result.append(pair.name.utf16_view());
 
         // 2. Append a single U+003D EQUALS SIGN character (=) to result.
-        TRY(result.try_append('='));
+        result.append_ascii('=');
 
         // 3. Append pair's value to result.
-        TRY(result.try_append(pair.value));
+        result.append(pair.value.utf16_view());
 
         // 4. Append a U+000D CARRIAGE RETURN (CR) U+000A LINE FEED (LF) character pair to result.
-        TRY(result.try_append("\r\n"sv));
+        result.append_ascii("\r\n"sv);
     }
 
     // 3. Return result.
@@ -827,13 +834,13 @@ static ErrorOr<String> plain_text_encode(Vector<DOMURL::QueryParam> const& pairs
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#submit-mutate-action
-ErrorOr<void> HTMLFormElement::mutate_action_url(URL::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, String encoding, GC::Ref<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
+ErrorOr<void> HTMLFormElement::mutate_action_url(URL::URL parsed_action, GC::ConservativeVector<XHR::FormDataEntry> entry_list, Utf16String encoding, GC::Ref<LocalNavigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
 {
     // 1. Let pairs be the result of converting to a list of name-value pairs with entry list.
     auto pairs = TRY(convert_to_list_of_name_value_pairs(entry_list));
 
     // 2. Let query be the result of running the application/x-www-form-urlencoded serializer with pairs and encoding.
-    auto query = url_encode(pairs, encoding);
+    auto query = url_encode(pairs, form_encoding_label_for_byte_serialization(encoding));
 
     // 3. Set parsed action's query component to query.
     parsed_action.set_query(query);
@@ -844,7 +851,7 @@ ErrorOr<void> HTMLFormElement::mutate_action_url(URL::URL parsed_action, Vector<
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#submit-body
-ErrorOr<void> HTMLFormElement::submit_as_entity_body(URL::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, EncodingTypeAttributeState encoding_type, [[maybe_unused]] String encoding, GC::Ref<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
+ErrorOr<void> HTMLFormElement::submit_as_entity_body(URL::URL parsed_action, GC::ConservativeVector<XHR::FormDataEntry> entry_list, EncodingTypeAttributeState encoding_type, Utf16String encoding, GC::Ref<LocalNavigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
 {
     // 1. Assert: method is POST.
 
@@ -860,7 +867,8 @@ ErrorOr<void> HTMLFormElement::submit_as_entity_body(URL::URL parsed_action, Vec
         auto pairs = TRY(convert_to_list_of_name_value_pairs(entry_list));
 
         // 2. Let body be the result of running the application/x-www-form-urlencoded serializer with pairs and encoding.
-        body = TRY(ByteBuffer::copy(url_encode(pairs, encoding).bytes()));
+        auto query = url_encode(pairs, form_encoding_label_for_byte_serialization(encoding));
+        body = TRY(ByteBuffer::copy(query.bytes()));
 
         // 3. Set body to the result of encoding body.
         // NOTE: `encoding` refers to `UTF-8 encode`, which body already is encoded as because it uses AK::String.
@@ -878,7 +886,7 @@ ErrorOr<void> HTMLFormElement::submit_as_entity_body(URL::URL parsed_action, Vec
         // 2. Let mimeType be the isomorphic encoding of the concatenation of "multipart/form-data; boundary=" and the multipart/form-data
         //    boundary string generated by the multipart/form-data encoding algorithm.
         mime_type = POSTResource::RequestContentType::MultipartFormData;
-        mime_type_directives.empend("boundary"sv, move(body_and_mime_type.boundary));
+        mime_type_directives.empend("boundary"_utf16, move(body_and_mime_type.boundary));
         break;
     }
     case EncodingTypeAttributeState::PlainText: {
@@ -887,7 +895,9 @@ ErrorOr<void> HTMLFormElement::submit_as_entity_body(URL::URL parsed_action, Vec
         auto pairs = TRY(convert_to_list_of_name_value_pairs(entry_list));
 
         // 2. Let body be the result of running the text/plain encoding algorithm with pairs.
-        body = TRY(ByteBuffer::copy(TRY(plain_text_encode(pairs)).bytes()));
+        auto serialized_body = TRY(plain_text_encode(pairs));
+        auto serialized_body_utf8 = serialized_body.to_utf8();
+        body = TRY(ByteBuffer::copy(serialized_body_utf8.bytes()));
 
         // FIXME: 3. Set body to the result of encoding body using encoding.
 
@@ -905,7 +915,7 @@ ErrorOr<void> HTMLFormElement::submit_as_entity_body(URL::URL parsed_action, Vec
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#submit-get-action
-void HTMLFormElement::get_action_url(URL::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, GC::Ref<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
+void HTMLFormElement::get_action_url(URL::URL parsed_action, GC::ConservativeVector<XHR::FormDataEntry> entry_list, GC::Ref<LocalNavigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
 {
     // 1. Plan to navigate to parsed action.
     // Spec Note: entry list is discarded.
@@ -913,13 +923,13 @@ void HTMLFormElement::get_action_url(URL::URL parsed_action, Vector<XHR::FormDat
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#submit-mailto-headers
-ErrorOr<void> HTMLFormElement::mail_with_headers(URL::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, [[maybe_unused]] String encoding, GC::Ref<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
+ErrorOr<void> HTMLFormElement::mail_with_headers(URL::URL parsed_action, GC::ConservativeVector<XHR::FormDataEntry> entry_list, Utf16String encoding, GC::Ref<LocalNavigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
 {
     // 1. Let pairs be the result of converting to a list of name-value pairs with entry list.
     auto pairs = TRY(convert_to_list_of_name_value_pairs(entry_list));
 
     // 2. Let headers be the result of running the application/x-www-form-urlencoded serializer with pairs and encoding.
-    auto headers = url_encode(pairs, encoding);
+    auto headers = url_encode(pairs, form_encoding_label_for_byte_serialization(encoding));
 
     // 3. Replace occurrences of U+002B PLUS SIGN characters (+) in headers with the string "%20".
     TRY(headers.replace("+"sv, "%20"sv, ReplaceMode::All));
@@ -932,7 +942,7 @@ ErrorOr<void> HTMLFormElement::mail_with_headers(URL::URL parsed_action, Vector<
     return {};
 }
 
-ErrorOr<void> HTMLFormElement::mail_as_body(URL::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, EncodingTypeAttributeState encoding_type, [[maybe_unused]] String encoding, GC::Ref<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
+ErrorOr<void> HTMLFormElement::mail_as_body(URL::URL parsed_action, GC::ConservativeVector<XHR::FormDataEntry> entry_list, EncodingTypeAttributeState encoding_type, Utf16String encoding, GC::Ref<LocalNavigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
 {
     // 1. Let pairs be the result of converting to a list of name-value pairs with entry list.
     auto pairs = TRY(convert_to_list_of_name_value_pairs(entry_list));
@@ -944,18 +954,18 @@ ErrorOr<void> HTMLFormElement::mail_as_body(URL::URL parsed_action, Vector<XHR::
     case EncodingTypeAttributeState::PlainText: {
         // -> text/plain
         // 1. Let body be the result of running the text/plain encoding algorithm with pairs.
-        body = TRY(plain_text_encode(pairs));
+        auto plain_text_body = TRY(plain_text_encode(pairs));
 
         // 2. Set body to the result of running UTF-8 percent-encode on body using the default encode set. [URL]
-        // NOTE: body is already UTF-8 encoded due to using AK::String, so we only have to do the percent encoding.
+        // NOTE: URL::percent_encode performs the UTF-8 percent-encoding from the UTF-16 input.
         // NOTE: "default encode set" links to "path percent-encode-set": https://url.spec.whatwg.org/#default-encode-set
-        body = URL::percent_encode(body, URL::PercentEncodeSet::Path);
+        body = URL::percent_encode(plain_text_body.utf16_view(), URL::PercentEncodeSet::Path);
         break;
     }
     default:
         // -> Otherwise
         // Let body be the result of running the application/x-www-form-urlencoded serializer with pairs and encoding.
-        body = url_encode(pairs, encoding);
+        body = url_encode(pairs, form_encoding_label_for_byte_serialization(encoding));
         break;
     }
 
@@ -985,15 +995,13 @@ ErrorOr<void> HTMLFormElement::mail_as_body(URL::URL parsed_action, Vector<XHR::
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#plan-to-navigate
-void HTMLFormElement::plan_to_navigate_to(URL::URL url, Variant<Empty, String, POSTResource> post_resource, Vector<XHR::FormDataEntry> entry_list, GC::Ref<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
+void HTMLFormElement::plan_to_navigate_to(URL::URL url, DocumentResource post_resource, GC::ConservativeVector<XHR::FormDataEntry> entry_list, GC::Ref<LocalNavigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement)
 {
     // 1. Let referrerPolicy be the empty string.
     ReferrerPolicy::ReferrerPolicy referrer_policy = ReferrerPolicy::ReferrerPolicy::EmptyString;
 
     // 2. If the form element's link types include the noreferrer keyword, then set referrerPolicy to "no-referrer".
-    auto rel = MUST(get_attribute_value(HTML::AttributeNames::rel).to_lowercase());
-    auto link_types = rel.bytes_as_string_view().split_view_if(Infra::is_ascii_whitespace);
-    if (link_types.contains_slow("noreferrer"sv))
+    if (has_link_type(get_attribute_value_view(HTML::AttributeNames::rel).value_or({}), u"noreferrer"sv))
         referrer_policy = ReferrerPolicy::ReferrerPolicy::NoReferrer;
 
     // 3. If the form has a non-null planned navigation, remove it from its task queue.
@@ -1037,15 +1045,28 @@ Optional<JS::Value> HTMLFormElement::item_value(size_t index) const
     return {};
 }
 
+bool HTMLFormElement::is_supported_property_name(Utf16FlyString const& name) const
+{
+    // NB: This is a simplified version of ::supported_property_names() that does not require sorting or allocations.
+    for (auto const& candidate : m_associated_elements) {
+        if (is_form_control(*candidate, *this) || is<HTMLImageElement>(*candidate)) {
+            if (first_is_one_of(name, candidate->id(), candidate->name()))
+                return true;
+        }
+    }
+
+    return m_past_names_map.contains(name);
+}
+
 // https://html.spec.whatwg.org/multipage/forms.html#the-form-element:supported-property-names
-Vector<FlyString> HTMLFormElement::supported_property_names() const
+Vector<Utf16FlyString> HTMLFormElement::supported_property_names() const
 {
     // The supported property names consist of the names obtained from the following algorithm, in the order obtained from this algorithm:
 
     // 1. Let sourced names be an initially empty ordered list of tuples consisting of a string, an element, a source,
     //    where the source is either id, name, or past, and, if the source is past, an age.
     struct SourcedName {
-        FlyString name;
+        Utf16FlyString name;
         GC::Ptr<DOM::Element const> element;
         enum class Source {
             Id,
@@ -1101,10 +1122,9 @@ Vector<FlyString> HTMLFormElement::supported_property_names() const
     // 5. Sort sourced names by tree order of the element entry of each tuple, sorting entries with the same element by
     //    putting entries whose source is id first, then entries whose source is name, and finally entries whose source
     //    is past, and sorting entries with the same element and source by their age, oldest first.
-    // FIXME: Require less const casts here by changing the signature of DOM::Node::compare_document_position
     quick_sort(sourced_names, [](auto const& lhs, auto const& rhs) -> bool {
         if (lhs.element != rhs.element)
-            return const_cast<DOM::Element*>(lhs.element.ptr())->compare_document_position(const_cast<DOM::Element*>(rhs.element.ptr())) & DOM::Node::DOCUMENT_POSITION_FOLLOWING;
+            return lhs.element->is_before(*rhs.element);
         if (lhs.source != rhs.source)
             return lhs.source < rhs.source;
         return lhs.age < rhs.age;
@@ -1114,24 +1134,22 @@ Vector<FlyString> HTMLFormElement::supported_property_names() const
     // 6. Remove any entries in sourced names that have the empty string as their name.
     // 7. Remove any entries in sourced names that have the same name as an earlier entry in the map.
     // 8. Return the list of names from sourced names, maintaining their relative order.
-    OrderedHashTable<FlyString> names;
+    OrderedHashTable<Utf16FlyString> names;
     names.ensure_capacity(sourced_names.size());
     for (auto const& entry : sourced_names) {
         if (entry.name.is_empty())
             continue;
         names.set(entry.name, AK::HashSetExistingEntryBehavior::Keep);
     }
-
-    Vector<FlyString> result;
+    Vector<Utf16FlyString> result;
     result.ensure_capacity(names.size());
     for (auto const& name : names)
-        result.unchecked_append(name);
-
+        result.append(name);
     return result;
 }
 
 // https://html.spec.whatwg.org/multipage/forms.html#dom-form-nameditem
-JS::Value HTMLFormElement::named_item_value(FlyString const& name) const
+JS::Value HTMLFormElement::named_item_value(Utf16FlyString const& name) const
 {
     auto& realm = this->realm();
     auto& root = as<ParentNode>(this->root());

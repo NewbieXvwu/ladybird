@@ -1,11 +1,13 @@
 /*
  * Copyright (c) 2020, the SerenityOS developers.
+ * Copyright (c) 2022, Dan Klishch <danilklishch@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <LibTest/TestCase.h>
 
+#include <AK/Array.h>
 #include <AK/StringConversions.h>
 #include <AK/Utf16View.h>
 
@@ -611,6 +613,32 @@ TEST_CASE(unsigned_integer)
     EXPECT(!actual_u64.has_value());
 }
 
+TEST_CASE(unicode_emojis_with_low_byte_in_UTF_16_matching_the_value_of_an_ascii_digit)
+{
+#define EXPECT_PARSE_TO_FAIL_FOR_EMOJI(string_value)                     \
+    do {                                                                 \
+        EXPECT(!AK::parse_number<u32>(string_value##sv).has_value());    \
+        EXPECT(!AK::parse_number<u32>(u##string_value##sv).has_value()); \
+    } while (false)
+
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("ℹ");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("ℹ️");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("☸");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("☸️");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("☹");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("☹️");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("✳");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("✳️");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("✴");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("✴️");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("⤴");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("⤴️");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("⤵");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("⤵️");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("〰");
+    EXPECT_PARSE_TO_FAIL_FOR_EMOJI("〰️");
+}
+
 TEST_CASE(octal)
 {
     auto value = AK::parse_number<u16>(StringView(), AK::TrimWhitespace::No, 8);
@@ -663,4 +691,70 @@ TEST_CASE(octal)
     actual = AK::parse_number<u16>("177777"sv, AK::TrimWhitespace::No, 8);
     EXPECT_EQ(actual.has_value(), true);
     EXPECT_EQ(actual.value(), 0177777u);
+}
+
+template<>
+struct AK::Formatter<AK::DecimalExponentialForm> : Formatter<FormatString> {
+    ErrorOr<void> format(FormatBuilder& builder, AK::DecimalExponentialForm value)
+    {
+        return Formatter<FormatString>::format(builder, "(s={} f={} e={})"sv, value.sign, value.fraction, value.exponent);
+    }
+};
+
+#define DOES_CONVERT_TO(type, value, sign, fraction, exponent)                 \
+    do {                                                                       \
+        EXPECT_EQ(                                                             \
+            AK::convert_to_decimal_exponential_form(static_cast<type>(value)), \
+            (AK::DecimalExponentialForm { sign, fraction, exponent }));        \
+    } while (false)
+
+TEST_CASE(double_conversion)
+{
+    DOES_CONVERT_TO(double, 0, 0, 0, 0);
+    DOES_CONVERT_TO(double, -0., 1, 0, 0);
+    DOES_CONVERT_TO(double, 1, 0, 1, 0);
+    DOES_CONVERT_TO(double, -1, 1, 1, 0);
+    DOES_CONVERT_TO(double, .1, 0, 1, -1);
+    DOES_CONVERT_TO(double, .2, 0, 2, -1);
+    DOES_CONVERT_TO(double, .3, 0, 3, -1);
+    DOES_CONVERT_TO(double, .12345, 0, 12345, -5);
+    DOES_CONVERT_TO(double, .0012345, 0, 12345, -7);
+    DOES_CONVERT_TO(double, .1 + .2, 0, 30000000000000004, -17);
+    DOES_CONVERT_TO(double, 17976931348623157e292, 0, 17976931348623157, 292);
+    DOES_CONVERT_TO(double, -17976931348623157e292, 1, 17976931348623157, 292);
+    DOES_CONVERT_TO(double, 22250738585072014e-324, 0, 22250738585072014, -324);
+    DOES_CONVERT_TO(double, -22250738585072014e-324, 1, 22250738585072014, -324);
+    DOES_CONVERT_TO(double, bit_cast<double>(0xc3c04222300db8acULL), 1, 23430728857074627, 2);
+}
+
+TEST_CASE(float_conversion)
+{
+    DOES_CONVERT_TO(float, 0, 0, 0, 0);
+    DOES_CONVERT_TO(float, -0., 1, 0, 0);
+    DOES_CONVERT_TO(float, 1, 0, 1, 0);
+    DOES_CONVERT_TO(float, -1, 1, 1, 0);
+    DOES_CONVERT_TO(float, .1, 0, 1, -1);
+    DOES_CONVERT_TO(float, .2, 0, 2, -1);
+    DOES_CONVERT_TO(float, .3, 0, 3, -1);
+    DOES_CONVERT_TO(float, 0.025, 0, 25, -3);
+    DOES_CONVERT_TO(float, 34028235e31, 0, 34028235, 31);
+    DOES_CONVERT_TO(float, -34028235e31, 1, 34028235, 31);
+    DOES_CONVERT_TO(float, 11754944e-45, 0, 11754944, -45);
+    DOES_CONVERT_TO(float, -11754944e-45, 1, 11754944, -45);
+}
+
+BENCHMARK_CASE(bench_float_conversion)
+{
+    static constexpr auto numbers = to_array<double>({
+        123.456789,
+        0.000000123456789,
+        9876543210123456.0,
+        1.23e-7,
+        58.0,
+    });
+
+    for (size_t i = 0; i < 100'000'000; i++) {
+        auto result = AK::convert_to_decimal_exponential_form(numbers[i % numbers.size()]);
+        AK::taint_for_optimizer(result);
+    }
 }

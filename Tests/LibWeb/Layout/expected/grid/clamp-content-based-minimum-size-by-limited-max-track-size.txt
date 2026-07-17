@@ -1,9 +1,9 @@
-Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-inline
+Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children: not-inline
   BlockContainer <html> at [0,0] [0+0+0 800 0+0+0] [0+0+0 136 0+0+0] [BFC] children: not-inline
     BlockContainer <body> at [8,8] [8+0+0 784 0+0+8] [8+0+0 120 0+0+8] children: not-inline
       Box <div.grid> at [13,13] [0+5+0 50 0+5+724] [0+5+0 50 0+5+0] [GFC] children: not-inline
         BlockContainer <div#a> at [13,13] [0+0+0 0 0+0+0] [0+0+0 25 0+0+0] [BFC] children: inline
-          frag 0 from TextNode start: 0, length: 10, rect: [13,13 115.625x18] baseline: 13.796875
+          frag 0 from TextNode start: 0, length: 10, rect: [13,13 115.625x16] baseline: 12.796875
               "XXXXXXXXXX"
           TextNode <#text> (not painted)
         BlockContainer <div#b> at [13,38] [0+0+0 0 0+0+0] [0+0+0 25 0+0+0] [BFC] children: not-inline
@@ -18,15 +18,14 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-
 ViewportPaintable (Viewport<#document>) [0,0 800x600]
   PaintableWithLines (BlockContainer<HTML>) [0,0 800x136]
     PaintableWithLines (BlockContainer<BODY>) [8,8 784x120]
-      PaintableBox (Box<DIV>.grid) [8,8 60x60]
-        PaintableWithLines (BlockContainer<DIV>#a) [13,13 0x25] overflow: [13,13 115.625x18]
-          TextPaintable (TextNode<#text>)
+      Paintable (Box<DIV>.grid) [8,8 60x60]
+        PaintableWithLines (BlockContainer<DIV>#a) [13,13 0x25]
         PaintableWithLines (BlockContainer<DIV>#b) [13,38 0x25]
       PaintableWithLines (BlockContainer(anonymous)) [8,68 784x0]
-      PaintableBox (Box<DIV>.grid) [8,68 60x60]
+      Paintable (Box<DIV>.grid) [8,68 60x60]
         PaintableWithLines (BlockContainer<DIV>#a) [18,73 0x25]
         PaintableWithLines (BlockContainer<DIV>#b) [13,98 10x25]
       PaintableWithLines (BlockContainer(anonymous)) [8,128 784x0]
 
-SC for Viewport<#document> [0,0 800x600] [children: 1] (z-index: auto)
- SC for BlockContainer<HTML> [0,0 800x136] [children: 0] (z-index: auto)
+SC for Viewport<#document> [0,0 800x600] (z-index: auto)
+ SC for BlockContainer<HTML> [0,0 800x136] (z-index: auto)

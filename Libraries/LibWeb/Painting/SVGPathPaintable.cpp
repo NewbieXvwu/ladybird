@@ -7,16 +7,15 @@
 
 #include <LibGfx/Quad.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
+#include <LibWeb/Painting/HitTestDisplayList.h>
 #include <LibWeb/Painting/SVGPathPaintable.h>
 #include <LibWeb/Painting/SVGSVGPaintable.h>
 
 namespace Web::Painting {
 
-GC_DEFINE_ALLOCATOR(SVGPathPaintable);
-
-GC::Ref<SVGPathPaintable> SVGPathPaintable::create(Layout::SVGGraphicsBox const& layout_box)
+NonnullRefPtr<SVGPathPaintable> SVGPathPaintable::create(Layout::SVGGraphicsBox const& layout_box)
 {
-    return layout_box.heap().allocate<SVGPathPaintable>(layout_box);
+    return adopt_ref(*new SVGPathPaintable(layout_box));
 }
 
 SVGPathPaintable::SVGPathPaintable(Layout::SVGGraphicsBox const& layout_box)
@@ -24,19 +23,25 @@ SVGPathPaintable::SVGPathPaintable(Layout::SVGGraphicsBox const& layout_box)
 {
 }
 
-Layout::SVGGraphicsBox const& SVGPathPaintable::layout_box() const
+void SVGPathPaintable::reset_for_relayout()
 {
-    return static_cast<Layout::SVGGraphicsBox const&>(layout_node());
+    SVGGraphicsPaintable::reset_for_relayout();
+    m_computed_path.clear();
 }
 
-TraversalDecision SVGPathPaintable::hit_test(CSSPixelPoint position, HitTestType type, Function<TraversalDecision(HitTestResult)> const& callback) const
+Optional<CSSPixelRect> SVGPathPaintable::clip_path_geometry_bounds(Gfx::AffineTransform const& additional_transform) const
 {
-    if (!computed_path().has_value())
-        return TraversalDecision::Continue;
-    auto transformed_bounding_box = computed_transforms().svg_to_css_pixels_transform().map_to_quad(computed_path()->bounding_box());
-    if (!transformed_bounding_box.contains(position.to_type<float>()))
-        return TraversalDecision::Continue;
-    return SVGGraphicsPaintable::hit_test(position, type, callback);
+    if (!contributes_to_clip_path() || !computed_path().has_value())
+        return {};
+
+    auto const* svg_node = layout_box().first_ancestor_of_type<Layout::SVGSVGBox>();
+    if (!svg_node || !svg_node->paintable_box())
+        return {};
+
+    auto path = computed_path()->copy_transformed(computed_transforms().svg_to_css_pixels_transform(additional_transform));
+    path.offset(svg_node->paintable_box()->absolute_rect().location().to_type<float>());
+
+    return path.bounding_box().to_type<CSSPixels>();
 }
 
 static Gfx::WindingRule to_gfx_winding_rule(SVG::FillRule fill_rule)
@@ -53,15 +58,22 @@ static Gfx::WindingRule to_gfx_winding_rule(SVG::FillRule fill_rule)
 
 void SVGPathPaintable::paint(DisplayListRecordingContext& context, PaintPhase phase) const
 {
-    if (!is_visible() || !computed_path().has_value())
+    if (!computed_path().has_value())
         return;
+
+    if (context.draw_svg_geometry_for_clip_path()) {
+        if (!contributes_to_clip_path())
+            return;
+    } else if (!is_visible()) {
+        return;
+    }
 
     SVGGraphicsPaintable::paint(context, phase);
 
     if (phase != PaintPhase::Foreground)
         return;
 
-    auto& graphics_element = layout_box().dom_node();
+    auto& graphics_element = dom_node();
 
     auto const* svg_node = layout_box().first_ancestor_of_type<Layout::SVGSVGBox>();
     auto svg_element_rect = svg_node->paintable_box()->absolute_rect();
@@ -72,16 +84,6 @@ void SVGPathPaintable::paint(DisplayListRecordingContext& context, PaintPhase ph
     auto paint_transform = computed_transforms().svg_to_device_pixels_transform(context);
     auto path = computed_path()->copy_transformed(paint_transform);
     path.offset(offset);
-
-    // Fills are computed as though all subpaths are closed (https://svgwg.org/svg2-draft/painting.html#FillProperties)
-    auto closed_path = [&] {
-        // We need to fill the path before applying the stroke, however the filled
-        // path must be closed, whereas the stroke path may not necessary be closed.
-        // Copy the path and close it for filling, but use the previous path for stroke
-        auto copy = path;
-        copy.close_all_subpaths();
-        return copy;
-    };
 
     auto svg_viewport = [&] {
         if (maybe_view_box.has_value())
@@ -95,7 +97,7 @@ void SVGPathPaintable::paint(DisplayListRecordingContext& context, PaintPhase ph
         // within a clipPath conceptually defines a 1-bit mask (with the possible exception of anti-aliasing along
         // the edge of the geometry) which represents the silhouette of the graphics associated with that element.
         context.display_list_recorder().fill_path({
-            .path = closed_path(),
+            .path = path,
             .paint_style_or_color = Gfx::Color(Color::Black),
             .winding_rule = to_gfx_winding_rule(graphics_element.clip_rule().value_or(SVG::ClipRule::Nonzero)),
             .should_anti_alias = should_anti_alias(),
@@ -112,9 +114,9 @@ void SVGPathPaintable::paint(DisplayListRecordingContext& context, PaintPhase ph
     auto paint_fill = [&] {
         auto fill_opacity = graphics_element.fill_opacity().value_or(1);
         auto winding_rule = to_gfx_winding_rule(graphics_element.fill_rule().value_or(SVG::FillRule::Nonzero));
-        if (auto paint_style = graphics_element.fill_paint_style(paint_context); paint_style.has_value()) {
+        if (auto paint_style = graphics_element.fill_paint_style(paint_context, &context); paint_style.has_value()) {
             context.display_list_recorder().fill_path({
-                .path = closed_path(),
+                .path = path,
                 .opacity = fill_opacity,
                 .paint_style_or_color = *paint_style,
                 .winding_rule = winding_rule,
@@ -122,7 +124,7 @@ void SVGPathPaintable::paint(DisplayListRecordingContext& context, PaintPhase ph
             });
         } else if (auto fill_color = graphics_element.fill_color(); fill_color.has_value()) {
             context.display_list_recorder().fill_path({
-                .path = closed_path(),
+                .path = path,
                 .paint_style_or_color = fill_color->with_opacity(fill_opacity),
                 .winding_rule = winding_rule,
                 .should_anti_alias = should_anti_alias(),
@@ -157,22 +159,20 @@ void SVGPathPaintable::paint(DisplayListRecordingContext& context, PaintPhase ph
             break;
         }
 
-        CSS::CalculationResolutionContext calculation_context {
-            .length_resolution_context = CSS::Length::ResolutionContext::for_layout_node(layout_node()),
-        };
-        auto miter_limit = graphics_element.stroke_miterlimit().value_or(CSS::InitialValues::stroke_miterlimit()).resolved(calculation_context).value_or(0);
-
+        auto miter_limit = graphics_element.stroke_miterlimit().value_or(0);
         auto stroke_opacity = graphics_element.stroke_opacity().value_or(1);
 
+        // https://svgwg.org/svg2-draft/painting.html#PaintingVectorEffects
+        // With the non-scaling-stroke vector effect, stroke outline shall be calculated in the "host" coordinate space instead of user coordinate system.
         // Note: This is assuming .x_scale() == .y_scale() (which it does currently).
-        auto viewbox_scale = paint_transform.x_scale();
-        float stroke_thickness = graphics_element.stroke_width().value_or(1) * viewbox_scale;
+        auto stroke_scale = computed_values().vector_effect() == CSS::VectorEffect::NonScalingStroke ? 1.0f : paint_transform.x_scale();
+        float stroke_thickness = graphics_element.stroke_width().value_or(1) * stroke_scale;
         auto stroke_dasharray = graphics_element.stroke_dasharray();
         for (auto& value : stroke_dasharray)
-            value *= viewbox_scale;
-        float stroke_dashoffset = graphics_element.stroke_dashoffset().value_or(0) * viewbox_scale;
+            value *= stroke_scale;
+        float stroke_dashoffset = graphics_element.stroke_dashoffset().value_or(0) * stroke_scale;
 
-        if (auto paint_style = graphics_element.stroke_paint_style(paint_context); paint_style.has_value()) {
+        if (auto paint_style = graphics_element.stroke_paint_style(paint_context, &context); paint_style.has_value()) {
             context.display_list_recorder().stroke_path({
                 .cap_style = cap_style,
                 .join_style = join_style,
@@ -213,6 +213,41 @@ void SVGPathPaintable::paint(DisplayListRecordingContext& context, PaintPhase ph
             break;
         }
     }
+}
+
+void SVGPathPaintable::record_hit_test_items(DisplayListRecordingContext& context, PaintPhase phase) const
+{
+    if (phase != PaintPhase::Foreground)
+        return;
+
+    auto* hit_test_display_list = context.hit_test_display_list();
+    if (!hit_test_display_list)
+        return;
+
+    if (!computed_path().has_value())
+        return;
+
+    if (computed_values().visibility() != CSS::Visibility::Visible || !visible_for_hit_testing())
+        return;
+
+    auto& graphics_element = dom_node();
+
+    // FIXME: Hit test the stroked region of paths without a fill, rather than treating them as non-hittable.
+    if (!graphics_element.fill_color().has_value())
+        return;
+
+    auto const* svg_node = layout_box().first_ancestor_of_type<Layout::SVGSVGBox>();
+    if (!svg_node || !svg_node->paintable_box())
+        return;
+
+    auto transformed_path = computed_path()->copy_transformed(computed_transforms().svg_to_css_pixels_transform());
+    transformed_path.offset(svg_node->paintable_box()->absolute_rect().location().to_type<float>());
+    auto bounding_box = transformed_path.bounding_box().to_type<CSSPixels>();
+    if (bounding_box.is_empty())
+        return;
+
+    auto winding_rule = to_gfx_winding_rule(graphics_element.fill_rule().value_or(SVG::FillRule::Nonzero));
+    hit_test_display_list->append_svg_path(const_cast<SVGPathPaintable&>(*this), move(transformed_path), winding_rule, bounding_box, accumulated_visual_context_index());
 }
 
 }

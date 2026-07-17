@@ -8,15 +8,22 @@
 #include <AK/LexicalPath.h>
 #include <AK/ScopeGuard.h>
 #include <LibCore/DirIterator.h>
+#include <LibCore/File.h>
 #include <LibCore/System.h>
 #include <LibFileSystem/FileSystem.h>
 
-#if !defined(AK_OS_IOS) && defined(AK_OS_BSD_GENERIC)
-#    include <sys/disk.h>
-#elif defined(AK_OS_LINUX)
-#    include <linux/fs.h>
-#elif defined(AK_OS_WINDOWS)
-#    include <windows.h>
+#if defined(AK_OS_WINDOWS)
+#    include <direct.h>
+
+#    include <AK/Windows.h>
+#else
+#    include <sys/statvfs.h>
+
+#    if !defined(AK_OS_IOS) && defined(AK_OS_BSD_GENERIC)
+#        include <sys/disk.h>
+#    elif defined(AK_OS_LINUX)
+#        include <linux/fs.h>
+#    endif
 #endif
 
 // On Linux distros that use glibc `basename` is defined as a macro that expands to `__xpg_basename`, so we undefine it
@@ -25,6 +32,49 @@
 #endif
 
 namespace FileSystem {
+
+static ErrorOr<struct stat> stat_path(StringView path)
+{
+    return Core::File::stat(path);
+}
+
+static ErrorOr<struct stat> stat_fd(int fd)
+{
+    return Core::File::fstat(fd);
+}
+
+// LibFileSystem is the portable home for path operations, so it is the one place
+// (outside LibCore's own backends) still allowed to reach for platform primitives.
+// On Windows these forward to the CRT for now.
+// FIXME: Nativize the Windows half (DeleteFileW etc.) and map both platforms'
+//        errors into a portable taxonomy.
+#ifdef AK_OS_WINDOWS
+static ErrorOr<void> remove_file(StringView path)
+{
+    ByteString path_string = path;
+    if (::_unlink(path_string.characters()) < 0)
+        return Error::from_syscall("unlink"sv, errno);
+    return {};
+}
+
+static ErrorOr<void> remove_directory(StringView path)
+{
+    ByteString path_string = path;
+    if (::_rmdir(path_string.characters()) < 0)
+        return Error::from_syscall("rmdir"sv, errno);
+    return {};
+}
+#else
+static ErrorOr<void> remove_file(StringView path)
+{
+    return Core::System::unlink(path);
+}
+
+static ErrorOr<void> remove_directory(StringView path)
+{
+    return Core::System::rmdir(path);
+}
+#endif
 
 ErrorOr<ByteString> current_working_directory()
 {
@@ -48,9 +98,6 @@ ErrorOr<ByteString> absolute_path(StringView path)
 #ifndef AK_OS_WINDOWS
 ErrorOr<ByteString> real_path(StringView path)
 {
-    if (path.is_null())
-        return Error::from_errno(ENOENT);
-
     ByteString dep_path = path;
     char* real_path = realpath(dep_path.characters(), nullptr);
     ScopeGuard free_path = [real_path]() { free(real_path); };
@@ -70,17 +117,17 @@ ErrorOr<ByteString> real_path(StringView path)
 
 bool exists(StringView path)
 {
-    return !Core::System::stat(path).is_error();
+    return !stat_path(path).is_error();
 }
 
 bool exists(int fd)
 {
-    return !Core::System::fstat(fd).is_error();
+    return !stat_fd(fd).is_error();
 }
 
 bool is_regular_file(StringView path)
 {
-    auto st_or_error = Core::System::stat(path);
+    auto st_or_error = stat_path(path);
     if (st_or_error.is_error())
         return false;
     auto st = st_or_error.release_value();
@@ -89,7 +136,7 @@ bool is_regular_file(StringView path)
 
 bool is_regular_file(int fd)
 {
-    auto st_or_error = Core::System::fstat(fd);
+    auto st_or_error = stat_fd(fd);
     if (st_or_error.is_error())
         return false;
     auto st = st_or_error.release_value();
@@ -98,7 +145,7 @@ bool is_regular_file(int fd)
 
 bool is_directory(StringView path)
 {
-    auto st_or_error = Core::System::stat(path);
+    auto st_or_error = stat_path(path);
     if (st_or_error.is_error())
         return false;
     auto st = st_or_error.release_value();
@@ -107,7 +154,7 @@ bool is_directory(StringView path)
 
 bool is_directory(int fd)
 {
-    auto st_or_error = Core::System::fstat(fd);
+    auto st_or_error = stat_fd(fd);
     if (st_or_error.is_error())
         return false;
     auto st = st_or_error.release_value();
@@ -278,7 +325,7 @@ ErrorOr<void> copy_file_or_directory(StringView destination_path, StringView sou
             return Error::from_errno(EISDIR);
         }
 
-        return copy_directory(final_destination_path, source_path, source_stat);
+        return copy_directory(final_destination_path, source_path, source_stat, link_mode, preserve_mode);
     }
 
     if (link_mode == LinkMode::Allowed)
@@ -333,9 +380,23 @@ bool can_delete_or_move(StringView path)
 }
 #endif // !AK_OS_WINDOWS
 
+#ifdef AK_OS_WINDOWS
+ErrorOr<void> move_file(StringView destination_path, StringView source_path, PreserveMode)
+{
+    // NOTE: Unlike POSIX rename(), MoveFileExW is not guaranteed to replace an existing
+    //       destination atomically. MOVEFILE_COPY_ALLOWED provides the cross-volume
+    //       copy-and-delete fallback that the POSIX implementation does by hand.
+    auto wide_source_path = TRY(to_wide_string(source_path));
+    auto wide_destination_path = TRY(to_wide_string(destination_path));
+    if (!MoveFileExW(wide_source_path.data(), wide_destination_path.data(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+        return Error::from_windows_error();
+    return {};
+}
+#endif
+
 ErrorOr<void> remove(StringView path, RecursionMode mode)
 {
-    if (is_directory(path) && mode == RecursionMode::Allowed) {
+    if (mode == RecursionMode::Allowed && is_directory(path)) {
         auto di = Core::DirIterator(path, Core::DirIterator::SkipParentAndBaseDir);
         if (di.has_error())
             return di.error();
@@ -343,9 +404,9 @@ ErrorOr<void> remove(StringView path, RecursionMode mode)
         while (di.has_next())
             TRY(remove(di.next_full_path(), RecursionMode::Allowed));
 
-        TRY(Core::System::rmdir(path));
+        TRY(remove_directory(path));
     } else {
-        TRY(Core::System::unlink(path));
+        TRY(remove_file(path));
     }
 
     return {};
@@ -353,14 +414,40 @@ ErrorOr<void> remove(StringView path, RecursionMode mode)
 
 ErrorOr<off_t> size_from_stat(StringView path)
 {
-    auto st = TRY(Core::System::stat(path));
+    auto st = TRY(stat_path(path));
     return st.st_size;
 }
 
 ErrorOr<off_t> size_from_fstat(int fd)
 {
-    auto st = TRY(Core::System::fstat(fd));
+    auto st = TRY(stat_fd(fd));
     return st.st_size;
+}
+
+ErrorOr<DiskSpace> compute_disk_space(LexicalPath const& path)
+{
+#if defined(AK_OS_WINDOWS)
+    ULARGE_INTEGER free_bytes;
+    ULARGE_INTEGER total_bytes;
+
+    if (!GetDiskFreeSpaceExA(path.string().characters(), &free_bytes, &total_bytes, nullptr))
+        return Error::from_windows_error();
+
+    return DiskSpace {
+        .free_bytes = free_bytes.QuadPart,
+        .total_bytes = total_bytes.QuadPart,
+    };
+#else
+    struct statvfs stats {};
+
+    if (::statvfs(path.string().characters(), &stats) != 0)
+        return Error::from_syscall("statvfs"sv, errno);
+
+    return DiskSpace {
+        .free_bytes = stats.f_bavail * stats.f_frsize,
+        .total_bytes = stats.f_blocks * stats.f_frsize,
+    };
+#endif
 }
 
 }

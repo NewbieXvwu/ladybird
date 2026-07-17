@@ -15,26 +15,38 @@ namespace WebView {
 class Action;
 class Application;
 class Autocomplete;
+class AutocompleteService;
+class BookmarkStore;
+class CanonicalNavigable;
+class CanonicalTraversable;
+class CompositorClient;
+class CompositorConnection;
+class CompositorHostBase;
 class CookieJar;
-class Database;
+class HistoryStore;
+class HSTSStore;
 class Menu;
 class OutOfProcessWebView;
 class ProcessManager;
 class Settings;
+class SiteIsolationManager;
+class StorageJar;
+class TraversableSessionHistory;
 class ViewImplementation;
 class WebContentClient;
+class WebWorkerClient;
 class WebUI;
-
-#if defined(AK_OS_MACOS)
-class MachPortServer;
-#endif
 
 struct Attribute;
 struct AutocompleteEngine;
+struct BookmarkItem;
 struct BrowserOptions;
 struct ConsoleOutput;
 struct CookieStorageKey;
+struct DictionaryLookup;
+struct DictionaryLookupTextStyle;
 struct DOMNodeProperties;
+struct HistoryEntry;
 struct Mutation;
 struct ProcessHandle;
 struct SearchEngine;

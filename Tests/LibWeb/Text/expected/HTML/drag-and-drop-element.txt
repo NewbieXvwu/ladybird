@@ -1,0 +1,47 @@
+Drag div:
+source: dragstart
+target: dragenter
+    types: text/plain
+target: dragover
+    types: text/plain
+target: drop
+    types: text/plain
+    text/plain: 'hello'
+    text/uri-list: ''
+source: dragend:copy
+
+Drag non-draggable div:
+nodrag: mousedown
+nodrag: mousemove
+nodrag: mouseup
+
+Drag link:
+dragstart
+    types: text/uri-list
+target: dragenter
+    types: text/uri-list
+target: dragover
+    types: text/uri-list
+target: drop
+    types: text/uri-list
+    text/plain: ''
+    text/uri-list: 'https://example.com/'
+
+Drag image:
+dragstart
+    types: text/uri-list
+target: dragenter
+    types: text/uri-list
+target: dragover
+    types: text/uri-list
+target: drop
+    types: text/uri-list
+    text/plain: ''
+    text/uri-list: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='
+
+Dragstart cancelled:
+source: dragstart
+dragstart (cancelling)
+
+Mousedown cancelled (prevents dragstart):
+source: mousedown (cancelling)

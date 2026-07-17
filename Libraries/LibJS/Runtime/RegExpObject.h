@@ -10,35 +10,27 @@
 #include <AK/EnumBits.h>
 #include <AK/Optional.h>
 #include <AK/Result.h>
+#include <AK/String.h>
 #include <LibJS/Export.h>
 #include <LibJS/Runtime/Object.h>
-#include <LibRegex/Regex.h>
+#include <LibRegex/ECMAScriptRegex.h>
 
 namespace JS {
 
 JS_API ThrowCompletionOr<GC::Ref<RegExpObject>> regexp_create(VM&, Value pattern, Value flags);
 ThrowCompletionOr<GC::Ref<RegExpObject>> regexp_alloc(VM&, FunctionObject& new_target);
 
-Result<regex::RegexOptions<ECMAScriptFlags>, String> regex_flags_from_string(Utf16View const& flags);
 struct ParseRegexPatternError {
-    String error;
+    Utf16String error;
 };
-ErrorOr<String, ParseRegexPatternError> parse_regex_pattern(Utf16View const& pattern, bool unicode, bool unicode_sets);
-ThrowCompletionOr<String> parse_regex_pattern(VM& vm, Utf16View const& pattern, bool unicode, bool unicode_sets);
+ErrorOr<Utf16String, ParseRegexPatternError> parse_regex_pattern(Utf16View const& pattern, bool unicode, bool unicode_sets);
+ThrowCompletionOr<Utf16String> parse_regex_pattern(VM& vm, Utf16View const& pattern, bool unicode, bool unicode_sets);
 
 class JS_API RegExpObject : public Object {
     JS_OBJECT(RegExpObject, Object);
     GC_DECLARE_ALLOCATOR(RegExpObject);
 
 public:
-    // JS regexps are all 'global' by default as per our definition, but the "global" flag enables "stateful".
-    // FIXME: Enable 'BrowserExtended' only if in a browser context.
-    static constexpr regex::RegexOptions<ECMAScriptFlags> default_flags {
-        (regex::ECMAScriptFlags)regex::AllFlags::SingleMatch
-        | (regex::ECMAScriptFlags)regex::AllFlags::Global
-        | regex::ECMAScriptFlags::BrowserExtended
-    };
-
     enum class Flags {
         HasIndices = 1 << 0,
         Global = 1 << 1,
@@ -51,10 +43,10 @@ public:
     };
 
     static GC::Ref<RegExpObject> create(Realm&);
-    static GC::Ref<RegExpObject> create(Realm&, Regex<ECMA262> regex, Utf16String pattern, Utf16String flags);
+    static GC::Ref<RegExpObject> create(Realm&, Utf16String pattern, Utf16String flags);
 
     ThrowCompletionOr<GC::Ref<RegExpObject>> regexp_initialize(VM&, Value pattern, Value flags);
-    String escape_regexp_pattern() const;
+    Utf16String escape_regexp_pattern() const;
 
     virtual void initialize(Realm&) override;
     virtual ~RegExpObject() override = default;
@@ -62,17 +54,18 @@ public:
     Utf16String const& pattern() const { return m_pattern; }
     Utf16String const& flags() const { return m_flags; }
     Flags flag_bits() const { return m_flag_bits; }
-    Regex<ECMA262> const& regex() { return *m_regex; }
-    Regex<ECMA262> const& regex() const { return *m_regex; }
     Realm& realm() { return *m_realm; }
     Realm const& realm() const { return *m_realm; }
     bool legacy_features_enabled() const { return m_legacy_features_enabled; }
     void set_legacy_features_enabled(bool legacy_features_enabled) { m_legacy_features_enabled = legacy_features_enabled; }
     void set_realm(Realm& realm) { m_realm = &realm; }
 
+    regex::ECMAScriptRegex const* cached_regex() const { return m_cached_regex; }
+    void set_cached_regex(regex::ECMAScriptRegex const* ptr) const { m_cached_regex = ptr; }
+
 private:
     RegExpObject(Object& prototype);
-    RegExpObject(Regex<ECMA262> regex, Utf16String pattern, Utf16String flags, Object& prototype);
+    RegExpObject(Utf16String pattern, Utf16String flags, Object& prototype);
 
     virtual bool is_regexp_object() const final { return true; }
     virtual void visit_edges(Visitor&) override;
@@ -81,9 +74,9 @@ private:
     Utf16String m_flags;
     Flags m_flag_bits { 0 };
     bool m_legacy_features_enabled { false }; // [[LegacyFeaturesEnabled]]
+    mutable regex::ECMAScriptRegex const* m_cached_regex { nullptr };
     // Note: This is initialized in RegExpAlloc, but will be non-null afterwards
     GC::Ptr<Realm> m_realm; // [[Realm]]
-    Optional<Regex<ECMA262>> m_regex;
 };
 
 template<>

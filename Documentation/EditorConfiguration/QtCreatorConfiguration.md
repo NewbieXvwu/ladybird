@@ -16,7 +16,6 @@ First, make sure you have a working toolchain and can build and run Ladybird. Go
 * Add the following `#define`s to the file:
     ```
     #define ENABLE_COMPILETIME_FORMAT_CHECK
-    #define SANITIZE_PTRS 1
     ```
 * Edit the `ladybird.cxxflags` file to say `-std=c++23 -fsigned-char -fconcepts -fno-exceptions -fno-semantic-interposition -fPIC`
 * Edit the `ladybird.includes` file to list the following lines (adapt to the actual path of your skia folder):
@@ -24,8 +23,9 @@ First, make sure you have a working toolchain and can build and run Ladybird. Go
     ./
     Libraries/
     Services/
-    Build/release/Lagom/Libraries/
-    Build/release/Lagom/Services/
+    Build/release/
+    Build/release/Libraries/
+    Build/release/Services/
     Build/release/vcpkg_installed/x64-linux/include/skia/
     AK/
     ```
@@ -70,7 +70,7 @@ In order to so, create a new file anywhere, for example `license-template.creato
 
 ```
 /*
- * Copyright (c) 2024, the Ladybird developers.
+ * Copyright (c) 2024-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */

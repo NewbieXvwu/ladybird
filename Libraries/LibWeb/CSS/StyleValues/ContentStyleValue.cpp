@@ -12,11 +12,18 @@
 
 namespace Web::CSS {
 
-String ContentStyleValue::to_string(SerializationMode mode) const
+void ContentStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    if (has_alt_text())
-        return MUST(String::formatted("{} / {}", m_properties.content->to_string(mode), m_properties.alt_text->to_string(mode)));
-    return m_properties.content->to_string(mode);
+    m_properties.content->serialize(builder, mode);
+    if (auto alt_text = m_properties.alt_text) {
+        builder.append(" / "sv);
+        alt_text->serialize(builder, mode);
+    }
+}
+
+bool ContentStyleValue::is_computationally_independent() const
+{
+    return m_properties.content->is_computationally_independent() && (!m_properties.alt_text || m_properties.alt_text->is_computationally_independent());
 }
 
 void ContentStyleValue::set_style_sheet(GC::Ptr<CSSStyleSheet> style_sheet)

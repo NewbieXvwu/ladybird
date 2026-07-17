@@ -1,102 +1,89 @@
-# These are the minimal set of sources needed to build the code generators. We separate them to allow
-# LibCore to depend on generated sources.
 set(SOURCES
+    AddressInfoVector.cpp
     ArgsParser.cpp
+    ConfigFile.cpp
+    DirIterator.cpp
     Directory.cpp
     DirectoryEntry.cpp
-    DirIterator.cpp
+    ElapsedTimer.cpp
     Environment.cpp
+    EventLoop.cpp
+    EventLoopImplementation.cpp
+    EventReceiver.cpp
     File.cpp
+    ImmutableBytes.cpp
+    MimeData.cpp
+    Notifier.cpp
+    ReportTime.cpp
+    Resource.cpp
+    ResourceImplementation.cpp
+    ResourceImplementationFile.cpp
+    SharedVersion.cpp
+    SocketAddress.cpp
     StandardPaths.cpp
+    SystemServerTakeover.cpp
+    ThreadEventQueue.cpp
+    Timer.cpp
+    TimeZone.cpp
     Version.cpp
 )
 
 if (WIN32)
     list(APPEND SOURCES
-        ProcessWindows.cpp
-        SocketpairWindows.cpp
-        SystemWindows.cpp)
-else()
-    list(APPEND SOURCES
-        Process.cpp
-        System.cpp)
-endif()
-
-ladybird_lib(LibCoreMinimal coreminimal)
-
-if (WIN32)
-    find_path(DIRENT_INCLUDE_DIR dirent.h REQUIRED)
-    target_include_directories(LibCoreMinimal PRIVATE ${DIRENT_INCLUDE_DIR})
-endif()
-
-if (${CMAKE_SYSTEM_NAME} MATCHES "NetBSD")
-    # NetBSD has its shm_open and shm_unlink functions in librt so we need to link that
-    target_link_libraries(LibCoreMinimal PRIVATE rt)
-endif()
-
-if (LAGOM_TOOLS_ONLY)
-    return()
-endif()
-
-set(SOURCES
-    ConfigFile.cpp
-    DateTime.cpp
-    ElapsedTimer.cpp
-    EventLoop.cpp
-    EventLoopImplementation.cpp
-    EventReceiver.cpp
-    MappedFile.cpp
-    MimeData.cpp
-    Notifier.cpp
-    Resource.cpp
-    ResourceImplementation.cpp
-    ResourceImplementationFile.cpp
-    SystemServerTakeover.cpp
-    ThreadEventQueue.cpp
-    Timer.cpp
-)
-
-if (WIN32)
-    list(APPEND SOURCES
-        SocketWindows.cpp
         AnonymousBufferWindows.cpp
         EventLoopImplementationWindows.cpp
+        FileWindows.cpp
+        LocalServerWindows.cpp
+        MappedFileWindows.cpp
+        ProcessWindows.cpp
+        SocketWindows.cpp
+        SocketpairWindows.cpp
+        SystemWindows.cpp
+        TCPServerWindows.cpp
         UDPServerWindows.cpp
-        TCPServerWindows.cpp)
+    )
 else()
     list(APPEND SOURCES
-        Socket.cpp
         AnonymousBuffer.cpp
         EventLoopImplementationUnix.cpp
+        FilePosix.cpp
+        LocalServer.cpp
+        MappedFile.cpp
+        Process.cpp
+        Socket.cpp
+        System.cpp
+        TCPServer.cpp
         UDPServer.cpp
-        TCPServer.cpp)
+    )
 endif()
 
-if (NOT WIN32 AND NOT EMSCRIPTEN)
-    list(APPEND SOURCES LocalServer.cpp)
-elseif (WIN32)
-    list(APPEND SOURCES LocalServerWindows.cpp)
-endif()
+include(CheckIncludeFile)
 
-# FIXME: Implement these for other systems.
-if (LINUX AND NOT EMSCRIPTEN)
-    list(APPEND SOURCES
-        FileWatcherLinux.cpp
-        Platform/ProcessStatisticsLinux.cpp
-        TimeZoneWatcherLinux.cpp
-    )
-elseif (APPLE AND NOT IOS)
-    list(APPEND SOURCES
-        FileWatcherMacOS.mm
-        Platform/ProcessStatisticsMach.cpp
-        TimeZoneWatcherMacOS.mm
-    )
+check_include_file(sys/inotify.h HAVE_INOTIFY)
+
+if (HAVE_INOTIFY)
+    list(APPEND SOURCES FileWatcherInotify.cpp)
 else()
-    list(APPEND SOURCES
-        FileWatcherUnimplemented.cpp
-        Platform/ProcessStatisticsUnimplemented.cpp
-        TimeZoneWatcherUnimplemented.cpp
-    )
+    list(APPEND SOURCES FileWatcherUnimplemented.cpp)
+endif()
+
+# FIXME: Implement ProcessStatistics for Windows and *BSD
+if (LINUX)
+    list(APPEND SOURCES Platform/ProcessStatisticsLinux.cpp)
+elseif (APPLE AND NOT IOS)
+    list(APPEND SOURCES Platform/ProcessStatisticsMach.cpp)
+else ()
+    list(APPEND SOURCES Platform/ProcessStatisticsUnimplemented.cpp)
+endif()
+
+if (LINUX OR BSD)
+    list(APPEND SOURCES TimeZoneWatcherUnix.cpp)
+elseif (APPLE AND NOT IOS)
+    list(APPEND SOURCES TimeZoneWatcherMacOS.mm)
+elseif (WIN32)
+    list(APPEND SOURCES TimeZoneWatcherWindows.cpp)
+else()
+    list(APPEND SOURCES TimeZoneWatcherUnimplemented.cpp)
 endif()
 
 if (APPLE OR CMAKE_SYSTEM_NAME STREQUAL "GNU")
@@ -105,11 +92,11 @@ endif()
 
 if (APPLE)
     list(APPEND SOURCES IOSurface.cpp)
+    list(APPEND SOURCES Platform/ScopedAutoreleasePoolMacOS.mm)
 endif()
 
-ladybird_lib(LibCore core)
-target_link_libraries(LibCore PRIVATE LibUnicode LibURL Threads::Threads)
-target_link_libraries(LibCore PUBLIC LibCoreMinimal)
+ladybird_lib(LibCore core EXPLICIT_SYMBOL_EXPORT)
+target_link_libraries(LibCore PRIVATE LibSync Threads::Threads LibUnicode LibURL LibTextCodec)
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "NetBSD")
     # NetBSD has its shm_open and shm_unlink functions in librt so we need to link that
@@ -131,31 +118,12 @@ if (APPLE)
     target_link_libraries(LibCore PUBLIC "-framework IOSurface")
 endif()
 
-if (ANDROID)
-    target_link_libraries(LibCore PRIVATE log)
+if (WIN32)
+    target_link_libraries(LibCore PRIVATE ntdll.dll)
+    find_path(DIRENT_INCLUDE_DIR dirent.h REQUIRED)
+    target_include_directories(LibCore PRIVATE ${DIRENT_INCLUDE_DIR})
 endif()
 
-if (ENABLE_SWIFT)
-    set(SWIFT_EXCLUDE_HEADERS "SocketAddressWindows.h")
-    if(WIN32)
-        list(APPEND SWIFT_EXCLUDE_HEADERS "EventLoopImplementationUnix.h")
-    else()
-        list(APPEND SWIFT_EXCLUDE_HEADERS "EventLoopImplementationWindows.h")
-    endif()
-    if (NOT APPLE)
-        list(APPEND SWIFT_EXCLUDE_HEADERS
-            IOSurface.h
-            MachPort.h
-            MachMessageTypes.h
-            ProcessStatisticsMach.h
-        )
-    endif()
-
-    generate_clang_module_map(LibCore EXCLUDE_FILES ${SWIFT_EXCLUDE_HEADERS})
-    target_sources(LibCore PRIVATE
-        EventSwift.mm
-        EventLoopExecutor.swift)
-    set_source_files_properties(EventSwift.mm PRIVATE PROPERTIES COMPILE_FLAGS -fblocks)
-    target_link_libraries(LibCore PRIVATE AK)
-    add_swift_target_properties(LibCore LAGOM_LIBRARIES AK)
+if (ANDROID)
+    target_link_libraries(LibCore PRIVATE log)
 endif()

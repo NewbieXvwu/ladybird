@@ -5,9 +5,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibJS/Runtime/DataView.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ReadableByteStreamControllerPrototype.h>
+#include <LibWeb/Bindings/ReadableByteStreamController.h>
 #include <LibWeb/Streams/AbstractOperations.h>
 #include <LibWeb/Streams/ReadableByteStreamController.h>
 #include <LibWeb/Streams/ReadableStream.h>
@@ -47,11 +48,11 @@ WebIDL::ExceptionOr<void> ReadableByteStreamController::close()
 {
     // 1. If this.[[closeRequested]] is true, throw a TypeError exception.
     if (m_close_requested)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Controller is already closed"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Controller is already closed"_utf16 };
 
     // 2. If this.[[stream]].[[state]] is not "readable", throw a TypeError exception.
     if (m_stream->state() != ReadableStream::State::Readable) {
-        auto message = m_stream->state() == ReadableStream::State::Closed ? "Cannot close a closed stream"sv : "Cannot close an errored stream"sv;
+        auto message = m_stream->state() == ReadableStream::State::Closed ? "Cannot close a closed stream"_utf16 : "Cannot close an errored stream"_utf16;
         return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, message };
     }
 
@@ -62,10 +63,10 @@ WebIDL::ExceptionOr<void> ReadableByteStreamController::close()
 }
 
 // https://streams.spec.whatwg.org/#rbs-controller-error
-void ReadableByteStreamController::error(JS::Value error)
+void ReadableByteStreamController::error(Optional<JS::Value> error)
 {
     // 1. Perform ! ReadableByteStreamControllerError(this, e).
-    readable_byte_stream_controller_error(*this, error);
+    readable_byte_stream_controller_error(*this, error.value_or(JS::js_undefined()));
 }
 
 ReadableByteStreamController::ReadableByteStreamController(JS::Realm& realm)
@@ -80,23 +81,23 @@ void ReadableByteStreamController::initialize(JS::Realm& realm)
 }
 
 // https://streams.spec.whatwg.org/#rbs-controller-enqueue
-WebIDL::ExceptionOr<void> ReadableByteStreamController::enqueue(GC::Root<WebIDL::ArrayBufferView>& chunk)
+WebIDL::ExceptionOr<void> ReadableByteStreamController::enqueue(WebIDL::ArrayBufferView chunk)
 {
     // 1. If chunk.[[ByteLength]] is 0, throw a TypeError exception.
     // 2. If chunk.[[ViewedArrayBuffer]].[[ByteLength]] is 0, throw a TypeError exception.
-    if (chunk->byte_length() == 0 || chunk->viewed_array_buffer()->byte_length() == 0)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot enqueue chunk with byte length of zero"sv };
+    if (chunk.byte_length() == 0 || chunk.viewed_array_buffer()->byte_length() == 0)
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot enqueue chunk with byte length of zero"_utf16 };
 
     // 3. If this.[[closeRequested]] is true, throw a TypeError exception.
     if (m_close_requested)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Close is requested for controller"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Close is requested for controller"_utf16 };
 
     // 4. If this.[[stream]].[[state]] is not "readable", throw a TypeError exception.
     if (!m_stream->is_readable())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Stream is not readable"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Stream is not readable"_utf16 };
 
     // 5. Return ? ReadableByteStreamControllerEnqueue(this, chunk).
-    return readable_byte_stream_controller_enqueue(*this, chunk->raw_object());
+    return readable_byte_stream_controller_enqueue(*this, chunk.array_buffer_view().visit([](auto const& object) -> JS::Value { return object; }));
 }
 
 // https://streams.spec.whatwg.org/#rbs-controller-private-cancel

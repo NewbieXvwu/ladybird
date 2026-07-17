@@ -7,6 +7,7 @@
 #pragma once
 
 #include <LibWeb/Layout/Box.h>
+#include <LibWeb/Layout/FlexLayoutData.h>
 #include <LibWeb/Layout/FormattingContext.h>
 
 namespace Web::Layout {
@@ -18,7 +19,7 @@ public:
 
     virtual bool inhibits_floating() const override { return true; }
 
-    virtual void run(AvailableSpace const&) override;
+    virtual void run(LayoutInput const&) override;
     virtual CSSPixels automatic_content_width() const override;
     virtual CSSPixels automatic_content_height() const override;
 
@@ -54,10 +55,12 @@ private:
     };
 
     struct FlexItem {
-        GC::Ref<Box> box;
+        Box& box;
         LayoutState::UsedValues& used_values;
         Optional<CSS::FlexBasis> used_flex_basis {};
         bool used_flex_basis_is_definite { false };
+        bool main_size_was_resolved_from_aspect_ratio { false };
+        bool cross_size_was_resolved_from_aspect_ratio { false };
         CSSPixels flex_base_size { 0 };
         CSSPixels hypothetical_main_size { 0 };
         CSSPixels hypothetical_cross_size { 0 };
@@ -111,8 +114,10 @@ private:
     struct FlexLine {
         Vector<FlexItem&> items;
         CSSPixels cross_size { 0 };
+        bool has_baseline_aligned_items { false };
         Optional<CSSPixels> remaining_free_space;
         double chosen_flex_fraction { 0 };
+        FlexLayoutGrowthState growth_state { FlexLayoutGrowthState::Shrinking };
 
         double sum_of_flex_factor_of_unfrozen_items() const;
         double sum_of_scaled_flex_shrink_factor_of_unfrozen_items() const;
@@ -131,11 +136,14 @@ private:
     [[nodiscard]] CSSPixels inner_cross_size(FlexItem const& item) const { return inner_cross_size(item.used_values); }
     bool has_main_min_size(Box const&) const;
     bool has_cross_min_size(Box const&) const;
-    CSSPixels specified_main_max_size(Box const&) const;
-    CSSPixels specified_cross_max_size(Box const&) const;
-    bool is_cross_auto(Box const&) const;
-    CSSPixels specified_main_min_size(Box const&) const;
-    CSSPixels specified_cross_min_size(Box const&) const;
+    CSSPixels specified_main_max_size(FlexItem const&) const;
+    CSSPixels specified_cross_max_size(FlexItem const&) const;
+    CSSPixels specified_main_max_size_for_intrinsic_contribution(FlexItem const&,
+        AvailableSize const&) const;
+    CSSPixels specified_main_min_size(FlexItem const&) const;
+    CSSPixels specified_cross_min_size(FlexItem const&) const;
+    CSSPixels calculate_inner_flex_container_cross_min_size() const;
+    CSSPixels calculate_inner_flex_container_cross_max_size() const;
     bool has_main_max_size(Box const&) const;
     bool has_cross_max_size(Box const&) const;
     CSSPixels automatic_minimum_size(FlexItem const&) const;
@@ -150,8 +158,8 @@ private:
     CSS::Size const& computed_cross_min_size(Box const&) const;
     CSS::Size const& computed_cross_max_size(Box const&) const;
 
-    CSSPixels get_pixel_width(Box const&, CSS::Size const&) const;
-    CSSPixels get_pixel_height(Box const&, CSS::Size const&) const;
+    CSSPixels get_pixel_width(FlexItem const&, CSS::Size const&) const;
+    CSSPixels get_pixel_height(FlexItem const&, CSS::Size const&) const;
 
     bool flex_item_is_stretched(FlexItem const&) const;
 
@@ -159,7 +167,6 @@ private:
     void set_cross_size(Box const&, CSSPixels size);
     void set_main_size(FlexItem&, CSSPixels size);
     void set_cross_size(FlexItem&, CSSPixels size);
-    void set_offset(FlexItem&, CSSPixels main_offset, CSSPixels cross_offset);
 
     void set_main_axis_first_margin(FlexItem&, CSSPixels margin);
     void set_main_axis_second_margin(FlexItem&, CSSPixels margin);
@@ -179,10 +186,11 @@ private:
 
     void resolve_flexible_lengths();
     void resolve_flexible_lengths_for_line(FlexLine&);
+    void save_flex_layout_data() const;
 
     void resolve_cross_axis_auto_margins();
 
-    void determine_hypothetical_cross_size_of_item(FlexItem&, bool resolve_percentage_min_max_sizes);
+    void determine_hypothetical_cross_size_of_item(FlexItem&);
 
     void calculate_cross_size_of_each_flex_line();
 
@@ -196,10 +204,17 @@ private:
 
     void align_all_flex_items_along_the_cross_axis();
 
+    void resolve_baseline_aligned_items();
+
     void align_all_flex_lines();
 
     bool is_row_layout() const { return m_flex_direction == CSS::FlexDirection::Row || m_flex_direction == CSS::FlexDirection::RowReverse; }
     bool is_single_line() const { return flex_container().computed_values().flex_wrap() == CSS::FlexWrap::Nowrap; }
+    bool inline_axis_is_horizontal(Box const&) const;
+    bool main_axis_is_horizontal() const;
+    bool cross_axis_is_horizontal() const { return !main_axis_is_horizontal(); }
+    bool main_axis_is_parallel_to_inline_axis(Box const&) const;
+    bool cross_axis_is_reverse() const;
     bool is_direction_reverse() const;
     void populate_specified_margins(FlexItem&, CSS::FlexDirection) const;
 
@@ -216,6 +231,7 @@ private:
     [[nodiscard]] CSSPixels calculate_max_content_main_size(FlexItem const&) const;
     [[nodiscard]] CSSPixels calculate_min_content_cross_size(FlexItem const&) const;
     [[nodiscard]] CSSPixels calculate_max_content_cross_size(FlexItem const&) const;
+    [[nodiscard]] Optional<CSSPixels> cross_size_transferred_from_definite_main_size(FlexItem const&) const;
 
     [[nodiscard]] CSSPixels calculate_fit_content_main_size(FlexItem const&) const;
     [[nodiscard]] CSSPixels calculate_fit_content_cross_size(FlexItem const&) const;
@@ -239,6 +255,9 @@ private:
     };
     Optional<AxisAgnosticAvailableSpace> m_available_space_for_items;
     Optional<AvailableSpace> m_available_space;
+    Optional<LayoutInput> m_layout_input;
+    ContainingBlockConstraints m_item_percentage_bases;
+    ContainingBlockConstraints item_containing_block_constraints() const;
 };
 
 }

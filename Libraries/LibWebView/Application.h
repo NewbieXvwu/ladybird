@@ -7,30 +7,56 @@
 #pragma once
 
 #include <AK/ByteString.h>
+#include <AK/Function.h>
 #include <AK/LexicalPath.h>
 #include <AK/Optional.h>
-#include <AK/Swift.h>
+#include <LibCore/AnonymousBuffer.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/Forward.h>
+#include <LibDatabase/Forward.h>
 #include <LibDevTools/DevToolsDelegate.h>
 #include <LibDevTools/Forward.h>
+#include <LibGfx/Point.h>
+#include <LibGfx/Size.h>
+#include <LibIPC/Forward.h>
 #include <LibImageDecoderClient/Client.h>
 #include <LibMain/Main.h>
-#include <LibRequests/RequestClient.h>
+#include <LibRequests/Forward.h>
 #include <LibURL/URL.h>
 #include <LibWeb/CSS/PreferredColorScheme.h>
 #include <LibWeb/CSS/PreferredContrast.h>
 #include <LibWeb/CSS/PreferredMotion.h>
+#include <LibWeb/Clipboard/SystemClipboard.h>
+#include <LibWeb/Compositor/Types.h>
+#include <LibWeb/HTML/ActivateTab.h>
+#include <LibWeb/HTML/CrossProcessId.h>
+#include <LibWebView/BookmarkStore.h>
+#include <LibWebView/BrowserProcess.h>
+#include <LibWebView/FileDownloader.h>
 #include <LibWebView/Forward.h>
 #include <LibWebView/Options.h>
+#include <LibWebView/PrivateBrowsing.h>
 #include <LibWebView/Process.h>
 #include <LibWebView/ProcessManager.h>
+#include <LibWebView/Profile.h>
 #include <LibWebView/Settings.h>
 #include <LibWebView/StorageJar.h>
+
+#if defined(AK_OS_MACOS)
+#    include <LibIPC/TransportBootstrapMach.h>
+#endif
+
+namespace Web {
+
+struct MouseEvent;
+struct PinchEvent;
+
+}
 
 namespace WebView {
 
 struct ApplicationSettingsObserver;
+struct ApplicationBookmarkStoreObserver;
 
 class WEBVIEW_API Application : public DevTools::DevToolsDelegate {
     AK_MAKE_NONCOPYABLE(Application);
@@ -42,21 +68,105 @@ public:
 
     static Application& the() { return *s_the; }
 
-    static Settings& settings() { return the().m_settings; }
+    static Settings& settings() { return *the().m_settings; }
+    static Profile const& profile() { return *the().m_profile; }
+    BrowserProcess& browser_process() { return *m_browser_process; }
+    bool should_exit_after_profile_coordination() const { return m_should_exit_after_profile_coordination; }
+    static AutocompleteService& autocomplete_service() { return *the().m_autocomplete_service; }
 
     static BrowserOptions const& browser_options() { return the().m_browser_options; }
+    static RequestServerOptions const& request_server_options() { return the().m_request_server_options; }
     static WebContentOptions& web_content_options() { return the().m_web_content_options; }
 
-    static Requests::RequestClient& request_server_client() { return *the().m_request_server_client; }
+    virtual Optional<String> system_font_family() const { return {}; }
+
+    static Requests::RequestClient& request_server_client(IsPrivate = IsPrivate::No);
     static ImageDecoderClient::Client& image_decoder_client() { return *the().m_image_decoder_client; }
 
-    static CookieJar& cookie_jar() { return *the().m_cookie_jar; }
-    static StorageJar& storage_jar() { return *the().m_storage_jar; }
+    virtual bool supports_vertical_tabs() const { return false; }
+    virtual bool supports_private_browsing_windows() const { return false; }
+    virtual bool supports_client_side_window_decorations() const { return false; }
+    void tab_settings_changed(Badge<ApplicationSettingsObserver>);
+
+    static BookmarkStore& bookmark_store() { return *the().m_bookmark_store; }
+    void update_bookmark_action_for_current_web_view();
+    void bookmarks_changed(Badge<ApplicationBookmarkStoreObserver>);
+    void show_bookmarks_bar_changed(Badge<ApplicationSettingsObserver>);
+
+    struct BookmarkID {
+        String id;
+        Optional<String> target_folder_id;
+    };
+    virtual Optional<BookmarkID> bookmark_item_id_for_context_menu() const { return {}; }
+    virtual void show_bookmark_context_menu(Gfx::IntPoint, Optional<BookmarkItem const&>, [[maybe_unused]] Optional<String const&> target_folder_id) { }
+
+    struct AddBookmarkDialogResult {
+        BookmarkItem::Bookmark bookmark;
+        Optional<String> target_folder_id;
+    };
+    using AddBookmarkPromise = Core::Promise<AddBookmarkDialogResult>;
+    virtual NonnullRefPtr<AddBookmarkPromise> display_add_bookmark_dialog(Optional<String const&> target_folder_id = {}) const;
+
+    using BookmarkPromise = Core::Promise<BookmarkItem::Bookmark>;
+    virtual NonnullRefPtr<BookmarkPromise> display_edit_bookmark_dialog([[maybe_unused]] BookmarkItem::Bookmark const& current_bookmark) const;
+
+    using BookmarkFolderPromise = Core::Promise<BookmarkItem::Folder>;
+    virtual NonnullRefPtr<BookmarkFolderPromise> display_add_bookmark_folder_dialog(Optional<String const&> default_title = {}) const;
+    virtual NonnullRefPtr<BookmarkFolderPromise> display_edit_bookmark_folder_dialog([[maybe_unused]] BookmarkItem::Folder const& current_folder) const;
+
+    static HistoryStore& history_store(IsPrivate);
+    static CookieJar& cookie_jar(IsPrivate);
+    static HSTSStore& hsts_store(IsPrivate);
+    static StorageJar& storage_jar(IsPrivate);
 
     static ProcessManager& process_manager() { return *the().m_process_manager; }
+#if defined(AK_OS_MACOS)
+    static IPC::TransportBootstrapMachServer& transport_bootstrap_server() { return the().m_transport_bootstrap_server; }
+    void set_browser_process_transport_handler(Function<void(NonnullOwnPtr<IPC::Transport>)> handler);
+#endif
 
     ErrorOr<NonnullRefPtr<WebContentClient>> launch_web_content_process(ViewImplementation&);
+    struct ChildFrameWebContentProcess {
+        NonnullRefPtr<WebContentClient> client;
+        u64 page_id { 0 };
+    };
+    ErrorOr<ChildFrameWebContentProcess> launch_child_frame_web_content_process(IsPrivate, Web::HTML::CrossProcessId root_navigable_id);
+    u64 allocate_page_id();
+    Web::HTML::CrossProcessIdAllocator allocate_cross_process_id_allocator();
+    Web::HTML::CrossProcessId allocate_ui_process_cross_process_id();
+
+    void maybe_close_private_browsing_session();
+    void reset_private_browsing_session();
+
+    Web::Compositor::CompositorContextId allocate_compositor_context_id();
+    ErrorOr<void> connect_web_content_to_compositor(WebContentClient&);
+    ErrorOr<IPC::TransportHandle> connect_new_compositor_canvas_client();
+    void register_compositor_context(WebContentClient&, Web::Compositor::CompositorContextId, Optional<u64> page_id);
+    ErrorOr<void> try_register_compositor_context(WebContentClient&, Web::Compositor::CompositorContextId, Optional<u64> page_id);
+    void update_compositor_viewport(Web::Compositor::CompositorContextId, Gfx::IntSize viewport_size, Web::Compositor::WindowResizingInProgress = Web::Compositor::WindowResizingInProgress::No);
+    void update_compositor_display_metadata(Web::Compositor::CompositorContextId, Optional<u64> display_id, double refresh_rate);
+    bool send_async_scroll_to_compositor(Web::Compositor::CompositorContextId, Gfx::FloatPoint position, Gfx::FloatPoint delta_in_device_pixels);
+    bool handle_mouse_event_in_compositor(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
+    bool handle_pinch_event_in_compositor(Web::Compositor::CompositorContextId, Web::PinchEvent const&);
+    bool dispatch_mouse_event_to_web_content(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
+    void notify_compositor_presented_bitmap_ready_to_paint(Web::Compositor::CompositorContextId, i32 bitmap_id);
+
+    Function<void()> on_compositor_process_death;
+
     virtual Optional<ViewImplementation&> active_web_view() const { return {}; }
+    virtual Vector<ViewImplementation&> active_window_web_views() const { return {}; }
+    virtual bool activate_tab_with_url(URL::URL const&) const { return false; }
+
+    virtual Optional<ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const { return {}; }
+    virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const;
+    virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const;
+    virtual void open_url_in_new_window(URL::URL const&, IsPrivate) { }
+
+    void open_bookmark_in_new_tab(String const& bookmark_id, Web::HTML::ActivateTab) const;
+    void open_bookmark_folder_in_new_tabs(String const& folder_id) const;
+    void open_bookmark_in_new_window(String const& bookmark_id, IsPrivate);
+
+    Main::Arguments const& command_line_arguments() const { return m_arguments; }
 
     void add_child_process(Process&&);
 
@@ -66,16 +176,61 @@ public:
 #endif
     Optional<Process&> find_process(pid_t);
 
-    ErrorOr<LexicalPath> path_for_downloaded_file(StringView file) const;
+    virtual bool should_capture_web_content_output() const { return false; }
+
+    ErrorOr<LexicalPath> default_path_for_downloaded_file(ByteString const& file) const;
+    ErrorOr<LexicalPath> path_for_downloaded_file(ByteString const& file) const;
 
     virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const;
     virtual void display_error_dialog(StringView error_message) const;
+    ErrorOr<String> download_file_path_for_frontend_action(FileDownloader::Download const&) const;
+    ErrorOr<String> download_directory_path_for_frontend_action(FileDownloader::Download const&) const;
+    virtual void open_download(FileDownloader::Download const&) const;
+    virtual void show_download_in_folder(FileDownloader::Download const&) const;
+
+    // FIXME: We should implement UI-agnostic platform APIs to interact with the system clipboard.
+    enum class ClipboardType : u8 {
+        Text,
+        Selection,
+    };
+    virtual bool supports_clipboard_type(ClipboardType) const;
+    virtual Utf16String clipboard_text(ClipboardType = ClipboardType::Text) const;
+    virtual void set_clipboard_text(String, ClipboardType = ClipboardType::Text);
+
+    virtual Vector<Web::Clipboard::SystemClipboardRepresentation> clipboard_entries() const;
+    virtual void insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation);
+
+    struct BrowsingDataSizes {
+        u64 cache_size_since_requested_time { 0 };
+        u64 total_cache_size { 0 };
+
+        u64 site_data_size_since_requested_time { 0 };
+        u64 total_site_data_size { 0 };
+    };
+    NonnullRefPtr<Core::Promise<BrowsingDataSizes>> estimate_browsing_data_size_accessed_since(UnixDateTime since);
+
+    struct ClearBrowsingDataOptions {
+        enum class Delete {
+            No,
+            Yes,
+        };
+
+        UnixDateTime since { UnixDateTime::earliest() };
+        Delete delete_cached_files { Delete::No };
+        Delete delete_history { Delete::No };
+        Delete delete_site_data { Delete::No };
+    };
+    void clear_browsing_data(ClearBrowsingDataOptions const&);
 
     Action& reload_action() { return *m_reload_action; }
     Action& copy_selection_action() { return *m_copy_selection_action; }
+    Action& cut_selection_action() { return *m_cut_selection_action; }
     Action& paste_action() { return *m_paste_action; }
     Action& select_all_action() { return *m_select_all_action; }
-    Action& view_source_action() { return *m_view_source_action; }
+
+    Action& open_about_page_action() { return *m_open_about_page_action; }
+    Action& open_downloads_page_action() { return *m_open_downloads_page_action; }
+    Action& open_settings_page_action() { return *m_open_settings_page_action; }
 
     Menu& zoom_menu() { return *m_zoom_menu; }
     Action& reset_zoom_action() { return *m_reset_zoom_action; }
@@ -83,59 +238,131 @@ public:
     Menu& color_scheme_menu() { return *m_color_scheme_menu; }
     Menu& contrast_menu() { return *m_contrast_menu; }
     Menu& motion_menu() { return *m_motion_menu; }
+
+    Action& toggle_vertical_tabs_expanded_action() { return *m_toggle_vertical_tabs_expanded_action; }
+
+    Action& toggle_menu_bar_action() { return *m_toggle_menu_bar_action; }
+
+    Menu& bookmarks_menu() { return *m_bookmarks_menu; }
+    void toggle_bookmark_for_view(ViewImplementation&);
+
+    Menu& history_menu() { return *m_history_menu; }
+
+    Menu& inspect_menu() { return *m_inspect_menu; }
+    Action& view_source_action() { return *m_view_source_action; }
+
     Menu& debug_menu() { return *m_debug_menu; }
+
+    FileDownloader& file_downloader() { return m_file_downloader; }
 
     void apply_view_options(Badge<ViewImplementation>, ViewImplementation&);
 
-    enum class DevtoolsState {
-        Disabled,
-        Enabled,
-    };
-    ErrorOr<DevtoolsState> toggle_devtools_enabled();
+    ErrorOr<void> toggle_devtools_enabled();
     void refresh_tab_list();
+
+    Optional<Core::TimeZoneWatcher&> time_zone_watcher();
 
 protected:
     explicit Application(Optional<ByteString> ladybird_binary_path = {});
 
     ErrorOr<void> initialize(Main::Arguments const&);
 
-    virtual void process_did_exit(Process&&);
+    virtual void process_did_exit(Process&&, Optional<int> exit_status);
 
     virtual void create_platform_arguments(Core::ArgsParser&) { }
-    virtual void create_platform_options(BrowserOptions&, WebContentOptions&) { }
-    virtual NonnullOwnPtr<Core::EventLoop> create_platform_event_loop();
+    virtual void create_platform_options(BrowserOptions&, RequestServerOptions&, WebContentOptions&) { }
+    virtual bool should_coordinate_browser_process() const { return true; }
+    virtual Core::EventLoop& create_platform_event_loop();
 
-    virtual Optional<ByteString> ask_user_for_download_folder() const { return {}; }
+    virtual Optional<ByteString> ask_user_for_download_path([[maybe_unused]] ByteString const& file) const { return {}; }
+
+    virtual void update_tabs_display() const { }
+
+    virtual void rebuild_bookmarks_menu() const { }
+
+    virtual void on_recently_closed_entries_changed() const { }
+
+    virtual void on_devtools_enabled() const;
+    virtual void on_devtools_disabled() const;
 
     Main::Arguments& arguments() { return m_arguments; }
 
 private:
+    ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(Optional<ViewImplementation&>, IsPrivate, u64 initial_page_id, Optional<Web::HTML::CrossProcessId> root_navigable_id = {});
+    PrivateBrowsingSession& ensure_private_browsing_session();
     ErrorOr<void> launch_services();
     void launch_spare_web_content_process();
+    ErrorOr<void> launch_compositor_process();
+    void handle_compositor_process_death();
+    void recover_compositor_process();
+    void crash_compositor_process();
     ErrorOr<void> launch_request_server();
     ErrorOr<void> launch_image_decoder_server();
     ErrorOr<void> launch_devtools_server();
+    ErrorOr<void> load_content_blocker_lists();
 
     void initialize_actions();
+    void update_vertical_tabs_action();
+
+    struct MenuData {
+        Menu& menu;
+        ReadonlySpan<BookmarkItem> items;
+        Optional<String const&> target_folder_id;
+    };
+    void create_bookmark_menu_items(Optional<MenuData> = {});
+
+    Vector<BookmarkItem::Bookmark> bookmarks_for_all_tabs_in_current_window() const;
 
     virtual Vector<DevTools::TabDescription> tab_list() const override;
     virtual Vector<DevTools::CSSProperty> css_property_list() const override;
+    virtual void navigate_tab(DevTools::TabDescription const&, String const&) const override;
+    virtual void reload_tab(DevTools::TabDescription const&, bool) const override;
+    virtual void traverse_the_history_by_delta(DevTools::TabDescription const&, int) const override;
+    virtual Vector<HTTP::Cookie::Cookie> cookies(DevTools::TabDescription const&) const override;
+    virtual ErrorOr<void> set_cookie(DevTools::TabDescription const&, Optional<HTTP::Cookie::Cookie>, HTTP::Cookie::Cookie) const override;
+    virtual void delete_cookies(DevTools::TabDescription const&, Vector<HTTP::Cookie::Cookie>) const override;
+    virtual void listen_for_host_cookie_changes(DevTools::TabDescription const&, OnHostCookieChange) const override;
+    virtual void stop_listening_for_host_cookie_changes(DevTools::TabDescription const&) const override;
+    virtual void inspect_storage(DevTools::TabDescription const&, Web::StorageAPI::StorageEndpointType, OnStorageItemsReceived) const override;
+    virtual ErrorOr<Optional<String>> set_storage_item(DevTools::TabDescription const&, Web::StorageAPI::StorageEndpointType, String const&, String const&, String const&) const override;
+    virtual ErrorOr<Optional<String>> remove_storage_item(DevTools::TabDescription const&, Web::StorageAPI::StorageEndpointType, String const&, String const&) const override;
+    virtual ErrorOr<void> clear_storage(DevTools::TabDescription const&, Web::StorageAPI::StorageEndpointType, String const&) const override;
+    virtual u64 add_storage_change_listener(DevTools::TabDescription const&, OnStorageChange) const override;
+    virtual void remove_storage_change_listener(DevTools::TabDescription const&, u64) const override;
+    virtual void inspect_indexed_database_storage(DevTools::TabDescription const&, OnIndexedDBInspectionComplete) const override;
+    virtual void inspect_indexed_database_objects(DevTools::TabDescription const&, String const&, Optional<JsonArray>, JsonObject, OnIndexedDBInspectionComplete) const override;
+    virtual void delete_indexed_database(DevTools::TabDescription const&, String const&, String const&, OnIndexedDBInspectionComplete) const override;
+    virtual void clear_indexed_database_object_store(DevTools::TabDescription const&, String const&, String const&, OnIndexedDBInspectionComplete) const override;
+    virtual void delete_indexed_database_record(DevTools::TabDescription const&, String const&, String const&, OnIndexedDBInspectionComplete) const override;
+    virtual u64 add_indexed_database_change_listener(DevTools::TabDescription const&, OnIndexedDatabaseChange) const override;
+    virtual void remove_indexed_database_change_listener(DevTools::TabDescription const&, u64) const override;
     virtual void inspect_tab(DevTools::TabDescription const&, OnTabInspectionComplete) const override;
+    virtual void inspect_accessibility_tree(DevTools::TabDescription const&, OnAccessibilityTreeInspectionComplete) const override;
     virtual void listen_for_dom_properties(DevTools::TabDescription const&, OnDOMNodePropertiesReceived) const override;
     virtual void stop_listening_for_dom_properties(DevTools::TabDescription const&) const override;
-    virtual void inspect_dom_node(DevTools::TabDescription const&, DOMNodeProperties::Type, Web::UniqueNodeID, Optional<Web::CSS::PseudoElement>) const override;
+    virtual void inspect_dom_node(DevTools::TabDescription const&, DOMNodeProperties::Type, Web::UniqueNodeID, Optional<Web::CSS::PseudoElement>, JsonObject options = {}) const override;
     virtual void clear_inspected_dom_node(DevTools::TabDescription const&) const override;
+    virtual void start_node_picker(DevTools::TabDescription const&, OnNodePickerEvent) const override;
+    virtual void stop_node_picker(DevTools::TabDescription const&) const override;
+    virtual void clear_node_picker(DevTools::TabDescription const&) const override;
+    virtual void inspect_grid_layouts(DevTools::TabDescription const&, Web::UniqueNodeID, OnGridLayoutsReceived) const override;
+    virtual void inspect_current_grid(DevTools::TabDescription const&, Web::UniqueNodeID, OnCurrentGridReceived) const override;
+    virtual void inspect_current_flexbox(DevTools::TabDescription const&, Web::UniqueNodeID, bool, OnCurrentFlexboxReceived) const override;
     virtual void highlight_dom_node(DevTools::TabDescription const&, Web::UniqueNodeID, Optional<Web::CSS::PseudoElement>) const override;
     virtual void clear_highlighted_dom_node(DevTools::TabDescription const&) const override;
+    virtual void highlight_flexbox(DevTools::TabDescription const&, Web::UniqueNodeID, JsonValue) const override;
+    virtual void clear_flexbox_highlight(DevTools::TabDescription const&, Web::UniqueNodeID) const override;
+    virtual void highlight_grid(DevTools::TabDescription const&, Web::UniqueNodeID, JsonValue) const override;
+    virtual void clear_grid_highlight(DevTools::TabDescription const&, Web::UniqueNodeID) const override;
     virtual void listen_for_dom_mutations(DevTools::TabDescription const&, OnDOMMutationReceived) const override;
     virtual void stop_listening_for_dom_mutations(DevTools::TabDescription const&) const override;
     virtual void get_dom_node_inner_html(DevTools::TabDescription const&, Web::UniqueNodeID, OnDOMNodeHTMLReceived) const override;
     virtual void get_dom_node_outer_html(DevTools::TabDescription const&, Web::UniqueNodeID, OnDOMNodeHTMLReceived) const override;
     virtual void set_dom_node_outer_html(DevTools::TabDescription const&, Web::UniqueNodeID, String const&, OnDOMNodeEditComplete) const override;
     virtual void set_dom_node_text(DevTools::TabDescription const&, Web::UniqueNodeID, String const&, OnDOMNodeEditComplete) const override;
-    virtual void set_dom_node_tag(DevTools::TabDescription const&, Web::UniqueNodeID, String const&, OnDOMNodeEditComplete) const override;
+    virtual void set_dom_node_tag(DevTools::TabDescription const&, Web::UniqueNodeID, Utf16FlyString const&, OnDOMNodeEditComplete) const override;
     virtual void add_dom_node_attributes(DevTools::TabDescription const&, Web::UniqueNodeID, ReadonlySpan<Attribute>, OnDOMNodeEditComplete) const override;
-    virtual void replace_dom_node_attribute(DevTools::TabDescription const&, Web::UniqueNodeID, String const&, ReadonlySpan<Attribute>, OnDOMNodeEditComplete) const override;
+    virtual void replace_dom_node_attribute(DevTools::TabDescription const&, Web::UniqueNodeID, Utf16FlyString const&, ReadonlySpan<Attribute>, OnDOMNodeEditComplete) const override;
     virtual void create_child_element(DevTools::TabDescription const&, Web::UniqueNodeID, OnDOMNodeEditComplete) const override;
     virtual void insert_dom_node_before(DevTools::TabDescription const&, Web::UniqueNodeID, Web::UniqueNodeID, Optional<Web::UniqueNodeID>, OnDOMNodeEditComplete) const override;
     virtual void clone_dom_node(DevTools::TabDescription const&, Web::UniqueNodeID, OnDOMNodeEditComplete) const override;
@@ -144,40 +371,79 @@ private:
     virtual void retrieve_style_sheet_source(DevTools::TabDescription const&, Web::CSS::StyleSheetIdentifier const&) const override;
     virtual void listen_for_style_sheet_sources(DevTools::TabDescription const&, OnStyleSheetSourceReceived) const override;
     virtual void stop_listening_for_style_sheet_sources(DevTools::TabDescription const&) const override;
+    virtual void retrieve_sources(DevTools::TabDescription const&, OnSourcesReceived) const override;
+    virtual void retrieve_source(DevTools::TabDescription const&, Web::HTML::ScriptRegistry::Identifier, OnSourceReceived) const override;
+    virtual void listen_for_sources(DevTools::TabDescription const&, OnSourceAvailable) const override;
+    virtual void stop_listening_for_sources(DevTools::TabDescription const&) const override;
+    virtual void resolve_dom_node_url(DevTools::TabDescription const&, Optional<Web::UniqueNodeID>, String const&, OnResolvedURLReceived) const override;
     virtual void evaluate_javascript(DevTools::TabDescription const&, String const&, OnScriptEvaluationComplete) const override;
-    virtual void listen_for_console_messages(DevTools::TabDescription const&, OnConsoleMessageAvailable, OnReceivedConsoleMessages) const override;
+    virtual void listen_for_console_messages(DevTools::TabDescription const&, OnConsoleMessage) const override;
     virtual void stop_listening_for_console_messages(DevTools::TabDescription const&) const override;
-    virtual void request_console_messages(DevTools::TabDescription const&, i32) const override;
+    virtual void listen_for_network_events(DevTools::TabDescription const&, OnNetworkRequestStarted, OnNetworkResponseHeadersReceived, OnNetworkResponseBodyReceived, OnNetworkRequestFinished) const override;
+    virtual void stop_listening_for_network_events(DevTools::TabDescription const&) const override;
+    virtual void listen_for_navigation_events(DevTools::TabDescription const&, OnNavigationStarted, OnNavigationFinished) const override;
+    virtual void stop_listening_for_navigation_events(DevTools::TabDescription const&) const override;
+    virtual void did_connect_devtools_client(DevTools::TabDescription const&) const override;
+    virtual void did_disconnect_devtools_client(DevTools::TabDescription const&) const override;
 
     static Application* s_the;
 
-    Settings m_settings;
+    Optional<Profile> m_profile;
+    OwnPtr<Settings> m_settings;
+    OwnPtr<BrowserProcess> m_browser_process;
+    bool m_should_exit_after_profile_coordination { false };
     OwnPtr<ApplicationSettingsObserver> m_settings_observer;
+
+    OwnPtr<BookmarkStore> m_bookmark_store;
+    OwnPtr<ApplicationBookmarkStoreObserver> m_bookmark_store_observer;
+    OwnPtr<HistoryStore> m_history_store;
+    OwnPtr<AutocompleteService> m_autocomplete_service;
 
     Main::Arguments m_arguments;
     BrowserOptions m_browser_options;
+    RequestServerOptions m_request_server_options;
     WebContentOptions m_web_content_options;
+    Optional<Core::AnonymousBuffer> m_content_blocker_list_buffer;
 
     RefPtr<Requests::RequestClient> m_request_server_client;
+    RefPtr<Requests::RequestClient> m_private_request_server_client;
     RefPtr<ImageDecoderClient::Client> m_image_decoder_client;
+    RefPtr<CompositorClient> m_compositor_client;
+    size_t m_compositor_restart_count { 0 };
+    enum class CompositorRecoveryState {
+        Idle,
+        Queued,
+        Recovering,
+    };
+    CompositorRecoveryState m_compositor_recovery_state { CompositorRecoveryState::Idle };
 
     RefPtr<WebContentClient> m_spare_web_content_process;
     bool m_has_queued_task_to_launch_spare_web_content_process { false };
+    u64 m_next_page_or_compositor_context_id { 1 };
+    u64 m_next_cross_process_id_namespace { 1 };
+    Web::HTML::CrossProcessIdAllocator m_ui_process_cross_process_id_allocator;
 
-    RefPtr<Database> m_database;
+    RefPtr<Database::Database> m_database;
+    RefPtr<Database::Database> m_history_database;
     OwnPtr<CookieJar> m_cookie_jar;
+    OwnPtr<HSTSStore> m_hsts_store;
     OwnPtr<StorageJar> m_storage_jar;
+    OwnPtr<PrivateBrowsingSession> m_private_browsing_session;
 
     OwnPtr<Core::TimeZoneWatcher> m_time_zone_watcher;
 
-    OwnPtr<Core::EventLoop> m_event_loop;
+    Core::EventLoop* m_event_loop { nullptr };
     OwnPtr<ProcessManager> m_process_manager;
 
     RefPtr<Action> m_reload_action;
     RefPtr<Action> m_copy_selection_action;
+    RefPtr<Action> m_cut_selection_action;
     RefPtr<Action> m_paste_action;
     RefPtr<Action> m_select_all_action;
-    RefPtr<Action> m_view_source_action;
+
+    RefPtr<Action> m_open_about_page_action;
+    RefPtr<Action> m_open_downloads_page_action;
+    RefPtr<Action> m_open_settings_page_action;
 
     RefPtr<Menu> m_zoom_menu;
     RefPtr<Action> m_reset_zoom_action;
@@ -191,20 +457,44 @@ private:
     RefPtr<Menu> m_motion_menu;
     Web::CSS::PreferredMotion m_motion { Web::CSS::PreferredMotion::Auto };
 
+    RefPtr<Action> m_toggle_vertical_tabs_expanded_action;
+
+    RefPtr<Action> m_toggle_menu_bar_action;
+
+    RefPtr<Menu> m_bookmarks_menu;
+    RefPtr<Action> m_toggle_bookmark_action;
+    RefPtr<Action> m_toggle_bookmark_bar_action;
+    size_t m_bookmarks_menu_static_size { 0 };
+
+    RefPtr<Menu> m_history_menu;
+
+    RefPtr<Menu> m_inspect_menu;
+    RefPtr<Action> m_view_source_action;
+    RefPtr<Action> m_toggle_devtools_action;
+
     RefPtr<Menu> m_debug_menu;
     RefPtr<Action> m_show_line_box_borders_action;
+    RefPtr<Action> m_show_caret_hit_test_debug_overlay_action;
     RefPtr<Action> m_enable_scripting_action;
-    RefPtr<Action> m_enable_content_filtering_action;
+    RefPtr<Action> m_enable_content_blocking_action;
     RefPtr<Action> m_block_pop_ups_action;
     StringView m_user_agent_string;
     StringView m_navigator_compatibility_mode;
 
+    Optional<Web::Clipboard::SystemClipboardRepresentation> m_clipboard;
+
+    FileDownloader m_file_downloader;
+
 #if defined(AK_OS_MACOS)
-    OwnPtr<MachPortServer> m_mach_port_server;
+    OwnPtr<IPC::MachBootstrapListener> m_mach_port_server;
+    IPC::TransportBootstrapMachServer m_transport_bootstrap_server;
+    Function<void(NonnullOwnPtr<IPC::Transport>)> m_on_browser_process_transport;
 #endif
 
     OwnPtr<DevTools::DevToolsServer> m_devtools;
-} SWIFT_IMMORTAL_REFERENCE;
+
+    mutable HashMap<u64, u64> m_navigation_listener_ids;
+};
 
 }
 

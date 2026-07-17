@@ -9,7 +9,8 @@
 #include <LibJS/Runtime/PromiseCapability.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ReadableStreamPrototype.h>
+#include <LibWeb/Bindings/ReadableStream.h>
+#include <LibWeb/Bindings/UnderlyingSource.h>
 #include <LibWeb/DOM/AbortSignal.h>
 #include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
@@ -23,10 +24,10 @@
 #include <LibWeb/Streams/ReadableStreamDefaultReader.h>
 #include <LibWeb/Streams/ReadableStreamOperations.h>
 #include <LibWeb/Streams/TransformStream.h>
-#include <LibWeb/Streams/UnderlyingSource.h>
 #include <LibWeb/Streams/WritableStream.h>
 #include <LibWeb/Streams/WritableStreamOperations.h>
 #include <LibWeb/WebIDL/Buffers.h>
+#include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::Streams {
@@ -34,25 +35,25 @@ namespace Web::Streams {
 GC_DEFINE_ALLOCATOR(ReadableStream);
 
 // https://streams.spec.whatwg.org/#rs-constructor
-WebIDL::ExceptionOr<GC::Ref<ReadableStream>> ReadableStream::construct_impl(JS::Realm& realm, Optional<GC::Root<JS::Object>> const& underlying_source_object, QueuingStrategy const& strategy)
+WebIDL::ExceptionOr<GC::Ref<ReadableStream>> ReadableStream::construct_impl(JS::Realm& realm, GC::Ptr<JS::Object> underlying_source_object, Bindings::QueuingStrategy const& strategy)
 {
     auto& vm = realm.vm();
 
     auto readable_stream = realm.create<ReadableStream>(realm);
 
     // 1. If underlyingSource is missing, set it to null.
-    auto underlying_source = underlying_source_object.has_value() ? JS::Value(underlying_source_object.value()) : JS::js_null();
+    auto underlying_source = underlying_source_object ? JS::Value(underlying_source_object) : JS::js_null();
 
     // 2. Let underlyingSourceDict be underlyingSource, converted to an IDL value of type UnderlyingSource.
-    auto underlying_source_dict = TRY(UnderlyingSource::from_value(vm, underlying_source));
+    auto underlying_source_dict = TRY(Bindings::convert_to_idl_value_for_underlying_source(vm, underlying_source));
 
     // 3. Perform ! InitializeReadableStream(this).
 
     // 4. If underlyingSourceDict["type"] is "bytes":
-    if (underlying_source_dict.type.has_value() && underlying_source_dict.type.value() == ReadableStreamType::Bytes) {
+    if (underlying_source_dict.type.has_value() && underlying_source_dict.type.value() == Bindings::ReadableStreamType::Bytes) {
         // 1. If strategy["size"] exists, throw a RangeError exception.
         if (strategy.size)
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "Size strategy not allowed for byte stream"sv };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "Size strategy not allowed for byte stream"_utf16 };
 
         // 2. Let highWaterMark be ? ExtractHighWaterMark(strategy, 0).
         auto high_water_mark = TRY(extract_high_water_mark(strategy, 0));
@@ -116,22 +117,22 @@ bool ReadableStream::locked() const
 }
 
 // https://streams.spec.whatwg.org/#rs-cancel
-GC::Ref<WebIDL::Promise> ReadableStream::cancel(JS::Value reason)
+GC::Ref<WebIDL::Promise> ReadableStream::cancel(Optional<JS::Value> reason)
 {
     auto& realm = this->realm();
 
     // 1. If ! IsReadableStreamLocked(this) is true, return a promise rejected with a TypeError exception.
     if (is_readable_stream_locked(*this)) {
-        auto exception = JS::TypeError::create(realm, "Cannot cancel a locked stream"sv);
+        auto exception = JS::TypeError::create(realm, "Cannot cancel a locked stream"_utf16);
         return WebIDL::create_rejected_promise(realm, exception);
     }
 
     // 2. Return ! ReadableStreamCancel(this, reason).
-    return readable_stream_cancel(*this, reason);
+    return readable_stream_cancel(*this, reason.value_or(JS::js_undefined()));
 }
 
 // https://streams.spec.whatwg.org/#rs-get-reader
-WebIDL::ExceptionOr<ReadableStreamReader> ReadableStream::get_reader(ReadableStreamGetReaderOptions const& options)
+WebIDL::ExceptionOr<ReadableStreamReader> ReadableStream::get_reader(Bindings::ReadableStreamGetReaderOptions const& options)
 {
     // 1. If options["mode"] does not exist, return ? AcquireReadableStreamDefaultReader(this).
     if (!options.mode.has_value())
@@ -145,18 +146,18 @@ WebIDL::ExceptionOr<ReadableStreamReader> ReadableStream::get_reader(ReadableStr
 }
 
 // https://streams.spec.whatwg.org/#rs-pipe-through
-WebIDL::ExceptionOr<GC::Ref<ReadableStream>> ReadableStream::pipe_through(ReadableWritablePair transform, StreamPipeOptions const& options)
+WebIDL::ExceptionOr<GC::Ref<ReadableStream>> ReadableStream::pipe_through(Bindings::ReadableWritablePair transform, Bindings::StreamPipeOptions const& options)
 {
     // 1. If ! IsReadableStreamLocked(this) is true, throw a TypeError exception.
     if (is_readable_stream_locked(*this))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Failed to execute 'pipeThrough' on 'ReadableStream': Cannot pipe a locked stream"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Failed to execute 'pipeThrough' on 'ReadableStream': Cannot pipe a locked stream"_utf16 };
 
     // 2. If ! IsWritableStreamLocked(transform["writable"]) is true, throw a TypeError exception.
     if (is_writable_stream_locked(*transform.writable))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Failed to execute 'pipeThrough' on 'ReadableStream': parameter 1's 'writable' is locked"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Failed to execute 'pipeThrough' on 'ReadableStream': parameter 1's 'writable' is locked"_utf16 };
 
     // 3. Let signal be options["signal"] if it exists, or undefined otherwise.
-    auto signal = options.signal;
+    GC::Ptr<DOM::AbortSignal> signal = options.signal;
 
     // 4. Let promise be ! ReadableStreamPipeTo(this, transform["writable"], options["preventClose"], options["preventAbort"], options["preventCancel"], signal).
     auto promise = readable_stream_pipe_to(*this, *transform.writable, options.prevent_close, options.prevent_abort, options.prevent_cancel, signal);
@@ -169,23 +170,23 @@ WebIDL::ExceptionOr<GC::Ref<ReadableStream>> ReadableStream::pipe_through(Readab
 }
 
 // https://streams.spec.whatwg.org/#rs-pipe-to
-GC::Ref<WebIDL::Promise> ReadableStream::pipe_to(WritableStream& destination, StreamPipeOptions const& options)
+GC::Ref<WebIDL::Promise> ReadableStream::pipe_to(WritableStream& destination, Bindings::StreamPipeOptions const& options)
 {
     auto& realm = this->realm();
     auto& vm = realm.vm();
 
     // 1. If ! IsReadableStreamLocked(this) is true, return a promise rejected with a TypeError exception.
     if (is_readable_stream_locked(*this)) {
-        return WebIDL::create_rejected_promise_from_exception(realm, vm.throw_completion<JS::TypeError>("Failed to execute 'pipeTo' on 'ReadableStream': Cannot pipe a locked stream"sv));
+        return WebIDL::create_rejected_promise_from_exception(realm, vm.throw_completion<JS::TypeError>("Failed to execute 'pipeTo' on 'ReadableStream': Cannot pipe a locked stream"_utf16));
     }
 
     // 2. If ! IsWritableStreamLocked(destination) is true, return a promise rejected with a TypeError exception.
     if (is_writable_stream_locked(destination)) {
-        return WebIDL::create_rejected_promise_from_exception(realm, vm.throw_completion<JS::TypeError>("Failed to execute 'pipeTo' on 'ReadableStream':  Cannot pipe to a locked stream"sv));
+        return WebIDL::create_rejected_promise_from_exception(realm, vm.throw_completion<JS::TypeError>("Failed to execute 'pipeTo' on 'ReadableStream':  Cannot pipe to a locked stream"_utf16));
     }
 
     // 3. Let signal be options["signal"] if it exists, or undefined otherwise.
-    auto signal = options.signal;
+    GC::Ptr<DOM::AbortSignal> signal = options.signal;
 
     // 4. Return ! ReadableStreamPipeTo(this, destination, options["preventClose"], options["preventAbort"], options["preventCancel"], signal).
     return readable_stream_pipe_to(*this, destination, options.prevent_close, options.prevent_abort, options.prevent_cancel, signal);
@@ -294,7 +295,7 @@ WebIDL::ExceptionOr<void> ReadableStream::pull_from_bytes(ByteBuffer bytes)
 
     // 4. If stream’s current BYOB request view is non-null, then set desiredSize to stream’s current BYOB request
     //    view's byte length.
-    if (auto byob_view = current_byob_request_view())
+    if (auto byob_view = current_byob_request_view(); byob_view.has_value())
         desired_size = byob_view->byte_length();
 
     // 5. Let pullSize be the smaller value of available and desiredSize.
@@ -304,13 +305,13 @@ WebIDL::ExceptionOr<void> ReadableStream::pull_from_bytes(ByteBuffer bytes)
     auto pulled = pull_size == available ? move(bytes) : MUST(bytes.slice(0, pull_size));
 
     // 7. Remove the first pullSize bytes from bytes.
-    if (pull_size != available)
-        bytes = MUST(bytes.slice(pull_size, available - pull_size));
+    // NB: We skip this step. No caller actually wants its bytes trimmed, and we don't take the bytes by reference anyways.
 
     // 8. If stream’s current BYOB request view is non-null, then:
-    if (auto byob_view = current_byob_request_view()) {
+    if (auto byob_view = current_byob_request_view(); byob_view.has_value()) {
         // 1. Write pulled into stream’s current BYOB request view.
-        byob_view->write(pulled);
+        if (byob_view->write_checked(pulled).is_error())
+            return WebIDL::InvalidStateError::create(realm, "BYOB request view is detached or out-of-bounds"_utf16);
 
         // 2. Perform ? ReadableByteStreamControllerRespond(stream.[[controller]], pullSize).
         TRY(readable_byte_stream_controller_respond(controller, pull_size));
@@ -329,7 +330,7 @@ WebIDL::ExceptionOr<void> ReadableStream::pull_from_bytes(ByteBuffer bytes)
 }
 
 // https://streams.spec.whatwg.org/#readablestream-current-byob-request-view
-GC::Ptr<WebIDL::ArrayBufferView> ReadableStream::current_byob_request_view()
+Optional<WebIDL::ArrayBufferView> ReadableStream::current_byob_request_view()
 {
     // 1. Assert: stream.[[controller]] implements ReadableByteStreamController.
     VERIFY(m_controller->has<GC::Ref<ReadableByteStreamController>>());
@@ -342,7 +343,10 @@ GC::Ptr<WebIDL::ArrayBufferView> ReadableStream::current_byob_request_view()
         return {};
 
     // 4. Return byobRequest.[[view]].
-    return byob_request->view();
+    auto view = byob_request->view();
+    if (view.has<Empty>())
+        return {};
+    return view.downcast<WebIDL::ArrayBufferViewVariant>();
 }
 
 // https://streams.spec.whatwg.org/#readablestream-enqueue
@@ -363,21 +367,21 @@ WebIDL::ExceptionOr<void> ReadableStream::enqueue(JS::Value chunk)
 
         // 2. Assert: chunk is an ArrayBufferView.
         VERIFY(chunk.is_object());
-        auto chunk_view = heap().allocate<WebIDL::ArrayBufferView>(chunk.as_object());
+        auto chunk_view = WebIDL::ArrayBufferView { WebIDL::ArrayBufferView::from_object(chunk.as_object()) };
 
         // 3. Let byobView be the current BYOB request view for stream.
         auto byob_view = current_byob_request_view();
 
         // 4. If byobView is non-null, and chunk.[[ViewedArrayBuffer]] is byobView.[[ViewedArrayBuffer]], then:
-        if (byob_view && chunk_view->viewed_array_buffer() == byob_view->viewed_array_buffer()) {
+        if (byob_view.has_value() && chunk_view.viewed_array_buffer() == byob_view->viewed_array_buffer()) {
             // 1. Assert: chunk.[[ByteOffset]] is byobView.[[ByteOffset]].
-            VERIFY(chunk_view->byte_offset() == byob_view->byte_offset());
+            VERIFY(chunk_view.byte_offset() == byob_view->byte_offset());
 
             // 2. Assert: chunk.[[ByteLength]] ≤ byobView.[[ByteLength]].
-            VERIFY(chunk_view->byte_length() <= byob_view->byte_length());
+            VERIFY(chunk_view.byte_length() <= byob_view->byte_length());
 
             // 3. Perform ? ReadableByteStreamControllerRespond(stream.[[controller]], chunk.[[ByteLength]]).
-            TRY(readable_byte_stream_controller_respond(readable_byte_controller, chunk_view->byte_length()));
+            TRY(readable_byte_stream_controller_respond(readable_byte_controller, chunk_view.byte_length()));
         }
         // 5. Otherwise, perform ? ReadableByteStreamControllerEnqueue(stream.[[controller]], chunk).
         else {
@@ -490,7 +494,7 @@ WebIDL::ExceptionOr<void> ReadableStream::transfer_steps(HTML::TransferDataEncod
     WebIDL::mark_promise_as_handled(promise);
 
     // 9. Set dataHolder.[[port]] to ! StructuredSerializeWithTransfer(port2, « port2 »).
-    auto result = MUST(HTML::structured_serialize_with_transfer(vm, port2, { { GC::Root { port2 } } }));
+    auto result = MUST(HTML::structured_serialize_with_transfer(vm, port2, { { port2 } }));
     data_holder.extend(move(result.transfer_data_holders));
 
     return {};

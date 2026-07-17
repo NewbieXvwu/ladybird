@@ -42,6 +42,9 @@ public:
     };
     ResolvingFunctions create_resolving_functions();
 
+    static Value resolve_function_steps(VM&, Promise&, bool& already_resolved);
+    static Value reject_function_steps(VM&, Promise&, bool& already_resolved);
+
     void fulfill(Value value);
     void reject(Value reason);
     Value perform_then(Value on_fulfilled, Value on_rejected, GC::Ptr<PromiseCapability> result_capability);
@@ -53,6 +56,7 @@ protected:
     explicit Promise(Object& prototype);
 
     virtual void visit_edges(Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
 private:
     virtual bool is_promise() const override { return true; }
@@ -62,10 +66,10 @@ private:
 
     // 27.2.6 Properties of Promise Instances, https://tc39.es/ecma262/#sec-properties-of-promise-instances
     State m_state { State::Pending };                     // [[PromiseState]]
+    bool m_is_handled { false };                          // [[PromiseIsHandled]]
     Value m_result;                                       // [[PromiseResult]]
     Vector<GC::Ptr<PromiseReaction>> m_fulfill_reactions; // [[PromiseFulfillReactions]]
     Vector<GC::Ptr<PromiseReaction>> m_reject_reactions;  // [[PromiseRejectReactions]]
-    bool m_is_handled { false };                          // [[PromiseIsHandled]]
 };
 
 template<>

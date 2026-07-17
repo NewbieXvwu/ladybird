@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, Gregory Bertilson <zaggy1024@gmail.com>
+ * Copyright (c) 2024-2025, Gregory Bertilson <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,6 +8,9 @@
 
 extern "C" {
 struct AVCodecContext;
+struct AVFormatContext;
+struct AVIOContext;
 struct AVPacket;
 struct AVFrame;
+struct SwrContext;
 }

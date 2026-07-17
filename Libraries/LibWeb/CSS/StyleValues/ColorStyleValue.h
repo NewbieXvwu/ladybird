@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 #include <LibGfx/Color.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 
@@ -22,7 +22,7 @@ enum class ColorSyntax : u8 {
 
 class ColorStyleValue : public StyleValue {
 public:
-    static ValueComparingNonnullRefPtr<ColorStyleValue const> create_from_color(Color color, ColorSyntax color_syntax, Optional<FlyString> name = {});
+    static ValueComparingNonnullRefPtr<ColorStyleValue const> create_from_color(Color color, ColorSyntax color_syntax, Optional<Utf16FlyString> name = {});
     virtual ~ColorStyleValue() override = default;
 
     virtual bool has_color() const override { return true; }
@@ -31,6 +31,7 @@ public:
         RGB, // This is used by RGBColorStyleValue for rgb(...) and rgba(...).
         A98RGB,
         DisplayP3,
+        DisplayP3Linear,
         HSL,
         HWB,
         Lab,
@@ -43,29 +44,29 @@ public:
         Rec2020,
         XYZD50,
         XYZD65,
-        LightDark, // This is used by LightDarkStyleValue for light-dark(..., ...).
-        ColorMix,
     };
-    ColorType color_type() const { return m_color_type; }
+    Optional<ColorType> color_type() const { return m_color_type; }
     ColorSyntax color_syntax() const { return m_color_syntax; }
 
+    static Optional<double> resolve_hue(StyleValue const&, CalculationResolutionContext const&);
+    static Optional<double> resolve_with_reference_value(StyleValue const&, float one_hundred_percent_value, CalculationResolutionContext const&);
+    static Optional<double> resolve_alpha(StyleValue const&, CalculationResolutionContext const&);
+
+    static Optional<RelativeColorContext> extract_channels_in_color_space(StyleValue const& origin_color, ColorType target_color_type, ColorResolutionContext const&);
+
 protected:
-    explicit ColorStyleValue(ColorType color_type, ColorSyntax color_syntax)
+    explicit ColorStyleValue(Optional<ColorType> color_type, ColorSyntax color_syntax)
         : StyleValue(Type::Color)
         , m_color_type(color_type)
         , m_color_syntax(color_syntax)
     {
     }
 
-    static Optional<double> resolve_hue(StyleValue const&, CalculationResolutionContext const&);
-    static Optional<double> resolve_with_reference_value(StyleValue const&, float one_hundred_percent_value, CalculationResolutionContext const&);
-    static Optional<double> resolve_alpha(StyleValue const&, CalculationResolutionContext const&);
-
     void serialize_color_component(StringBuilder& builder, SerializationMode mode, StyleValue const& component, float one_hundred_percent_value, Optional<double> clamp_min = {}, Optional<double> clamp_max = {}) const;
     void serialize_alpha_component(StringBuilder& builder, SerializationMode mode, StyleValue const& component) const;
     void serialize_hue_component(StringBuilder& builder, SerializationMode mode, StyleValue const& component) const;
 
-    ColorType m_color_type;
+    Optional<ColorType> m_color_type;
     ColorSyntax m_color_syntax;
 };
 

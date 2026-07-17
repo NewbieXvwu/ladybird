@@ -6,8 +6,8 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
-#include <LibWeb/CSS/PropertyID.h>
+#include <AK/Utf16FlyString.h>
+#include <LibWeb/Forward.h>
 
 namespace Web::CSS {
 
@@ -16,15 +16,19 @@ enum class Important : u8 {
     Yes,
 };
 
-struct StyleProperty {
+struct WEB_API StyleProperty {
     ~StyleProperty();
 
     Important important { Important::No };
-    CSS::PropertyID property_id;
+    PropertyID property_id;
     NonnullRefPtr<StyleValue const> value;
-    FlyString custom_name {};
 
     bool operator==(StyleProperty const& other) const;
+};
+
+struct StylePropertyAndName {
+    StyleProperty property;
+    Utf16FlyString name {};
 };
 
 }

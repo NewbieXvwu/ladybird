@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGC/HeapBlock.h>
 #include <LibJS/Runtime/WeakRef.h>
 
 namespace JS {
@@ -38,13 +39,16 @@ WeakRef::WeakRef(Symbol& value, Object& prototype)
 
 void WeakRef::remove_dead_cells(Badge<GC::Heap>)
 {
-    if (m_value.visit([](Cell* cell) -> bool { return cell->state() == Cell::State::Live; }, [](Empty) -> bool { VERIFY_NOT_REACHED(); }))
+    auto is_alive = m_value.visit(
+        [this](Cell* cell) -> bool {
+            auto* block = GC::HeapBlock::from_cell(cell);
+            return heap().is_live_heap_block(block) && cell->state() == Cell::State::Live && cell->is_marked();
+        },
+        [](Empty) -> bool { return true; });
+    if (is_alive)
         return;
 
     m_value = Empty {};
-    // This is an optimization, we deregister from the garbage collector early (even if we were not garbage collected ourself yet)
-    // to reduce the garbage collection overhead, which we can do because a cleared weak ref cannot be reused.
-    WeakContainer::deregister();
 }
 
 void WeakRef::visit_edges(Visitor& visitor)

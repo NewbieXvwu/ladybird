@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 #include <LibGC/Root.h>
 #include <LibJS/Runtime/Promise.h>
 #include <LibJS/Runtime/Value.h>
@@ -15,18 +15,13 @@
 
 namespace Web::HTML {
 
-struct PromiseRejectionEventInit : public DOM::EventInit {
-    GC::Root<JS::Object> promise;
-    JS::Value reason { JS::js_undefined() };
-};
-
 class PromiseRejectionEvent final : public DOM::Event {
     WEB_PLATFORM_OBJECT(PromiseRejectionEvent, DOM::Event);
     GC_DECLARE_ALLOCATOR(PromiseRejectionEvent);
 
 public:
-    [[nodiscard]] static GC::Ref<PromiseRejectionEvent> create(JS::Realm&, FlyString const& event_name, PromiseRejectionEventInit const& = {});
-    static WebIDL::ExceptionOr<GC::Ref<PromiseRejectionEvent>> construct_impl(JS::Realm&, FlyString const& event_name, PromiseRejectionEventInit const&);
+    [[nodiscard]] static GC::Ref<PromiseRejectionEvent> create(JS::Realm&, Utf16FlyString const& event_name, Bindings::PromiseRejectionEventInit const&);
+    static WebIDL::ExceptionOr<GC::Ref<PromiseRejectionEvent>> construct_impl(JS::Realm&, Utf16FlyString const& event_name, Bindings::PromiseRejectionEventInit const&);
 
     virtual ~PromiseRejectionEvent() override;
 
@@ -35,7 +30,7 @@ public:
     JS::Value reason() const { return m_reason; }
 
 private:
-    PromiseRejectionEvent(JS::Realm&, FlyString const& event_name, PromiseRejectionEventInit const& event_init);
+    PromiseRejectionEvent(JS::Realm&, Utf16FlyString const& event_name, Bindings::PromiseRejectionEventInit const& event_init);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;

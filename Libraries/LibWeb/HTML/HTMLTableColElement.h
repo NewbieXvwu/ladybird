@@ -19,15 +19,15 @@ public:
     virtual ~HTMLTableColElement() override;
 
     WebIDL::UnsignedLong span() const;
-    WebIDL::ExceptionOr<void> set_span(WebIDL::UnsignedLong);
+    void set_span(WebIDL::UnsignedLong);
 
 private:
     HTMLTableColElement(DOM::Document&, DOM::QualifiedName);
 
     virtual void initialize(JS::Realm&) override;
 
-    virtual bool is_presentational_hint(FlyString const&) const override;
-    virtual void apply_presentational_hints(GC::Ref<CSS::CascadedProperties>) const override;
+    virtual bool is_presentational_hint(Utf16FlyString const&) const override;
+    virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
 };
 
 }

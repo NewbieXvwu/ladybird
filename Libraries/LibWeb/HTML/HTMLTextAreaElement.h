@@ -2,13 +2,15 @@
  * Copyright (c) 2020, the SerenityOS developers.
  * Copyright (c) 2022, Luke Wilde <lukew@serenityos.org>
  * Copyright (c) 2024, Bastiaan van der Plaat <bastiaan.v.d.plaat@gmail.com>
- * Copyright (c) 2024, Jelle Raaijmakers <jelle@ladybird.org>
+ * Copyright (c) 2024-2026, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16View.h>
 #include <LibCore/Timer.h>
 #include <LibWeb/ARIA/Roles.h>
 #include <LibWeb/DOM/Text.h>
@@ -26,18 +28,16 @@ class WEB_API HTMLTextAreaElement final
     , public AutocompleteElement {
     WEB_PLATFORM_OBJECT(HTMLTextAreaElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLTextAreaElement);
-    FORM_ASSOCIATED_ELEMENT(HTMLElement, HTMLTextAreaElement);
     AUTOCOMPLETE_ELEMENT(HTMLElement, HTMLTextAreaElement);
 
 public:
     virtual ~HTMLTextAreaElement() override;
 
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
-    String const& type() const
+    Utf16FlyString type() const
     {
-        static String const textarea = "textarea"_string;
-        return textarea;
+        return "textarea"_utf16_fly_string;
     }
 
     // ^EventTarget
@@ -48,6 +48,9 @@ public:
 
     virtual void did_lose_focus() override;
     virtual void did_receive_focus() override;
+
+    // ^FormAssociatedElement
+    virtual bool is_form_associated_element() const override { return true; }
 
     // ^FormAssociatedElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-listed
@@ -71,25 +74,26 @@ public:
     virtual WebIDL::ExceptionOr<void> cloned(Node&, bool) const override;
 
     virtual void form_associated_element_was_inserted() override;
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
-    virtual void children_changed(ChildrenChangedMetadata const*) override;
+    virtual void children_changed(ChildrenChangedMetadata const&) override;
 
     // https://www.w3.org/TR/html-aria/#el-textarea
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::textbox; }
 
     Utf16String default_value() const;
-    void set_default_value(Utf16String const&);
+    void set_default_value(Utf16View);
 
-    Utf16String value() const override;
-    void set_value(Utf16String const&);
+    Utf16String value() const;
+    virtual Utf16String form_value() const override { return value(); }
+    void set_value(Utf16View);
 
     // https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element:concept-fe-api-value-3
     Utf16String api_value() const;
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-textarea/input-relevant-value
-    virtual Utf16String relevant_value() override { return api_value(); }
-    virtual WebIDL::ExceptionOr<void> set_relevant_value(Utf16String const& value) override;
+    virtual Utf16String relevant_value() const override { return api_value(); }
+    virtual WebIDL::ExceptionOr<void> set_relevant_value(Utf16View value) override;
 
     virtual void set_dirty_value_flag(bool flag) override { m_dirty_value = flag; }
 
@@ -105,10 +109,10 @@ public:
     WebIDL::ExceptionOr<void> set_min_length(WebIDL::Long);
 
     WebIDL::UnsignedLong cols() const;
-    WebIDL::ExceptionOr<void> set_cols(unsigned);
+    void set_cols(unsigned);
 
     WebIDL::UnsignedLong rows() const;
-    WebIDL::ExceptionOr<void> set_rows(WebIDL::UnsignedLong);
+    void set_rows(WebIDL::UnsignedLong);
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-selectionstart
     WebIDL::UnsignedLong selection_start_binding() const;
@@ -119,14 +123,16 @@ public:
     WebIDL::ExceptionOr<void> set_selection_end_binding(WebIDL::UnsignedLong const&);
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-selectiondirection
-    String selection_direction_binding() const;
-    void set_selection_direction_binding(String const& direction);
+    Utf16FlyString selection_direction_binding() const;
+    void set_selection_direction_binding(Utf16View direction);
 
     void set_dirty_value_flag(Badge<FormAssociatedElement>, bool flag) { m_dirty_value = flag; }
 
     // ^FormAssociatedTextControlElement
-    virtual void did_edit_text_node() override;
+    virtual HTMLElement& text_control_to_html_element() override { return *this; }
+    virtual void did_edit_text_node(Utf16FlyString const& input_type, Optional<Utf16String> const& data) override;
     virtual GC::Ptr<DOM::Text> form_associated_element_to_text_node() override { return m_text_node; }
+    virtual GC::Ptr<DOM::Element> text_control_scroll_container() override { return this; }
 
     // https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element%3Asuffering-from-being-missing
     virtual bool suffering_from_being_missing() const override;
@@ -134,11 +140,21 @@ public:
     // https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element:concept-fe-mutable
     virtual bool is_mutable() const override;
 
+    GC::Ptr<DOM::Element> placeholder_element() { return m_placeholder_element; }
+    GC::Ptr<DOM::Element const> placeholder_element() const { return m_placeholder_element; }
+
+    Optional<Utf16String> placeholder_value() const;
+
 private:
     HTMLTextAreaElement(DOM::Document&, DOM::QualifiedName);
 
+    virtual EventResult handle_return_key(Utf16FlyString const& ui_input_type) override;
+
+    virtual bool is_html_textarea_element() const final { return true; }
+
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
 
     void set_raw_value(Utf16String);
 
@@ -149,8 +165,6 @@ private:
 
     void handle_maxlength_attribute();
 
-    void queue_firing_input_event();
-
     void update_placeholder_visibility();
 
     GC::Ptr<DOM::Element> m_placeholder_element;
@@ -158,8 +172,6 @@ private:
 
     GC::Ptr<DOM::Element> m_inner_text_element;
     GC::Ptr<DOM::Text> m_text_node;
-
-    RefPtr<Core::Timer> m_input_event_timer;
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-fe-dirty
     bool m_dirty_value { false };
@@ -173,5 +185,12 @@ private:
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-fe-api-value
     mutable Optional<Utf16String> m_api_value;
 };
+
+}
+
+namespace Web::DOM {
+
+template<>
+inline bool Node::fast_is<HTML::HTMLTextAreaElement>() const { return is_html_textarea_element(); }
 
 }

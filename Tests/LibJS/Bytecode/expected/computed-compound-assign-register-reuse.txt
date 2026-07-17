@@ -1,0 +1,34 @@
+$1e945bad computed-compound-assign-register-reuse.js:9:1
+  Registers: 9
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] GetGlobal dst:reg6, `subVector`
+  [  10] NewPrimitiveArray dst:reg7, elements:[1, 2]
+  [  30] NewPrimitiveArray dst:reg8, elements:[3, 4]
+  [  50] Call dst:reg5, callee:reg6, this_value:Undefined, subVector, arguments:[reg7, reg8]
+  [  78] End value:reg5
+
+
+subVector$3599dc10 computed-compound-assign-register-reuse.js:5:13
+  Registers: 9
+  Blocks:    1
+  Constants:
+    [0] = Int32(0)
+    [1] = Int32(1)
+    [2] = Undefined
+
+block0:
+  [   0] GetByValue dst:reg5, base:arg0, property:Int32(0) (self[Int32(0)])
+  [  18] Mov2 dst1:reg6, src1:Int32(0), dst2:reg7, src2:arg1
+  [  30] GetByValue dst:reg8, base:reg7, property:Int32(0) (v[Int32(0)])
+  [  48] Sub dst:reg7, lhs:reg5, rhs:reg8
+  [  58] PutByValue base:arg0, property:reg6, src:reg7, kind:Normal
+  [  70] GetByValue dst:reg7, base:arg0, property:Int32(1) (self[Int32(1)])
+  [  88] Mov2 dst1:reg5, src1:Int32(1), dst2:reg6, src2:arg1
+  [  a0] GetByValue dst:reg8, base:reg6, property:Int32(1) (v[Int32(1)])
+  [  b8] Sub dst:reg6, lhs:reg7, rhs:reg8
+  [  c8] PutByValue base:arg0, property:reg5, src:reg6, kind:Normal
+  [  e0] End value:Undefined

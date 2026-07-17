@@ -5,29 +5,61 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibJS/AST.h>
-#include <LibJS/Bytecode/Interpreter.h>
 #include <LibJS/Runtime/FunctionEnvironment.h>
 #include <LibJS/Runtime/NativeFunction.h>
+#include <LibJS/Runtime/NativeJavaScriptBackedFunction.h>
 #include <LibJS/Runtime/Realm.h>
+#include <LibJS/Runtime/VM.h>
 #include <LibJS/Runtime/Value.h>
 
 namespace JS {
 
 GC_DEFINE_ALLOCATOR(NativeFunction);
+GC_DEFINE_ALLOCATOR(RawNativeFunction);
 
-void NativeFunction::initialize(Realm& realm)
-{
-    Base::initialize(realm);
-    m_name_string = PrimitiveString::create(vm(), m_name);
+namespace {
+
+class CapturingNativeFunction final : public NativeFunction {
+    JS_OBJECT(CapturingNativeFunction, NativeFunction);
+    GC_DECLARE_ALLOCATOR(CapturingNativeFunction);
+
+public:
+    CapturingNativeFunction(Function<ThrowCompletionOr<Value>(VM&)> native_function, Object* prototype, Realm& realm, Optional<Bytecode::Builtin> builtin)
+        : NativeFunction(prototype, realm, builtin)
+        , m_native_function(move(native_function))
+    {
+    }
+
+    CapturingNativeFunction(Utf16FlyString name, Function<ThrowCompletionOr<Value>(VM&)> native_function, Object& prototype)
+        : NativeFunction(move(name), prototype)
+        , m_native_function(move(native_function))
+    {
+    }
+
+    virtual ThrowCompletionOr<Value> call() override
+    {
+        VERIFY(m_native_function);
+        return m_native_function(vm());
+    }
+
+private:
+    virtual void visit_edges(Cell::Visitor& visitor) override
+    {
+        NativeFunction::visit_edges(visitor);
+        visitor.visit_possible_values(m_native_function.raw_capture_range());
+    }
+
+    AK::Function<ThrowCompletionOr<Value>(VM&)> m_native_function;
+};
+
+GC_DEFINE_ALLOCATOR(CapturingNativeFunction);
+
 }
 
 void NativeFunction::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit_possible_values(m_native_function.raw_capture_range());
     visitor.visit(m_realm);
-    visitor.visit(m_name_string);
 }
 
 // 10.3.3 CreateBuiltinFunction ( behaviour, length, name, additionalInternalSlotsList [ , realm [ , prototype [ , prefix ] ] ] ), https://tc39.es/ecma262/#sec-createbuiltinfunction
@@ -51,7 +83,7 @@ GC::Ref<NativeFunction> NativeFunction::create(Realm& allocating_realm, Function
     // 7. Set func.[[Extensible]] to true.
     // 8. Set func.[[Realm]] to realm.
     // 9. Set func.[[InitialName]] to null.
-    auto function = allocating_realm.create<NativeFunction>(move(behaviour), prototype, *realm.value(), builtin);
+    auto function = allocating_realm.create<CapturingNativeFunction>(move(behaviour), prototype, *realm.value(), builtin);
 
     function->unsafe_set_shape(realm.value()->intrinsics().native_function_shape());
 
@@ -68,17 +100,46 @@ GC::Ref<NativeFunction> NativeFunction::create(Realm& allocating_realm, Function
     return function;
 }
 
-GC::Ref<NativeFunction> NativeFunction::create(Realm& realm, Utf16FlyString const& name, Function<ThrowCompletionOr<Value>(VM&)> function)
+GC::Ref<NativeFunction> NativeFunction::create(Realm& allocating_realm, NativeFunctionPointer behaviour, i32 length, PropertyKey const& name, Optional<Realm*> realm, Optional<StringView> const& prefix, Optional<Bytecode::Builtin> builtin)
 {
-    return realm.create<NativeFunction>(name, move(function), realm.intrinsics().function_prototype());
+    return RawNativeFunction::create(allocating_realm, behaviour, length, name, realm, prefix, builtin);
 }
 
-NativeFunction::NativeFunction(AK::Function<ThrowCompletionOr<Value>(VM&)> native_function, Object* prototype, Realm& realm, Optional<Bytecode::Builtin> builtin)
-    : FunctionObject(realm, prototype)
-    , m_builtin(builtin)
-    , m_native_function(move(native_function))
-    , m_realm(&realm)
+GC::Ref<NativeFunction> NativeFunction::create(Realm& realm, Utf16FlyString const& name, Function<ThrowCompletionOr<Value>(VM&)> function)
 {
+    return realm.create<CapturingNativeFunction>(name, move(function), realm.intrinsics().function_prototype());
+}
+
+GC::Ref<NativeFunction> NativeFunction::create(Realm& realm, Utf16FlyString const& name, NativeFunctionPointer function)
+{
+    return RawNativeFunction::create(realm, name, function);
+}
+
+GC::Ref<RawNativeFunction> RawNativeFunction::create(Realm& allocating_realm, NativeFunctionPointer behaviour, i32 length, PropertyKey const& name, Optional<Realm*> realm, Optional<StringView> const& prefix, Optional<Bytecode::Builtin> builtin)
+{
+    auto& vm = allocating_realm.vm();
+
+    if (!realm.has_value())
+        realm = vm.current_realm();
+
+    auto prototype = realm.value()->intrinsics().function_prototype();
+    auto function = allocating_realm.create<RawNativeFunction>(behaviour, prototype, *realm.value(), builtin);
+    function->unsafe_set_shape(realm.value()->intrinsics().native_function_shape());
+    function->put_direct(realm.value()->intrinsics().native_function_length_offset(), Value { length });
+    function->put_direct(realm.value()->intrinsics().native_function_name_offset(), function->make_function_name(name, prefix));
+    return function;
+}
+
+GC::Ref<RawNativeFunction> RawNativeFunction::create(Realm& realm, Utf16FlyString const& name, NativeFunctionPointer function)
+{
+    return realm.create<RawNativeFunction>(name, function, realm.intrinsics().function_prototype());
+}
+
+NativeFunction::NativeFunction(Object* prototype, Realm& realm, Optional<Bytecode::Builtin> builtin)
+    : FunctionObject(realm, prototype)
+    , m_realm(realm)
+{
+    m_builtin = builtin;
 }
 
 // FIXME: m_realm is supposed to be the realm argument of CreateBuiltinFunction, or the current
@@ -87,23 +148,29 @@ NativeFunction::NativeFunction(AK::Function<ThrowCompletionOr<Value>(VM&)> nativ
 
 NativeFunction::NativeFunction(Object& prototype)
     : FunctionObject(prototype)
-    , m_realm(&prototype.shape().realm())
-{
-}
-
-NativeFunction::NativeFunction(Utf16FlyString name, AK::Function<ThrowCompletionOr<Value>(VM&)> native_function, Object& prototype)
-    : FunctionObject(prototype)
-    , m_name(move(name))
-    , m_native_function(move(native_function))
-    , m_realm(&prototype.shape().realm())
+    , m_realm(prototype.shape().realm())
 {
 }
 
 NativeFunction::NativeFunction(Utf16FlyString name, Object& prototype)
     : FunctionObject(prototype)
     , m_name(move(name))
-    , m_realm(&prototype.shape().realm())
+    , m_realm(prototype.shape().realm())
 {
+}
+
+RawNativeFunction::RawNativeFunction(NativeFunctionPointer native_function, Object* prototype, Realm& realm, Optional<Bytecode::Builtin> builtin)
+    : NativeFunction(prototype, realm, builtin)
+    , m_native_function(native_function)
+{
+    set_is_raw_native_function();
+}
+
+RawNativeFunction::RawNativeFunction(Utf16FlyString name, NativeFunctionPointer native_function, Object& prototype)
+    : NativeFunction(move(name), prototype)
+    , m_native_function(native_function)
+{
+    set_is_raw_native_function();
 }
 
 // NOTE: Do not attempt to DRY these, it's not worth it. The difference in return types (Value vs Object*),
@@ -123,21 +190,10 @@ ThrowCompletionOr<Value> NativeFunction::internal_call(ExecutionContext& callee_
 
     // 4. Set the Function of calleeContext to F.
     callee_context.function = this;
-    callee_context.function_name = m_name_string;
 
     // 5. Let calleeRealm be F.[[Realm]].
-    auto callee_realm = m_realm;
-    // NOTE: This non-standard fallback is needed until we can guarantee that literally
-    // every function has a realm - especially in LibWeb that's sometimes not the case
-    // when a function is created while no JS is running, as we currently need to rely on
-    // that (:acid2:, I know - see set_event_handler_attribute() for an example).
-    // If there's no 'current realm' either, we can't continue and crash.
-    if (!callee_realm)
-        callee_realm = vm.current_realm();
-    VERIFY(callee_realm);
-
     // 6. Set the Realm of calleeContext to calleeRealm.
-    callee_context.realm = callee_realm;
+    callee_context.realm = m_realm;
 
     // 7. Set the ScriptOrModule of calleeContext to null.
     // Note: This is already the default value.
@@ -145,14 +201,27 @@ ThrowCompletionOr<Value> NativeFunction::internal_call(ExecutionContext& callee_
     // 8. Perform any necessary implementation-defined initialization of calleeContext.
     callee_context.this_value = this_argument;
 
-    callee_context.lexical_environment = caller_context.lexical_environment;
-    callee_context.variable_environment = caller_context.variable_environment;
+    if (function_environment_needed()) {
+        // 7. Let localEnv be NewFunctionEnvironment(F, newTarget).
+        auto local_environment = new_function_environment(as<NativeJavaScriptBackedFunction>(*this), nullptr);
+        auto& shared_data = as<NativeJavaScriptBackedFunction>(*this).shared_data();
+        auto function_environment_bindings_count = shared_data.m_function_environment_bindings_count;
+        local_environment->set_environment_shape_cache(shared_data.m_function_environment_shape, function_environment_bindings_count);
+        local_environment->ensure_capacity(function_environment_bindings_count);
+
+        // 8. Set the LexicalEnvironment of calleeContext to localEnv.
+        callee_context.lexical_environment = local_environment;
+
+        // 9. Set the VariableEnvironment of calleeContext to localEnv.
+        callee_context.variable_environment = local_environment;
+    } else {
+        callee_context.lexical_environment = caller_context.lexical_environment;
+        callee_context.variable_environment = caller_context.variable_environment;
+    }
+
     // Note: Keeping the private environment is probably only needed because of async methods in classes
     //       calling async_block_start which goes through a NativeFunction here.
     callee_context.private_environment = caller_context.private_environment;
-
-    // NOTE: This is a LibJS specific hack for NativeFunction to inherit the strictness of its caller.
-    callee_context.is_strict_mode = caller_context.is_strict_mode;
 
     // </8.> --------------------------------------------------------------------------
 
@@ -182,30 +251,31 @@ ThrowCompletionOr<GC::Ref<Object>> NativeFunction::internal_construct(ExecutionC
 
     // 4. Set the Function of calleeContext to F.
     callee_context.function = this;
-    callee_context.function_name = m_name_string;
 
     // 5. Let calleeRealm be F.[[Realm]].
-    auto callee_realm = m_realm;
-    // NOTE: This non-standard fallback is needed until we can guarantee that literally
-    // every function has a realm - especially in LibWeb that's sometimes not the case
-    // when a function is created while no JS is running, as we currently need to rely on
-    // that (:acid2:, I know - see set_event_handler_attribute() for an example).
-    // If there's no 'current realm' either, we can't continue and crash.
-    if (!callee_realm)
-        callee_realm = vm.current_realm();
-    VERIFY(callee_realm);
-
     // 6. Set the Realm of calleeContext to calleeRealm.
-    callee_context.realm = callee_realm;
+    callee_context.realm = m_realm;
 
     // 7. Set the ScriptOrModule of calleeContext to null.
     // Note: This is already the default value.
 
-    callee_context.lexical_environment = caller_context.lexical_environment;
-    callee_context.variable_environment = caller_context.variable_environment;
+    if (function_environment_needed()) {
+        // 7. Let localEnv be NewFunctionEnvironment(F, newTarget).
+        auto local_environment = new_function_environment(as<NativeJavaScriptBackedFunction>(*this), nullptr);
+        auto& shared_data = as<NativeJavaScriptBackedFunction>(*this).shared_data();
+        auto function_environment_bindings_count = shared_data.m_function_environment_bindings_count;
+        local_environment->set_environment_shape_cache(shared_data.m_function_environment_shape, function_environment_bindings_count);
+        local_environment->ensure_capacity(function_environment_bindings_count);
 
-    // NOTE: This is a LibJS specific hack for NativeFunction to inherit the strictness of its caller.
-    callee_context.is_strict_mode = caller_context.is_strict_mode;
+        // 8. Set the LexicalEnvironment of calleeContext to localEnv.
+        callee_context.lexical_environment = local_environment;
+
+        // 9. Set the VariableEnvironment of calleeContext to localEnv.
+        callee_context.variable_environment = local_environment;
+    } else {
+        callee_context.lexical_environment = caller_context.lexical_environment;
+        callee_context.variable_environment = caller_context.variable_environment;
+    }
 
     // </8.> --------------------------------------------------------------------------
 
@@ -224,6 +294,11 @@ ThrowCompletionOr<GC::Ref<Object>> NativeFunction::internal_construct(ExecutionC
 
 ThrowCompletionOr<Value> NativeFunction::call()
 {
+    VERIFY_NOT_REACHED();
+}
+
+ThrowCompletionOr<Value> RawNativeFunction::call()
+{
     VERIFY(m_native_function);
     return m_native_function(vm());
 }
@@ -237,6 +312,11 @@ ThrowCompletionOr<GC::Ref<Object>> NativeFunction::construct(FunctionObject&)
 bool NativeFunction::is_strict_mode() const
 {
     return true;
+}
+
+Utf16String NativeFunction::name_for_call_stack() const
+{
+    return m_name.to_utf16_string();
 }
 
 }

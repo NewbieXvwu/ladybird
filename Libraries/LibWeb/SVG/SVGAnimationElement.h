@@ -8,7 +8,7 @@
 
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/Bindings/SVGAnimationElementPrototype.h>
+#include <LibWeb/Bindings/SVGAnimationElement.h>
 #include <LibWeb/SVG/SVGElement.h>
 
 namespace Web::SVG {
@@ -16,6 +16,15 @@ namespace Web::SVG {
 class SVGAnimationElement final : public SVGElement {
     WEB_PLATFORM_OBJECT(SVGAnimationElement, SVGElement);
     GC_DECLARE_ALLOCATOR(SVGAnimationElement);
+
+    void set_onbegin(GC::Ptr<WebIDL::CallbackType>);
+    GC::Ptr<WebIDL::CallbackType> onbegin();
+
+    void set_onend(GC::Ptr<WebIDL::CallbackType>);
+    GC::Ptr<WebIDL::CallbackType> onend();
+
+    void set_onrepeat(GC::Ptr<WebIDL::CallbackType>);
+    GC::Ptr<WebIDL::CallbackType> onrepeat();
 
 private:
     SVGAnimationElement(DOM::Document&, DOM::QualifiedName);

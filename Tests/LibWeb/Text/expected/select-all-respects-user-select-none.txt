@@ -1,0 +1,2 @@
+selection.toString(): "hiddenvisiblealso hiddenalso visible"
+clipboard text: "visible\n\nalso visible"

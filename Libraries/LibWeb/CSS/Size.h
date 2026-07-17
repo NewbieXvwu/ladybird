@@ -37,6 +37,8 @@ public:
     static Size make_fit_content();
     static Size make_none();
 
+    static Size from_style_value(NonnullRefPtr<StyleValue const> const&);
+
     bool is_auto() const { return m_type == Type::Auto; }
     bool is_calculated() const { return m_type == Type::Calculated; }
     bool is_length() const { return m_type == Type::Length; }
@@ -45,10 +47,12 @@ public:
     bool is_max_content() const { return m_type == Type::MaxContent; }
     bool is_fit_content() const { return m_type == Type::FitContent; }
     bool is_none() const { return m_type == Type::None; }
+    Type type() const { return m_type; }
 
+    bool is_intrinsic_sizing_constraint() const { return is_min_content() || is_max_content() || is_fit_content(); }
     bool is_length_percentage() const { return is_length() || is_percentage() || is_calculated(); }
 
-    [[nodiscard]] CSSPixels to_px(Layout::Node const&, CSSPixels reference_value) const;
+    [[nodiscard]] CSSPixels to_px(CSSPixels reference_value) const;
 
     bool contains_percentage() const;
 
@@ -70,12 +74,19 @@ public:
         return m_length_percentage->percentage();
     }
 
+    LengthPercentage const& length_percentage() const
+    {
+        VERIFY(is_length_percentage());
+        return *m_length_percentage;
+    }
+
     Optional<LengthPercentage> const& fit_content_available_space() const
     {
         VERIFY(is_fit_content());
         return m_length_percentage;
     }
 
+    void serialize(StringBuilder&, SerializationMode) const;
     String to_string(SerializationMode) const;
     bool operator==(Size const&) const = default;
 

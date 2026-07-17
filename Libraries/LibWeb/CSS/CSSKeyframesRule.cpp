@@ -1,25 +1,27 @@
 /*
  * Copyright (c) 2023, Ali Mohammad Pur <mpfard@serenityos.org>
  * Copyright (c) 2024, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/CSSKeyframesRulePrototype.h>
+#include <LibWeb/Bindings/CSSKeyframesRule.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
 #include <LibWeb/CSS/CSSRuleList.h>
+#include <LibWeb/Dump.h>
 
 namespace Web::CSS {
 
 GC_DEFINE_ALLOCATOR(CSSKeyframesRule);
 
-GC::Ref<CSSKeyframesRule> CSSKeyframesRule::create(JS::Realm& realm, FlyString name, GC::Ref<CSSRuleList> css_rules)
+GC::Ref<CSSKeyframesRule> CSSKeyframesRule::create(JS::Realm& realm, Utf16FlyString name, GC::Ref<CSSRuleList> css_rules)
 {
     return realm.create<CSSKeyframesRule>(realm, move(name), move(css_rules));
 }
 
-CSSKeyframesRule::CSSKeyframesRule(JS::Realm& realm, FlyString name, GC::Ref<CSSRuleList> keyframes)
+CSSKeyframesRule::CSSKeyframesRule(JS::Realm& realm, Utf16FlyString name, GC::Ref<CSSRuleList> keyframes)
     : CSSRule(realm, Type::Keyframes)
     , m_name(move(name))
     , m_rules(move(keyframes))
@@ -40,22 +42,34 @@ void CSSKeyframesRule::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-String CSSKeyframesRule::serialized() const
+Utf16String CSSKeyframesRule::serialized() const
 {
-    StringBuilder builder;
+    Utf16StringBuilder builder;
     builder.appendff("@keyframes \"{}\"", name());
-    builder.append(" { "sv);
+    builder.append_ascii(" { "sv);
     for (auto const& keyframe : *m_rules) {
-        builder.append(keyframe->css_text());
-        builder.append(' ');
+        builder.append(keyframe->serialized());
+        builder.append_ascii(' ');
     }
-    builder.append('}');
-    return MUST(builder.to_string());
+    builder.append_ascii('}');
+    return builder.to_string();
 }
 
 WebIDL::UnsignedLong CSSKeyframesRule::length() const
 {
     return m_rules->length();
+}
+
+void CSSKeyframesRule::dump(StringBuilder& builder, int indent_levels) const
+{
+    Base::dump(builder, indent_levels);
+
+    dump_indent(builder, indent_levels + 1);
+    builder.appendff("Name: {}\n", name());
+    dump_indent(builder, indent_levels + 1);
+    builder.appendff("Keyframes ({}):\n", length());
+    for (auto& rule : *css_rules())
+        dump_rule(builder, rule, indent_levels + 2);
 }
 
 }

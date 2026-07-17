@@ -11,6 +11,8 @@
 #include <AK/Forward.h>
 #include <AK/HashTable.h>
 #include <AK/Traits.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Variant.h>
 #include <LibWeb/CSS/PseudoClass.h>
 
 namespace Web::CSS {
@@ -29,9 +31,11 @@ public:
         };
 
         Type type;
-        Variant<FlyString, PseudoClass, Empty> value { Empty {} };
+        Variant<Utf16FlyString, PseudoClass, Empty> value { Empty {} };
 
-        FlyString const& name() const { return value.get<FlyString>(); }
+        Utf16FlyString const& name() const { return value.get<Utf16FlyString>(); }
+        Utf16FlyString const& id() const { return value.get<Utf16FlyString>(); }
+        Utf16FlyString const& class_name() const { return value.get<Utf16FlyString>(); }
 
         bool operator==(Property const& other) const = default;
     };
@@ -39,25 +43,94 @@ public:
     void include_all_from(InvalidationSet const& other);
 
     bool needs_invalidate_self() const { return m_needs_invalidate_self; }
-    void set_needs_invalidate_self() { m_needs_invalidate_self = true; }
+    void set_needs_invalidate_self()
+    {
+        m_needs_invalidate_self = true;
+        m_hash = {};
+    }
 
     bool needs_invalidate_whole_subtree() const { return m_needs_invalidate_whole_subtree; }
-    void set_needs_invalidate_whole_subtree() { m_needs_invalidate_whole_subtree = true; }
+    void set_needs_invalidate_whole_subtree()
+    {
+        m_needs_invalidate_whole_subtree = true;
+        m_hash = {};
+    }
 
-    void set_needs_invalidate_class(FlyString const& name) { m_properties.set({ Property::Type::Class, name }); }
-    void set_needs_invalidate_id(FlyString const& name) { m_properties.set({ Property::Type::Id, name }); }
-    void set_needs_invalidate_tag_name(FlyString const& name) { m_properties.set({ Property::Type::TagName, name }); }
-    void set_needs_invalidate_attribute(FlyString const& name) { m_properties.set({ Property::Type::Attribute, name }); }
-    void set_needs_invalidate_pseudo_class(PseudoClass pseudo_class) { m_properties.set({ Property::Type::PseudoClass, pseudo_class }); }
+    bool operator==(InvalidationSet const& other) const;
+
+    void set_needs_invalidate_class(Utf16FlyString const& name)
+    {
+        add_property({ Property::Type::Class, name });
+    }
+    void set_needs_invalidate_id(Utf16FlyString const& name)
+    {
+        add_property({ Property::Type::Id, name });
+    }
+    void set_needs_invalidate_tag_name(Utf16FlyString const& name)
+    {
+        add_property({ Property::Type::TagName, name });
+    }
+    void set_needs_invalidate_attribute(Utf16FlyString const& name)
+    {
+        add_property({ Property::Type::Attribute, name });
+    }
+    void set_needs_invalidate_pseudo_class(PseudoClass pseudo_class)
+    {
+        add_property({ Property::Type::PseudoClass, pseudo_class });
+    }
 
     bool is_empty() const;
     bool has_properties() const { return !m_properties.is_empty(); }
     void for_each_property(Function<IterationDecision(Property const&)> const& callback) const;
 
+    u32 hash() const;
+
 private:
+    class PropertySet {
+    public:
+        PropertySet();
+        PropertySet(PropertySet const&);
+        PropertySet(PropertySet&&);
+        ~PropertySet();
+
+        PropertySet& operator=(PropertySet const&);
+        PropertySet& operator=(PropertySet&&);
+
+        bool is_empty() const;
+        size_t size() const;
+        bool contains(Property const&) const;
+        bool set(Property);
+        bool include_all_from(PropertySet const&);
+        bool operator==(PropertySet const&) const;
+        void accumulate_hash(u32& property_hash_sum, u32& property_hash_xor) const;
+
+        IterationDecision for_each(Function<IterationDecision(Property const&)> const&) const;
+
+    private:
+        enum class StorageType : u8 {
+            Empty,
+            Single,
+            HashTable,
+        };
+
+        void destroy_storage();
+        void copy_from(PropertySet const&);
+        void move_from(PropertySet&&);
+
+        StorageType m_storage_type { StorageType::Empty };
+        union {
+            Empty m_empty;
+            Property m_property;
+            HashTable<Property> m_properties;
+        };
+    };
+
+    void add_property(Property);
+
     bool m_needs_invalidate_self { false };
     bool m_needs_invalidate_whole_subtree { false };
-    HashTable<Property> m_properties;
+    PropertySet m_properties;
+    mutable Optional<u32> m_hash;
 };
 
 }

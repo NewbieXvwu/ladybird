@@ -6,7 +6,7 @@
 
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/TextTrackListPrototype.h>
+#include <LibWeb/Bindings/TextTrackList.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/TextTrackList.h>
 
@@ -50,6 +50,11 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> TextTrackList::internal_
     return Base::internal_get_own_property(property_name);
 }
 
+void TextTrackList::add_track(GC::Ref<TextTrack> text_track)
+{
+    m_text_tracks.append(text_track);
+}
+
 // https://html.spec.whatwg.org/multipage/media.html#dom-texttracklist-length
 size_t TextTrackList::length() const
 {
@@ -57,7 +62,7 @@ size_t TextTrackList::length() const
 }
 
 // https://html.spec.whatwg.org/multipage/media.html#dom-texttracklist-gettrackbyid
-GC::Ptr<TextTrack> TextTrackList::get_track_by_id(StringView id) const
+GC::Ptr<TextTrack> TextTrackList::get_track_by_id(Utf16View id) const
 {
     // The getTrackById(id) method must return the first TextTrack in the TextTrackList object whose id
     // IDL attribute would return a value equal to the value of the id argument.

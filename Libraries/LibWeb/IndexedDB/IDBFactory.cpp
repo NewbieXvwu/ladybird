@@ -8,7 +8,7 @@
 #include <AK/Vector.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/Value.h>
-#include <LibWeb/Bindings/IDBFactoryPrototype.h>
+#include <LibWeb/Bindings/IDBFactory.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/HTML/EventNames.h>
@@ -39,13 +39,13 @@ void IDBFactory::initialize(JS::Realm& realm)
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbfactory-open
-WebIDL::ExceptionOr<GC::Ref<IDBOpenDBRequest>> IDBFactory::open(String const& name, Optional<u64> version)
+WebIDL::ExceptionOr<GC::Ref<IDBOpenDBRequest>> IDBFactory::open(Utf16String const& name, Optional<u64> version)
 {
     auto& realm = this->realm();
 
     // 1. If version is 0 (zero), throw a TypeError.
     if (version.has_value() && version.value() == 0)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "The version provided must not be 0"_string };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "The version provided must not be 0"_utf16 };
 
     // 2. Let environment be this's relevant settings object.
     auto& environment = HTML::relevant_settings_object(*this);
@@ -60,12 +60,11 @@ WebIDL::ExceptionOr<GC::Ref<IDBOpenDBRequest>> IDBFactory::open(String const& na
     auto request = IDBOpenDBRequest::create(realm);
 
     // 5. Run these steps in parallel:
-    Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(realm.heap(), [&realm, storage_key, name, version, request] {
-        HTML::TemporaryExecutionContext context(realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes);
+    // NB: We could defer these steps, but it wouldn't be observable anyway, since open_a_database_connection() will
+    //     put this work into a queue and then process it later in the event loop regardless.
 
-        // 1. Let result be the result of opening a database connection, with storageKey, name, version if given and undefined otherwise, and request.
-        auto result = open_a_database_connection(realm, storage_key.value(), name, version, request);
-
+    // 1. Let result be the result of opening a database connection, with storageKey, name, version if given and undefined otherwise, and request.
+    open_a_database_connection(realm, storage_key.value(), name, version, request, GC::create_function(realm.heap(), [&realm, request](WebIDL::ExceptionOr<GC::Ref<IDBDatabase>> result) {
         // 2. Set request’s processed flag to true.
         request->set_processed(true);
 
@@ -123,7 +122,7 @@ WebIDL::ExceptionOr<i8> IDBFactory::cmp(JS::Value first, JS::Value second)
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbfactory-deletedatabase
-WebIDL::ExceptionOr<GC::Ref<IDBOpenDBRequest>> IDBFactory::delete_database(String const& name)
+WebIDL::ExceptionOr<GC::Ref<IDBOpenDBRequest>> IDBFactory::delete_database(Utf16String const& name)
 {
     auto& realm = this->realm();
 
@@ -140,12 +139,11 @@ WebIDL::ExceptionOr<GC::Ref<IDBOpenDBRequest>> IDBFactory::delete_database(Strin
     auto request = IDBOpenDBRequest::create(realm);
 
     // 4. Run these steps in parallel:
-    Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(realm.heap(), [&realm, storage_key, name, request] {
-        HTML::TemporaryExecutionContext context(realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes);
+    // NB: We could defer these steps, but it wouldn't be observable anyway, since delete_a_database() will
+    //     put this work into a queue and then process it later in the event loop regardless.
 
-        // 1. Let result be the result of deleting a database, with storageKey, name, and request.
-        auto result = delete_a_database(realm, storage_key.value(), name, request);
-
+    // 1. Let result be the result of deleting a database, with storageKey, name, and request.
+    delete_a_database(realm, storage_key.value(), name, request, GC::create_function(realm.heap(), [&realm, request](WebIDL::ExceptionOr<u64> result) {
         // 2. Set request’s processed flag to true.
         request->set_processed(true);
 
@@ -205,9 +203,10 @@ GC::Ref<WebIDL::Promise> IDBFactory::databases()
         auto databases = Database::for_key(storage_key);
 
         // 2. Let result be a new list.
-        auto result = MUST(JS::Array::create(realm, databases.size()));
+        auto result = MUST(JS::Array::create(realm, 0));
 
         // 3. For each db of databases:
+        u32 result_index = 0;
         for (u32 i = 0; i < databases.size(); ++i) {
             auto& db = databases[i];
 
@@ -225,7 +224,7 @@ GC::Ref<WebIDL::Promise> IDBFactory::databases()
             MUST(info->create_data_property("version"_utf16_fly_string, JS::Value(db->version())));
 
             // 4. Append info to result.
-            MUST(result->create_data_property_or_throw(i, info));
+            MUST(result->create_data_property_or_throw(result_index++, info));
         }
 
         // 4. Resolve p with result.

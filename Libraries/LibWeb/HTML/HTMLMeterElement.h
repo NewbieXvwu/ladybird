@@ -21,22 +21,22 @@ public:
     virtual ~HTMLMeterElement() override;
 
     double value() const;
-    WebIDL::ExceptionOr<void> set_value(double);
+    void set_value(double);
     double min() const;
-    WebIDL::ExceptionOr<void> set_min(double value);
+    void set_min(double value);
     double max() const;
-    WebIDL::ExceptionOr<void> set_max(double value);
+    void set_max(double value);
     double low() const;
-    WebIDL::ExceptionOr<void> set_low(double value);
+    void set_low(double value);
     double high() const;
-    WebIDL::ExceptionOr<void> set_high(double value);
+    void set_high(double value);
     double optimum() const;
-    WebIDL::ExceptionOr<void> set_optimum(double value);
+    void set_optimum(double value);
 
     // ^HTMLElement
     virtual void inserted() override;
 
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-label
     virtual bool is_labelable() const override { return true; }

@@ -86,7 +86,6 @@ namespace Gfx {
     C(RulerBorder)                 \
     C(RulerInactiveText)           \
     C(Selection)                   \
-    C(SelectionText)               \
     C(SyntaxComment)               \
     C(SyntaxControlKeyword)        \
     C(SyntaxIdentifier)            \
@@ -281,7 +280,7 @@ inline StringView to_string(PathRole role)
 }
 
 struct SystemTheme {
-    ARGB32 color[(int)ColorRole::__Count];
+    BGRA8888 color[(int)ColorRole::__Count];
     Gfx::TextAlignment alignment[(int)AlignmentRole::__Count];
     bool flag[(int)FlagRole::__Count];
     int metric[(int)MetricRole::__Count];

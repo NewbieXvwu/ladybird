@@ -11,6 +11,7 @@
 #include <AK/SinglyLinkedList.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Streams/Algorithms.h>
+#include <LibWeb/WebIDL/Buffers.h>
 
 namespace Web::Streams {
 
@@ -65,8 +66,16 @@ protected:
     virtual void visit_edges(Cell::Visitor& visitor) override;
 
 private:
-    PullIntoDescriptor(GC::Ref<JS::ArrayBuffer> buffer, u64 buffer_byte_length, u64 byte_offset, u64 byte_length, u64 bytes_filled,
-        u64 minimum_fill, u64 element_size, GC::Ref<JS::NativeFunction> view_constructor, ReaderType reader_type)
+    PullIntoDescriptor(
+        GC::Ref<JS::ArrayBuffer> buffer,
+        u64 buffer_byte_length,
+        u64 byte_offset,
+        u64 byte_length,
+        u64 bytes_filled,
+        u64 minimum_fill,
+        u64 element_size,
+        GC::Ref<JS::NativeFunction> view_constructor,
+        ReaderType reader_type)
         : buffer(buffer)
         , buffer_byte_length(buffer_byte_length)
         , byte_offset(byte_offset)
@@ -114,8 +123,8 @@ public:
 
     Optional<double> desired_size() const;
     WebIDL::ExceptionOr<void> close();
-    void error(JS::Value error);
-    WebIDL::ExceptionOr<void> enqueue(GC::Root<WebIDL::ArrayBufferView>&);
+    void error(Optional<JS::Value> error);
+    WebIDL::ExceptionOr<void> enqueue(WebIDL::ArrayBufferView);
 
     Optional<u64> const& auto_allocate_chunk_size() { return m_auto_allocate_chunk_size; }
     void set_auto_allocate_chunk_size(Optional<u64> value) { m_auto_allocate_chunk_size = value; }

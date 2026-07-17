@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLTableRowElementPrototype.h>
+#include <LibWeb/Bindings/HTMLTableRowElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
+#include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/HTMLCollection.h>
@@ -38,37 +39,41 @@ void HTMLTableRowElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-bool HTMLTableRowElement::is_presentational_hint(FlyString const& name) const
+bool HTMLTableRowElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
 
     return first_is_one_of(name,
+        HTML::AttributeNames::align,
         HTML::AttributeNames::bgcolor,
         HTML::AttributeNames::background,
         HTML::AttributeNames::height,
         HTML::AttributeNames::valign);
 }
 
-void HTMLTableRowElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void HTMLTableRowElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
-    Base::apply_presentational_hints(cascaded_properties);
-    for_each_attribute([&](auto& name, auto& value) {
-        if (name == HTML::AttributeNames::bgcolor) {
+    Base::apply_presentational_hints(properties);
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
+        if (name == HTML::AttributeNames::align) {
+            if (auto parsed_value = parse_table_child_element_align_value(value))
+                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = parsed_value.release_nonnull() });
+        } else if (name == HTML::AttributeNames::bgcolor) {
             // https://html.spec.whatwg.org/multipage/rendering.html#tables-2:rules-for-parsing-a-legacy-colour-value
             auto color = parse_legacy_color_value(value);
             if (color.has_value())
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BackgroundColor, CSS::ColorStyleValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy));
+                properties.append({ .property_id = CSS::PropertyID::BackgroundColor, .value = CSS::ColorStyleValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy) });
         } else if (name == HTML::AttributeNames::background) {
             // https://html.spec.whatwg.org/multipage/rendering.html#tables-2:encoding-parsing-and-serializing-a-url
             if (auto parsed_value = document().encoding_parse_url(value); parsed_value.has_value())
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BackgroundImage, CSS::ImageStyleValue::create(*parsed_value));
+                properties.append({ .property_id = CSS::PropertyID::BackgroundImage, .value = CSS::StyleValueList::create({ CSS::ImageStyleValue::create(*parsed_value) }, CSS::StyleValueList::Separator::Comma) });
         } else if (name == HTML::AttributeNames::height) {
             if (auto parsed_value = parse_dimension_value(value))
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Height, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::Height, .value = *parsed_value });
         } else if (name == HTML::AttributeNames::valign) {
             if (auto parsed_value = parse_css_value(CSS::Parser::ParsingParams { document() }, value, CSS::PropertyID::VerticalAlign))
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::VerticalAlign, parsed_value.release_nonnull());
+                properties.append({ .property_id = CSS::PropertyID::VerticalAlign, .value = parsed_value.release_nonnull() });
         }
     });
 }

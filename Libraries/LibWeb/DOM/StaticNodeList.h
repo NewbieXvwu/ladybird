@@ -6,13 +6,12 @@
 
 #pragma once
 
-#include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/NodeList.h>
 
 namespace Web::DOM {
 
 class StaticNodeList final : public NodeList {
-    WEB_PLATFORM_OBJECT(StaticNodeList, NodeList);
+    WEB_NON_IDL_PLATFORM_OBJECT(StaticNodeList, NodeList);
     GC_DECLARE_ALLOCATOR(StaticNodeList);
 
 public:
@@ -27,6 +26,7 @@ private:
     StaticNodeList(JS::Realm&, Vector<GC::Root<Node>>);
 
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     Vector<GC::Ref<Node>> m_static_nodes;
 };

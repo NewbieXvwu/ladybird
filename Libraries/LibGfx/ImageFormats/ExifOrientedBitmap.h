@@ -32,7 +32,7 @@ public:
         return ExifOrientedBitmap(move(bitmap), size, orientation);
     }
 
-    template<OneOf<ARGB32, CMYK> Value>
+    template<OneOf<RawPixel, CMYK> Value>
     void set_pixel(u32 x, u32 y, Value color)
     {
         auto const new_position = oriented_position(IntPoint(x, y));
@@ -92,7 +92,7 @@ private:
         case Orientation::FlipVertically:
             return IntPoint(point.x(), m_height - point.y() - 1);
         case Orientation::Rotate90ClockwiseThenFlipHorizontally:
-            return flip_horizontally(rotate_90_clockwise(point));
+            return IntPoint(point.y(), point.x());
         case Orientation::Rotate90Clockwise:
             return rotate_90_clockwise(point);
         case Orientation::FlipHorizontallyThenRotate90Clockwise:

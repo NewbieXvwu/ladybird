@@ -1,17 +1,18 @@
 /*
- * Copyright (c) 2023, Gregory Bertilson <zaggy1024@gmail.com>
+ * Copyright (c) 2023-2025, Gregory Bertilson <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include "SampleFormats.h"
 #include <AK/AtomicRefCounted.h>
 #include <AK/Function.h>
 #include <AK/Time.h>
 #include <LibCore/Forward.h>
+#include <LibCore/Promise.h>
 #include <LibCore/ThreadedPromise.h>
+#include <LibMedia/Audio/SampleSpecification.h>
 #include <LibMedia/Export.h>
 
 namespace Audio {
@@ -28,16 +29,22 @@ enum class OutputState {
 // Timing information provided by the class should allow audio timestamps to be tracked with the best accuracy possible.
 class MEDIA_API PlaybackStream : public AtomicRefCounted<PlaybackStream> {
 public:
-    using AudioDataRequestCallback = Function<ReadonlyBytes(Bytes buffer, PcmSampleFormat format, size_t sample_count)>;
+    using CreatePromise = Core::Promise<NonnullRefPtr<PlaybackStream>>;
+    using AudioDataRequestCallback = Function<ReadonlySpan<float>(Span<float> buffer)>;
 
-    // Creates a new audio Output class.
+    // Begins creating a new audio output and returns a promise that is resolved when it is ready.
     //
     // The initial_output_state parameter determines whether it will begin playback immediately.
     //
-    // The AudioDataRequestCallback will be called when the Output needs more audio data to fill its buffers and
+    // The returned promise will be resolved with the PlaybackStream if the audio output was successfully initialized,
+    // or rejected with an error if not.
+    //
+    // The AudioDataRequestCallback will be called when the output needs more audio data to fill its buffers and
     // continue playback. This callback will only be allowed to run on one thread at a time, to prevent any data
     // race on the resource used by the callback.
-    static ErrorOr<NonnullRefPtr<PlaybackStream>> create(OutputState initial_output_state, u32 sample_rate, u8 channels, u32 target_latency_ms, AudioDataRequestCallback&&);
+    static NonnullRefPtr<CreatePromise> create(OutputState initial_output_state, u32 target_latency_ms, AudioDataRequestCallback&&);
+
+    virtual SampleSpecification sample_specification() const = 0;
 
     virtual ~PlaybackStream() = default;
 
@@ -58,12 +65,16 @@ public:
     // as soon as possible instead of waiting for remaining audio to play.
     virtual NonnullRefPtr<Core::ThreadedPromise<void>> discard_buffer_and_suspend() = 0;
 
+    // Notifies the stream that the data request callback may be able to provide data now. This is used to
+    // wake playback streams that have stopped requesting data due to an underrun.
+    virtual void notify_data_available() = 0;
+
     // Returns a accurate monotonically-increasing time duration that is based on the number of samples that have
     // been played by the output device. The value is interpolated and takes into account latency to the speakers
     // whenever possible.
     //
     // This function should be able to run from any thread safely.
-    virtual ErrorOr<AK::Duration> total_time_played() = 0;
+    virtual AK::Duration total_time_played() const = 0;
 
     virtual NonnullRefPtr<Core::ThreadedPromise<void>> set_volume(double volume) = 0;
 };

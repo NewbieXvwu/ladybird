@@ -8,22 +8,17 @@
 
 #include <LibWasm/AbstractMachine/AbstractMachine.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
-#include <LibWeb/Bindings/GlobalPrototype.h>
+#include <LibWeb/Bindings/Global.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 
 namespace Web::WebAssembly {
-
-struct GlobalDescriptor {
-    Bindings::ValueType value;
-    bool mutable_ { false };
-};
 
 class Global : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(Global, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(Global);
 
 public:
-    static WebIDL::ExceptionOr<GC::Ref<Global>> construct_impl(JS::Realm&, GlobalDescriptor& descriptor, JS::Value v);
+    static WebIDL::ExceptionOr<GC::Ref<Global>> construct_impl(JS::Realm&, Bindings::GlobalDescriptor const&, Optional<JS::Value>);
 
     WebIDL::ExceptionOr<JS::Value> value_of() const;
 

@@ -1,4 +1,4 @@
-Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-inline
+Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children: not-inline
   BlockContainer <html> at [0,0] [0+0+0 800 0+0+0] [0+0+0 996 0+0+0] [BFC] children: not-inline
     BlockContainer <body> at [8,8] [8+0+0 784 0+0+8] [8+0+0 980 0+0+8] children: not-inline
       BlockContainer <div.sin> at [8,8] positioned [0+0+0 80 0+0+704] [0+0+0 100 0+0+0] children: not-inline
@@ -23,12 +23,12 @@ ViewportPaintable (Viewport<#document>) [0,0 800x600] overflow: [0,0 800x996]
       PaintableWithLines (BlockContainer<DIV>.atan2) [8,788 100x200]
       PaintableWithLines (BlockContainer(anonymous)) [8,988 784x0]
 
-SC for Viewport<#document> [0,0 800x600] [children: 1] (z-index: auto)
- SC for BlockContainer<HTML> [0,0 800x996] [children: 7] (z-index: auto)
-  SC for BlockContainer<DIV>.sin [8,8 80x100] [children: 0] (z-index: auto), transform: [0 1 -1 0 0 0]
-  SC for BlockContainer<DIV>.cos [8,108 100x100] [children: 0] (z-index: auto), transform: [0 1 -1 0 0 0]
-  SC for BlockContainer<DIV>.tan [8,208 120x100] [children: 0] (z-index: auto), transform: [0 1 -1 0 0 0]
-  SC for BlockContainer<DIV>.asin [8,308 100x140] [children: 0] (z-index: auto), transform: [0 1 -1 0 0 0]
-  SC for BlockContainer<DIV>.acos [8,448 100x160] [children: 0] (z-index: auto), transform: [0 1 -1 0 0 0]
-  SC for BlockContainer<DIV>.atan [8,608 100x180] [children: 0] (z-index: auto), transform: [0 1 -1 0 0 0]
-  SC for BlockContainer<DIV>.atan2 [8,788 100x200] [children: 0] (z-index: auto), transform: [0 1 -1 0 0 0]
+SC for Viewport<#document> [0,0 800x600] (z-index: auto)
+ SC for BlockContainer<HTML> [0,0 800x996] (z-index: auto)
+  SC for BlockContainer<DIV>.sin [8,8 80x100] (z-index: auto), has_transform
+  SC for BlockContainer<DIV>.cos [8,108 100x100] (z-index: auto), has_transform
+  SC for BlockContainer<DIV>.tan [8,208 120x100] (z-index: auto), has_transform
+  SC for BlockContainer<DIV>.asin [8,308 100x140] (z-index: auto), has_transform
+  SC for BlockContainer<DIV>.acos [8,448 100x160] (z-index: auto), has_transform
+  SC for BlockContainer<DIV>.atan [8,608 100x180] (z-index: auto), has_transform
+  SC for BlockContainer<DIV>.atan2 [8,788 100x200] (z-index: auto), has_transform

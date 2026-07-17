@@ -1,8 +1,3 @@
-#import <HTML/HTMLElement.idl>
-#import <HTML/HTMLFormElement.idl>
-#import <HTML/PopoverInvokerElement.idl>
-#import <HTML/ValidityState.idl>
-
 [MissingValueDefault=submit, InvalidValueDefault=submit]
 enum ButtonTypeState {
     "submit",
@@ -15,17 +10,17 @@ enum ButtonTypeState {
 interface HTMLButtonElement : HTMLElement {
     [HTMLConstructor] constructor();
 
-    [CEReactions] attribute DOMString command;
+    [CEReactions] attribute Utf16DOMString command;
     [CEReactions, Reflect=commandfor] attribute Element? commandForElement;
     [CEReactions, Reflect] attribute boolean disabled;
     readonly attribute HTMLFormElement? form;
-    [CEReactions] attribute USVString formAction;
-    [CEReactions, Reflect=formenctype, Enumerated=FormEnctypeAttribute] attribute DOMString formEnctype;
-    [CEReactions, Reflect=formmethod, Enumerated=FormMethodAttribute] attribute DOMString formMethod;
+    [CEReactions] attribute Utf16USVString formAction;
+    [CEReactions, Reflect=formenctype, Enumerated=FormEnctypeAttribute] attribute Utf16DOMString formEnctype;
+    [CEReactions, Reflect=formmethod, Enumerated=FormMethodAttribute] attribute Utf16DOMString formMethod;
     [CEReactions, Reflect=formnovalidate] attribute boolean formNoValidate;
-    [CEReactions, Reflect=formtarget] attribute DOMString formTarget;
-    [CEReactions, Reflect] attribute DOMString name;
-    [CEReactions, ImplementedAs=type_for_bindings, Enumerated=ButtonTypeState] attribute DOMString type;
+    [CEReactions, Reflect=formtarget] attribute Utf16DOMString formTarget;
+    [CEReactions, Reflect] attribute Utf16DOMString name;
+    [CEReactions, ImplementedAs=type_for_bindings, Enumerated=ButtonTypeState] attribute Utf16DOMString type;
     [CEReactions, Reflect] attribute Utf16DOMString value;
 
     readonly attribute boolean willValidate;
@@ -33,8 +28,8 @@ interface HTMLButtonElement : HTMLElement {
     readonly attribute Utf16DOMString validationMessage;
     boolean checkValidity();
     boolean reportValidity();
-    undefined setCustomValidity(DOMString error);
+    undefined setCustomValidity(Utf16DOMString error);
 
     readonly attribute NodeList labels;
 };
-HTMLButtonElement includes PopoverInvokerElement;
+HTMLButtonElement includes PopoverTargetAttributes;

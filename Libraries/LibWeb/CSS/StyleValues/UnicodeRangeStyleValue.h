@@ -21,9 +21,11 @@ public:
 
     Gfx::UnicodeRange const& unicode_range() const { return m_unicode_range; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(UnicodeRangeStyleValue const&) const;
+
+    virtual bool is_computationally_independent() const override { VERIFY_NOT_REACHED(); }
 
 private:
     UnicodeRangeStyleValue(Gfx::UnicodeRange);

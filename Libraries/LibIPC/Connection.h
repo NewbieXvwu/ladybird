@@ -11,7 +11,7 @@
 #include <AK/Forward.h>
 #include <AK/Queue.h>
 #include <LibCore/EventReceiver.h>
-#include <LibIPC/File.h>
+#include <LibIPC/Attachment.h>
 #include <LibIPC/Forward.h>
 #include <LibIPC/Message.h>
 #include <LibIPC/Transport.h>
@@ -26,7 +26,7 @@ public:
 
     [[nodiscard]] bool is_open() const;
     ErrorOr<void> post_message(Message const&);
-    ErrorOr<void> post_message(MessageBuffer);
+    ErrorOr<void> post_message(MessageBuffer&);
 
     void shutdown();
     virtual void die() { }
@@ -36,22 +36,22 @@ public:
 protected:
     explicit ConnectionBase(IPC::Stub&, NonnullOwnPtr<Transport>, u32 local_endpoint_magic);
 
-    virtual void may_have_become_unresponsive() { }
-    virtual void did_become_responsive() { }
     virtual void shutdown_with_error(Error const&);
-    virtual OwnPtr<Message> try_parse_message(ReadonlyBytes, Queue<File>&) = 0;
+    virtual OwnPtr<Message> try_parse_message(ReadonlyBytes, Queue<Attachment>&) = 0;
 
     OwnPtr<IPC::Message> wait_for_specific_endpoint_message_impl(u32 endpoint_magic, int message_id);
     void wait_for_transport_to_become_readable();
-    ErrorOr<void> drain_messages_from_peer();
+    enum class PeerEOF {
+        No,
+        Yes
+    };
+    PeerEOF drain_messages_from_peer();
 
     void handle_messages();
 
     IPC::Stub& m_local_stub;
 
     NonnullOwnPtr<Transport> m_transport;
-
-    RefPtr<Core::Timer> m_responsiveness_timer;
 
     Vector<NonnullOwnPtr<Message>> m_unprocessed_messages;
 
@@ -64,12 +64,6 @@ public:
     Connection(IPC::Stub& local_stub, NonnullOwnPtr<Transport> transport)
         : ConnectionBase(local_stub, move(transport), LocalEndpoint::static_magic())
     {
-    }
-
-    template<typename MessageType>
-    OwnPtr<MessageType> wait_for_specific_message()
-    {
-        return wait_for_specific_endpoint_message<MessageType, LocalEndpoint>();
     }
 
     template<typename RequestType, typename... Args>
@@ -98,15 +92,19 @@ protected:
         return {};
     }
 
-    virtual OwnPtr<Message> try_parse_message(ReadonlyBytes bytes, Queue<File>& fds) override
+    virtual OwnPtr<Message> try_parse_message(ReadonlyBytes bytes, Queue<Attachment>& attachments) override
     {
-        auto local_message = LocalEndpoint::decode_message(bytes, fds);
+        auto local_message = LocalEndpoint::decode_message(bytes, attachments);
         if (!local_message.is_error())
             return local_message.release_value();
 
-        auto peer_message = PeerEndpoint::decode_message(bytes, fds);
+        auto peer_message = PeerEndpoint::decode_message(bytes, attachments);
         if (!peer_message.is_error())
             return peer_message.release_value();
+
+        dbgln("Failed to parse IPC message:");
+        dbgln("  Local endpoint error: {}", local_message.error());
+        dbgln("  Peer endpoint error: {}", peer_message.error());
 
         return nullptr;
     }

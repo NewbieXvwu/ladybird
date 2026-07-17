@@ -19,6 +19,8 @@ class SVGMaskElement final : public SVGGraphicsElement {
 public:
     virtual ~SVGMaskElement() override;
 
+    virtual bool is_svg_mask_element() const final { return true; }
+
     virtual Optional<ViewBox> active_view_box() const override
     {
         // maskContentUnits = objectBoundingBox acts like the mask is sized to the bounding box
@@ -28,9 +30,9 @@ public:
         return {};
     }
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
 
     CSSPixelRect resolve_masking_area(CSSPixelRect const& mask_target) const;
 
@@ -44,5 +46,12 @@ private:
     Optional<MaskContentUnits> m_mask_content_units = {};
     Optional<MaskUnits> m_mask_units = {};
 };
+
+}
+
+namespace Web::DOM {
+
+template<>
+inline bool Node::fast_is<SVG::SVGMaskElement>() const { return is_svg_mask_element(); }
 
 }

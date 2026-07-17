@@ -4,6 +4,7 @@
 <script>
     asyncTest(async (done) => {
         const scriptContainer = document.getElementById("script-container");
+        globalThis.errors = new Map();
 
         const createScript = (type) => {
             return new Promise((resolve) => {
@@ -12,7 +13,10 @@
                         throw Error();
                     } catch (e) {
                         const uuidRegex = /[a-zA-Z0-9]+-[a-zA-Z0-9]+-[a-zA-Z0-9]+-[a-zA-Z0-9]+-[a-zA-Z0-9]+/g;
-                        globalThis.println("${type}: " + e.stack.replace(uuidRegex, "[flaky-uuid-replaced]"));
+                        const normalizedStack = e.stack
+                            .replace(uuidRegex, "[flaky-uuid-replaced]")
+                            .replace(/blob:(file:\\/\\/\\/|ladybird\\/)/g, "blob:<origin>/");
+                        globalThis.errors.set("${type}", normalizedStack);
                     }
                 `;
 
@@ -38,6 +42,12 @@
         ];
 
         await Promise.all(scriptPromises);
+        
+        const sortedErrors = new Map([...globalThis.errors.entries()].sort());
+        for (const [type, normalizedStack] of sortedErrors) {
+            globalThis.println(`${type}: ${normalizedStack}`);
+        }
+        
         done();
     });
 </script>

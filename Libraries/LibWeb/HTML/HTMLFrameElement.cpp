@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLFrameElementPrototype.h>
+#include <LibWeb/Bindings/HTMLFrameElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
@@ -49,24 +49,23 @@ void HTMLFrameElement::inserted()
         return;
 
     // 3. Create a new child navigable for insertedNode.
-    MUST(create_new_child_navigable(GC::create_function(realm().heap(), [this] {
-        // 4. Process the frame attributes for insertedNode, with initialInsertion set to true.
-        process_the_frame_attributes(InitialInsertion::Yes);
-        set_content_navigable_has_session_history_entry_and_ready_for_navigation();
-    })));
+    create_new_child_navigable();
+
+    // 4. Process the frame attributes for insertedNode, with initialInsertion set to true.
+    process_the_frame_attributes(InitialInsertion::Yes);
 }
 
 // https://html.spec.whatwg.org/multipage/obsolete.html#frames:html-element-removing-steps
-void HTMLFrameElement::removed_from(DOM::Node* old_parent, DOM::Node& old_root)
+void HTMLFrameElement::removed_from(IsSubtreeRoot is_subtree_root, DOM::Node* old_ancestor, DOM::Node& old_root)
 {
-    Base::removed_from(old_parent, old_root);
+    Base::removed_from(is_subtree_root, old_ancestor, old_root);
 
     // The frame HTML element removing steps, given removedNode, are to destroy a child navigable given removedNode.
     destroy_the_child_navigable();
 }
 
 // https://html.spec.whatwg.org/multipage/obsolete.html#frames:frame-3
-void HTMLFrameElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLFrameElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -83,7 +82,7 @@ i32 HTMLFrameElement::default_tab_index_value() const
     return 0;
 }
 
-void HTMLFrameElement::adjust_computed_style(CSS::ComputedProperties& style)
+void HTMLFrameElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
 {
     // https://drafts.csswg.org/css-display-3/#unbox
     if (style.display().is_contents())

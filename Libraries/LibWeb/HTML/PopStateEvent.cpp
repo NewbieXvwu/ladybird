@@ -7,24 +7,24 @@
 #include <LibGC/Heap.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/PopStateEventPrototype.h>
+#include <LibWeb/Bindings/PopStateEvent.h>
 #include <LibWeb/HTML/PopStateEvent.h>
 
 namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(PopStateEvent);
 
-[[nodiscard]] GC::Ref<PopStateEvent> PopStateEvent::create(JS::Realm& realm, FlyString const& event_name, PopStateEventInit const& event_init)
+[[nodiscard]] GC::Ref<PopStateEvent> PopStateEvent::create(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::PopStateEventInit const& event_init)
 {
     return realm.create<PopStateEvent>(realm, event_name, event_init);
 }
 
-GC::Ref<PopStateEvent> PopStateEvent::construct_impl(JS::Realm& realm, FlyString const& event_name, PopStateEventInit const& event_init)
+GC::Ref<PopStateEvent> PopStateEvent::construct_impl(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::PopStateEventInit const& event_init)
 {
     return realm.create<PopStateEvent>(realm, event_name, event_init);
 }
 
-PopStateEvent::PopStateEvent(JS::Realm& realm, FlyString const& event_name, PopStateEventInit const& event_init)
+PopStateEvent::PopStateEvent(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::PopStateEventInit const& event_init)
     : DOM::Event(realm, event_name, event_init)
     , m_state(event_init.state)
 {

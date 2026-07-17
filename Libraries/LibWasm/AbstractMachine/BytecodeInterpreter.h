@@ -13,12 +13,10 @@
 
 namespace Wasm {
 
-union SourcesAndDestination {
-    struct {
-        Dispatch::RegisterOrStack sources[3];
-        Dispatch::RegisterOrStack destination;
-    };
-    u32 sources_and_destination;
+enum class Outcome : u64 {
+    // 0..Constants::max_allowed_executed_instructions_per_call -> next IP.
+    Continue = Constants::max_allowed_executed_instructions_per_call + 1,
+    Return,
 };
 
 struct WASM_API BytecodeInterpreter final : public Interpreter {
@@ -59,14 +57,23 @@ struct WASM_API BytecodeInterpreter final : public Interpreter {
     enum class CallAddressSource {
         DirectCall,
         IndirectCall,
+        DirectTailCall,
+        IndirectTailCall,
     };
 
-    template<bool HasCompiledList, bool HasDynamicInsnLimit>
+    enum class CallType {
+        UsingRegisters,
+        UsingCallRecord,
+        UsingStack,
+    };
+
+    template<bool HasCompiledList, bool HasDynamicInsnLimit, bool HaveDirectThreadingInfo>
     void interpret_impl(Configuration&, Expression const&);
 
-protected:
-    InstructionPointer branch_to_label(Configuration&, LabelIndex);
-    template<typename ReadT, typename PushT>
+    template<bool NeedsStackAdjustment>
+    InstructionPointer branch_to_label(Configuration&, LabelIndex, InstructionPointer current_ip, bool actually_branching = true);
+    Optional<InstructionPointer> unwind_to_throw_handler(Configuration&, ExceptionAddress);
+    template<typename ReadT, typename PushT, SourceAddressMix>
     bool load_and_push(Configuration&, Instruction const&, SourcesAndDestination const&);
     template<typename PopT, typename StoreT>
     bool pop_and_store(Configuration&, Instruction const&, SourcesAndDestination const&);
@@ -88,14 +95,32 @@ protected:
     void pop_and_push_m_splat(Configuration&, Instruction const&, SourcesAndDestination const&);
     template<typename M, template<typename> typename SetSign, typename VectorType = Native128ByteVectorOf<M, SetSign>>
     VectorType pop_vector(Configuration&, size_t source, SourcesAndDestination const&);
-    bool store_to_memory(Configuration&, Instruction::MemoryArgument const&, ReadonlyBytes data, u32 base);
-    bool call_address(Configuration&, FunctionAddress, CallAddressSource = CallAddressSource::DirectCall);
+    bool store_to_memory(Configuration&, Instruction::MemoryArgument const&, ReadonlyBytes data, Value const& base);
+    Outcome call_address(Configuration&, FunctionAddress, SourcesAndDestination const&, CallAddressSource = CallAddressSource::DirectCall, CallType = CallType::UsingStack);
+    Outcome run_compiled_function_direct(Configuration&);
+    Outcome run_native_entry(Configuration&);
+    bool trap_if_insufficient_native_stack_space(size_t minimum_native_stack_space_to_keep_free = 2 * MiB);
 
-    template<typename PopTypeLHS, typename PushType, typename Operator, typename PopTypeRHS = PopTypeLHS, typename... Args>
+    template<typename T>
+    bool store_to_memory(MemoryInstance&, u64 address, T value);
+
+    template<typename PopTypeLHS, typename PushType, typename Operator, SourceAddressMix, typename PopTypeRHS = PopTypeLHS, typename... Args>
     bool binary_numeric_operation(Configuration&, SourcesAndDestination const&, Args&&...);
 
-    template<typename PopType, typename PushType, typename Operator, typename... Args>
+    template<typename PopType, typename PushType, typename Operator, SourceAddressMix, size_t input_arg = 0, typename... Args>
     bool unary_operation(Configuration&, SourcesAndDestination const&, Args&&...);
+
+    ALWAYS_INLINE bool set_trap(StringView reason)
+    {
+        m_trap = Trap { ByteString(reason) };
+        return true;
+    }
+
+    ALWAYS_INLINE bool set_trap(Trap trap)
+    {
+        m_trap = move(trap);
+        return true;
+    }
 
     template<typename T>
     T read_value(ReadonlyBytes data);
@@ -119,6 +144,7 @@ protected:
         return false;
     }
 
+protected:
     Variant<Trap, Empty> m_trap;
     StackInfo const& m_stack_info;
 };

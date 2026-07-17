@@ -5,7 +5,15 @@
  */
 
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
-#include <LibWeb/Bindings/MathMLElementPrototype.h>
+#include <LibWeb/Bindings/MathMLElement.h>
+#include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/CSS/StyleValues/FunctionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
+#include <LibWeb/HTML/Numbers.h>
+#include <LibWeb/HTML/Parser/HTMLParser.h>
+#include <LibWeb/MathML/AttributeNames.h>
 #include <LibWeb/MathML/MathMLElement.h>
 #include <LibWeb/MathML/TagNames.h>
 
@@ -20,23 +28,23 @@ MathMLElement::MathMLElement(DOM::Document& document, DOM::QualifiedName qualifi
 {
 }
 
-void MathMLElement::attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void MathMLElement::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(local_name, old_value, value, namespace_);
-    HTMLOrSVGElement::attribute_changed(local_name, old_value, value, namespace_);
+    HTMLOrSVGOrMathMLElement::attribute_changed(local_name, old_value, value, namespace_);
 }
 
 WebIDL::ExceptionOr<void> MathMLElement::cloned(DOM::Node& node, bool clone_children) const
 {
     TRY(Base::cloned(node, clone_children));
-    TRY(HTMLOrSVGElement::cloned(node, clone_children));
+    TRY(HTMLOrSVGOrMathMLElement::cloned(node, clone_children));
     return {};
 }
 
 void MathMLElement::inserted()
 {
     Base::inserted();
-    HTMLOrSVGElement::inserted();
+    HTMLOrSVGOrMathMLElement::inserted();
 }
 
 void MathMLElement::initialize(JS::Realm& realm)
@@ -56,7 +64,79 @@ Optional<ARIA::Role> MathMLElement::default_role() const
 void MathMLElement::visit_edges(JS::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    HTMLOrSVGElement::visit_edges(visitor);
+    HTMLOrSVGOrMathMLElement::visit_edges(visitor);
+}
+
+bool MathMLElement::is_presentational_hint(Utf16FlyString const& name) const
+{
+    return first_is_one_of(name, AttributeNames::dir, AttributeNames::mathcolor, AttributeNames::mathbackground,
+        AttributeNames::mathsize, AttributeNames::displaystyle, AttributeNames::scriptlevel);
+}
+
+void MathMLElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
+{
+    Base::apply_presentational_hints(properties);
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
+        if (name == AttributeNames::dir) {
+            // https://w3c.github.io/mathml-core/#attributes-common-to-html-and-mathml-elements
+            // The dir attribute, if present, must be an ASCII case-insensitive match to ltr or rtl. In that case, the
+            // user agent is expected to treat the attribute as a presentational hint setting the element's direction
+            // property to the corresponding value. More precisely, an ASCII case-insensitive match to rtl is mapped to
+            // rtl while an ASCII case-insensitive match to ltr is mapped to ltr.
+            if (value.equals_ignoring_ascii_case("ltr"sv))
+                properties.append({ .property_id = CSS::PropertyID::Direction, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Ltr) });
+            else if (value.equals_ignoring_ascii_case("rtl"sv))
+                properties.append({ .property_id = CSS::PropertyID::Direction, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Rtl) });
+        } else if (name == AttributeNames::mathcolor) {
+            // https://w3c.github.io/mathml-core/#legacy-mathml-style-attributes
+            // The mathcolor and mathbackground attributes, if present, must have a value that is a <color>. In that case,
+            // the user agent is expected to treat these attributes as a presentational hint setting the element's color
+            // and background-color properties to the corresponding values.
+            if (auto parsed_value = parse_css_type(CSS::Parser::ParsingParams { document() }, value, CSS::ValueType::Color))
+                properties.append({ .property_id = CSS::PropertyID::Color, .value = parsed_value.release_nonnull() });
+        } else if (name == AttributeNames::mathbackground) {
+            if (auto parsed_value = parse_css_type(CSS::Parser::ParsingParams { document() }, value, CSS::ValueType::Color))
+                properties.append({ .property_id = CSS::PropertyID::BackgroundColor, .value = parsed_value.release_nonnull() });
+        } else if (name == AttributeNames::mathsize) {
+            // https://w3c.github.io/mathml-core/#dfn-mathsize
+            // The mathsize attribute, if present, must have a value that is a valid <length-percentage>.
+            // In that case, the user agent is expected to treat the attribute as a presentational hint setting the
+            // element's font-size property to the corresponding value.
+            // NB: We parse the value as a font size, then filter out non LengthPercentage values, to ensure negative
+            //     LengthPercentage values are rejected.
+            if (auto parsed_value = parse_css_value(CSS::Parser::ParsingParams { document() }, value, CSS::PropertyID::FontSize);
+                parsed_value && (parsed_value->is_length() || parsed_value->is_percentage() || parsed_value->is_calculated()))
+                properties.append({ .property_id = CSS::PropertyID::FontSize, .value = parsed_value.release_nonnull() });
+        } else if (name == AttributeNames::displaystyle) {
+            // https://w3c.github.io/mathml-core/#dfn-displaystyle
+            // The displaystyle attribute, if present, must have a value that is a boolean. In that case, the user agent
+            // is expected to treat the attribute as a presentational hint setting the element's math-style property to
+            // the corresponding value. More precisely, an ASCII case-insensitive match to true is mapped to normal while
+            // an ASCII case-insensitive match to false is mapped to compact.
+            if (value.equals_ignoring_ascii_case("true"sv))
+                properties.append({ .property_id = CSS::PropertyID::MathStyle, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Normal) });
+            else if (value.equals_ignoring_ascii_case("false"sv))
+                properties.append({ .property_id = CSS::PropertyID::MathStyle, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Compact) });
+        } else if (name == AttributeNames::scriptlevel) {
+            // https://w3c.github.io/mathml-core/#dfn-scriptlevel
+            // The scriptlevel attribute, if present, must have value +<U>, -<U> or <U> where <U> is an unsigned-integer.
+            // In that case the user agent is expected to treat the scriptlevel attribute as a presentational hint
+            // setting the element's math-depth property to the corresponding value. More precisely, +<U>, -<U> and <U>
+            // are respectively mapped to add(<U>) add(<-U>) and <U>.
+            if (Optional<Utf16View> parsed_value = HTML::parse_integer_digits(value); parsed_value.has_value()) {
+                auto string_value = parsed_value.value();
+                if (auto integer_value = parsed_value->to_number<i32>(TrimWhitespace::No); integer_value.has_value()) {
+                    auto style_value = [&]() -> NonnullRefPtr<CSS::StyleValue const> {
+                        if (string_value.code_unit_at(0) == '+' || string_value.code_unit_at(0) == '-')
+                            return CSS::FunctionStyleValue::create("add"_utf16_fly_string, CSS::IntegerStyleValue::create(integer_value.release_value()));
+
+                        return CSS::IntegerStyleValue::create(integer_value.release_value());
+                    }();
+                    properties.append({ .property_id = CSS::PropertyID::MathDepth, .value = style_value });
+                }
+            }
+        }
+    });
 }
 
 }

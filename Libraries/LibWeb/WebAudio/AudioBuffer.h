@@ -15,12 +15,6 @@
 
 namespace Web::WebAudio {
 
-struct AudioBufferOptions {
-    WebIDL::UnsignedLong number_of_channels { 1 };
-    WebIDL::UnsignedLong length {};
-    float sample_rate {};
-};
-
 // https://webaudio.github.io/web-audio-api/#AudioBuffer
 class AudioBuffer final : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(AudioBuffer, Bindings::PlatformObject);
@@ -28,7 +22,7 @@ class AudioBuffer final : public Bindings::PlatformObject {
 
 public:
     static WebIDL::ExceptionOr<GC::Ref<AudioBuffer>> create(JS::Realm&, WebIDL::UnsignedLong number_of_channels, WebIDL::UnsignedLong length, float sample_rate);
-    static WebIDL::ExceptionOr<GC::Ref<AudioBuffer>> construct_impl(JS::Realm&, AudioBufferOptions const&);
+    static WebIDL::ExceptionOr<GC::Ref<AudioBuffer>> construct_impl(JS::Realm&, Bindings::AudioBufferOptions const&);
 
     virtual ~AudioBuffer() override;
 
@@ -37,14 +31,15 @@ public:
     double duration() const;
     WebIDL::UnsignedLong number_of_channels() const;
     WebIDL::ExceptionOr<GC::Ref<JS::Float32Array>> get_channel_data(WebIDL::UnsignedLong channel) const;
-    WebIDL::ExceptionOr<void> copy_from_channel(GC::Root<WebIDL::BufferSource> const&, WebIDL::UnsignedLong channel_number, WebIDL::UnsignedLong buffer_offset = 0) const;
-    WebIDL::ExceptionOr<void> copy_to_channel(GC::Root<WebIDL::BufferSource> const&, WebIDL::UnsignedLong channel_number, WebIDL::UnsignedLong buffer_offset = 0);
+    WebIDL::ExceptionOr<void> copy_from_channel(GC::Ref<JS::Float32Array>, WebIDL::UnsignedLong channel_number, WebIDL::UnsignedLong buffer_offset = 0) const;
+    WebIDL::ExceptionOr<void> copy_to_channel(GC::Ref<JS::Float32Array>, WebIDL::UnsignedLong channel_number, WebIDL::UnsignedLong buffer_offset = 0);
 
 private:
-    explicit AudioBuffer(JS::Realm&, AudioBufferOptions const&);
+    explicit AudioBuffer(JS::Realm&, Bindings::AudioBufferOptions const&);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     // https://webaudio.github.io/web-audio-api/#dom-audiobuffer-number-of-channels-slot
     // The number of audio channels for this AudioBuffer, which is an unsigned long.

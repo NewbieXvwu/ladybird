@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2021-2023, Linus Groh <linusg@serenityos.org>
- * Copyright (c) 2024-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2024-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -31,7 +31,7 @@ void InstantPrototype::initialize(Realm& realm)
     auto& vm = this->vm();
 
     // 8.3.2 Temporal.Instant.prototype[ %Symbol.toStringTag% ], https://tc39.es/proposal-temporal/#sec-properties-of-the-temporal-instant-prototype-object
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Temporal.Instant"_string), Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Temporal.Instant"_utf16_fly_string), Attribute::Configurable);
 
     define_native_accessor(realm, vm.names.epochMilliseconds, epoch_milliseconds_getter, {}, Attribute::Configurable);
     define_native_accessor(realm, vm.names.epochNanoseconds, epoch_nanoseconds_getter, {}, Attribute::Configurable);
@@ -143,11 +143,9 @@ JS_DEFINE_NATIVE_FUNCTION(InstantPrototype::round)
     // 2. Perform ? RequireInternalSlot(instant, [[InitializedTemporalInstant]]).
     auto instant = TRY(typed_this_object(vm));
 
-    // 3. If roundTo is undefined, then
-    if (round_to_value.is_undefined()) {
-        // a. Throw a TypeError exception.
+    // 3. If roundTo is undefined, throw a TypeError exception.
+    if (round_to_value.is_undefined())
         return vm.throw_completion<TypeError>(ErrorType::TemporalMissingOptionsObject);
-    }
 
     GC::Ptr<Object> round_to;
 
@@ -278,14 +276,12 @@ JS_DEFINE_NATIVE_FUNCTION(InstantPrototype::to_string)
     if (auto const* unit = smallest_unit.get_pointer<Unit>(); unit && *unit == Unit::Hour)
         return vm.throw_completion<RangeError>(ErrorType::OptionIsNotValidValue, temporal_unit_to_string(*unit), vm.names.smallestUnit);
 
-    String time_zone_buffer;
-    Optional<StringView> time_zone;
+    Optional<Utf16String> time_zone;
 
     // 11. If timeZone is not undefined, then
     if (!time_zone_value.is_undefined()) {
         // a. Set timeZone to ? ToTemporalTimeZoneIdentifier(timeZone).
-        time_zone_buffer = TRY(to_temporal_time_zone_identifier(vm, time_zone_value));
-        time_zone = time_zone_buffer;
+        time_zone = TRY(to_temporal_time_zone_identifier(vm, time_zone_value));
     }
 
     // 12. Let precision be ToSecondsStringPrecisionRecord(smallestUnit, digits).
@@ -298,11 +294,11 @@ JS_DEFINE_NATIVE_FUNCTION(InstantPrototype::to_string)
     auto rounded_instant = MUST(create_temporal_instant(vm, BigInt::create(vm, move(rounded_nanoseconds))));
 
     // 15. Return TemporalInstantToString(roundedInstant, timeZone, precision.[[Precision]]).
-    return PrimitiveString::create(vm, temporal_instant_to_string(rounded_instant, time_zone, precision.precision));
+    return PrimitiveString::create(vm, temporal_instant_to_string(rounded_instant, time_zone.map([](auto const& time_zone) { return time_zone.utf16_view(); }), precision.precision));
 }
 
 // 8.3.12 Temporal.Instant.prototype.toLocaleString ( [ locales [ , options ] ] ), https://tc39.es/proposal-temporal/#sec-temporal.instant.prototype.tolocalestring
-// 15.12.2.1 Temporal.Instant.prototype.toLocaleString ( [ locales [ , options ] ] ), https://tc39.es/proposal-temporal/#sup-temporal.instant.prototype.tolocalestring
+// 15.11.2.1 Temporal.Instant.prototype.toLocaleString ( [ locales [ , options ] ] ), https://tc39.es/proposal-temporal/#sup-temporal.instant.prototype.tolocalestring
 JS_DEFINE_NATIVE_FUNCTION(InstantPrototype::to_locale_string)
 {
     auto& realm = *vm.current_realm();
@@ -350,7 +346,7 @@ JS_DEFINE_NATIVE_FUNCTION(InstantPrototype::to_zoned_date_time_iso)
     auto time_zone = TRY(to_temporal_time_zone_identifier(vm, vm.argument(0)));
 
     // 4. Return ! CreateTemporalZonedDateTime(instant.[[EpochNanoseconds]], timeZone, "iso8601").
-    return MUST(create_temporal_zoned_date_time(vm, instant->epoch_nanoseconds(), move(time_zone), "iso8601"_string));
+    return MUST(create_temporal_zoned_date_time(vm, instant->epoch_nanoseconds(), move(time_zone), "iso8601"_utf16));
 }
 
 }

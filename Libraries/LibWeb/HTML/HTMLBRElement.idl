@@ -1,11 +1,9 @@
-#import <HTML/HTMLElement.idl>
-
 // https://html.spec.whatwg.org/multipage/semantics.html#htmlbrelement
 [Exposed=Window]
 interface HTMLBRElement : HTMLElement {
 
     [HTMLConstructor] constructor();
 
-    [CEReactions, Reflect] attribute DOMString clear;
+    [CEReactions, Reflect] attribute Utf16DOMString clear;
 
 };

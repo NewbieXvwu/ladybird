@@ -7,35 +7,38 @@
 
 #pragma once
 
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/ARIA/Roles.h>
-#include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
 
 namespace Web::HTML {
 
 class HTMLOutputElement final
-    : public HTMLElement
-    , public FormAssociatedElement {
+    : public HTMLElement {
     WEB_PLATFORM_OBJECT(HTMLOutputElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLOutputElement);
-    FORM_ASSOCIATED_ELEMENT(HTMLElement, HTMLOutputElement)
 
 public:
     virtual ~HTMLOutputElement() override;
 
     GC::Ref<DOM::DOMTokenList> html_for();
 
-    String const& type() const
+    Utf16FlyString type() const
     {
-        static String const output = "output"_string;
-        return output;
+        return "output"_utf16_fly_string;
     }
 
     Utf16String default_value() const;
-    void set_default_value(Utf16String const&);
+    void set_default_value(Utf16View);
 
-    Utf16String value() const override;
-    void set_value(Utf16String const&);
+    Utf16String value() const;
+    virtual Utf16String form_value() const override { return value(); }
+    void set_value(Utf16View);
+
+    // ^FormAssociatedElement
+    virtual bool is_form_associated_element() const override { return true; }
 
     // ^FormAssociatedElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-listed
@@ -63,7 +66,7 @@ private:
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor& visitor) override;
 
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     GC::Ptr<DOM::DOMTokenList> m_html_for;
 

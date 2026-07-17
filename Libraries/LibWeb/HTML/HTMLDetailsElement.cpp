@@ -5,8 +5,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLDetailsElementPrototype.h>
+#include <AK/Utf16View.h>
+#include <LibWeb/Bindings/HTMLDetailsElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/Invalidation/ElementStateInvalidator.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/ShadowRoot.h>
@@ -56,7 +58,7 @@ void HTMLDetailsElement::inserted()
 }
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#the-details-element:concept-element-attributes-change-ext
-void HTMLDetailsElement::attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLDetailsElement::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(local_name, old_value, value, namespace_);
 
@@ -72,16 +74,18 @@ void HTMLDetailsElement::attribute_changed(FlyString const& local_name, Optional
 
     // 3. If localName is open, then:
     else if (local_name == HTML::AttributeNames::open) {
+        CSS::Invalidation::invalidate_style_after_open_state_change(*this);
+
         // 1. If one of oldValue or value is null and the other is not null, run the following steps, which are known as
         //    the details notification task steps, for this details element:
         if (old_value.has_value() != value.has_value()) {
             // 1. If oldValue is null, queue a details toggle event task given the details element, "closed", and "open".
             if (!old_value.has_value()) {
-                queue_a_details_toggle_event_task("closed"_string, "open"_string);
+                queue_a_details_toggle_event_task("closed"_utf16_fly_string, "open"_utf16_fly_string);
             }
             // 2. Otherwise, queue a details toggle event task given the details element, "open", and "closed".
             else {
-                queue_a_details_toggle_event_task("open"_string, "closed"_string);
+                queue_a_details_toggle_event_task("open"_utf16_fly_string, "closed"_utf16_fly_string);
             }
         }
 
@@ -95,14 +99,14 @@ void HTMLDetailsElement::attribute_changed(FlyString const& local_name, Optional
     }
 }
 
-void HTMLDetailsElement::children_changed(ChildrenChangedMetadata const* metadata)
+void HTMLDetailsElement::children_changed(ChildrenChangedMetadata const& metadata)
 {
     Base::children_changed(metadata);
     update_shadow_tree_slots();
 }
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#queue-a-details-toggle-event-task
-void HTMLDetailsElement::queue_a_details_toggle_event_task(String old_state, String new_state)
+void HTMLDetailsElement::queue_a_details_toggle_event_task(Utf16FlyString old_state, Utf16FlyString new_state)
 {
     // 1. If element's details toggle task tracker is not null, then:
     if (m_details_toggle_task_tracker.has_value()) {
@@ -122,7 +126,7 @@ void HTMLDetailsElement::queue_a_details_toggle_event_task(String old_state, Str
     auto task_id = queue_an_element_task(HTML::Task::Source::DOMManipulation, [this, old_state, new_state = move(new_state)]() mutable {
         // 1. Fire an event named toggle at element, using ToggleEvent, with the oldState attribute initialized to
         //    oldState and the newState attribute initialized to newState.
-        ToggleEventInit event_init {};
+        Bindings::ToggleEventInit event_init {};
         event_init.old_state = move(old_state);
         event_init.new_state = move(new_state);
 
@@ -141,7 +145,7 @@ void HTMLDetailsElement::queue_a_details_toggle_event_task(String old_state, Str
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#details-name-group
 template<typename Callback>
-void for_each_element_in_details_name_group(HTMLDetailsElement& details, FlyString const& name, Callback&& callback)
+void for_each_element_in_details_name_group(HTMLDetailsElement& details, Utf16View name, Callback&& callback)
 {
     // The details name group that contains a details element a also contains all the other details elements b that
     // fulfill all of the following conditions:
@@ -230,7 +234,9 @@ WebIDL::ExceptionOr<void> HTMLDetailsElement::create_shadow_tree_if_needed()
 
     // The details element is expected to have an internal shadow tree with three child elements:
     auto shadow_root = realm.create<DOM::ShadowRoot>(document(), *this, Bindings::ShadowRootMode::Closed);
+    shadow_root->set_user_agent_internal(true);
     shadow_root->set_slot_assignment(Bindings::SlotAssignmentMode::Manual);
+    set_shadow_root(shadow_root);
 
     // The first child element is a slot that is expected to take the details element's first summary element child, if any.
     auto summary_slot = TRY(DOM::create_element(document(), HTML::TagNames::slot, Namespace::HTML));
@@ -238,12 +244,12 @@ WebIDL::ExceptionOr<void> HTMLDetailsElement::create_shadow_tree_if_needed()
 
     // The second child element is a slot that is expected to take the details element's remaining descendants, if any.
     auto descendants_slot = TRY(DOM::create_element(document(), HTML::TagNames::slot, Namespace::HTML));
-    descendants_slot->set_use_pseudo_element(CSS::PseudoElement::DetailsContent);
     MUST(shadow_root->append_child(descendants_slot));
+    descendants_slot->set_associated_shadow_host_pseudo_element(CSS::PseudoElement::DetailsContent);
 
     // The third child element is either a link or style element with the following styles for the default summary:
     auto style = TRY(DOM::create_element(document(), HTML::TagNames::style, Namespace::HTML));
-    style->set_text_content(R"~~~(
+    auto style_text = realm.create<DOM::Text>(document(), R"~~~(
         :host summary {
             display: list-item;
             counter-increment: list-item 0;
@@ -253,11 +259,11 @@ WebIDL::ExceptionOr<void> HTMLDetailsElement::create_shadow_tree_if_needed()
             list-style-type: disclosure-open;
         }
     )~~~"_utf16);
+    MUST(style->append_child(style_text));
     MUST(shadow_root->append_child(style));
 
     m_summary_slot = static_cast<HTML::HTMLSlotElement&>(*summary_slot);
     m_descendants_slot = static_cast<HTML::HTMLSlotElement&>(*descendants_slot);
-    set_shadow_root(shadow_root);
 
     return {};
 }
@@ -267,12 +273,12 @@ void HTMLDetailsElement::update_shadow_tree_slots()
     if (!shadow_root())
         return;
 
-    Vector<HTMLSlotElement::SlottableHandle> summary_assignment;
-    Vector<HTMLSlotElement::SlottableHandle> descendants_assignment;
+    GC::ConservativeVector<HTMLSlotElement::SlottableHandle> summary_assignment;
+    GC::ConservativeVector<HTMLSlotElement::SlottableHandle> descendants_assignment;
 
     auto* summary = first_child_of_type<HTMLSummaryElement>();
     if (summary != nullptr)
-        summary_assignment.append(GC::make_root(static_cast<DOM::Element&>(*summary)));
+        summary_assignment.append(GC::Ref { static_cast<DOM::Element&>(*summary) });
 
     for_each_in_subtree([&](auto& child) {
         if (&child == summary)
@@ -281,7 +287,7 @@ void HTMLDetailsElement::update_shadow_tree_slots()
             return TraversalDecision::Continue;
 
         child.as_slottable().visit([&](auto& node) {
-            descendants_assignment.append(GC::make_root(node));
+            descendants_assignment.append(node);
         });
 
         return TraversalDecision::Continue;
@@ -300,14 +306,14 @@ void HTMLDetailsElement::update_shadow_tree_style()
         return;
 
     if (has_attribute(HTML::AttributeNames::open)) {
-        MUST(m_descendants_slot->set_attribute(HTML::AttributeNames::style, R"~~~(
+        m_descendants_slot->set_attribute_value(HTML::AttributeNames::style, R"~~~(
             display: block;
-        )~~~"_string));
+        )~~~"_utf16);
     } else {
-        MUST(m_descendants_slot->set_attribute(HTML::AttributeNames::style, R"~~~(
+        m_descendants_slot->set_attribute_value(HTML::AttributeNames::style, R"~~~(
             display: block;
             content-visibility: hidden;
-        )~~~"_string));
+        )~~~"_utf16);
     }
 
     shadow_root()->set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::DetailsElementOpenedOrClosed);

@@ -7,7 +7,7 @@
 
 #include <AK/Vector.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/WorkerGlobalScopePrototype.h>
+#include <LibWeb/Bindings/WorkerGlobalScope.h>
 #include <LibWeb/CSS/FontFaceSet.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/Directive.h>
 #include <LibWeb/ContentSecurityPolicy/Policy.h>
@@ -17,6 +17,7 @@
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/MessageEvent.h>
 #include <LibWeb/HTML/MessagePort.h>
+#include <LibWeb/HTML/PolicyContainers.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/WorkerGlobalScope.h>
@@ -35,6 +36,16 @@ WorkerGlobalScope::WorkerGlobalScope(JS::Realm& realm, GC::Ref<Web::Page> page)
 }
 
 WorkerGlobalScope::~WorkerGlobalScope() = default;
+
+// https://webidl.spec.whatwg.org/#platform-object-setprototypeof
+JS::ThrowCompletionOr<bool> WorkerGlobalScope::internal_set_prototype_of(JS::Object* prototype)
+{
+    // 1. If O’s associated realm’s is global prototype chain mutable is true, return ? OrdinarySetPrototypeOf(O, V).
+    // NB: This is never the case for WorkerGlobalScope.
+
+    // 2. Return ? SetImmutablePrototype(O, V).
+    return set_immutable_prototype(prototype);
+}
 
 void WorkerGlobalScope::initialize_web_interfaces_impl()
 {
@@ -86,8 +97,7 @@ void WorkerGlobalScope::close_a_worker()
 }
 
 // https://html.spec.whatwg.org/multipage/workers.html#importing-scripts-and-libraries
-// https://whatpr.org/html/9893/workers.html#importing-scripts-and-libraries
-WebIDL::ExceptionOr<void> WorkerGlobalScope::import_scripts(Vector<String> const& urls, PerformTheFetchHook perform_fetch)
+WebIDL::ExceptionOr<void> WorkerGlobalScope::import_scripts(Vector<Utf16String> const& urls, PerformTheFetchHook perform_fetch)
 {
     // The algorithm may optionally be customized by supplying custom perform the fetch hooks,
     // which if provided will be used when invoking fetch a classic worker-imported script.
@@ -95,8 +105,8 @@ WebIDL::ExceptionOr<void> WorkerGlobalScope::import_scripts(Vector<String> const
 
     // FIXME: 1. If worker global scope's type is "module", throw a TypeError exception.
 
-    // 2. Let settings object be the current principal settings object.
-    auto& settings_object = HTML::current_principal_settings_object();
+    // 2. Let settings object be the current settings object.
+    auto& settings_object = HTML::current_settings_object();
 
     // 3. If urls is empty, return.
     if (urls.is_empty())

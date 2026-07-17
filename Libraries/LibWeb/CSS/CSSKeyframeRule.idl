@@ -1,9 +1,6 @@
-#import <CSS/CSSRule.idl>
-#import <CSS/CSSStyleProperties.idl>
-
 // https://drafts.csswg.org/css-animations-1/#interface-csskeyframerule-idl
 [Exposed=Window]
 interface CSSKeyframeRule : CSSRule {
-    attribute CSSOMString keyText;
+    attribute Utf16CSSOMString keyText;
     [SameObject, PutForwards=cssText] readonly attribute CSSStyleProperties style;
 };

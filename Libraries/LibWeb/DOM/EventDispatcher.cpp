@@ -6,6 +6,7 @@
  */
 
 #include <AK/Assertions.h>
+#include <AK/Optional.h>
 #include <AK/TypeCasts.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/FunctionObject.h>
@@ -30,6 +31,20 @@
 #include <LibWeb/WebIDL/AbstractOperations.h>
 
 namespace Web::DOM {
+
+// https://dom.spec.whatwg.org/#concept-event-listener-invoke
+static Optional<Utf16FlyString> legacy_event_type_for_event_type(Utf16FlyString const& event_type)
+{
+    if (event_type == HTML::EventNames::animationend)
+        return HTML::EventNames::webkitAnimationEnd;
+    if (event_type == HTML::EventNames::animationiteration)
+        return HTML::EventNames::webkitAnimationIteration;
+    if (event_type == HTML::EventNames::animationstart)
+        return HTML::EventNames::webkitAnimationStart;
+    if (event_type == HTML::EventNames::transitionend)
+        return HTML::EventNames::webkitTransitionEnd;
+    return {};
+}
 
 // https://dom.spec.whatwg.org/#concept-event-listener-inner-invoke
 bool EventDispatcher::inner_invoke(Event& event, Vector<GC::Root<DOM::DOMEventListener>>& listeners, Event::Phase phase, bool invocation_target_in_shadow_tree, bool& legacy_output_did_listeners_throw)
@@ -89,7 +104,7 @@ bool EventDispatcher::inner_invoke(Event& event, Vector<GC::Root<DOM::DOMEventLi
 
         // 11. Call a user object’s operation with listener’s callback, "handleEvent", « event », and event’s currentTarget attribute value.
         // FIXME: These should be wrapped for us in call_user_object_operation, but it currently doesn't do that.
-        auto* this_value = event.current_target().ptr();
+        auto* this_value = event.current_target_for_bindings().ptr();
         auto* wrapped_event = &event;
         auto result = WebIDL::call_user_object_operation(callback, "handleEvent"_utf16_fly_string, this_value, { { wrapped_event } });
 
@@ -164,16 +179,10 @@ void EventDispatcher::invoke(Event::PathEntry& struct_, Event& event, Event::Pha
 
         // 2. If event’s type attribute value is a match for any of the strings in the first column in the following table,
         //    set event’s type attribute value to the string in the second column on the same row as the matching string, and return otherwise.
-        if (event.type() == HTML::EventNames::animationend)
-            event.set_type(HTML::EventNames::webkitAnimationEnd);
-        else if (event.type() == HTML::EventNames::animationiteration)
-            event.set_type(HTML::EventNames::webkitAnimationIteration);
-        else if (event.type() == HTML::EventNames::animationstart)
-            event.set_type(HTML::EventNames::webkitAnimationStart);
-        else if (event.type() == HTML::EventNames::transitionend)
-            event.set_type(HTML::EventNames::webkitTransitionEnd);
-        else
+        auto legacy_event_type = legacy_event_type_for_event_type(event.type());
+        if (!legacy_event_type.has_value())
             return;
+        event.set_type(legacy_event_type.release_value());
 
         // 3. Inner invoke with event, listeners, phase, invocationTargetInShadowTree, and legacyOutputDidListenersThrowFlag if given.
         inner_invoke(event, listeners, phase, invocation_target_in_shadow_tree, legacy_output_did_listeners_throw);
@@ -214,8 +223,22 @@ bool EventDispatcher::dispatch(GC::Ref<EventTarget> target, Event& event, bool l
     // 5. Let clearTargets be false.
     bool clear_targets = false;
 
+    // OPTIMIZATION: Only dispatch events if there is at least one listener on the node or its ancestors. Activation
+    //               events are always dispatched. This saves us from going through the path building and dispatch
+    //               phases for events that will be dropped on the floor anyway.
+    bool is_activation_event = is<UIEvents::MouseEvent>(event) && event.type() == HTML::EventNames::click;
+    bool should_dispatch = is_activation_event;
+    if (!should_dispatch) {
+        auto const* node = as_if<Node>(*target);
+        should_dispatch = !node || node->has_inclusive_ancestor_with_event_listener(event.type());
+        if (!should_dispatch && event.is_trusted()) {
+            if (auto legacy_event_type = legacy_event_type_for_event_type(event.type()); legacy_event_type.has_value())
+                should_dispatch = node->has_inclusive_ancestor_with_event_listener(*legacy_event_type);
+        }
+    }
+
     // 6. If target is not relatedTarget or target is event’s relatedTarget, then:
-    if (related_target != target || event.related_target() == target) {
+    if (should_dispatch && (related_target != target || event.related_target() == target)) {
         // 1. Let touchTargets be a new list.
         Event::TouchTargetList touch_targets;
 
@@ -227,8 +250,9 @@ bool EventDispatcher::dispatch(GC::Ref<EventTarget> target, Event& event, bool l
         // 3. Append to an event path with event, target, targetOverride, relatedTarget, touchTargets, and false.
         event.append_to_path(*target, target_override, related_target, touch_targets, false);
 
-        // 4. Let isActivationEvent be true, if event is a MouseEvent object and event’s type attribute is "click"; otherwise false.
-        bool is_activation_event = is<UIEvents::MouseEvent>(event) && event.type() == HTML::EventNames::click;
+        // 4. Let isActivationEvent be true, if event is a MouseEvent object and event’s type attribute is "click";
+        //    otherwise false.
+        // NB: Step 4 is executed above as part of an optimization.
 
         // 5. If isActivationEvent is true and target has activation behavior, then set activationTarget to target.
         if (is_activation_event && target->has_activation_behavior())

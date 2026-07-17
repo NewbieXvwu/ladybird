@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Ladybird contributors
+ * Copyright (c) 2025-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -12,7 +12,7 @@ namespace Web::CSS {
 
 class ColorSchemeStyleValue final : public StyleValueWithDefaultOperators<ColorSchemeStyleValue> {
 public:
-    static ValueComparingNonnullRefPtr<ColorSchemeStyleValue const> create(Vector<String> schemes, bool only)
+    static ValueComparingNonnullRefPtr<ColorSchemeStyleValue const> create(Vector<Utf16FlyString> schemes, bool only)
     {
         return adopt_ref(*new (nothrow) ColorSchemeStyleValue(move(schemes), only));
     }
@@ -22,21 +22,23 @@ public:
     }
     virtual ~ColorSchemeStyleValue() override = default;
 
-    Vector<String> const& schemes() const { return m_properties.schemes; }
+    Vector<Utf16FlyString> const& schemes() const { return m_properties.schemes; }
     bool const& only() const { return m_properties.only; }
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(ColorSchemeStyleValue const& other) const { return m_properties == other.m_properties; }
 
+    virtual bool is_computationally_independent() const override { return true; }
+
 private:
-    ColorSchemeStyleValue(Vector<String> schemes, bool only)
+    ColorSchemeStyleValue(Vector<Utf16FlyString> schemes, bool only)
         : StyleValueWithDefaultOperators(Type::ColorScheme)
         , m_properties { .schemes = move(schemes), .only = only }
     {
     }
 
     struct Properties {
-        Vector<String> schemes;
+        Vector<Utf16FlyString> schemes;
         bool only;
         bool operator==(Properties const&) const = default;
     } m_properties;

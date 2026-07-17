@@ -6,66 +6,50 @@
 
 #pragma once
 
-#include <AK/IterationDecision.h>
+#include <AK/Badge.h>
+#include <AK/Concepts.h>
 #include <AK/Optional.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16StringBuilder.h>
+#include <AK/Utf16View.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/ARIA/ARIAMixin.h>
-#include <LibWeb/ARIA/AttributeNames.h>
 #include <LibWeb/Animations/Animatable.h>
-#include <LibWeb/Bindings/ElementPrototype.h>
+#include <LibWeb/Bindings/Element.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ShadowRootPrototype.h>
-#include <LibWeb/CSS/CascadedProperties.h>
+#include <LibWeb/Bindings/ShadowRoot.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Selector.h>
-#include <LibWeb/CSS/StyleInvalidation.h>
 #include <LibWeb/CSS/StyleProperty.h>
-#include <LibWeb/CSS/StylePropertyMapReadOnly.h>
 #include <LibWeb/DOM/ChildNode.h>
 #include <LibWeb/DOM/NonDocumentTypeChildNode.h>
 #include <LibWeb/DOM/ParentNode.h>
 #include <LibWeb/DOM/PseudoElement.h>
 #include <LibWeb/DOM/QualifiedName.h>
+#include <LibWeb/DOM/RequestFullscreenError.h>
 #include <LibWeb/DOM/Slottable.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/AttributeNames.h>
 #include <LibWeb/HTML/EventLoop/Task.h>
-#include <LibWeb/HTML/LazyLoadingElement.h>
+#include <LibWeb/HTML/Parser/ParserScriptingMode.h>
 #include <LibWeb/HTML/ScrollOptions.h>
 #include <LibWeb/HTML/TagNames.h>
-#include <LibWeb/IntersectionObserver/IntersectionObserver.h>
+#include <LibWeb/HTML/TokenizedFeatures.h>
+#include <LibWeb/HTML/UserNavigationInvolvement.h>
+#include <LibWeb/TrustedTypes/TrustedHTML.h>
+#include <LibWeb/TrustedTypes/TrustedScript.h>
+#include <LibWeb/TrustedTypes/TrustedScriptURL.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/WebIDL/Types.h>
 
+namespace Web::Animations {
+
+struct AnimationUpdateContext;
+class KeyframeEffect;
+
+}
+
 namespace Web::DOM {
-
-struct ShadowRootInit {
-    Bindings::ShadowRootMode mode;
-    bool delegates_focus = false;
-    Bindings::SlotAssignmentMode slot_assignment { Bindings::SlotAssignmentMode::Named };
-    bool clonable = false;
-    bool serializable = false;
-};
-
-struct GetHTMLOptions {
-    bool serializable_shadow_roots { false };
-    Vector<GC::Root<ShadowRoot>> shadow_roots {};
-};
-
-// https://w3c.github.io/csswg-drafts/cssom-view-1/#dictdef-scrollintoviewoptions
-struct ScrollIntoViewOptions : public HTML::ScrollOptions {
-    Bindings::ScrollLogicalPosition block { Bindings::ScrollLogicalPosition::Start };
-    Bindings::ScrollLogicalPosition inline_ { Bindings::ScrollLogicalPosition::Nearest };
-    Bindings::ScrollIntoViewContainer container { Bindings::ScrollIntoViewContainer::All };
-};
-
-// https://drafts.csswg.org/cssom-view-1/#dictdef-checkvisibilityoptions
-struct CheckVisibilityOptions {
-    bool check_opacity = false;
-    bool check_visibility_css = false;
-    bool content_visibility_auto = false;
-    bool opacity_property = false;
-    bool visibility_property = false;
-};
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#upgrade-reaction
 // An upgrade reaction, which will upgrade the custom element and contains a custom element definition; or
@@ -82,7 +66,7 @@ struct CustomElementCallbackReaction {
 
 // https://dom.spec.whatwg.org/#concept-element-custom-element-state
 // An element’s custom element state is one of "undefined", "failed", "uncustomized", "precustomized", or "custom".
-enum class CustomElementState {
+enum class CustomElementState : u8 {
     Undefined,
     Failed,
     Uncustomized,
@@ -92,13 +76,18 @@ enum class CustomElementState {
 
 // https://drafts.csswg.org/css-contain/#proximity-to-the-viewport
 // An element that has content-visibility: auto is in one of three states when it comes to its proximity to the viewport:
-enum class ProximityToTheViewport {
+enum class ProximityToTheViewport : u8 {
     // - The element is close to the viewport:
     CloseToTheViewport,
     // - The element is far away from the viewport:
     FarAwayFromTheViewport,
     // - The element’s proximity to the viewport is not determined:
     NotDetermined,
+};
+
+enum class ScheduleAnimationUpdate : u8 {
+    No,
+    Yes,
 };
 
 class WEB_API Element
@@ -109,78 +98,93 @@ class WEB_API Element
     , public ARIA::ARIAMixin
     , public Animations::Animatable {
     WEB_PLATFORM_OBJECT(Element, ParentNode);
+    GC_DECLARE_ALLOCATOR(Element);
 
 public:
     virtual ~Element() override;
 
-    FlyString const& qualified_name() const { return m_qualified_name.as_string(); }
-    FlyString const& html_uppercased_qualified_name() const;
+    virtual bool is_dom_element() const final { return true; }
 
-    virtual FlyString node_name() const final { return html_uppercased_qualified_name(); }
-    FlyString const& local_name() const { return m_qualified_name.local_name(); }
+    virtual Node& slottable_as_node() override { return *this; }
 
-    FlyString const& lowercased_local_name() const { return m_qualified_name.lowercased_local_name(); }
+    Utf16FlyString const& qualified_name() const { return m_qualified_name.as_string(); }
+    Utf16FlyString const& html_uppercased_qualified_name() const;
 
-    // NOTE: This is for the JS bindings
-    FlyString const& tag_name() const { return html_uppercased_qualified_name(); }
+    virtual Utf16FlyString node_name() const final { return html_uppercased_qualified_name(); }
+    Utf16FlyString const& local_name() const { return m_qualified_name.local_name(); }
 
-    Optional<FlyString> const& prefix() const { return m_qualified_name.prefix(); }
-
-    void set_prefix(Optional<FlyString> value);
-
-    Optional<String> locate_a_namespace_prefix(Optional<String> const& namespace_) const;
+    Utf16FlyString const& lowercased_local_name() const { return m_qualified_name.lowercased_local_name(); }
 
     // NOTE: This is for the JS bindings
-    Optional<FlyString> const& namespace_uri() const { return m_qualified_name.namespace_(); }
+    Utf16FlyString const& tag_name() const { return html_uppercased_qualified_name(); }
 
-    bool has_attribute(FlyString const& name) const;
-    bool has_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& name) const;
+    Optional<Utf16FlyString> const& prefix() const { return m_qualified_name.prefix(); }
+
+    void set_prefix(Optional<Utf16FlyString> value);
+
+    Optional<Utf16String> locate_a_namespace_prefix(Optional<Utf16View> namespace_) const;
+
+    // NOTE: This is for the JS bindings
+    Optional<Utf16FlyString> const& namespace_uri() const { return m_qualified_name.namespace_(); }
+
+    bool has_attribute(Utf16FlyString const& name) const;
+    bool has_attribute_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& name) const;
     bool has_attributes() const;
 
-    Optional<String> attribute(FlyString const& name) const { return get_attribute(name); }
+    Optional<Utf16String> attribute(Utf16FlyString const& name) const { return get_attribute(name); }
 
-    Optional<String> get_attribute(FlyString const& name) const;
-    Optional<String> get_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& name) const;
-    String get_attribute_value(FlyString const& local_name, Optional<FlyString> const& namespace_ = {}) const;
+    Optional<Utf16String> get_attribute(Utf16FlyString const& name) const;
+    Optional<Utf16String> get_attribute_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& name) const;
+    Utf16String get_attribute_value(Utf16FlyString const& local_name, Optional<Utf16FlyString> const& namespace_ = {}) const;
+    Optional<Utf16View> get_attribute_value_view(Utf16FlyString const& name) const;
 
-    Optional<String> lang() const;
+    Utf16String get_an_elements_target(Optional<Utf16String> target = {}) const;
+    HTML::TokenizedFeature::NoOpener get_an_elements_noopener(URL::URL const& url, Utf16View target) const;
 
-    WebIDL::ExceptionOr<void> set_attribute(FlyString const& name, String const& value);
-    WebIDL::ExceptionOr<void> set_attribute(FlyString const& name, Utf16String const& value);
+    bool cannot_navigate() const;
 
-    WebIDL::ExceptionOr<void> set_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& qualified_name, String const& value);
-    void set_attribute_value(FlyString const& local_name, String const& value, Optional<FlyString> const& prefix = {}, Optional<FlyString> const& namespace_ = {});
-    WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node(Attr&);
-    WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node_ns(Attr&);
+    void follow_the_hyperlink(Optional<Utf16String> hyperlink_suffix, HTML::UserNavigationInvolvement = HTML::UserNavigationInvolvement::None);
 
-    void append_attribute(FlyString const& name, String const& value);
+    Optional<Utf16String> lang() const;
+    void invalidate_lang_value();
+
+    WebIDL::ExceptionOr<void> set_attribute_for_bindings(Utf16FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
+
+    WebIDL::ExceptionOr<void> set_attribute_ns_for_bindings(Optional<Utf16FlyString> namespace_, Utf16FlyString const& qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
+    void set_attribute_value(Utf16FlyString const& local_name, Utf16View value, Optional<Utf16FlyString> const& prefix = {}, Optional<Utf16FlyString> const& namespace_ = {});
+    void set_attribute_value(Utf16FlyString const& local_name, Utf16String value, Optional<Utf16FlyString> const& prefix = {}, Optional<Utf16FlyString> const& namespace_ = {});
+    WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node_for_bindings(Attr&);
+    WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node_ns_for_bindings(Attr&);
+
     void append_attribute(Attr&);
-    void remove_attribute(FlyString const& name);
-    void remove_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& name);
+    void remove_attribute(Utf16FlyString const& name);
+    void remove_attribute_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& name);
     WebIDL::ExceptionOr<GC::Ref<Attr>> remove_attribute_node(GC::Ref<Attr>);
 
-    WebIDL::ExceptionOr<bool> toggle_attribute(FlyString const& name, Optional<bool> force);
+    WebIDL::ExceptionOr<bool> toggle_attribute(Utf16FlyString const& name, Optional<bool> force);
     size_t attribute_list_size() const;
 
     GC::Ptr<NamedNodeMap const> attributes() const;
     GC::Ptr<NamedNodeMap> attributes();
 
-    Vector<String> get_attribute_names() const;
+    Vector<Utf16FlyString> get_attribute_names() const;
 
-    GC::Ptr<Attr> get_attribute_node(FlyString const& name) const;
-    GC::Ptr<Attr> get_attribute_node_ns(Optional<FlyString> const& namespace_, FlyString const& name) const;
+    GC::Ptr<Attr> get_attribute_node(Utf16FlyString const& name) const;
+    GC::Ptr<Attr> get_attribute_node_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& name) const;
 
-    GC::Ptr<DOM::Element> get_the_attribute_associated_element(FlyString const& content_attribute, GC::Ptr<DOM::Element> explicitly_set_attribute_element) const;
-    Optional<GC::RootVector<GC::Ref<DOM::Element>>> get_the_attribute_associated_elements(FlyString const& content_attribute, Optional<Vector<WeakPtr<DOM::Element>>> const& explicitly_set_attribute_elements) const;
+    GC::Ptr<DOM::Element> get_the_attribute_associated_element(Utf16FlyString const& content_attribute, GC::Ptr<DOM::Element> explicitly_set_attribute_element) const;
+    Optional<GC::RootVector<GC::Ref<DOM::Element>>> get_the_attribute_associated_elements(Utf16FlyString const& content_attribute, Optional<Vector<GC::Weak<DOM::Element>> const&> explicitly_set_attribute_elements) const;
 
-    DOMTokenList* class_list();
+    GC::Ref<DOMTokenList> class_list();
+    GC::Ref<DOMTokenList> part_list();
+    ReadonlySpan<Utf16FlyString> part_names() const { return m_parts; }
 
-    WebIDL::ExceptionOr<GC::Ref<ShadowRoot>> attach_shadow(ShadowRootInit init);
-    WebIDL::ExceptionOr<void> attach_a_shadow_root(Bindings::ShadowRootMode mode, bool clonable, bool serializable, bool delegates_focus, Bindings::SlotAssignmentMode slot_assignment);
+    WebIDL::ExceptionOr<GC::Ref<ShadowRoot>> attach_shadow(Bindings::ShadowRootInit const&);
+    WebIDL::ExceptionOr<void> attach_a_shadow_root(Bindings::ShadowRootMode mode, bool clonable, bool serializable, bool delegates_focus, Bindings::SlotAssignmentMode slot_assignment, GC::Ptr<HTML::CustomElementRegistry> registry);
     GC::Ptr<ShadowRoot> shadow_root_for_bindings() const;
 
-    WebIDL::ExceptionOr<bool> matches(StringView selectors) const;
-    WebIDL::ExceptionOr<DOM::Element const*> closest(StringView selectors) const;
+    WebIDL::ExceptionOr<bool> matches(Utf16View selectors) const;
+    WebIDL::ExceptionOr<DOM::Element const*> closest(Utf16View selectors) const;
 
     int client_top() const;
     int client_left() const;
@@ -188,38 +192,91 @@ public:
     int client_height() const;
     [[nodiscard]] double current_css_zoom() const;
 
+    void for_each_attribute(Function<void(Attr&)>);
     void for_each_attribute(Function<void(Attr const&)>) const;
 
-    void for_each_attribute(Function<void(FlyString const&, String const&)>) const;
+    void for_each_attribute(Function<void(Utf16FlyString const&, Utf16View)>) const;
 
-    bool has_class(FlyString const&, CaseSensitivity = CaseSensitivity::CaseSensitive) const;
-    Vector<FlyString> const& class_names() const { return m_classes; }
+    bool has_class(Utf16View, CaseSensitivity = CaseSensitivity::CaseSensitive) const;
+    bool has_class(Utf16FlyString const&, CaseSensitivity = CaseSensitivity::CaseSensitive) const;
+    Vector<Utf16FlyString> const& class_names() const { return m_classes; }
 
     // https://html.spec.whatwg.org/multipage/embedded-content-other.html#dimension-attributes
     virtual bool supports_dimension_attributes() const { return false; }
 
-    virtual bool is_presentational_hint(FlyString const&) const { return false; }
-    virtual void apply_presentational_hints(GC::Ref<CSS::CascadedProperties>) const { }
+    virtual bool is_presentational_hint(Utf16FlyString const&) const { return false; }
+    virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const;
 
-    void run_attribute_change_steps(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_);
+    void run_attribute_change_steps(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_);
 
     CSS::RequiredInvalidationAfterStyleChange recompute_style(bool& did_change_custom_properties);
-    CSS::RequiredInvalidationAfterStyleChange recompute_inherited_style();
+    CSS::RequiredInvalidationAfterStyleChange recompute_inherited_style(ScheduleAnimationUpdate = ScheduleAnimationUpdate::No);
 
-    Optional<CSS::PseudoElement> use_pseudo_element() const { return m_use_pseudo_element; }
-    void set_use_pseudo_element(Optional<CSS::PseudoElement> use_pseudo_element) { m_use_pseudo_element = move(use_pseudo_element); }
+    void set_needs_layout_tree_rebuild(SetNeedsLayoutTreeUpdateReason);
 
-    GC::Ptr<Layout::NodeWithStyle> layout_node();
-    GC::Ptr<Layout::NodeWithStyle const> layout_node() const;
+    Optional<CSS::PseudoElement> associated_shadow_host_pseudo_element() const { return m_associated_shadow_host_pseudo_element; }
+    void set_associated_shadow_host_pseudo_element(CSS::PseudoElement pseudo_element);
 
-    GC::Ptr<CSS::ComputedProperties> computed_properties(Optional<CSS::PseudoElement> = {});
-    GC::Ptr<CSS::ComputedProperties const> computed_properties(Optional<CSS::PseudoElement> = {}) const;
-    void set_computed_properties(Optional<CSS::PseudoElement>, GC::Ptr<CSS::ComputedProperties>);
+    Layout::NodeWithStyle* layout_node();
+    Layout::NodeWithStyle const* layout_node() const;
 
-    [[nodiscard]] GC::Ptr<CSS::CascadedProperties> cascaded_properties(Optional<CSS::PseudoElement>) const;
-    void set_cascaded_properties(Optional<CSS::PseudoElement>, GC::Ptr<CSS::CascadedProperties>);
+    Layout::NodeWithStyle* unsafe_layout_node();
+    Layout::NodeWithStyle const* unsafe_layout_node() const;
 
+    RefPtr<CSS::ComputedValues const> computed_values(Optional<CSS::PseudoElement> = {}) const;
+    void set_computed_style(Optional<CSS::PseudoElement>, RefPtr<CSS::ComputedValues const>);
+    void refresh_computed_values(Optional<CSS::PseudoElement>, NonnullRefPtr<CSS::ComputedValues const>);
+    void update_animated_properties(Badge<Web::Animations::KeyframeEffect> const&, Optional<CSS::PseudoElement>, Web::Animations::KeyframeEffect&, Web::Animations::AnimationUpdateContext&);
+    void update_animated_properties_for_abstract_element(Badge<Web::Animations::KeyframeEffect> const&, DOM::AbstractElement, Web::Animations::KeyframeEffect&, Web::Animations::AnimationUpdateContext&);
+
+    Optional<SyntheticPseudoElement&> get_synthetic_pseudo_element(CSS::PseudoElement) const;
     Optional<PseudoElement&> get_pseudo_element(CSS::PseudoElement) const;
+
+    template<typename Callback>
+    void for_each_synthetic_pseudo_element(Callback const& callback)
+    {
+        if (!m_pseudo_element_data)
+            return;
+
+        for (auto i = to_underlying(CSS::first_synthetic_pseudo_element); i <= to_underlying(CSS::last_synthetic_pseudo_element); ++i) {
+            auto type = static_cast<CSS::PseudoElement>(i);
+            auto pseudo_element = m_pseudo_element_data->get(type);
+            if (!pseudo_element.has_value())
+                continue;
+
+            using ReturnType = InvokeResult<Callback, CSS::PseudoElement, SyntheticPseudoElement&>;
+            if constexpr (IsSame<ReturnType, IterationDecision>) {
+                if (callback(type, as<SyntheticPseudoElement>(*pseudo_element.release_value())) == IterationDecision::Break)
+                    return;
+            } else {
+                static_assert(IsSame<ReturnType, void>);
+                callback(type, as<SyntheticPseudoElement>(*pseudo_element.release_value()));
+            }
+        }
+    }
+
+    template<typename Callback>
+    void for_each_synthetic_pseudo_element(Callback const& callback) const
+    {
+        if (!m_pseudo_element_data)
+            return;
+
+        for (auto i = to_underlying(CSS::first_synthetic_pseudo_element); i <= to_underlying(CSS::last_synthetic_pseudo_element); ++i) {
+            auto type = static_cast<CSS::PseudoElement>(i);
+            auto pseudo_element = m_pseudo_element_data->get(type);
+            if (!pseudo_element.has_value())
+                continue;
+
+            using ReturnType = InvokeResult<Callback, CSS::PseudoElement, SyntheticPseudoElement&>;
+            if constexpr (IsSame<ReturnType, IterationDecision>) {
+                if (callback(type, as<SyntheticPseudoElement>(*pseudo_element.release_value())) == IterationDecision::Break)
+                    return;
+            } else {
+                static_assert(IsSame<ReturnType, void>);
+                callback(type, as<SyntheticPseudoElement>(*pseudo_element.release_value()));
+            }
+        }
+    }
 
     GC::Ptr<CSS::CSSStyleProperties> inline_style() { return m_inline_style; }
     GC::Ptr<CSS::CSSStyleProperties const> inline_style() const { return m_inline_style; }
@@ -231,24 +288,46 @@ public:
     CSS::StyleSheetList& document_or_shadow_root_style_sheets();
     ElementByIdMap& document_or_shadow_root_element_by_id_map();
 
-    WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> parse_fragment(StringView markup);
+    static WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> parse_fragment(Variant<GC::Ref<Element>, GC::Ref<DocumentFragment>> target, Utf16View markup, HTML::ParserScriptingMode = HTML::ParserScriptingMode::Inert);
 
     [[nodiscard]] GC::Ptr<Element const> element_to_inherit_style_from(Optional<CSS::PseudoElement>) const;
 
-    WebIDL::ExceptionOr<String> inner_html() const;
-    WebIDL::ExceptionOr<void> set_inner_html(StringView);
+    WebIDL::ExceptionOr<TrustedTypes::TrustedHTMLOrString> inner_html() const;
+    WebIDL::ExceptionOr<void> set_inner_html(TrustedTypes::TrustedHTMLOrString const&);
 
-    WebIDL::ExceptionOr<void> set_html_unsafe(StringView);
+    WebIDL::ExceptionOr<void> set_html_unsafe(TrustedTypes::TrustedHTMLOrString const&);
 
-    WebIDL::ExceptionOr<String> get_html(GetHTMLOptions const&) const;
+    WebIDL::ExceptionOr<Utf16String> get_html(Bindings::GetHTMLOptions const&) const;
 
-    WebIDL::ExceptionOr<void> insert_adjacent_html(String const& position, String const&);
+    WebIDL::ExceptionOr<void> insert_adjacent_html(Utf16View position, TrustedTypes::TrustedHTMLOrString const&);
 
-    WebIDL::ExceptionOr<String> outer_html() const;
-    WebIDL::ExceptionOr<void> set_outer_html(String const&);
+    enum class FullscreenRequester {
+        Bindings,
+        WebDriver,
+    };
+    GC::Ref<WebIDL::Promise> request_fullscreen(FullscreenRequester = FullscreenRequester::Bindings);
+
+    RequestFullscreenError is_element_allowed_to_enter_fullscreen(FullscreenRequester) const;
+    bool is_element_ready_for_fullscreen() const;
+
+    void set_fullscreen_flag(bool is_fullscreen) { m_fullscreen_flag = is_fullscreen; }
+    bool is_fullscreen_element() const { return m_fullscreen_flag; }
+
+    GC::Ptr<WebIDL::CallbackType> onfullscreenchange();
+    void set_onfullscreenchange(GC::Ptr<WebIDL::CallbackType>);
+
+    GC::Ptr<WebIDL::CallbackType> onfullscreenerror();
+    void set_onfullscreenerror(GC::Ptr<WebIDL::CallbackType>);
+
+    WebIDL::ExceptionOr<TrustedTypes::TrustedHTMLOrString> outer_html() const;
+    WebIDL::ExceptionOr<void> set_outer_html(TrustedTypes::TrustedHTMLOrString const&);
 
     bool is_focused() const;
-    bool is_active() const;
+    bool is_the_active_element() const;
+
+    bool is_being_activated() const;
+    virtual void set_being_activated(bool);
+
     bool is_target() const;
     bool is_document_element() const;
 
@@ -257,13 +336,35 @@ public:
     GC::Ptr<ShadowRoot const> shadow_root() const { return m_shadow_root; }
     void set_shadow_root(GC::Ptr<ShadowRoot>);
 
-    void set_custom_properties(Optional<CSS::PseudoElement>, HashMap<FlyString, CSS::StyleProperty> custom_properties);
-    [[nodiscard]] HashMap<FlyString, CSS::StyleProperty> const& custom_properties(Optional<CSS::PseudoElement>) const;
+    void set_custom_property_data(Optional<CSS::PseudoElement>, RefPtr<CSS::CustomPropertyData const>);
+    [[nodiscard]] RefPtr<CSS::CustomPropertyData const> custom_property_data(Optional<CSS::PseudoElement>) const;
+
+    [[nodiscard]] bool refresh_inherited_custom_property_data();
 
     bool style_uses_attr_css_function() const { return m_style_uses_attr_css_function; }
     void set_style_uses_attr_css_function() { m_style_uses_attr_css_function = true; }
     bool style_uses_var_css_function() const { return m_style_uses_var_css_function; }
     void set_style_uses_var_css_function() { m_style_uses_var_css_function = true; }
+    bool style_uses_tree_counting_function() const { return m_style_uses_tree_counting_function; }
+    void set_style_uses_tree_counting_function()
+    {
+        if (auto parent = parent_element())
+            parent->set_child_style_uses_tree_counting_function();
+
+        m_style_uses_tree_counting_function = true;
+    }
+    bool style_uses_if_css_function() const { return m_style_uses_if_css_function; }
+    void set_style_uses_if_css_function() { m_style_uses_if_css_function = true; }
+    bool style_uses_inherit_css_function() const { return m_style_uses_inherit_css_function; }
+    void set_style_uses_inherit_css_function() { m_style_uses_inherit_css_function = true; }
+    bool style_depends_on_size_container_query() const { return m_style_depends_on_size_container_query; }
+    void set_style_depends_on_size_container_query() { m_style_depends_on_size_container_query = true; }
+    bool style_depends_on_style_container_query() const { return m_style_depends_on_style_container_query; }
+    void set_style_depends_on_style_container_query() { m_style_depends_on_style_container_query = true; }
+    void invalidate_descendant_styles_depending_on_style_container_query();
+
+    bool child_style_uses_tree_counting_function() const { return m_child_style_uses_tree_counting_function; }
+    void set_child_style_uses_tree_counting_function() { m_child_style_uses_tree_counting_function = true; }
 
     // NOTE: The function is wrapped in a GC::HeapFunction immediately.
     HTML::TaskID queue_an_element_task(HTML::Task::Source, Function<void()>);
@@ -277,30 +378,49 @@ public:
     [[nodiscard]] Vector<CSSPixelRect> get_client_rects() const;
     [[nodiscard]] GC::Ref<Geometry::DOMRectList> get_client_rects_for_bindings() const;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>);
-    virtual void adjust_computed_style(CSS::ComputedProperties&) { }
+    [[nodiscard]] Vector<CSSPixelRect> client_rects_assuming_layout_clean() const;
+    [[nodiscard]] CSSPixelRect bounding_client_rect_assuming_layout_clean() const;
+
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>);
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) { }
 
     virtual void did_receive_focus() { }
     virtual void did_lose_focus() { }
     bool should_indicate_focus() const;
+    virtual bool is_focusable() const override;
 
-    static GC::Ptr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, GC::Ref<CSS::ComputedProperties>, Element*);
+    static RefPtr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, NonnullRefPtr<CSS::ComputedValues const>, Element*);
 
-    [[nodiscard]] bool affected_by_pseudo_class(CSS::PseudoClass) const;
-    bool includes_properties_from_invalidation_set(CSS::InvalidationSet const&) const;
+    void clear_removed_attributes_for_style_invalidation() { m_removed_attributes_for_style_invalidation.clear(); }
+    bool has_removed_attribute_for_style_invalidation(Utf16FlyString const& attribute_name) const
+    {
+        return m_removed_attributes_for_style_invalidation.contains_slow(attribute_name);
+    }
+    void remember_removed_attribute_for_style_invalidation(Utf16FlyString const& attribute_name)
+    {
+        if (!m_removed_attributes_for_style_invalidation.contains_slow(attribute_name))
+            m_removed_attributes_for_style_invalidation.append(attribute_name);
+    }
 
-    void set_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::PseudoElement, GC::Ptr<Layout::NodeWithStyle>);
-    GC::Ptr<Layout::NodeWithStyle> get_pseudo_element_node(CSS::PseudoElement) const;
-    bool has_pseudo_element(CSS::PseudoElement) const;
-    bool has_pseudo_elements() const;
-    void clear_pseudo_element_nodes(Badge<Layout::TreeBuilder>);
+    void set_synthetic_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::PseudoElement, Layout::NodeWithStyle*);
 
-    void serialize_children_as_json(JsonObjectSerializer<StringBuilder>&) const;
+    Layout::NodeWithStyle* pseudo_element_layout_node(CSS::PseudoElement) const;
+    Layout::NodeWithStyle* pseudo_element_unsafe_layout_node(CSS::PseudoElement) const;
+
+    bool has_synthetic_pseudo_elements() const;
+    void clear_synthetic_pseudo_element_layout_nodes(Badge<Layout::TreeBuilder, Node>) { clear_synthetic_pseudo_element_layout_nodes(); }
+
+    void serialize_children_as_json(JsonObjectSerializer<Utf16StringBuilder>&) const;
 
     i32 tab_index() const;
     void set_tab_index(i32 tab_index);
 
-    bool is_potentially_scrollable() const;
+    enum class TreatOverflowClipOnBodyParentAsOverflowHidden {
+        No,
+        Yes,
+    };
+    bool is_potentially_scrollable(TreatOverflowClipOnBodyParentAsOverflowHidden) const;
+    bool is_scroll_container() const;
 
     double scroll_top() const;
     double scroll_left() const;
@@ -312,27 +432,16 @@ public:
 
     bool is_actually_disabled() const;
 
-    WebIDL::ExceptionOr<GC::Ptr<Element>> insert_adjacent_element(String const& where, GC::Ref<Element> element);
-    WebIDL::ExceptionOr<void> insert_adjacent_text(String const& where, Utf16String const& data);
+    WebIDL::ExceptionOr<GC::Ptr<Element>> insert_adjacent_element(Utf16View where, GC::Ref<Element> element);
+    WebIDL::ExceptionOr<void> insert_adjacent_text(Utf16View where, Utf16View data);
 
     // https://w3c.github.io/csswg-drafts/cssom-view-1/#dom-element-scrollintoview
-    ErrorOr<void> scroll_into_view(Optional<Variant<bool, ScrollIntoViewOptions>> = {});
+    GC::Ref<WebIDL::Promise> scroll_into_view(Optional<Variant<bool, Bindings::ScrollIntoViewOptions>> = {});
 
     // https://www.w3.org/TR/wai-aria-1.2/#ARIAMixin
-#define __ENUMERATE_ARIA_ATTRIBUTE(name, attribute)                              \
-    Optional<String> name() const override                                       \
-    {                                                                            \
-        return get_attribute(ARIA::AttributeNames::name);                        \
-    }                                                                            \
-                                                                                 \
-    WebIDL::ExceptionOr<void> set_##name(Optional<String> const& value) override \
-    {                                                                            \
-        if (value.has_value())                                                   \
-            TRY(set_attribute(ARIA::AttributeNames::name, *value));              \
-        else                                                                     \
-            remove_attribute(ARIA::AttributeNames::name);                        \
-        return {};                                                               \
-    }
+#define __ENUMERATE_ARIA_ATTRIBUTE(name, attribute)      \
+    virtual Optional<Utf16String> name() const override; \
+    virtual void set_##name(Optional<Utf16String> const& value) override;
     ENUMERATE_ARIA_ATTRIBUTES
 #undef __ENUMERATE_ARIA_ATTRIBUTE
 
@@ -350,14 +459,14 @@ public:
     bool has_referenced_and_hidden_ancestor() const;
 
     void enqueue_a_custom_element_upgrade_reaction(HTML::CustomElementDefinition& custom_element_definition);
-    void enqueue_a_custom_element_callback_reaction(FlyString const& callback_name, GC::RootVector<JS::Value> arguments);
+    void enqueue_a_custom_element_callback_reaction(Utf16FlyString const& callback_name, GC::RootVector<JS::Value> arguments);
 
     using CustomElementReactionQueue = Vector<Variant<CustomElementUpgradeReaction, CustomElementCallbackReaction>>;
     CustomElementReactionQueue* custom_element_reaction_queue() { return m_custom_element_reaction_queue; }
     CustomElementReactionQueue const* custom_element_reaction_queue() const { return m_custom_element_reaction_queue; }
     CustomElementReactionQueue& ensure_custom_element_reaction_queue();
 
-    HTML::CustomStateSet const* custom_state_set() const { return m_custom_state_set; }
+    GC::Ptr<HTML::CustomStateSet const> custom_state_set() const { return m_custom_state_set; }
     HTML::CustomStateSet& ensure_custom_state_set();
 
     JS::ThrowCompletionOr<void> upgrade_element(GC::Ref<HTML::CustomElementDefinition> custom_element_definition);
@@ -366,22 +475,21 @@ public:
     bool is_defined() const;
     bool is_custom() const;
 
-    Optional<String> const& is_value() const { return m_is_value; }
-    void set_is_value(Optional<String> const& is) { m_is_value = is; }
+    Optional<Utf16FlyString> const& is_value() const { return m_is_value; }
+    void set_is_value(Optional<Utf16FlyString> const& is) { m_is_value = is; }
 
     void set_custom_element_state(CustomElementState);
-    void setup_custom_element_from_constructor(HTML::CustomElementDefinition& custom_element_definition, Optional<String> const& is_value);
+    void setup_custom_element_from_constructor(HTML::CustomElementDefinition& custom_element_definition, Optional<Utf16FlyString> const& is_value);
 
-    void scroll(HTML::ScrollToOptions);
-    void scroll(double x, double y);
-    void scroll_by(HTML::ScrollToOptions);
-    void scroll_by(double x, double y);
+    GC::Ref<WebIDL::Promise> scroll(Bindings::ScrollToOptions);
+    GC::Ref<WebIDL::Promise> scroll(double x, double y);
+    GC::Ref<WebIDL::Promise> scroll_by(Bindings::ScrollToOptions);
+    GC::Ref<WebIDL::Promise> scroll_by(double x, double y);
 
-    bool check_visibility(Optional<CheckVisibilityOptions>);
+    bool check_visibility(Optional<Bindings::CheckVisibilityOptions>);
 
-    void register_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, IntersectionObserver::IntersectionObserverRegistration);
+    void register_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, GC::Ref<IntersectionObserver::IntersectionObserver>);
     void unregister_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, GC::Ref<IntersectionObserver::IntersectionObserver>);
-    IntersectionObserver::IntersectionObserverRegistration& get_intersection_observer_registration(Badge<DOM::Document>, IntersectionObserver::IntersectionObserver const&);
 
     CSSPixelPoint scroll_offset(Optional<CSS::PseudoElement> type) const;
     void set_scroll_offset(Optional<CSS::PseudoElement> type, CSSPixelPoint offset);
@@ -406,8 +514,8 @@ public:
     Directionality directionality() const;
     bool is_auto_directionality_form_associated_element() const;
 
-    Optional<FlyString> const& id() const { return m_id; }
-    Optional<FlyString> const& name() const { return m_name; }
+    Optional<Utf16FlyString> const& id() const { return m_id; }
+    Optional<Utf16FlyString> const& name() const { return m_name; }
 
     virtual GC::Ptr<GC::Function<void()>> take_lazy_load_resumption_steps(Badge<DOM::Document>)
     {
@@ -442,18 +550,33 @@ public:
     bool matches_unchecked_pseudo_class() const;
     bool matches_placeholder_shown_pseudo_class() const;
     bool matches_link_pseudo_class() const;
+    bool matches_visited_pseudo_class() const;
     bool matches_local_link_pseudo_class() const;
-
-    void invalidate_style_if_affected_by_has();
+    bool matches_focus_within_pseudo_class() const;
 
     bool affected_by_has_pseudo_class_in_subject_position() const { return m_affected_by_has_pseudo_class_in_subject_position; }
     void set_affected_by_has_pseudo_class_in_subject_position(bool value) { m_affected_by_has_pseudo_class_in_subject_position = value; }
 
+    // Write-once: this can be set while matching descendants, and recomputing this element's own style may not revisit
+    // those descendant selectors. Keeping it sticky is conservative and avoids stale descendant style after mutations.
     bool affected_by_has_pseudo_class_in_non_subject_position() const { return m_affected_by_has_pseudo_class_in_non_subject_position; }
-    void set_affected_by_has_pseudo_class_in_non_subject_position(bool value) { m_affected_by_has_pseudo_class_in_non_subject_position = value; }
+    void set_affected_by_has_pseudo_class_in_non_subject_position() { m_affected_by_has_pseudo_class_in_non_subject_position = true; }
 
     bool affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator() const { return m_affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator; }
     void set_affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator(bool value) { m_affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator = value; }
+    // Set on any element reached by stepping through a + or ~ combinator while
+    // matching a :has() argument. Lets generic invalidation defer ancestor
+    // sibling scans until it reaches the sibling subtree root. Write-once,
+    // intentionally never cleared.
+    bool in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator() const { return m_in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator; }
+    void set_in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator(bool value) { m_in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator = value; }
+
+    // Set on any element that was traversed during matching of a :has() argument
+    // selector (i.e. the descendant/child/sibling walk inside :has()). Lets the
+    // invalidation walker terminate once it reaches an element whose state cannot
+    // affect any :has() anchor. Write-once, intentionally never cleared.
+    bool in_has_scope() const { return m_in_has_scope; }
+    void set_in_has_scope(bool value) { m_in_has_scope = value; }
 
     bool affected_by_direct_sibling_combinator() const { return m_affected_by_direct_sibling_combinator; }
     void set_affected_by_direct_sibling_combinator(bool value) { m_affected_by_direct_sibling_combinator = value; }
@@ -461,59 +584,45 @@ public:
     bool affected_by_indirect_sibling_combinator() const { return m_affected_by_indirect_sibling_combinator; }
     void set_affected_by_indirect_sibling_combinator(bool value) { m_affected_by_indirect_sibling_combinator = value; }
 
-    bool affected_by_sibling_position_or_count_pseudo_class() const { return m_affected_by_sibling_position_or_count_pseudo_class; }
-    void set_affected_by_sibling_position_or_count_pseudo_class(bool value) { m_affected_by_sibling_position_or_count_pseudo_class = value; }
+    bool affected_by_first_child_pseudo_class() const { return m_affected_by_first_child_pseudo_class; }
+    void set_affected_by_first_child_pseudo_class(bool value) { m_affected_by_first_child_pseudo_class = value; }
 
-    bool affected_by_nth_child_pseudo_class() const { return m_affected_by_nth_child_pseudo_class; }
-    void set_affected_by_nth_child_pseudo_class(bool value) { m_affected_by_nth_child_pseudo_class = value; }
+    bool affected_by_last_child_pseudo_class() const { return m_affected_by_last_child_pseudo_class; }
+    void set_affected_by_last_child_pseudo_class(bool value);
+
+    bool affected_by_forward_positional_pseudo_class() const { return m_affected_by_forward_positional_pseudo_class; }
+    void set_affected_by_forward_positional_pseudo_class(bool value) { m_affected_by_forward_positional_pseudo_class = value; }
+
+    bool affected_by_backward_positional_pseudo_class() const { return m_affected_by_backward_positional_pseudo_class; }
+    void set_affected_by_backward_positional_pseudo_class(bool value);
+
+    // Write-once: this can be set while matching descendants, and recomputing this element's own style may not revisit
+    // those descendant selectors. Keeping it sticky is conservative and avoids stale descendant style after moves.
+    bool affected_by_structural_pseudo_class_in_non_subject_position() const { return m_affected_by_structural_pseudo_class_in_non_subject_position; }
+    void set_affected_by_structural_pseudo_class_in_non_subject_position() { m_affected_by_structural_pseudo_class_in_non_subject_position = true; }
+
+    // Write-once: this can be set while matching descendants, and recomputing this element's own style may not revisit
+    // those descendant selectors. Keeping it sticky is conservative and avoids stale descendant style after moves.
+    bool affected_by_sibling_combinator_in_non_subject_position() const { return m_affected_by_sibling_combinator_in_non_subject_position; }
+    void set_affected_by_sibling_combinator_in_non_subject_position() { m_affected_by_sibling_combinator_in_non_subject_position = true; }
 
     size_t sibling_invalidation_distance() const { return m_sibling_invalidation_distance; }
     void set_sibling_invalidation_distance(size_t value) { m_sibling_invalidation_distance = value; }
 
-    bool style_affected_by_structural_changes() const
+    bool affected_by_forward_structural_changes() const
     {
-        return affected_by_direct_sibling_combinator() || affected_by_indirect_sibling_combinator() || affected_by_sibling_position_or_count_pseudo_class() || affected_by_nth_child_pseudo_class();
+        return affected_by_direct_sibling_combinator() || affected_by_indirect_sibling_combinator() || affected_by_first_child_pseudo_class() || affected_by_forward_positional_pseudo_class();
+    }
+
+    bool affected_by_backward_structural_changes() const
+    {
+        return affected_by_last_child_pseudo_class() || affected_by_backward_positional_pseudo_class();
     }
 
     i32 number_of_owned_list_items() const;
-    Element* list_owner() const;
+    GC::Ptr<Element> list_owner() const;
     void maybe_invalidate_ordinals_for_list_owner(Optional<Element*> skip_node = {});
     i32 ordinal_value();
-
-    template<typename Callback>
-    void for_each_numbered_item_owned_by_list_owner(Callback callback) const
-    {
-        const_cast<Element*>(this)->for_each_numbered_item_owned_by_list_owner(move(callback));
-    }
-
-    template<typename Callback>
-    void for_each_numbered_item_owned_by_list_owner(Callback callback)
-    {
-        for (auto* node = this->first_child(); node != nullptr; node = node->next_in_pre_order(this)) {
-            auto* element = as_if<Element>(node);
-            if (!element)
-                continue;
-
-            element->m_is_contained_in_list_subtree = true;
-
-            if (node->is_html_ol_ul_menu_element()) {
-                // Skip list nodes and their descendents. They have their own, unrelated ordinals.
-                while (node->last_child() != nullptr) // Find the last node (preorder) in the subtree headed by node. O(1).
-                    node = node->last_child();
-
-                continue;
-            }
-
-            if (!node->layout_node())
-                continue; // Skip nodes that do not participate in the layout.
-
-            if (!element->computed_properties()->display().is_list_item())
-                continue; // Skip nodes that are not list items.
-
-            if (callback(element) == IterationDecision::Break)
-                return;
-        }
-    }
 
     bool captured_in_a_view_transition() const { return m_captured_in_a_view_transition; }
     void set_captured_in_a_view_transition(bool value) { m_captured_in_a_view_transition = value; }
@@ -521,11 +630,13 @@ public:
     // https://drafts.csswg.org/css-images-4/#element-not-rendered
     bool not_rendered() const;
 
+    bool meets_focusable_area_rendering_requirements() const;
+
     // https://drafts.csswg.org/css-view-transitions-1/#document-scoped-view-transition-name
-    Optional<FlyString> document_scoped_view_transition_name();
+    Optional<Utf16FlyString> document_scoped_view_transition_name();
 
     // https://drafts.csswg.org/css-view-transitions-1/#capture-the-image
-    RefPtr<Gfx::ImmutableBitmap> capture_the_image();
+    Optional<Gfx::DecodedImageFrame> capture_the_image();
 
     void set_pointer_capture(WebIDL::Long pointer_id);
     void release_pointer_capture(WebIDL::Long pointer_id);
@@ -538,36 +649,58 @@ public:
 
     GC::Ref<CSS::StylePropertyMapReadOnly> computed_style_map();
 
+    // https://html.spec.whatwg.org/multipage/dom.html#block-rendering
+    void block_rendering();
+    // https://html.spec.whatwg.org/multipage/dom.html#unblock-rendering
+    void unblock_rendering();
+    // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#potentially-render-blocking
+    bool is_potentially_render_blocking();
+    // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#implicitly-potentially-render-blocking
+    virtual bool is_implicitly_potentially_render_blocking() const { return false; }
+
+    double ensure_css_random_base_value(CSS::RandomCachingKey const&);
+
+    GC::Ref<WebIDL::Promise> request_pointer_lock(Optional<Bindings::PointerLockOptions>);
+
+    GC::Ptr<HTML::CustomElementRegistry> custom_element_registry() const { return m_custom_element_registry; }
+    void set_custom_element_registry(GC::Ptr<HTML::CustomElementRegistry> registry) { m_custom_element_registry = registry; }
+
 protected:
     Element(Document&, DOM::QualifiedName);
     virtual void initialize(JS::Realm&) override;
 
     virtual void inserted() override;
-    virtual void removed_from(Node* old_parent, Node& old_root) override;
-    virtual void moved_from(GC::Ptr<Node> old_parent) override;
+    virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
+    virtual void moved_from(IsSubtreeRoot, GC::Ptr<Node> old_ancestor) override;
 
-    virtual void children_changed(ChildrenChangedMetadata const*) override;
+    virtual void children_changed(ChildrenChangedMetadata const&) override;
     virtual i32 default_tab_index_value() const;
 
     // https://dom.spec.whatwg.org/#concept-element-attributes-change-ext
-    virtual void attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_);
+    MUST_UPCALL virtual void attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_);
 
     virtual void computed_properties_changed() { }
 
     virtual void visit_edges(Cell::Visitor&) override;
 
-    virtual bool id_reference_exists(String const&) const override;
+    virtual bool id_reference_exists(Utf16View) const override;
 
     CustomElementState custom_element_state() const { return m_custom_element_state; }
+    GC::Ptr<HTML::CustomElementDefinition> custom_element_definition() const { return m_custom_element_definition; }
 
     void play_or_cancel_animations_after_display_property_change();
+    void clear_element_reference_pseudo_elements();
 
 private:
-    FlyString make_html_uppercased_qualified_name() const;
+    Utf16FlyString make_html_uppercased_qualified_name() const;
 
-    void invalidate_style_after_attribute_change(FlyString const& attribute_name, Optional<String> const& old_value, Optional<String> const& new_value);
+    void exit_fullscreen_on_element_removal();
+    CSS::RequiredInvalidationAfterStyleChange recompute_pseudo_element_styles(bool& did_change_custom_properties, bool had_list_marker, CSS::ComputedValues const* old_originating_style);
+    void apply_computed_style_to_layout_node_if_needed(CSS::RequiredInvalidationAfterStyleChange const&);
+    void set_in_display_none_subtree_on_descendant_styles();
+    void mark_descendants_with_stale_styles_for_style_update();
 
-    WebIDL::ExceptionOr<GC::Ptr<Node>> insert_adjacent(StringView where, GC::Ref<Node> node);
+    WebIDL::ExceptionOr<GC::Ptr<Node>> insert_adjacent(Utf16View where, GC::Ref<Node> node);
 
     void enqueue_an_element_on_the_appropriate_element_queue();
 
@@ -575,51 +708,63 @@ private:
     Optional<Directionality> contained_text_auto_directionality(bool can_exclude_root) const;
     Directionality parent_directionality() const;
 
+    template<typename Callback>
+    void for_each_numbered_item_owned_by_list_owner(Callback callback) const
+    {
+        const_cast<Element*>(this)->for_each_numbered_item_owned_by_list_owner(move(callback));
+    }
+
+    template<typename Callback>
+    void for_each_numbered_item_owned_by_list_owner(Callback callback);
+
     QualifiedName m_qualified_name;
-    mutable Optional<FlyString> m_html_uppercased_qualified_name;
+    mutable Optional<Utf16FlyString> m_html_uppercased_qualified_name;
 
     GC::Ptr<NamedNodeMap> m_attributes;
     GC::Ptr<CSS::CSSStyleProperties> m_inline_style;
     GC::Ptr<CSS::StylePropertyMap> m_attribute_style_map;
     GC::Ptr<DOMTokenList> m_class_list;
     GC::Ptr<ShadowRoot> m_shadow_root;
+    GC::Ptr<DOMTokenList> m_part_list;
 
-    GC::Ptr<CSS::CascadedProperties> m_cascaded_properties;
-    GC::Ptr<CSS::ComputedProperties> m_computed_properties;
-    HashMap<FlyString, CSS::StyleProperty> m_custom_properties;
+    RefPtr<CSS::ComputedValues const> m_computed_values;
+    RefPtr<CSS::CustomPropertyData const> m_custom_property_data;
 
     using PseudoElementData = HashMap<CSS::PseudoElement, GC::Ref<PseudoElement>>;
     mutable OwnPtr<PseudoElementData> m_pseudo_element_data;
-    PseudoElement& ensure_pseudo_element(CSS::PseudoElement) const;
+    void register_element_reference_pseudo_element(CSS::PseudoElement type, GC::Ref<Element> element);
+    SyntheticPseudoElement& ensure_synthetic_pseudo_element(CSS::PseudoElement) const;
+    void clear_synthetic_pseudo_element_layout_nodes();
 
-    Optional<CSS::PseudoElement> m_use_pseudo_element;
+    Optional<CSS::PseudoElement> m_associated_shadow_host_pseudo_element;
 
-    Vector<FlyString> m_classes;
+    Vector<Utf16FlyString> m_classes;
+    Vector<Utf16FlyString> m_parts;
     Optional<Dir> m_dir;
 
-    Optional<FlyString> m_id;
-    Optional<FlyString> m_name;
+    Optional<Utf16FlyString> m_id;
+    Optional<Utf16FlyString> m_name;
 
     // https://html.spec.whatwg.org/multipage/custom-elements.html#custom-element-reaction-queue
     // All elements have an associated custom element reaction queue, initially empty. Each item in the custom element reaction queue is of one of two types:
     // NOTE: See the structs at the top of this header.
     OwnPtr<CustomElementReactionQueue> m_custom_element_reaction_queue;
 
-    // https://dom.spec.whatwg.org/#concept-element-custom-element-state
-    CustomElementState m_custom_element_state { CustomElementState::Undefined };
+    // https://dom.spec.whatwg.org/#element-custom-element-registry
+    GC::Ptr<HTML::CustomElementRegistry> m_custom_element_registry;
 
     // https://dom.spec.whatwg.org/#concept-element-custom-element-definition
     GC::Ptr<HTML::CustomElementDefinition> m_custom_element_definition;
 
     // https://dom.spec.whatwg.org/#concept-element-is-value
-    Optional<String> m_is_value;
+    Optional<Utf16FlyString> m_is_value;
 
     // https://html.spec.whatwg.org/multipage/custom-elements.html#states-set
     GC::Ptr<HTML::CustomStateSet> m_custom_state_set;
 
     // https://www.w3.org/TR/intersection-observer/#dom-element-registeredintersectionobservers-slot
     // Element objects have an internal [[RegisteredIntersectionObservers]] slot, which is initialized to an empty list.
-    OwnPtr<Vector<IntersectionObserver::IntersectionObserverRegistration>> m_registered_intersection_observers;
+    OwnPtr<Vector<GC::Ref<IntersectionObserver::IntersectionObserver>>> m_registered_intersection_observers;
 
     // https://drafts.css-houdini.org/css-typed-om-1/#dom-element-computedstylemapcache-slot
     // Every Element has a [[computedStyleMapCache]] internal slot, initially set to null, which caches the result of
@@ -627,20 +772,42 @@ private:
     GC::Ptr<CSS::StylePropertyMapReadOnly> m_computed_style_map_cache;
 
     CSSPixelPoint m_scroll_offset;
+    Vector<Utf16FlyString, 1> m_removed_attributes_for_style_invalidation;
 
+    bool m_is_being_activated : 1 { false };
     bool m_in_top_layer : 1 { false };
     bool m_rendered_in_top_layer : 1 { false };
     bool m_style_uses_attr_css_function : 1 { false };
     bool m_style_uses_var_css_function : 1 { false };
+    bool m_style_uses_tree_counting_function : 1 { false };
+    bool m_style_uses_if_css_function : 1 { false };
+    bool m_style_uses_inherit_css_function : 1 { false };
+    bool m_style_depends_on_size_container_query : 1 { false };
+    bool m_style_depends_on_style_container_query : 1 { false };
+    bool m_child_style_uses_tree_counting_function : 1 { false };
     bool m_affected_by_has_pseudo_class_in_subject_position : 1 { false };
     bool m_affected_by_has_pseudo_class_in_non_subject_position : 1 { false };
     bool m_affected_by_direct_sibling_combinator : 1 { false };
     bool m_affected_by_indirect_sibling_combinator : 1 { false };
-    bool m_affected_by_sibling_position_or_count_pseudo_class : 1 { false };
-    bool m_affected_by_nth_child_pseudo_class : 1 { false };
+    bool m_affected_by_first_child_pseudo_class : 1 { false };
+    bool m_affected_by_last_child_pseudo_class : 1 { false };
+    bool m_affected_by_forward_positional_pseudo_class : 1 { false };
+    bool m_affected_by_backward_positional_pseudo_class : 1 { false };
+    bool m_affected_by_structural_pseudo_class_in_non_subject_position : 1 { false };
+    bool m_affected_by_sibling_combinator_in_non_subject_position : 1 { false };
     bool m_affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator : 1 { false };
+    bool m_in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator : 1 { false };
+    bool m_in_has_scope : 1 { false };
+    bool m_fullscreen_flag : 1 { false };
 
     size_t m_sibling_invalidation_distance { 0 };
+
+    OwnPtr<CSS::CountersSet> m_counters_set;
+
+    // https://html.spec.whatwg.org/multipage/grouping-content.html#ordinal-value
+    Optional<i32> m_ordinal_value;
+
+    mutable Optional<Utf16String> m_lang_value;
 
     // https://w3c.github.io/webappsec-csp/#is-element-nonceable
     // AD-HOC: We need to know the element had a duplicate attribute when it was created from the HTML parser.
@@ -649,7 +816,8 @@ private:
     //         flag is set.
     bool m_had_duplicate_attribute_during_tokenization { false };
 
-    OwnPtr<CSS::CountersSet> m_counters_set;
+    // https://dom.spec.whatwg.org/#concept-element-custom-element-state
+    CustomElementState m_custom_element_state { CustomElementState::Undefined };
 
     // https://drafts.csswg.org/css-contain/#proximity-to-the-viewport
     ProximityToTheViewport m_proximity_to_the_viewport { ProximityToTheViewport::NotDetermined };
@@ -657,9 +825,10 @@ private:
     // https://drafts.csswg.org/css-view-transitions-1/#captured-in-a-view-transition
     bool m_captured_in_a_view_transition { false };
 
-    // https://html.spec.whatwg.org/multipage/grouping-content.html#ordinal-value
-    Optional<i32> m_ordinal_value;
     bool m_is_contained_in_list_subtree { false };
+
+    // https://drafts.csswg.org/css-values-5/#random-caching
+    HashMap<CSS::RandomCachingKey, double> m_element_specific_css_random_base_value_cache;
 };
 
 template<>
@@ -675,7 +844,7 @@ inline GC::Ptr<Element const> Node::parent_element() const
     return as_if<Element>(this->parent());
 }
 
-inline bool Element::has_class(FlyString const& class_name, CaseSensitivity case_sensitivity) const
+inline bool Element::has_class(Utf16View class_name, CaseSensitivity case_sensitivity) const
 {
     if (case_sensitivity == CaseSensitivity::CaseSensitive) {
         return any_of(m_classes, [&](auto& it) {
@@ -687,26 +856,30 @@ inline bool Element::has_class(FlyString const& class_name, CaseSensitivity case
     });
 }
 
-inline bool Element::has_pseudo_element(CSS::PseudoElement type) const
+inline bool Element::has_class(Utf16FlyString const& class_name, CaseSensitivity case_sensitivity) const
 {
-    if (!m_pseudo_element_data)
-        return false;
-    if (!CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(type))
-        return false;
-    auto pseudo_element = m_pseudo_element_data->get(type);
-    if (!pseudo_element.has_value())
-        return false;
-    return pseudo_element.value()->layout_node();
+    if (case_sensitivity == CaseSensitivity::CaseSensitive) {
+        // NB: Comparing two interned strings is a pointer comparison.
+        return any_of(m_classes, [&](auto& it) {
+            return it == class_name;
+        });
+    }
+    return any_of(m_classes, [&](auto& it) {
+        return it.equals_ignoring_ascii_case(class_name);
+    });
 }
 
-bool is_valid_namespace_prefix(FlyString const&);
-bool is_valid_attribute_local_name(FlyString const&);
-bool is_valid_element_local_name(FlyString const&);
+bool is_valid_namespace_prefix(Utf16View);
+bool is_valid_attribute_local_name(Utf16View);
+bool is_valid_element_local_name(Utf16View const&);
 
 enum class ValidationContext {
     Attribute,
     Element,
 };
-WebIDL::ExceptionOr<QualifiedName> validate_and_extract(JS::Realm&, Optional<FlyString> namespace_, FlyString const& qualified_name, ValidationContext context);
+WebIDL::ExceptionOr<QualifiedName> validate_and_extract(JS::Realm&, Optional<Utf16FlyString> namespace_, Utf16FlyString const& qualified_name, ValidationContext context);
 
 }
+
+template<>
+inline bool JS::Object::fast_is<Web::DOM::Element>() const { return is_dom_element(); }

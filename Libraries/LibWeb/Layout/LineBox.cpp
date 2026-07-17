@@ -7,6 +7,7 @@
 
 #include <AK/CharacterTypes.h>
 #include <AK/Utf8View.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Position.h>
 #include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/LineBox.h>
@@ -40,7 +41,9 @@ void LineBox::add_fragment(Node const& layout_node, size_t start, size_t length,
     CSSPixels trailing_size, CSSPixels leading_margin, CSSPixels trailing_margin, CSSPixels content_width,
     CSSPixels content_height, CSSPixels border_box_top, CSSPixels border_box_bottom, RefPtr<Gfx::GlyphRun> glyph_run)
 {
-    bool text_align_is_justify = layout_node.computed_values().text_align() == CSS::TextAlign::Justify;
+    auto const* layout_node_with_style = as_if<NodeWithStyle>(layout_node);
+    auto const& style_source = layout_node_with_style ? *layout_node_with_style : *layout_node.parent();
+    bool text_align_is_justify = style_source.computed_values().text_align() == CSS::TextAlign::Justify;
     if (glyph_run && !text_align_is_justify && !m_fragments.is_empty()
         && &m_fragments.last().layout_node() == &layout_node
         && &m_fragments.last().m_glyph_run->font() == &glyph_run->font()
@@ -59,15 +62,38 @@ void LineBox::add_fragment(Node const& layout_node, size_t start, size_t length,
     m_block_length = max(m_block_length, content_height + border_box_top + border_box_bottom);
 }
 
+void LineBox::add_static_position_marker(Box const& box, bool preceded_by_inline_box_start_edges)
+{
+    // Inline box start edges count like content here: a line box holding an inline element with
+    // non-zero margin, border or padding is not a zero-height line box (CSS 2 § 9.4.2), so a
+    // block-level abspos after such an edge belongs below this line, not at its top.
+    m_static_position_markers.append(StaticPositionMarker {
+        .box = &box,
+        .inline_offset = m_inline_length,
+        .block_offset = 0,
+        .writing_mode = m_writing_mode,
+        .preceded_by_in_flow_content = !m_fragments.is_empty() || preceded_by_inline_box_start_edges,
+    });
+}
+
+void LineBox::clamp_static_position_markers_to_inline_length()
+{
+    for (auto& marker : m_static_position_markers) {
+        if (marker.inline_offset > m_inline_length)
+            marker.inline_offset = m_inline_length;
+    }
+}
+
 CSSPixels LineBox::calculate_or_trim_trailing_whitespace(RemoveTrailingWhitespace should_remove)
 {
     auto should_trim = [](LineBoxFragment* fragment) {
-        auto white_space_collapse = fragment->layout_node().computed_values().white_space_collapse();
+        auto white_space_collapse = fragment->style_source().computed_values().white_space_collapse();
 
         return white_space_collapse == CSS::WhiteSpaceCollapse::Collapse || white_space_collapse == CSS::WhiteSpaceCollapse::PreserveBreaks;
     };
 
     CSSPixels whitespace_width = 0;
+    CSSPixels trailing_whitespace_width = 0;
     LineBoxFragment* last_fragment = nullptr;
     size_t fragment_index = m_fragments.size();
     for (;;) {
@@ -86,16 +112,23 @@ CSSPixels LineBox::calculate_or_trim_trailing_whitespace(RemoveTrailingWhitespac
             break;
 
         whitespace_width += last_fragment->inline_length();
+        trailing_whitespace_width += last_fragment->inline_length();
         if (should_remove == RemoveTrailingWhitespace::Yes) {
             m_inline_length -= last_fragment->inline_length();
             m_fragments.remove(fragment_index);
+            clamp_static_position_markers_to_inline_length();
         }
     }
 
     auto last_text = last_fragment->text();
-    if (last_text.is_null())
+    if (last_text.is_empty()) {
+        // No text to trim, but we may have removed whitespace-only fragments.
+        if (should_remove == RemoveTrailingWhitespace::Yes && trailing_whitespace_width > 0)
+            last_fragment->set_has_trailing_whitespace(true);
         return whitespace_width;
+    }
 
+    // Trim trailing whitespace characters from the last fragment.
     size_t last_text_length = last_text.length_in_code_units();
     while (last_text_length) {
         auto last_character = last_text.code_unit_at(--last_text_length);
@@ -103,13 +136,22 @@ CSSPixels LineBox::calculate_or_trim_trailing_whitespace(RemoveTrailingWhitespac
             break;
 
         auto const& font = last_fragment->glyph_run() ? last_fragment->glyph_run()->font() : last_fragment->layout_node().first_available_font();
-        int last_character_width = font.glyph_width(last_character);
+        CSSPixels last_character_width = CSSPixels(font.glyph_width(last_character)) + last_fragment->style_source().computed_values().letter_spacing();
         whitespace_width += last_character_width;
+        trailing_whitespace_width += last_character_width;
         if (should_remove == RemoveTrailingWhitespace::Yes) {
             --last_fragment->m_length_in_code_units;
             last_fragment->set_inline_length(last_fragment->inline_length() - last_character_width);
             m_inline_length -= last_character_width;
+            clamp_static_position_markers_to_inline_length();
         }
+    }
+
+    // Track trimmed whitespace for selection purposes, but don't overwrite a value
+    // that was already set during line breaking (for wrapped lines).
+    if (should_remove == RemoveTrailingWhitespace::Yes
+        && (trailing_whitespace_width > 0 || !last_fragment->has_trailing_whitespace())) {
+        last_fragment->set_has_trailing_whitespace(trailing_whitespace_width > 0);
     }
 
     return whitespace_width;

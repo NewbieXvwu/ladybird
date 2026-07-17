@@ -5,11 +5,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibJS/Parser.h>
+#include <LibGC/Timer.h>
 #include <LibJS/Runtime/ECMAScriptFunctionObject.h>
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/ObjectEnvironment.h>
 #include <LibJS/Runtime/PromiseConstructor.h>
+#include <LibJS/Runtime/SharedFunctionInstanceData.h>
+#include <LibJS/RustIntegration.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -17,7 +19,6 @@
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/WebDriver/ExecuteScript.h>
-#include <LibWeb/WebDriver/HeapTimer.h>
 
 namespace Web::WebDriver {
 
@@ -49,43 +50,30 @@ static JS::ThrowCompletionOr<JS::Value> execute_a_function_body(HTML::BrowsingCo
 
     // FIXME: This does not handle scripts which contain `await` statements. It is not as as simple as declaring this
     //        function async, unfortunately. See: https://github.com/w3c/webdriver/issues/1436
-    auto source_text = ByteString::formatted(
+    auto body_utf16 = Utf16String::from_utf8(body);
+    auto source_text = Utf16String::formatted(
         R"~~~(function() {{
             {}
         }})~~~",
-        body);
+        body_utf16);
 
-    auto parser = JS::Parser { JS::Lexer { source_text } };
-    auto function_expression = parser.parse_function_node<JS::FunctionExpression>();
+    auto rust_compilation = JS::RustIntegration::compile_dynamic_function(
+        realm.vm(), source_text, Utf16String {}, body_utf16, JS::FunctionKind::Normal);
 
     // 4. If body is not parsable as a FunctionBody or if parsing detects an early error, return Completion { [[Type]]: normal, [[Value]]: null, [[Target]]: empty }.
-    if (parser.has_errors())
+    if (!rust_compilation.has_value() || rust_compilation->is_error())
         return JS::js_null();
 
-    // 5. If body begins with a directive prologue that contains a use strict directive then let strict be true, otherwise let strict be false.
-    // NOTE: Handled in step 8 below.
-
-    // 6. Prepare to run a script with realm.
-    HTML::prepare_to_run_script(realm);
+    // 6. Prepare to run script with environment settings.
+    HTML::prepare_to_run_script(environment_settings);
 
     // 7. Prepare to run a callback with environment settings.
-    HTML::prepare_to_run_callback(realm);
+    HTML::prepare_to_run_callback(environment_settings);
 
-    // 8. Let function be the result of calling FunctionCreate, with arguments:
-    // kind
-    //    Normal.
-    // list
-    //    An empty List.
-    // body
-    //    The result of parsing body above.
-    // global scope
-    //    The result of parsing global scope above.
-    // strict
-    //    The result of parsing strict above.
-    auto function = JS::ECMAScriptFunctionObject::create_from_function_node(
-        function_expression,
-        Utf16FlyString {},
+    // 8. Let function be the result of calling FunctionCreate.
+    auto function = JS::ECMAScriptFunctionObject::create_from_function_data(
         realm,
+        rust_compilation->value(),
         &global_scope,
         nullptr);
 
@@ -95,16 +83,16 @@ static JS::ThrowCompletionOr<JS::Value> execute_a_function_body(HTML::BrowsingCo
     auto completion = JS::call(realm.vm(), *function, window, parameters);
 
     // 10. Clean up after running a callback with environment settings.
-    HTML::clean_up_after_running_callback(realm);
+    HTML::clean_up_after_running_callback(environment_settings);
 
-    // 11. Clean up after running a script with realm.
-    HTML::clean_up_after_running_script(realm);
+    // 11. Clean up after running a script with environment settings.
+    HTML::clean_up_after_running_script(environment_settings);
 
     // 12. Return completion.
     return completion;
 }
 
-static void fire_completion_when_resolved(GC::Ref<WebIDL::Promise> promise, GC::Ref<HeapTimer> timer, GC::Ref<OnScriptComplete> on_complete)
+static void fire_completion_when_resolved(GC::Ref<WebIDL::Promise> promise, GC::Ref<GC::Timer> timer, GC::Ref<OnScriptComplete> on_complete)
 {
     auto reaction_steps = GC::create_function(promise->heap(), [promise, timer, on_complete](JS::Value) -> WebIDL::ExceptionOr<JS::Value> {
         if (timer->is_timed_out())
@@ -127,7 +115,7 @@ void execute_script(HTML::BrowsingContext const& browsing_context, String body, 
     auto& vm = document->vm();
 
     // 5. Let timer be a new timer.
-    auto timer = realm.create<HeapTimer>();
+    auto timer = vm.heap().allocate<GC::Timer>();
 
     // 6. If timeout is not null:
     if (timeout_ms.has_value()) {
@@ -178,7 +166,7 @@ void execute_async_script(HTML::BrowsingContext const& browsing_context, String 
     auto& vm = document->vm();
 
     // 5. Let timer be a new timer.
-    auto timer = realm.create<HeapTimer>();
+    auto timer = vm.heap().allocate<GC::Timer>();
 
     // 6. If timeout is not null:
     if (timeout_ms.has_value()) {

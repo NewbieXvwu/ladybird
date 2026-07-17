@@ -25,10 +25,9 @@ public:
 
     bool properties_equal(URLStyleValue const& other) const { return m_url == other.m_url; }
 
-    virtual String to_string(SerializationMode) const override
-    {
-        return m_url.to_string();
-    }
+    virtual bool is_computationally_independent() const override { return true; }
+
+    virtual void serialize(StringBuilder& builder, SerializationMode) const override { builder.append(m_url.to_string()); }
 
 private:
     URLStyleValue(URL const& url)

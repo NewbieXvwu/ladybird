@@ -1,14 +1,23 @@
 <!DOCTYPE html>
-<html>
-<link rel="match" href="../expected/css-gradients-ref.html" />
+<meta name="fuzzy" content="maxDifference=0-162;totalPixels=0-435">
 <style>
   body {
     background-color: white;
   }
 
+  section.boxes {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+  }
+
+  section.rects {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+  }
+
   div {
     border: 1px solid black;
-    margin: 20px;
+    margin: 5px;
   }
 
   .box {
@@ -77,6 +86,10 @@
   .grad-10 {
     background-image: linear-gradient(90deg, red, transparent, blue);
   }
+  
+  .grad-10-calc-angle {
+    background-image: linear-gradient(calc(30deg * 3), red, transparent, blue);
+  }
 
   .grad-11 {
     background-image: linear-gradient(to top right, indigo, white, deeppink);
@@ -96,6 +109,14 @@
 
   .grad-webkit {
     background-image: -webkit-linear-gradient(top right, yellow, black, yellow, black);
+  }
+
+  .grad-webkit-angle {
+    background-image: -webkit-linear-gradient(120deg, red, blue);
+  }
+
+  .grad-webkit-angle-equivalent {
+    background-image: linear-gradient(330deg, red, blue);
   }
 
   .grad-15 {
@@ -133,6 +154,10 @@
 
   .grad-repeat-3 {
     background-image: -webkit-repeating-linear-gradient(left, red 10%, blue 30%);
+  }
+
+  .grad-repeat-4 {
+    background-image: repeating-linear-gradient(to bottom, blue 0 2px, red 2px 4px);
   }
 
   .grad-double-position {
@@ -193,6 +218,18 @@
     background-image: radial-gradient(200px 100px ellipse at 25% 50%, yellow, #009966, purple);
   }
 
+  .grad-radial-5 {
+    background-image: radial-gradient(ellipse closest-side farthest-side at 25% 25%, yellow, #009966, purple);
+  }
+
+  .grad-radial-6 {
+    background-image: radial-gradient(50% at 25% 25%, yellow, #009966, purple);
+  }
+
+  .grad-radial-7 {
+    background-image: radial-gradient(closest-side 50% at 25% 25%, yellow, #009966, purple);
+  }
+
   .grad-radial-repeat-1 {
     background-image: repeating-radial-gradient(#e66465, #9198e5 20%);
   }
@@ -209,7 +246,7 @@
     background-image: repeating-radial-gradient(circle at calc(100% - 10px) calc(20% + 10px), #333, #333 10px, #eee 10px, #eee 20px);
   }
 </style>
-<body>
+<section class="boxes">
   <div class="box grad-0"></div>
   <div class="box grad-1"></div>
   <div class="box grad-2"></div>
@@ -219,16 +256,12 @@
   <div class="box grad-6"></div>
   <div class="box grad-rainbow"></div>
   <div class="box grad-hints"></div>
-  <div class="rect grad-7"></div>
   <div class="box grad-8"></div>
   <div class="box grad-9"></div>
   <div class="box grad-10"></div>
-  <div class="rect grad-11"></div>
-  <div class="rect grad-12"></div>
-  <div class="rect grad-13"></div>
-  <div class="rect grad-14"></div>
-  <div class="rect grad-15"></div>
   <div class="box grad-webkit"></div>
+  <div class="box grad-webkit-angle"></div>
+  <div class="box grad-webkit-angle-equivalent"></div>
   <div class="box grad-repeat-0"></div>
   <div class="box grad-repeat-1"></div>
   <div class="box grad-repeat-2"></div>
@@ -242,13 +275,25 @@
   <div class="box grad-conic-6"></div>
   <div class="box grad-conic-repeat-1"></div>
   <div class="box grad-conic-repeat-2"></div>
+  <div class="box grad-repeat-4"></div>
+  <div class="box grad-10-calc-angle"></div>
+</section>
+<section class="rects">
+  <div class="rect grad-7"></div>
+  <div class="rect grad-11"></div>
+  <div class="rect grad-12"></div>
+  <div class="rect grad-13"></div>
+  <div class="rect grad-14"></div>
+  <div class="rect grad-15"></div>
   <div class="rect grad-radial-1"></div>
   <div class="rect grad-radial-2"></div>
   <div class="rect grad-radial-3"></div>
   <div class="rect grad-radial-4"></div>
+  <div class="rect grad-radial-5"></div>
+  <div class="rect grad-radial-6"></div>
+  <div class="rect grad-radial-7"></div>
   <div class="rect grad-radial-repeat-1"></div>
   <div class="rect grad-radial-repeat-2"></div>
   <div class="rect grad-radial-repeat-3"></div>
   <div class="rect grad-radial-calc"></div>
-</body>
-</html>
+</section>

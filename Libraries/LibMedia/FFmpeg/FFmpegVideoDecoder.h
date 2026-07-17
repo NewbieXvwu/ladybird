@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/HashMap.h>
 #include <LibMedia/CodecID.h>
 #include <LibMedia/Export.h>
 #include <LibMedia/VideoDecoder.h>
@@ -18,19 +19,19 @@ class MEDIA_API FFmpegVideoDecoder final : public VideoDecoder {
 public:
     static DecoderErrorOr<NonnullOwnPtr<FFmpegVideoDecoder>> try_create(CodecID, ReadonlyBytes codec_initialization_data);
     FFmpegVideoDecoder(AVCodecContext* codec_context, AVPacket* packet, AVFrame* frame);
-    ~FFmpegVideoDecoder();
+    virtual ~FFmpegVideoDecoder() override;
 
-    DecoderErrorOr<void> receive_sample(AK::Duration timestamp, ReadonlyBytes sample) override;
-    DecoderErrorOr<NonnullOwnPtr<VideoFrame>> get_decoded_frame() override;
+    virtual DecoderErrorOr<void> receive_coded_data(AK::Duration timestamp, AK::Duration duration, ReadonlyBytes coded_data, Optional<AK::Duration> decode_timestamp = {}) override;
+    virtual void signal_end_of_stream() override;
+    virtual DecoderErrorOr<NonnullRefPtr<VideoFrame>> get_decoded_frame(CodingIndependentCodePoints const& container_cicp) override;
 
-    void flush() override;
+    virtual void flush() override;
 
 private:
-    DecoderErrorOr<void> decode_single_sample(AK::Duration timestamp, u8* data, int size);
-
     AVCodecContext* m_codec_context;
     AVPacket* m_packet;
     AVFrame* m_frame;
+    HashMap<i64, AK::Duration> m_frame_durations;
 };
 
 }

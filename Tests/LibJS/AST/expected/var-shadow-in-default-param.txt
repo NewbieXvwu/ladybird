@@ -1,0 +1,112 @@
+Program (script) @4:1
+├─ VariableDeclaration (var) @4:1
+│  └─ VariableDeclarator @4:1
+│     ├─ Identifier "shadow" [global] (var) @4:5
+│     └─ StringLiteral "outer" @4:21
+├─ FunctionDeclaration "shadow_in_default" @5:1
+│  ├─ parameters
+│  │  └─ Identifier "x" [argument:0] @5:28
+│  │     └─ default
+│  │        └─ Identifier "shadow" (var) @5:32
+│  └─ body
+│     └─ FunctionBody @6:5
+│        ├─ VariableDeclaration (var) @6:5
+│        │  └─ VariableDeclarator @6:5
+│        │     ├─ Identifier "shadow" (var) @6:9
+│        │     └─ StringLiteral "inner" @6:25
+│        └─ ReturnStatement @7:5
+│           └─ Identifier "x" [argument:0] @7:12
+├─ FunctionDeclaration "no_conflict" @12:1
+│  ├─ parameters
+│  │  └─ Identifier "x" [argument:0] @12:22
+│  │     └─ default
+│  │        └─ NumericLiteral 1 @12:26
+│  └─ body
+│     └─ FunctionBody @13:5
+│        ├─ VariableDeclaration (var) @13:5
+│        │  └─ VariableDeclarator @13:5
+│        │     ├─ Identifier "y" [variable:0] (var) @13:9
+│        │     └─ NumericLiteral 2 @13:13
+│        └─ ReturnStatement @14:5
+│           └─ Identifier "y" [variable:0] (var) @14:12
+├─ FunctionDeclaration "param_redeclared" @19:1
+│  ├─ parameters
+│  │  └─ Identifier "a" [argument:0] (var) @19:27
+│  │     └─ default
+│  │        └─ NumericLiteral 10 @19:31
+│  └─ body
+│     └─ FunctionBody @20:5
+│        ├─ VariableDeclaration (var) @20:5
+│        │  └─ VariableDeclarator @20:5
+│        │     └─ Identifier "a" [argument:0] (var) @20:9
+│        └─ ReturnStatement @21:5
+│           └─ Identifier "a" [argument:0] (var) @21:12
+├─ FunctionDeclaration "multi_shadow" @25:1
+│  ├─ parameters
+│  │  ├─ Identifier "x" [argument:0] @25:23
+│  │  │  └─ default
+│  │  │     └─ Identifier "shadow" (var) @25:27
+│  │  └─ Identifier "y" [argument:1] @25:23
+│  │     └─ default
+│  │        └─ Identifier "shadow" (var) @25:39
+│  └─ body
+│     └─ FunctionBody @26:5
+│        ├─ VariableDeclaration (var) @26:5
+│        │  └─ VariableDeclarator @26:5
+│        │     ├─ Identifier "shadow" (var) @26:9
+│        │     └─ StringLiteral "inner" @26:25
+│        └─ ReturnStatement @27:5
+│           └─ Identifier "x" [argument:0] @27:12
+├─ FunctionDeclaration "destruct_shadow" @32:1
+│  ├─ parameters
+│  │  └─ BindingPattern (object)
+│  │     └─ entry
+│  │        └─ name
+│  │           └─ Identifier "x" [variable:0] @32:28
+│  │     └─ default
+│  │        └─ Identifier "shadow" (var) @32:34
+│  └─ body
+│     └─ FunctionBody @33:5
+│        ├─ VariableDeclaration (var) @33:5
+│        │  └─ VariableDeclarator @33:5
+│        │     ├─ Identifier "shadow" (var) @33:9
+│        │     └─ ObjectExpression @33:18
+│        └─ ReturnStatement @34:5
+│           └─ Identifier "x" [variable:0] @34:12
+├─ FunctionDeclaration "arrow_in_default" @40:1
+│  ├─ parameters
+│  │  └─ Identifier "x" [argument:0] @40:27
+│  │     └─ default
+│  │        └─ CallExpression @40:45
+│  │           └─ FunctionExpression "" [arrow] @40:32
+│  │              └─ body
+│  │                 └─ FunctionBody @40:32
+│  │                    └─ ReturnStatement @40:32
+│  │                       └─ Identifier "shadow" (var) @40:38
+│  └─ body
+│     └─ FunctionBody @41:5
+│        ├─ VariableDeclaration (var) @41:5
+│        │  └─ VariableDeclarator @41:5
+│        │     ├─ Identifier "shadow" (var) @41:9
+│        │     └─ StringLiteral "inner" @41:25
+│        └─ ReturnStatement @42:5
+│           └─ Identifier "x" [argument:0] @42:12
+└─ FunctionDeclaration "func_decl_no_conflict" @47:1
+   ├─ parameters
+   │  └─ Identifier "x" [argument:0] @47:32
+   │     └─ default
+   │        └─ NumericLiteral 1 @47:36
+   └─ body
+      └─ FunctionBody @48:5
+         ├─ VariableDeclaration (var) @48:5
+         │  └─ VariableDeclarator @48:5
+         │     ├─ Identifier "y" (var) @48:9
+         │     └─ NumericLiteral 42 @48:13
+         ├─ FunctionDeclaration "inner" @49:5
+         │  └─ body
+         │     └─ FunctionBody @49:24
+         │        └─ ReturnStatement @49:24
+         │           └─ Identifier "y" (var) @49:31
+         └─ ReturnStatement @50:5
+            └─ CallExpression @50:17
+               └─ Identifier "inner" [variable:0] @50:12

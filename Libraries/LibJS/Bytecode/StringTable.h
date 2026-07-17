@@ -9,6 +9,7 @@
 #include <AK/DistinctNumeric.h>
 #include <AK/Utf16String.h>
 #include <AK/Vector.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 
 namespace JS::Bytecode {
 
@@ -28,7 +29,16 @@ public:
     StringTableIndex insert(Utf16String);
     Utf16String const& get(StringTableIndex) const;
     void dump() const;
+    void ensure_capacity(size_t capacity) { m_strings.ensure_capacity(capacity); }
     bool is_empty() const { return m_strings.is_empty(); }
+    size_t size() const { return m_strings.size(); }
+    size_t external_memory_size() const
+    {
+        size_t size = vector_external_memory_size(m_strings);
+        for (auto const& string : m_strings)
+            size = saturating_add_external_memory_size(size, utf16_string_external_memory_size(string));
+        return size;
+    }
 
 private:
     Vector<Utf16String> m_strings;
@@ -39,99 +49,15 @@ private:
 namespace AK {
 
 template<>
-class Optional<JS::Bytecode::StringTableIndex> : public OptionalBase<JS::Bytecode::StringTableIndex> {
-    template<typename U>
-    friend class Optional;
+struct SentinelOptionalTraits<JS::Bytecode::StringTableIndex> {
+    static constexpr JS::Bytecode::StringTableIndex sentinel_value() { return { JS::Bytecode::StringTableIndex::invalid }; }
+    static constexpr bool is_sentinel(JS::Bytecode::StringTableIndex const& value) { return !value.is_valid(); }
+};
 
+template<>
+class Optional<JS::Bytecode::StringTableIndex> : public SentinelOptional<JS::Bytecode::StringTableIndex> {
 public:
-    using ValueType = JS::Bytecode::StringTableIndex;
-
-    Optional() = default;
-
-    template<SameAs<OptionalNone> V>
-    Optional(V) { }
-
-    Optional(Optional<JS::Bytecode::StringTableIndex> const& other)
-    {
-        if (other.has_value())
-            m_value = other.m_value;
-    }
-
-    Optional(Optional&& other)
-        : m_value(other.m_value)
-    {
-    }
-
-    template<typename U = JS::Bytecode::StringTableIndex>
-    requires(!IsSame<OptionalNone, RemoveCVReference<U>>)
-    explicit(!IsConvertible<U&&, JS::Bytecode::StringTableIndex>) Optional(U&& value)
-    requires(!IsSame<RemoveCVReference<U>, Optional<JS::Bytecode::StringTableIndex>> && IsConstructible<JS::Bytecode::StringTableIndex, U &&>)
-        : m_value(forward<U>(value))
-    {
-    }
-
-    template<SameAs<OptionalNone> V>
-    Optional& operator=(V)
-    {
-        clear();
-        return *this;
-    }
-
-    Optional& operator=(Optional const& other)
-    {
-        if (this != &other) {
-            clear();
-            m_value = other.m_value;
-        }
-        return *this;
-    }
-
-    Optional& operator=(Optional&& other)
-    {
-        if (this != &other) {
-            clear();
-            m_value = other.m_value;
-        }
-        return *this;
-    }
-
-    void clear()
-    {
-        m_value.value = JS::Bytecode::StringTableIndex::invalid;
-    }
-
-    [[nodiscard]] bool has_value() const
-    {
-        return m_value.is_valid();
-    }
-
-    [[nodiscard]] JS::Bytecode::StringTableIndex& value() &
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] JS::Bytecode::StringTableIndex const& value() const&
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] JS::Bytecode::StringTableIndex value() &&
-    {
-        return release_value();
-    }
-
-    [[nodiscard]] JS::Bytecode::StringTableIndex release_value()
-    {
-        VERIFY(has_value());
-        JS::Bytecode::StringTableIndex released_value = m_value;
-        clear();
-        return released_value;
-    }
-
-private:
-    JS::Bytecode::StringTableIndex m_value { JS::Bytecode::StringTableIndex::invalid };
+    using SentinelOptional::SentinelOptional;
 };
 
 }

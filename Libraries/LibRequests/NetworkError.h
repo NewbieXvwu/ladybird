@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, the Ladybird developers.
+ * Copyright (c) 2024-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -19,8 +19,10 @@ enum class NetworkError {
     SSLHandshakeFailed,
     SSLVerificationFailed,
     MalformedUrl,
+    IncompleteContent,
     InvalidContentEncoding,
     RequestServerDied,
+    CacheReadFailed,
     Unknown,
 };
 
@@ -43,10 +45,14 @@ constexpr StringView network_error_to_string(NetworkError network_error)
         return "SSL verification failed"sv;
     case NetworkError::MalformedUrl:
         return "The URL is not formatted properly"sv;
+    case NetworkError::IncompleteContent:
+        return "Connection was closed before entire response was received"sv;
     case NetworkError::InvalidContentEncoding:
         return "Response could not be decoded with its Content-Encoding"sv;
     case NetworkError::RequestServerDied:
         return "RequestServer is currently unavailable"sv;
+    case NetworkError::CacheReadFailed:
+        return "RequestServer encountered an error reading a cached HTTP response"sv;
     case NetworkError::Unknown:
         return "An unexpected network error occurred"sv;
     }

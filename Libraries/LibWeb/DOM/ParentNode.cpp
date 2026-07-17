@@ -7,13 +7,13 @@
  */
 
 #include <LibWeb/CSS/Parser/Parser.h>
-#include <LibWeb/CSS/SelectorEngine.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/HTMLCollection.h>
+#include <LibWeb/DOM/NodeList.h>
 #include <LibWeb/DOM/NodeOperations.h>
 #include <LibWeb/DOM/ParentNode.h>
+#include <LibWeb/DOM/SelectorQuery.h>
 #include <LibWeb/DOM/ShadowRoot.h>
-#include <LibWeb/DOM/StaticNodeList.h>
 #include <LibWeb/Dump.h>
 #include <LibWeb/Infra/CharacterTypes.h>
 #include <LibWeb/Infra/Strings.h>
@@ -23,85 +23,37 @@ namespace Web::DOM {
 
 GC_DEFINE_ALLOCATOR(ParentNode);
 
-static bool contains_named_namespace(CSS::SelectorList const& selectors)
-{
-    for (auto const& selector : selectors) {
-        for (auto const& compound_selector : selector->compound_selectors()) {
-            for (auto simple_selector : compound_selector.simple_selectors) {
-                if (simple_selector.value.has<CSS::Selector::SimpleSelector::QualifiedName>()) {
-                    if (simple_selector.qualified_name().namespace_type == CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::Named)
-                        return true;
-                }
-
-                if (simple_selector.value.has<CSS::Selector::SimpleSelector::PseudoClassSelector>()) {
-                    if (contains_named_namespace(simple_selector.pseudo_class().argument_selector_list))
-                        return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-enum class ReturnMatches {
-    First,
-    All,
-};
-// https://dom.spec.whatwg.org/#scope-match-a-selectors-string
-static WebIDL::ExceptionOr<Variant<GC::Ptr<Element>, GC::Ref<NodeList>>> scope_match_a_selectors_string(ParentNode& node, StringView selector_text, ReturnMatches return_matches)
-{
-    // To scope-match a selectors string selectors against a node, run these steps:
-    // 1. Let s be the result of parse a selector selectors.
-    auto maybe_selectors = parse_selector(CSS::Parser::ParsingParams { node.document() }, selector_text);
-
-    // 2. If s is failure, then throw a "SyntaxError" DOMException.
-    if (!maybe_selectors.has_value())
-        return WebIDL::SyntaxError::create(node.realm(), "Failed to parse selector"_utf16);
-
-    auto selectors = maybe_selectors.value();
-
-    // "Note: Support for namespaces within selectors is not planned and will not be added."
-    if (contains_named_namespace(selectors))
-        return WebIDL::SyntaxError::create(node.realm(), "Failed to parse selector"_utf16);
-
-    // 3. Return the result of match a selector against a tree with s and node’s root using scoping root node.
-    GC::Ptr<Element> single_result;
-    Vector<GC::Root<Node>> results;
-    // FIXME: This should be shadow-including. https://drafts.csswg.org/selectors-4/#match-a-selector-against-a-tree
-    node.for_each_in_subtree_of_type<Element>([&](auto& element) {
-        for (auto& selector : selectors) {
-            SelectorEngine::MatchContext context;
-            if (SelectorEngine::matches(selector, element, nullptr, context, {}, node)) {
-                if (return_matches == ReturnMatches::First) {
-                    single_result = &element;
-                    return TraversalDecision::Break;
-                }
-                results.append(element);
-                break;
-            }
-        }
-        return TraversalDecision::Continue;
-    });
-
-    if (return_matches == ReturnMatches::First)
-        return { single_result };
-
-    return { StaticNodeList::create(node.realm(), move(results)) };
-}
-
 // https://dom.spec.whatwg.org/#dom-parentnode-queryselector
-WebIDL::ExceptionOr<GC::Ptr<Element>> ParentNode::query_selector(StringView selector_text)
+WebIDL::ExceptionOr<GC::Ptr<Element>> ParentNode::query_selector(Utf16View selector_text)
 {
     // The querySelector(selectors) method steps are to return the first result of running scope-match a selectors string selectors against this,
     // if the result is not an empty list; otherwise null.
-    return TRY(scope_match_a_selectors_string(*this, selector_text, ReturnMatches::First)).get<GC::Ptr<Element>>();
+
+    // Scope-match step 1. Let s be the result of parse a selector selectors.
+    auto query = document().selector_query_for(selector_text);
+
+    // Scope-match step 2. If s is failure, then throw a "SyntaxError" DOMException.
+    if (!query)
+        return WebIDL::SyntaxError::create(realm(), "Failed to parse selector"_utf16);
+
+    // Scope-match step 3. Return the result of match a selector against a tree with s and node’s root using scoping root node.
+    return query->query_first(*this);
 }
 
 // https://dom.spec.whatwg.org/#dom-parentnode-queryselectorall
-WebIDL::ExceptionOr<GC::Ref<NodeList>> ParentNode::query_selector_all(StringView selector_text)
+WebIDL::ExceptionOr<GC::Ref<NodeList>> ParentNode::query_selector_all(Utf16View selector_text)
 {
     // The querySelectorAll(selectors) method steps are to return the static result of running scope-match a selectors string selectors against this.
-    return TRY(scope_match_a_selectors_string(*this, selector_text, ReturnMatches::All)).get<GC::Ref<NodeList>>();
+
+    // Scope-match step 1. Let s be the result of parse a selector selectors.
+    auto query = document().selector_query_for(selector_text);
+
+    // Scope-match step 2. If s is failure, then throw a "SyntaxError" DOMException.
+    if (!query)
+        return WebIDL::SyntaxError::create(realm(), "Failed to parse selector"_utf16);
+
+    // Scope-match step 3. Return the result of match a selector against a tree with s and node’s root using scoping root node.
+    return query->query_all(*this);
 }
 
 GC::Ptr<Element> ParentNode::first_element_child()
@@ -145,10 +97,10 @@ GC::Ref<HTMLCollection> ParentNode::children()
 
 // https://dom.spec.whatwg.org/#concept-getelementsbytagname
 // NOTE: This method is only exposed on Document and Element, but is in ParentNode to prevent code duplication.
-GC::Ref<HTMLCollection> ParentNode::get_elements_by_tag_name(FlyString const& qualified_name)
+GC::Ref<HTMLCollection> ParentNode::get_elements_by_tag_name(Utf16FlyString const& qualified_name)
 {
     // 1. If qualifiedName is "*" (U+002A), return a HTMLCollection rooted at root, whose filter matches only descendant elements.
-    if (qualified_name == "*") {
+    if (qualified_name == u"*"sv) {
         return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [](Element const&) {
             return true;
         });
@@ -156,60 +108,67 @@ GC::Ref<HTMLCollection> ParentNode::get_elements_by_tag_name(FlyString const& qu
 
     // 2. Otherwise, if root’s node document is an HTML document, return a HTMLCollection rooted at root, whose filter matches the following descendant elements:
     if (root().document().document_type() == Document::Type::HTML) {
-        FlyString qualified_name_in_ascii_lowercase = qualified_name.to_ascii_lowercase();
-        return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [qualified_name, qualified_name_in_ascii_lowercase](Element const& element) {
+        auto lowercase_qualified_name = qualified_name.to_ascii_lowercase();
+        return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [qualified_name, lowercase_qualified_name = move(lowercase_qualified_name)](Element const& element) {
             // - Whose namespace is the HTML namespace and whose qualified name is qualifiedName, in ASCII lowercase.
             if (element.namespace_uri() == Namespace::HTML)
-                return element.qualified_name() == qualified_name_in_ascii_lowercase;
+                return element.qualified_name() == lowercase_qualified_name;
 
             // - Whose namespace is not the HTML namespace and whose qualified name is qualifiedName.
-            return element.qualified_name() == qualified_name;
+            return element.qualified_name().view() == qualified_name.view();
         });
     }
 
     // 3. Otherwise, return a HTMLCollection rooted at root, whose filter matches descendant elements whose qualified name is qualifiedName.
     return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [qualified_name](Element const& element) {
-        return element.qualified_name() == qualified_name;
+        return element.qualified_name().view() == qualified_name.view();
     });
 }
 
 // https://dom.spec.whatwg.org/#concept-getelementsbytagnamens
 // NOTE: This method is only exposed on Document and Element, but is in ParentNode to prevent code duplication.
-GC::Ref<HTMLCollection> ParentNode::get_elements_by_tag_name_ns(Optional<FlyString> namespace_, FlyString const& local_name)
+GC::Ref<HTMLCollection> ParentNode::get_elements_by_tag_name_ns(Optional<Utf16FlyString> namespace_, Utf16FlyString const& local_name)
 {
     // 1. If namespace is the empty string, set it to null.
-    if (namespace_ == FlyString {})
+    if (namespace_ == Utf16FlyString {})
         namespace_ = OptionalNone {};
 
     // 2. If both namespace and localName are "*" (U+002A), return a HTMLCollection rooted at root, whose filter matches descendant elements.
-    if (namespace_ == "*" && local_name == "*") {
+    if (namespace_ == u"*"sv && local_name == u"*"sv) {
         return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [](Element const&) {
             return true;
         });
     }
 
     // 3. Otherwise, if namespace is "*" (U+002A), return a HTMLCollection rooted at root, whose filter matches descendant elements whose local name is localName.
-    if (namespace_ == "*") {
+    if (namespace_ == u"*"sv) {
         return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [local_name](Element const& element) {
-            return element.local_name() == local_name;
+            return element.local_name().view() == local_name.view();
         });
     }
 
     // 4. Otherwise, if localName is "*" (U+002A), return a HTMLCollection rooted at root, whose filter matches descendant elements whose namespace is namespace.
-    if (local_name == "*") {
+    if (local_name == u"*"sv) {
         return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [namespace_](Element const& element) {
-            return element.namespace_uri() == namespace_;
+            auto element_namespace = element.namespace_uri();
+            if (element_namespace.has_value() != namespace_.has_value())
+                return false;
+            return !namespace_.has_value() || element_namespace->view() == namespace_->view();
         });
     }
 
     // 5. Otherwise, return a HTMLCollection rooted at root, whose filter matches descendant elements whose namespace is namespace and local name is localName.
     return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [namespace_, local_name](Element const& element) {
-        return element.namespace_uri() == namespace_ && element.local_name() == local_name;
+        auto element_namespace = element.namespace_uri();
+        if (element_namespace.has_value() != namespace_.has_value())
+            return false;
+        return (!namespace_.has_value() || element_namespace->view() == namespace_->view())
+            && element.local_name().view() == local_name.view();
     });
 }
 
 // https://dom.spec.whatwg.org/#dom-parentnode-prepend
-WebIDL::ExceptionOr<void> ParentNode::prepend(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes)
+WebIDL::ExceptionOr<void> ParentNode::prepend(ReadonlySpan<Variant<GC::Ref<Node>, Utf16String>> const& nodes)
 {
     // 1. Let node be the result of converting nodes into a node given nodes and this’s node document.
     auto node = TRY(convert_nodes_to_single_node(nodes, document()));
@@ -220,7 +179,8 @@ WebIDL::ExceptionOr<void> ParentNode::prepend(Vector<Variant<GC::Root<Node>, Utf
     return {};
 }
 
-WebIDL::ExceptionOr<void> ParentNode::append(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes)
+// https://dom.spec.whatwg.org/#dom-parentnode-append
+WebIDL::ExceptionOr<void> ParentNode::append(ReadonlySpan<Variant<GC::Ref<Node>, Utf16String>> const& nodes)
 {
     // 1. Let node be the result of converting nodes into a node given nodes and this’s node document.
     auto node = TRY(convert_nodes_to_single_node(nodes, document()));
@@ -231,13 +191,14 @@ WebIDL::ExceptionOr<void> ParentNode::append(Vector<Variant<GC::Root<Node>, Utf1
     return {};
 }
 
-WebIDL::ExceptionOr<void> ParentNode::replace_children(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes)
+// https://dom.spec.whatwg.org/#dom-parentnode-replacechildren
+WebIDL::ExceptionOr<void> ParentNode::replace_children(ReadonlySpan<Variant<GC::Ref<Node>, Utf16String>> const& nodes)
 {
     // 1. Let node be the result of converting nodes into a node given nodes and this’s node document.
     auto node = TRY(convert_nodes_to_single_node(nodes, document()));
 
-    // 2. Ensure pre-insertion validity of node into this before null.
-    TRY(ensure_pre_insertion_validity(realm(), node, nullptr));
+    // 2. Ensure pre-insert validity given node, this, null, and this’s children.
+    TRY(ensure_pre_insert_validity(realm(), node, nullptr, ChildrenToExclude::AllChildren));
 
     // 3. Replace all with node within this.
     replace_all(*node);
@@ -261,38 +222,61 @@ WebIDL::ExceptionOr<void> ParentNode::move_before(GC::Ref<Node> node, GC::Ptr<No
 }
 
 // https://dom.spec.whatwg.org/#dom-document-getelementsbyclassname
-GC::Ref<HTMLCollection> ParentNode::get_elements_by_class_name(StringView class_names)
+GC::Ref<HTMLCollection> ParentNode::get_elements_by_class_name(Utf16View class_names)
 {
-    Vector<FlyString> list_of_class_names;
-    for (auto& name : class_names.split_view_if(Infra::is_ascii_whitespace)) {
-        list_of_class_names.append(FlyString::from_utf8(name).release_value_but_fixme_should_propagate_errors());
+    Vector<Utf16String> list_of_class_names;
+    auto append_class_name = [&](Utf16View class_name) {
+        if (!list_of_class_names.contains_slow(class_name))
+            list_of_class_names.append(Utf16String::from_utf16(class_name));
+    };
+
+    Optional<size_t> token_start;
+    for (size_t i = 0; i < class_names.length_in_code_units(); ++i) {
+        if (Infra::is_ascii_whitespace(class_names.code_unit_at(i))) {
+            if (token_start.has_value()) {
+                append_class_name(class_names.substring_view(*token_start, i - *token_start));
+                token_start = {};
+            }
+            continue;
+        }
+
+        if (!token_start.has_value())
+            token_start = i;
     }
+
+    if (token_start.has_value())
+        append_class_name(class_names.substring_view(*token_start));
+
     return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [list_of_class_names = move(list_of_class_names), quirks_mode = document().in_quirks_mode()](Element const& element) {
         for (auto& name : list_of_class_names) {
-            if (!element.has_class(name, quirks_mode ? CaseSensitivity::CaseInsensitive : CaseSensitivity::CaseSensitive))
+            if (!element.has_class(name.utf16_view(), quirks_mode ? CaseSensitivity::CaseInsensitive : CaseSensitivity::CaseSensitive))
                 return false;
         }
         return !list_of_class_names.is_empty();
     });
 }
 
-GC::Ptr<Element> ParentNode::get_element_by_id(FlyString const& id) const
+GC::Ptr<Element> ParentNode::get_element_by_id(Utf16View id) const
 {
     if (is_connected()) {
         // For connected document and shadow root we have a cache that allows fast lookup.
         if (is_document()) {
             auto const& document = static_cast<Document const&>(*this);
-            return document.element_by_id().get(id);
+            return document.element_by_id().get(id, document);
         }
         if (is_shadow_root()) {
             auto const& shadow_root = static_cast<ShadowRoot const&>(*this);
-            return shadow_root.element_by_id().get(id);
+            return shadow_root.element_by_id().get(id, shadow_root);
         }
+        // The document element's inclusive subtree contains every element in the document, so the document's cache
+        // gives the same answer as walking our subtree.
+        if (auto const& document = this->document(); document.document_element() == this)
+            return document.element_by_id().get(id, document);
     }
 
     GC::Ptr<Element> found_element;
     const_cast<ParentNode&>(*this).for_each_in_inclusive_subtree_of_type<Element>([&](Element& element) {
-        if (element.id() == id) {
+        if (element.id().has_value() && element.id()->view() == id) {
             found_element = &element;
             return TraversalDecision::Break;
         }

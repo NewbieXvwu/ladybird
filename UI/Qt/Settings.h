@@ -9,6 +9,7 @@
 #pragma once
 
 #include <AK/ByteString.h>
+#include <AK/Optional.h>
 #include <AK/OwnPtr.h>
 
 #include <QPoint>
@@ -24,11 +25,8 @@ public:
     Settings(Settings const&) = delete;
     Settings& operator=(Settings const&) = delete;
 
-    static Settings* the()
-    {
-        static Settings instance;
-        return &instance;
-    }
+    static Settings* initialize(ByteString config_path);
+    static Settings* the() { return s_the; }
 
     ByteString directory();
 
@@ -41,18 +39,12 @@ public:
     bool is_maximized();
     void set_is_maximized(bool is_maximized);
 
-    bool show_menubar();
-    void set_show_menubar(bool show_menubar);
-
-signals:
-    void show_menubar_changed(bool show_menubar);
-    void enable_do_not_track_changed(bool enable);
-
 protected:
-    Settings();
+    explicit Settings(ByteString config_path);
 
 private:
     OwnPtr<QSettings> m_qsettings;
+    static Settings* s_the;
 };
 
 }

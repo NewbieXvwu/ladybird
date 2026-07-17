@@ -6,11 +6,12 @@
 
 #include <LibWeb/Bindings/AudioConstructor.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
-#include <LibWeb/Bindings/HTMLAudioElementPrototype.h>
+#include <LibWeb/Bindings/HTMLAudioElement.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Namespace.h>
+#include <LibWeb/WebIDL/AbstractOperations.h>
 
 namespace Web::Bindings {
 
@@ -27,8 +28,8 @@ void AudioConstructor::initialize(JS::Realm& realm)
     Base::initialize(realm);
 
     define_direct_property(vm.names.length, JS::Value(0), JS::Attribute::Configurable);
-    define_direct_property(vm.names.name, JS::PrimitiveString::create(vm, "Audio"_string), JS::Attribute::Configurable);
-    define_direct_property(vm.names.prototype, &ensure_web_prototype<Bindings::HTMLAudioElementPrototype>(realm, "HTMLAudioElement"_fly_string), 0);
+    define_direct_property(vm.names.name, JS::PrimitiveString::create(vm, "Audio"_utf16_fly_string), JS::Attribute::Configurable);
+    define_direct_property(vm.names.prototype, &ensure_web_prototype<Bindings::HTMLAudioElementPrototype>(realm, "HTMLAudioElement"_utf16_fly_string), 0);
 }
 
 JS::ThrowCompletionOr<JS::Value> AudioConstructor::call()
@@ -37,27 +38,31 @@ JS::ThrowCompletionOr<JS::Value> AudioConstructor::call()
 }
 
 // https://html.spec.whatwg.org/multipage/media.html#dom-audio
-JS::ThrowCompletionOr<GC::Ref<JS::Object>> AudioConstructor::construct(FunctionObject&)
+// https://webidl.spec.whatwg.org/#legacy-factory-functions
+JS::ThrowCompletionOr<GC::Ref<JS::Object>> AudioConstructor::construct(FunctionObject& new_target)
 {
     auto& vm = this->vm();
 
     // 1. Let document be the current global object's associated Document.
-    auto& window = as<HTML::Window>(HTML::current_principal_global_object());
+    auto& window = as<HTML::Window>(HTML::current_global_object());
     auto& document = window.associated_document();
 
     // 2. Let audio be the result of creating an element given document, "audio", and the HTML namespace.
     auto audio = TRY(Bindings::throw_dom_exception_if_needed(vm, [&]() { return DOM::create_element(document, HTML::TagNames::audio, Namespace::HTML); }));
 
+    // https://webidl.spec.whatwg.org/#internally-create-a-new-object-implementing-the-interface
+    TRY(WebIDL::set_prototype_from_new_target<HTMLAudioElementPrototype>(vm, new_target, "HTMLAudioElement"_utf16_fly_string, *audio));
+
     // 3. Set an attribute value for audio using "preload" and "auto".
-    MUST(audio->set_attribute(HTML::AttributeNames::preload, "auto"_string));
+    audio->set_attribute_value(HTML::AttributeNames::preload, "auto"_utf16);
 
     auto src_value = vm.argument(0);
 
     // 4. If src is given, then set an attribute value for audio using "src" and src.
     //    (This will cause the user agent to invoke the object's resource selection algorithm before returning.)
     if (!src_value.is_undefined()) {
-        auto src = TRY(src_value.to_string(vm));
-        MUST(audio->set_attribute(HTML::AttributeNames::src, move(src)));
+        auto src = TRY(src_value.to_utf16_string(vm));
+        audio->set_attribute_value(HTML::AttributeNames::src, move(src));
     }
 
     // 5. Return audio.

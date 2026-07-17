@@ -24,17 +24,15 @@ public:
 
     Time const& time() const { return m_time; }
     virtual double raw_value() const override { return m_time.raw_value(); }
-    virtual FlyString unit_name() const override { return m_time.unit_name(); }
+    virtual Utf16FlyString unit_name() const override { return m_time.unit_name(); }
 
-    virtual String to_string(SerializationMode serialization_mode) const override { return m_time.to_string(serialization_mode); }
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
-    bool equals(StyleValue const& other) const override
-    {
-        if (type() != other.type())
-            return false;
-        auto const& other_time = other.as_time();
-        return m_time == other_time.m_time;
-    }
+    virtual void serialize(StringBuilder& builder, SerializationMode mode) const override { m_time.serialize(builder, mode); }
+
+    bool equals(StyleValue const& other) const override;
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     explicit TimeStyleValue(Time time)

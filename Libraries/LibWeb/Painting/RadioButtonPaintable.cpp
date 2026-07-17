@@ -8,7 +8,6 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
-#include <LibWeb/Layout/Label.h>
 #include <LibWeb/Layout/RadioButton.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/InputColors.h>
@@ -16,15 +15,13 @@
 
 namespace Web::Painting {
 
-GC_DEFINE_ALLOCATOR(RadioButtonPaintable);
-
-GC::Ref<RadioButtonPaintable> RadioButtonPaintable::create(Layout::RadioButton const& layout_box)
+NonnullRefPtr<RadioButtonPaintable> RadioButtonPaintable::create(Layout::RadioButton const& layout_box)
 {
-    return layout_box.heap().allocate<RadioButtonPaintable>(layout_box);
+    return adopt_ref(*new RadioButtonPaintable(layout_box));
 }
 
 RadioButtonPaintable::RadioButtonPaintable(Layout::RadioButton const& layout_box)
-    : LabelablePaintable(layout_box)
+    : Paintable(layout_box)
 {
 }
 
@@ -33,7 +30,7 @@ void RadioButtonPaintable::paint(DisplayListRecordingContext& context, PaintPhas
     if (!is_visible())
         return;
 
-    PaintableBox::paint(context, phase);
+    Paintable::paint(context, phase);
 
     if (phase != PaintPhase::Foreground)
         return;
@@ -48,9 +45,9 @@ void RadioButtonPaintable::paint(DisplayListRecordingContext& context, PaintPhas
         return rect.shrunken(amount, amount, amount, amount);
     };
 
-    auto const& radio_button = static_cast<HTML::HTMLInputElement const&>(layout_box().dom_node());
+    auto const& radio_button = static_cast<HTML::HTMLInputElement const&>(*dom_node());
 
-    bool enabled = layout_box().dom_node().enabled();
+    bool enabled = radio_button.enabled();
     auto input_colors = compute_input_colors(computed_values().color_scheme(), computed_values().accent_color());
 
     auto background_color = input_colors.background_color(enabled);
@@ -70,13 +67,18 @@ void RadioButtonPaintable::paint(DisplayListRecordingContext& context, PaintPhas
         if (!enabled)
             return input_colors.mid_gray;
         auto color = radio_color();
-        if (being_pressed())
+        // FIXME: Make this only take effect while this element or its labels are hovered.
+        if (radio_button.is_being_activated())
             color = InputColors::get_shade(color, 0.3f, computed_values().color_scheme());
         return color;
     }();
 
+    // Keep radio buttons painted as circles, centered within the space they occupy.
+    auto outer_rect = absolute_rect();
+    auto radio_button_size = min(outer_rect.width(), outer_rect.height());
+
     // This is based on a 1px outer border and 2px inner border when drawn at 13x13.
-    auto radio_button_rect = context.enclosing_device_rect(absolute_rect()).to_type<int>();
+    auto radio_button_rect = context.enclosing_device_rect(CSSPixelRect { 0, 0, radio_button_size, radio_button_size }.centered_within(outer_rect)).to_type<int>();
     auto outer_border_width = max(1, static_cast<int>(ceilf(radio_button_rect.width() / 13.0f)));
     auto inner_border_width = max(2, static_cast<int>(ceilf(radio_button_rect.width() / 4.0f)));
 

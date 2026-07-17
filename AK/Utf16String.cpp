@@ -5,8 +5,9 @@
  */
 
 #include <AK/Stream.h>
+#include <AK/StringNumber.h>
 #include <AK/Utf16String.h>
-#include <AK/Utf32View.h>
+#include <AK/Utf16StringBuilder.h>
 
 #include <simdutf.h>
 
@@ -24,7 +25,7 @@ Utf16String Utf16String::from_utf8_with_replacement_character(StringView utf8_st
     if (utf8_view.validate(AllowLonelySurrogates::No))
         return Utf16String::from_utf8_without_validation(utf8_string);
 
-    StringBuilder builder(StringBuilder::Mode::UTF16);
+    Utf16StringBuilder builder;
 
     for (auto code_point : utf8_view) {
         if (is_unicode_surrogate(code_point))
@@ -33,7 +34,22 @@ Utf16String Utf16String::from_utf8_with_replacement_character(StringView utf8_st
             builder.append_code_point(code_point);
     }
 
-    return builder.to_utf16_string();
+    return builder.to_string();
+}
+
+Utf16String Utf16String::from_ascii_without_validation(ReadonlyBytes ascii_string)
+{
+    if (ascii_string.size() <= Detail::MAX_SHORT_STRING_BYTE_COUNT) {
+        Utf16String string;
+        string.m_value.short_ascii_string = Detail::ShortString::create_with_byte_count(ascii_string.size());
+
+        auto result = ascii_string.copy_to(string.m_value.short_ascii_string.storage);
+        VERIFY(result == ascii_string.size());
+
+        return string;
+    }
+
+    return Utf16String { Detail::Utf16StringData::from_ascii(ascii_string) };
 }
 
 Utf16String Utf16String::from_utf8_without_validation(StringView utf8_string)
@@ -71,24 +87,9 @@ Utf16String Utf16String::from_utf16(Utf16View const& utf16_string)
     return Utf16String { Detail::Utf16StringData::from_utf16(utf16_string) };
 }
 
-Utf16String Utf16String::from_utf32(Utf32View const& utf32_string)
+Utf16String Utf16String::from_string_builder(Badge<Utf16StringBuilder>, Utf16StringBuilder& builder)
 {
-    if (utf32_string.length() <= Detail::MAX_SHORT_STRING_BYTE_COUNT && utf32_string.is_ascii()) {
-        Utf16String string;
-        string.m_value.short_ascii_string = Detail::ShortString::create_with_byte_count(utf32_string.length());
-
-        auto result = simdutf::convert_utf32_to_utf8(reinterpret_cast<char32_t const*>(utf32_string.code_points()), utf32_string.length(), reinterpret_cast<char*>(string.m_value.short_ascii_string.storage));
-        VERIFY(result == utf32_string.length());
-
-        return string;
-    }
-
-    return Utf16String { Detail::Utf16StringData::from_utf32(utf32_string) };
-}
-
-Utf16String Utf16String::from_string_builder(Badge<StringBuilder>, StringBuilder& builder)
-{
-    auto view = builder.utf16_string_view();
+    auto view = builder.view();
 
     if (view.length_in_code_units() <= Detail::MAX_SHORT_STRING_BYTE_COUNT && view.has_ascii_storage()) {
         Utf16String string;
@@ -140,9 +141,9 @@ Utf16String Utf16String::repeated(u32 code_point, size_t count)
         code_units[length_in_code_units++] = code_unit;
     });
 
-    StringBuilder builder(StringBuilder::Mode::UTF16);
+    Utf16StringBuilder builder;
     builder.append_repeated({ code_units.data(), length_in_code_units }, count);
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 Utf16String Utf16String::to_well_formed() const
@@ -162,8 +163,26 @@ String Utf16String::to_well_formed_utf8() const
 ErrorOr<void> Formatter<Utf16String>::format(FormatBuilder& builder, Utf16String const& utf16_string)
 {
     if (utf16_string.has_long_utf16_storage())
-        return builder.builder().try_append(utf16_string.utf16_view());
+        return builder.put_string(utf16_string.utf16_view());
     return builder.put_string(utf16_string.ascii_view());
 }
+
+template<Integral T>
+Utf16String Utf16String::number(T value)
+{
+    return create_string_from_number<Utf16String, T>(value);
+}
+
+template Utf16String Utf16String::number(char);
+template Utf16String Utf16String::number(signed char);
+template Utf16String Utf16String::number(unsigned char);
+template Utf16String Utf16String::number(signed short);
+template Utf16String Utf16String::number(unsigned short);
+template Utf16String Utf16String::number(int);
+template Utf16String Utf16String::number(unsigned int);
+template Utf16String Utf16String::number(long);
+template Utf16String Utf16String::number(unsigned long);
+template Utf16String Utf16String::number(long long);
+template Utf16String Utf16String::number(unsigned long long);
 
 }

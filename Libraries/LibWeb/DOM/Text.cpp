@@ -5,9 +5,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16StringBuilder.h>
 #include <LibUnicode/CharacterTypes.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/TextPrototype.h>
+#include <LibWeb/Bindings/Text.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -44,7 +45,7 @@ void Text::visit_edges(Cell::Visitor& visitor)
 WebIDL::ExceptionOr<GC::Ref<Text>> Text::construct_impl(JS::Realm& realm, Utf16String data)
 {
     // The new Text(data) constructor steps are to set this’s data to data and this’s node document to current global object’s associated Document.
-    auto& window = as<HTML::Window>(HTML::current_principal_global_object());
+    auto& window = as<HTML::Window>(HTML::current_global_object());
     return realm.create<Text>(window.associated_document(), move(data));
 }
 
@@ -141,11 +142,11 @@ Utf16String Text::whole_text()
         current_node = current_node->next_sibling();
     }
 
-    StringBuilder builder(StringBuilder::Mode::UTF16);
+    Utf16StringBuilder builder;
     for (auto const& text_node : nodes)
         builder.append(text_node->data());
 
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#text-node-directionality

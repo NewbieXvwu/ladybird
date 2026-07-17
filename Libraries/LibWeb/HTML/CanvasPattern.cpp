@@ -1,22 +1,22 @@
 /*
  * Copyright (c) 2023, MacDue <macdue@dueutil.tech>
  * Copyright (c) 2024, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGfx/Bitmap.h>
-#include <LibWeb/Bindings/CanvasPatternPrototype.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibWeb/Bindings/CanvasPattern.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/CanvasPattern.h>
 #include <LibWeb/HTML/CanvasRenderingContext2D.h>
-#include <LibWeb/SVG/SVGImageElement.h>
 
 namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(CanvasPattern);
 
-CanvasPattern::CanvasPattern(JS::Realm& realm, CanvasPatternPaintStyle& pattern)
+CanvasPattern::CanvasPattern(JS::Realm& realm, Gfx::CanvasPatternPaintStyle& pattern)
     : PlatformObject(realm)
     , m_pattern(pattern)
 {
@@ -25,17 +25,17 @@ CanvasPattern::CanvasPattern(JS::Realm& realm, CanvasPatternPaintStyle& pattern)
 CanvasPattern::~CanvasPattern() = default;
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-createpattern
-WebIDL::ExceptionOr<GC::Ptr<CanvasPattern>> CanvasPattern::create(JS::Realm& realm, CanvasImageSource const& image, StringView repetition)
+WebIDL::ExceptionOr<GC::Ptr<CanvasPattern>> CanvasPattern::create(JS::Realm& realm, CanvasImageSource const& image, Utf16FlyString const& repetition)
 {
-    auto parse_repetition = [&](auto repetition) -> Optional<CanvasPatternPaintStyle::Repetition> {
-        if (repetition == "repeat"sv)
-            return CanvasPatternPaintStyle::Repetition::Repeat;
-        if (repetition == "repeat-x"sv)
-            return CanvasPatternPaintStyle::Repetition::RepeatX;
-        if (repetition == "repeat-y"sv)
-            return CanvasPatternPaintStyle::Repetition::RepeatY;
-        if (repetition == "no-repeat"sv)
-            return CanvasPatternPaintStyle::Repetition::NoRepeat;
+    auto parse_repetition = [&](auto value) -> Optional<Gfx::CanvasPatternPaintStyle::Repetition> {
+        if (value == u"repeat"sv)
+            return Gfx::CanvasPatternPaintStyle::Repetition::Repeat;
+        if (value == u"repeat-x"sv)
+            return Gfx::CanvasPatternPaintStyle::Repetition::RepeatX;
+        if (value == u"repeat-y"sv)
+            return Gfx::CanvasPatternPaintStyle::Repetition::RepeatY;
+        if (value == u"no-repeat"sv)
+            return Gfx::CanvasPatternPaintStyle::Repetition::NoRepeat;
         return {};
     };
 
@@ -50,28 +50,46 @@ WebIDL::ExceptionOr<GC::Ptr<CanvasPattern>> CanvasPattern::create(JS::Realm& rea
     VERIFY(usability == CanvasImageSourceUsability::Good);
 
     // 4. If repetition is the empty string, then set it to "repeat".
-    if (repetition.is_empty())
-        repetition = "repeat"sv;
+    auto repetition_or_default = repetition.is_empty() ? "repeat"_utf16_fly_string : repetition;
 
     // 5. If repetition is not identical to one of "repeat", "repeat-x", "repeat-y", or "no-repeat",
     // then throw a "SyntaxError" DOMException.
-    auto repetition_value = parse_repetition(repetition);
+    auto repetition_value = parse_repetition(repetition_or_default);
     if (!repetition_value.has_value())
         return WebIDL::SyntaxError::create(realm, "Repetition value is not valid"_utf16);
 
     // 6. Let pattern be a new CanvasPattern object with the image image and the repetition behavior given by repetition.
-    auto pattern = TRY_OR_THROW_OOM(realm.vm(), CanvasPatternPaintStyle::create(image, *repetition_value));
+    auto frame = canvas_image_source_frame(image);
+    auto paint_style = TRY_OR_THROW_OOM(realm.vm(), Gfx::CanvasPatternPaintStyle::create(frame, *repetition_value));
+    auto pattern = realm.create<CanvasPattern>(realm, *paint_style);
 
     // FIXME: 7. If image is not origin-clean, then mark pattern as not origin-clean.
 
     // 8. Return pattern.
-    return realm.create<CanvasPattern>(realm, *pattern);
+    return pattern;
 }
 
 void CanvasPattern::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(CanvasPattern);
     Base::initialize(realm);
+}
+
+// https://html.spec.whatwg.org/multipage/canvas.html#dom-canvaspattern-settransform
+WebIDL::ExceptionOr<void> CanvasPattern::set_transform(Bindings::DOMMatrix2DInit& transform)
+{
+    // 1. Let matrix be the result of creating a DOMMatrix from the 2D dictionary transform.
+    auto matrix = TRY(Geometry::DOMMatrix::create_from_dom_matrix_2d_init(realm(), transform));
+
+    // 2. If one or more of matrix's m11 element, m12 element, m21 element, m22 element, m41 element, or m42 element are infinite or NaN, then return.
+    if (!isfinite(matrix->m11()) || !isfinite(matrix->m12()) || !isfinite(matrix->m21()) || !isfinite(matrix->m22()) || !isfinite(matrix->m41()) || !isfinite(matrix->m42()))
+        return {};
+
+    // 3. Reset the pattern's transformation matrix to matrix.
+    Gfx::AffineTransform affine_transform(matrix->a(), matrix->b(), matrix->c(), matrix->d(), matrix->e(), matrix->f());
+    m_pattern->set_transform(affine_transform);
+
+    return {};
 }
 
 }

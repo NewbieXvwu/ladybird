@@ -1,12 +1,3 @@
-#import <HTML/AudioTrackList.idl>
-#import <HTML/HTMLElement.idl>
-#import <HTML/MediaError.idl>
-#import <HTML/TextTrack.idl>
-#import <HTML/TextTrackList.idl>
-#import <HTML/TimeRanges.idl>
-#import <HTML/VideoTrackList.idl>
-#import <HTML/Scripting/Fetching.idl>
-
 // https://html.spec.whatwg.org/multipage/media.html#attr-media-preload
 [MissingValueDefault=metadata, InvalidValueDefault=metadata]
 enum Preload {
@@ -22,6 +13,8 @@ enum CanPlayTypeResult {
     "probably"
 };
 
+typedef (MediaSource or Blob) MediaProvider;
+
 // https://html.spec.whatwg.org/multipage/media.html#htmlmediaelement
 [Exposed=Window]
 interface HTMLMediaElement : HTMLElement {
@@ -30,19 +23,19 @@ interface HTMLMediaElement : HTMLElement {
     readonly attribute MediaError? error;
 
     // network state
-    [Reflect, CEReactions, URL] attribute USVString src;
-    [FIXME] attribute MediaProvider? srcObject;
-    readonly attribute USVString currentSrc;
-    [Reflect=crossorigin, CEReactions, Enumerated=CORSSettingsAttribute] attribute DOMString? crossOrigin;
+    [Reflect, CEReactions, URL] attribute Utf16USVString src;
+    attribute MediaProvider? srcObject;
+    readonly attribute Utf16USVString currentSrc;
+    [Reflect=crossorigin, CEReactions, Enumerated=CORSSettingsAttribute] attribute Utf16DOMString? crossOrigin;
     const unsigned short NETWORK_EMPTY = 0;
     const unsigned short NETWORK_IDLE = 1;
     const unsigned short NETWORK_LOADING = 2;
     const unsigned short NETWORK_NO_SOURCE = 3;
     readonly attribute unsigned short networkState;
-    [Reflect, CEReactions, Enumerated=Preload] attribute DOMString preload;
+    [Reflect, CEReactions, Enumerated=Preload] attribute Utf16DOMString preload;
     readonly attribute TimeRanges buffered;
     undefined load();
-    CanPlayTypeResult canPlayType(DOMString type);
+    CanPlayTypeResult canPlayType(Utf16DOMString type);
 
     // ready state
     const unsigned short HAVE_NOTHING = 0;
@@ -57,7 +50,7 @@ interface HTMLMediaElement : HTMLElement {
     attribute double currentTime;
     undefined fastSeek(double time);
     readonly attribute unrestricted double duration;
-    [FIXME] object getStartDate();
+    object getStartDate();
     readonly attribute boolean paused;
     attribute double defaultPlaybackRate;
     attribute double playbackRate;
@@ -80,6 +73,6 @@ interface HTMLMediaElement : HTMLElement {
     [SameObject] readonly attribute AudioTrackList audioTracks;
     [SameObject] readonly attribute VideoTrackList videoTracks;
     [SameObject] readonly attribute TextTrackList textTracks;
-    TextTrack addTextTrack(TextTrackKind kind, optional DOMString label = "", optional DOMString language = "");
+    TextTrack addTextTrack(TextTrackKind kind, optional Utf16DOMString label = "", optional Utf16DOMString language = "");
 
 };

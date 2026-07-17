@@ -7,17 +7,17 @@
 
 #pragma once
 
-#include <AK/Queue.h>
-#include <AK/StringBuilder.h>
-#include <AK/StringView.h>
 #include <AK/Types.h>
-#include <LibGC/Ptr.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/Export.h>
-#include <LibWeb/Forward.h>
-#include <LibWeb/HTML/Parser/Entities.h>
 #include <LibWeb/HTML/Parser/HTMLToken.h>
 
+struct RustFfiTokenizerHandle;
+
 namespace Web::HTML {
+
+class HTMLParser;
 
 #define ENUMERATE_TOKENIZER_STATES                                        \
     __ENUMERATE_TOKENIZER_STATE(Data)                                     \
@@ -104,7 +104,9 @@ namespace Web::HTML {
 class WEB_API HTMLTokenizer {
 public:
     explicit HTMLTokenizer();
-    explicit HTMLTokenizer(StringView input, ByteString const& encoding);
+    explicit HTMLTokenizer(Utf16String input);
+    explicit HTMLTokenizer(Utf16View input);
+    ~HTMLTokenizer();
 
     enum class State {
 #define __ENUMERATE_TOKENIZER_STATE(state) state,
@@ -118,56 +120,34 @@ public:
     };
     Optional<HTMLToken> next_token(StopAtInsertionPoint = StopAtInsertionPoint::No);
 
-    void set_parser(Badge<HTMLParser>, HTMLParser& parser) { m_parser = &parser; }
-
-    void switch_to(Badge<HTMLParser>, State new_state);
-    void switch_to(State new_state)
-    {
-        m_state = new_state;
-    }
-
-    void set_blocked(bool b) { m_blocked = b; }
-    bool is_blocked() const { return m_blocked; }
+    void switch_to(State new_state);
 
     auto const& source() const { return m_source; }
 
-    void insert_input_at_insertion_point(StringView input);
-    void insert_eof();
-    bool is_eof_inserted();
+    Utf16String unparsed_input() const;
 
-    bool is_insertion_point_defined() const { return m_insertion_point.defined; }
-    bool is_insertion_point_reached()
-    {
-        return m_insertion_point.defined && m_current_offset >= m_insertion_point.position;
-    }
-    void undefine_insertion_point() { m_insertion_point.defined = false; }
-    void store_insertion_point() { m_old_insertion_point = m_insertion_point; }
-    void restore_insertion_point() { m_insertion_point = m_old_insertion_point; }
-    void update_insertion_point()
-    {
-        m_insertion_point.defined = true;
-        m_insertion_point.position = m_current_offset;
-    }
+    void append_to_input_stream(Utf16View input);
+    void close_input_stream();
+    bool is_input_stream_closed() const { return m_input_stream_closed; }
+    void insert_input_at_insertion_point(Utf16View input);
+    void insert_eof();
+
+    bool is_insertion_point_defined() const;
+    bool is_insertion_point_reached();
+    void undefine_insertion_point();
+    void store_insertion_point();
+    void restore_insertion_point();
+    void store_old_insertion_point() { store_insertion_point(); }
+    void restore_old_insertion_point() { restore_insertion_point(); }
+    void update_insertion_point();
 
     // This permanently cuts off the tokenizer input stream.
-    void abort() { m_aborted = true; }
+    void abort();
+
+    void parser_did_run(Badge<HTMLParser>);
+    RustFfiTokenizerHandle* ffi_handle(Badge<HTMLParser>) { return m_tokenizer; }
 
 private:
-    void skip(size_t count);
-    Optional<u32> next_code_point(StopAtInsertionPoint);
-    Optional<u32> peek_code_point(ssize_t offset, StopAtInsertionPoint) const;
-
-    enum class ConsumeNextResult {
-        Consumed,
-        NotConsumed,
-        RanOutOfCharacters,
-    };
-    [[nodiscard]] ConsumeNextResult consume_next_if_match(StringView, StopAtInsertionPoint, CaseSensitivity = CaseSensitivity::CaseSensitive);
-
-    void create_new_token(HTMLToken::Type);
-    bool current_end_tag_token_is_appropriate() const;
-    String consume_current_builder();
-
     static char const* state_name(State state)
     {
         switch (state) {
@@ -180,54 +160,11 @@ private:
         VERIFY_NOT_REACHED();
     }
 
-    void will_emit(HTMLToken&);
-    void will_switch_to(State);
-    void will_reconsume_in(State);
-
-    bool consumed_as_part_of_an_attribute() const;
-
-    void restore_to(ssize_t new_iterator);
-    HTMLToken::Position nth_last_position(size_t n = 0);
-
-    GC::Ptr<HTMLParser> m_parser;
-
     State m_state { State::Data };
-    State m_return_state { State::Data };
+    Utf16String m_source;
+    bool m_input_stream_closed { false };
 
-    Vector<u32> m_temporary_buffer;
-
-    String m_source;
-    Vector<u32> m_decoded_input;
-
-    struct InsertionPoint {
-        ssize_t position { 0 };
-        bool defined { false };
-    };
-    InsertionPoint m_insertion_point {};
-    InsertionPoint m_old_insertion_point {};
-
-    ssize_t m_current_offset { 0 };
-    ssize_t m_prev_offset { 0 };
-
-    HTMLToken m_current_token;
-    StringBuilder m_current_builder;
-
-    NamedCharacterReferenceMatcher m_named_character_reference_matcher;
-
-    Optional<FlyString> m_last_emitted_start_tag_name;
-
-    bool m_explicit_eof_inserted { false };
-    bool m_has_emitted_eof { false };
-
-    Queue<HTMLToken> m_queued_tokens;
-
-    u32 m_character_reference_code { 0 };
-
-    bool m_blocked { false };
-
-    bool m_aborted { false };
-
-    Vector<HTMLToken::Position> m_source_positions;
+    RustFfiTokenizerHandle* m_tokenizer { nullptr };
 };
 
 }

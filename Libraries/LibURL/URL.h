@@ -10,8 +10,10 @@
 
 #include <AK/ByteString.h>
 #include <AK/CopyOnWrite.h>
+#include <AK/GenericShorthands.h>
 #include <AK/String.h>
 #include <AK/StringView.h>
+#include <AK/Utf16View.h>
 #include <AK/Vector.h>
 #include <LibURL/Host.h>
 #include <LibURL/Origin.h>
@@ -32,7 +34,6 @@ enum class PercentEncodeSet {
     Userinfo,
     Component,
     ApplicationXWWWFormUrlencoded,
-    EncodeURI
 };
 
 enum class ExcludeFragment {
@@ -74,6 +75,7 @@ enum class SpaceAsPlus {
     Yes,
 };
 String percent_encode(StringView input, PercentEncodeSet set = PercentEncodeSet::Userinfo, SpaceAsPlus = SpaceAsPlus::No);
+String percent_encode(Utf16View input, PercentEncodeSet set = PercentEncodeSet::Userinfo, SpaceAsPlus = SpaceAsPlus::No);
 ByteString percent_decode(StringView input);
 
 // https://url.spec.whatwg.org/#url-representation
@@ -110,7 +112,9 @@ public:
 
     void set_scheme(String);
     void set_username(StringView);
+    void set_username(Utf16View);
     void set_password(StringView);
+    void set_password(Utf16View);
     void set_host(Host);
     void set_port(Optional<u16>);
     void set_paths(Vector<ByteString> const&);
@@ -203,18 +207,16 @@ private:
     AK::CopyOnWrite<Data> m_data;
 };
 
+void set_file_scheme_urls_have_tuple_origins();
+bool file_scheme_urls_have_tuple_origins();
+
 Optional<URL> create_with_url_or_path(ByteString const&);
 Optional<URL> create_with_file_scheme(ByteString const& path, ByteString const& fragment = {}, ByteString const& hostname = {});
 URL create_with_data(StringView mime_type, StringView payload, bool is_base64 = false);
 
-bool is_public_suffix(StringView host);
-Optional<String> get_registrable_domain(StringView host);
-
 inline URL about_blank() { return URL::about("blank"_string); }
 inline URL about_srcdoc() { return URL::about("srcdoc"_string); }
 inline URL about_error() { return URL::about("error"_string); }
-inline URL about_version() { return URL::about("version"_string); }
-inline URL about_newtab() { return URL::about("newtab"_string); }
 
 }
 

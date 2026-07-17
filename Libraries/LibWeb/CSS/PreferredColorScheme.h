@@ -6,7 +6,8 @@
 
 #pragma once
 
-#include <AK/StringView.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16View.h>
 
 namespace Web::CSS {
 
@@ -16,7 +17,7 @@ enum class PreferredColorScheme {
     Light,
 };
 
-PreferredColorScheme preferred_color_scheme_from_string(StringView);
-StringView preferred_color_scheme_to_string(PreferredColorScheme);
+PreferredColorScheme preferred_color_scheme_from_string(Utf16View);
+Utf16FlyString preferred_color_scheme_to_utf16_fly_string(PreferredColorScheme);
 
 }

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<script src="include.js"></script>
+<style>
+#target {
+    width: 200px;
+    height: 200px;
+    background: blue;
+    border-radius: 50px;
+    position: absolute;
+    top: 0;
+    left: 0;
+    cursor: pointer;
+}
+
+#fractional-pill {
+    width: 129.96875px;
+    height: 46.09375px;
+    background: green;
+    border-radius: 999px;
+    position: absolute;
+    top: 250.390625px;
+    left: 411.5625px;
+}
+</style>
+<div id="target"></div>
+<div id="fractional-pill"></div>
+<script>
+test(() => {
+    // Corner at (5,5) - outside due to border-radius
+    let hit1 = internals.hitTest(5, 5);
+    // Inside ellipse curve
+    let hit2 = internals.hitTest(25, 25);
+    // Center
+    let hit3 = internals.hitTest(100, 100);
+    // Inside the bottom-right curve of a fractional pill-shaped rect.
+    let hit4 = internals.hitTest(527, 294);
+
+    println("Corner (5,5):");
+    printElement(hit1.node);
+    println("Near corner (25,25):");
+    printElement(hit2.node);
+    println("Center (100,100):");
+    printElement(hit3.node);
+    println("Fractional pill bottom-right curve (527,294):");
+    printElement(hit4.node);
+});
+</script>

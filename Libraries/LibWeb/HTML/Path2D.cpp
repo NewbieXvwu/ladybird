@@ -7,7 +7,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/Path2DPrototype.h>
+#include <LibWeb/Bindings/Path2D.h>
 #include <LibWeb/Geometry/DOMMatrix.h>
 #include <LibWeb/HTML/Path2D.h>
 #include <LibWeb/SVG/AttributeParser.h>
@@ -17,13 +17,13 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(Path2D);
 
-WebIDL::ExceptionOr<GC::Ref<Path2D>> Path2D::construct_impl(JS::Realm& realm, Optional<Variant<GC::Root<Path2D>, String>> const& path)
+WebIDL::ExceptionOr<GC::Ref<Path2D>> Path2D::construct_impl(JS::Realm& realm, Optional<Variant<GC::Ref<Path2D>, Utf16String>> const& path)
 {
     return realm.create<Path2D>(realm, path);
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-path2d
-Path2D::Path2D(JS::Realm& realm, Optional<Variant<GC::Root<Path2D>, String>> const& path)
+Path2D::Path2D(JS::Realm& realm, Optional<Variant<GC::Ref<Path2D>, Utf16String>> const& path)
     : PlatformObject(realm)
     , CanvasPath(static_cast<Bindings::PlatformObject&>(*this))
 {
@@ -34,13 +34,13 @@ Path2D::Path2D(JS::Realm& realm, Optional<Variant<GC::Root<Path2D>, String>> con
 
     // 3. If path is a Path2D object, then add all subpaths of path to output and return output.
     //    (In other words, it returns a copy of the argument.)
-    if (path->has<GC::Root<Path2D>>()) {
-        this->path() = path->get<GC::Root<Path2D>>()->path();
+    if (path->has<GC::Ref<Path2D>>()) {
+        this->path() = path->get<GC::Ref<Path2D>>()->path();
         return;
     }
 
     // 4. Let svgPath be the result of parsing and interpreting path according to SVG 2's rules for path data. [SVG]
-    auto path_instructions = SVG::AttributeParser::parse_path_data(path->get<String>());
+    auto path_instructions = SVG::AttributeParser::parse_path_data(path->get<Utf16String>());
     auto svg_path = path_instructions.to_gfx_path();
 
     if (!svg_path.is_empty()) {
@@ -62,11 +62,11 @@ Path2D::~Path2D() = default;
 void Path2D::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::Path2DPrototype>(realm, "Path2D"_fly_string));
+    set_prototype(&Bindings::ensure_web_prototype<Bindings::Path2DPrototype>(realm, "Path2D"_utf16_fly_string));
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-path2d-addpath
-WebIDL::ExceptionOr<void> Path2D::add_path(GC::Ref<Path2D> path, Geometry::DOMMatrix2DInit& transform)
+WebIDL::ExceptionOr<void> Path2D::add_path(GC::Ref<Path2D> path, Bindings::DOMMatrix2DInit& transform)
 {
     // The addPath(path, transform) method, when invoked on a Path2D object a, must run these steps:
 

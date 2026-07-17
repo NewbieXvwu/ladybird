@@ -11,6 +11,7 @@
 #include <LibCore/Socket.h>
 #include <LibCore/TCPServer.h>
 #include <LibDevTools/Actors/DeviceActor.h>
+#include <LibDevTools/Actors/ParentAccessibilityActor.h>
 #include <LibDevTools/Actors/PreferenceActor.h>
 #include <LibDevTools/Actors/ProcessActor.h>
 #include <LibDevTools/Actors/TabActor.h>
@@ -36,13 +37,30 @@ DevToolsServer::DevToolsServer(DevToolsDelegate& delegate, NonnullRefPtr<Core::T
     , m_delegate(delegate)
     , m_server_id(s_server_count++)
 {
-    m_server->on_ready_to_accept = [this]() {
-        if (auto result = on_new_client(); result.is_error())
+    m_server->on_ready_to_accept = [weak_self = make_weak_ptr<DevToolsServer>()] {
+        if (!weak_self)
+            return;
+
+        if (auto result = weak_self->on_new_client(); result.is_error())
             warnln("Failed to accept DevTools client: {}", result.error());
     };
 }
 
-DevToolsServer::~DevToolsServer() = default;
+DevToolsServer::~DevToolsServer()
+{
+    m_is_shutting_down = true;
+    m_server->on_ready_to_accept = {};
+
+    if (m_connection) {
+        m_connection->on_connection_closed = {};
+        m_connection->on_message_received = {};
+    }
+}
+
+Optional<u16> DevToolsServer::local_port() const
+{
+    return m_server->local_port();
+}
 
 void DevToolsServer::refresh_tab_list()
 {
@@ -56,6 +74,17 @@ void DevToolsServer::refresh_tab_list()
     m_root_actor->send_tab_list_changed_message();
 }
 
+void DevToolsServer::unregister_actor(String const& name)
+{
+    if (m_is_shutting_down)
+        return;
+
+    Core::deferred_invoke([weak_self = make_weak_ptr<DevToolsServer>(), name] {
+        if (weak_self)
+            weak_self->m_actor_registry.remove(name);
+    });
+}
+
 ErrorOr<void> DevToolsServer::on_new_client()
 {
     if (m_connection)
@@ -66,12 +95,14 @@ ErrorOr<void> DevToolsServer::on_new_client()
 
     m_connection = Connection::create(move(buffered_socket));
 
-    m_connection->on_connection_closed = [this]() {
-        close_connection();
+    m_connection->on_connection_closed = [weak_self = make_weak_ptr<DevToolsServer>()] {
+        if (weak_self)
+            weak_self->close_connection();
     };
 
-    m_connection->on_message_received = [this](auto message) {
-        on_message_received(move(message));
+    m_connection->on_message_received = [weak_self = make_weak_ptr<DevToolsServer>()](auto message) {
+        if (weak_self)
+            weak_self->on_message_received(move(message));
     };
 
     m_root_actor = register_actor<RootActor>();
@@ -79,6 +110,7 @@ ErrorOr<void> DevToolsServer::on_new_client()
     register_actor<DeviceActor>();
     register_actor<PreferenceActor>();
     register_actor<ProcessActor>(ProcessDescription { .is_parent = true });
+    register_actor<ParentAccessibilityActor>();
 
     return {};
 }
@@ -110,10 +142,16 @@ void DevToolsServer::close_connection()
 {
     dbgln_if(DEVTOOLS_DEBUG, "Lost connection to the DevTools client");
 
-    Core::deferred_invoke([this]() {
-        m_connection = nullptr;
-        m_actor_registry.clear();
-        m_root_actor = nullptr;
+    if (m_is_shutting_down)
+        return;
+
+    Core::deferred_invoke([weak_self = make_weak_ptr<DevToolsServer>()] {
+        if (!weak_self)
+            return;
+
+        weak_self->m_connection = nullptr;
+        weak_self->m_actor_registry.clear();
+        weak_self->m_root_actor = nullptr;
     });
 }
 

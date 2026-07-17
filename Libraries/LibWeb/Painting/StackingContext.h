@@ -6,40 +6,49 @@
 
 #pragma once
 
+#include <AK/NonnullRefPtr.h>
+#include <AK/RefCounted.h>
+#include <AK/RefPtr.h>
 #include <AK/Vector.h>
-#include <LibGfx/Matrix4x4.h>
+#include <AK/WeakPtr.h>
+#include <AK/Weakable.h>
+#include <AK/kmalloc.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Painting/Paintable.h>
 
 namespace Web::Painting {
 
-class WEB_API StackingContext {
+class WEB_API StackingContext final
+    : public RefCounted<StackingContext>
+    , public Weakable<StackingContext> {
     friend class ViewportPaintable;
 
 public:
-    StackingContext(PaintableBox&, StackingContext* parent, size_t index_in_tree_order);
+    AK_ALLOC_WITH_KMALLOC_PARTITION(HeapPartition::Painting);
 
-    StackingContext* parent() { return m_parent; }
-    StackingContext const* parent() const { return m_parent; }
+    static NonnullRefPtr<StackingContext> create(Paintable&, RefPtr<StackingContext> parent, size_t index_in_tree_order);
 
-    PaintableBox const& paintable_box() const { return *m_paintable; }
+    RefPtr<StackingContext> parent() { return m_parent.strong_ref(); }
+    RefPtr<StackingContext const> parent() const { return m_parent.strong_ref(); }
+
+    Paintable const& paintable_box() const
+    {
+        auto paintable = m_paintable.strong_ref();
+        VERIFY(paintable);
+        return *paintable;
+    }
 
     enum class StackingContextPaintPhase {
         BackgroundAndBorders,
         Floats,
         BackgroundAndBordersForInlineLevelAndReplaced,
         Foreground,
-        FocusAndOverlay,
     };
 
     static void paint_node_as_stacking_context(Paintable const&, DisplayListRecordingContext&);
     static void paint_descendants(DisplayListRecordingContext&, Paintable const&, StackingContextPaintPhase);
-    static void paint_svg(DisplayListRecordingContext&, PaintableBox const&, PaintPhase);
+    static void paint_svg(DisplayListRecordingContext&, Paintable const&, PaintPhase);
     void paint(DisplayListRecordingContext&) const;
-
-    [[nodiscard]] TraversalDecision hit_test(CSSPixelPoint, HitTestType, Function<TraversalDecision(HitTestResult)> const& callback) const;
-
-    Gfx::AffineTransform affine_transform_matrix() const;
 
     void dump(StringBuilder&, int indent = 0) const;
 
@@ -48,14 +57,17 @@ public:
     void set_last_paint_generation_id(u64 generation_id);
 
 private:
-    GC::Ref<PaintableBox> m_paintable;
-    StackingContext* const m_parent { nullptr };
-    Vector<StackingContext*> m_children;
+    StackingContext(Paintable&, RefPtr<StackingContext> parent, size_t index_in_tree_order);
+
+    WeakPtr<Paintable> m_paintable;
+    WeakPtr<StackingContext> m_parent;
+    Vector<NonnullRefPtr<StackingContext>> m_children;
     size_t m_index_in_tree_order { 0 };
     Optional<u64> m_last_paint_generation_id;
 
-    Vector<GC::Ref<PaintableBox const>> m_positioned_descendants_and_stacking_contexts_with_stack_level_0;
-    Vector<GC::Ref<PaintableBox const>> m_non_positioned_floating_descendants;
+    Vector<WeakPtr<Paintable>> m_positioned_descendants_and_stacking_contexts_with_stack_level_0;
+    Vector<WeakPtr<Paintable>> m_non_positioned_floating_descendants;
+    bool m_contains_inline_or_replaced_descendants { false };
 
     static void paint_child(DisplayListRecordingContext&, StackingContext const&);
     void paint_internal(DisplayListRecordingContext&) const;

@@ -7,7 +7,7 @@
 #include <LibJS/Runtime/Realm.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibWasm/Types.h>
-#include <LibWeb/Bindings/GlobalPrototype.h>
+#include <LibWeb/Bindings/Global.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/WebAssembly/Global.h>
 #include <LibWeb/WebAssembly/WebAssembly.h>
@@ -40,7 +40,7 @@ static Wasm::ValueType to_value_type(Bindings::ValueType type)
 }
 
 // https://webassembly.github.io/spec/js-api/#dom-global-global
-WebIDL::ExceptionOr<GC::Ref<Global>> Global::construct_impl(JS::Realm& realm, GlobalDescriptor& descriptor, JS::Value v)
+WebIDL::ExceptionOr<GC::Ref<Global>> Global::construct_impl(JS::Realm& realm, Bindings::GlobalDescriptor const& descriptor, Optional<JS::Value> v)
 {
     auto& vm = realm.vm();
 
@@ -53,7 +53,7 @@ WebIDL::ExceptionOr<GC::Ref<Global>> Global::construct_impl(JS::Realm& realm, Gl
     // 3. If valuetype is v128,
     // 3.1 Throw a TypeError exception.
     if (value_type.kind() == Wasm::ValueType::V128)
-        return vm.throw_completion<JS::TypeError>("V128 is not supported as a global value type"sv);
+        return vm.throw_completion<JS::TypeError>("V128 is not supported as a global value type"_utf16);
 
     // 4. If v is missing,
     // 4.1 Let value be DefaultValue(valuetype).
@@ -61,9 +61,9 @@ WebIDL::ExceptionOr<GC::Ref<Global>> Global::construct_impl(JS::Realm& realm, Gl
     // 5.1 Let value be ToWebAssemblyValue(v, valuetype).
     // FIXME: https://github.com/WebAssembly/spec/issues/1861
     //        Is there a difference between *missing* and undefined for optional any values?
-    auto value = v.is_undefined()
+    auto value = !v.has_value()
         ? Detail::default_webassembly_value(vm, value_type)
-        : TRY(Detail::to_webassembly_value(vm, v, value_type));
+        : TRY(Detail::to_webassembly_value(vm, *v, value_type));
 
     // 6. If mutable is true, let globaltype be var valuetype; otherwise, let globaltype be const valuetype.
     auto global_type = Wasm::GlobalType { value_type, mutable_ };
@@ -76,7 +76,7 @@ WebIDL::ExceptionOr<GC::Ref<Global>> Global::construct_impl(JS::Realm& realm, Gl
     auto& cache = Detail::get_cache(realm);
     auto address = cache.abstract_machine().store().allocate(global_type, value);
     if (!address.has_value())
-        return vm.throw_completion<JS::TypeError>("Wasm Global allocation failed"sv);
+        return vm.throw_completion<JS::TypeError>("Wasm Global allocation failed"_utf16);
 
     return realm.create<Global>(realm, *address);
 }
@@ -115,11 +115,11 @@ static WebIDL::ExceptionOr<JS::Value> get_global_value(Global const& global)
     auto& cache = Detail::get_cache(global.realm());
     auto* global_instance = cache.abstract_machine().store().get(global.address());
     if (!global_instance)
-        return global.vm().throw_completion<JS::RangeError>("Could not find the global instance"sv);
+        return global.vm().throw_completion<JS::RangeError>("Could not find the global instance"_utf16);
 
     auto value_type = global_instance->type().type();
     if (value_type.kind() == Wasm::ValueType::V128)
-        return global.vm().throw_completion<JS::TypeError>("V128 is not supported as a global value type"sv);
+        return global.vm().throw_completion<JS::TypeError>("V128 is not supported as a global value type"_utf16);
 
     // 5. Let value be global_read(store, globaladdr).
     auto value = global_instance->value();
@@ -154,14 +154,14 @@ WebIDL::ExceptionOr<void> Global::set_value(JS::Value the_given_value)
     auto& cache = Detail::get_cache(realm);
     auto* global_instance = cache.abstract_machine().store().get(address());
     if (!global_instance)
-        return vm.throw_completion<JS::RangeError>("Could not find the global instance"sv);
+        return vm.throw_completion<JS::RangeError>("Could not find the global instance"_utf16);
 
     auto mut_value_type = global_instance->type();
     if (mut_value_type.type().kind() == Wasm::ValueType::V128)
-        return vm.throw_completion<JS::TypeError>("Cannot set the value of a V128 global"sv);
+        return vm.throw_completion<JS::TypeError>("Cannot set the value of a V128 global"_utf16);
 
     if (!mut_value_type.is_mutable())
-        return vm.throw_completion<JS::TypeError>("Cannot set the value of a const global"sv);
+        return vm.throw_completion<JS::TypeError>("Cannot set the value of a const global"_utf16);
 
     // 6. Let value be ToWebAssemblyValue(the given value, valuetype).
     auto value = TRY(Detail::to_webassembly_value(vm, the_given_value, mut_value_type.type()));

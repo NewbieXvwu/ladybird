@@ -4,52 +4,89 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGfx/Font/FontVariant.h>
+#include <LibWeb/DOM/ShadowRoot.h>
+#include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/Layout/BreakNode.h>
 #include <LibWeb/Layout/InlineFormattingContext.h>
 #include <LibWeb/Layout/InlineLevelIterator.h>
 #include <LibWeb/Layout/InlineNode.h>
+#include <LibWeb/Layout/ListItemBox.h>
 #include <LibWeb/Layout/ListItemMarkerBox.h>
 #include <LibWeb/Layout/ReplacedBox.h>
 
 namespace Web::Layout {
 
-InlineLevelIterator::InlineLevelIterator(Layout::InlineFormattingContext& inline_formatting_context, Layout::LayoutState& layout_state, Layout::BlockContainer const& containing_block, LayoutState::UsedValues const& containing_block_used_values, LayoutMode layout_mode)
+InlineLevelIterator::InlineLevelIterator(Layout::InlineFormattingContext& inline_formatting_context, Layout::LayoutState& layout_state, Layout::BlockContainer const& containing_block, LayoutState::UsedValues const& containing_block_used_values, LayoutInput const& layout_input, LayoutMode layout_mode)
     : m_inline_formatting_context(inline_formatting_context)
     , m_layout_state(layout_state)
     , m_containing_block(containing_block)
     , m_containing_block_used_values(containing_block_used_values)
+    , m_layout_input(layout_input)
     , m_next_node(containing_block.first_child())
     , m_layout_mode(layout_mode)
 {
     skip_to_next();
+    generate_all_items();
+}
+
+static bool is_inline_flow_interrupting_block(Layout::Node const& node)
+{
+    auto const* node_with_metrics = as_if<Layout::NodeWithStyleAndBoxModelMetrics>(node);
+    return node_with_metrics && node_with_metrics->is_inline_flow_interrupting_block();
+}
+
+void InlineLevelIterator::generate_all_items()
+{
+    for (;;) {
+        auto item = generate_next_item();
+        if (!item.has_value())
+            break;
+
+        // Track accumulated width for tab calculations.
+        // Reset on forced breaks since tabs measure from line start.
+        if (item->type == Item::Type::ForcedBreak || item->type == Item::Type::BlockLevelBox) {
+            m_accumulated_width_for_tabs = 0;
+        } else {
+            m_accumulated_width_for_tabs += item->border_box_width();
+        }
+
+        m_items.append(item.release_value());
+    }
 }
 
 void InlineLevelIterator::enter_node_with_box_model_metrics(Layout::NodeWithStyleAndBoxModelMetrics const& node)
 {
+    if (node.is_fragmented_inline())
+        m_visited_fragmented_inlines.append(&node);
+
     if (!m_extra_leading_metrics.has_value())
         m_extra_leading_metrics = ExtraBoxMetrics {};
 
     // FIXME: It's really weird that *this* is where we assign box model metrics for these layout nodes..
 
-    auto& used_values = m_layout_state.get_mutable(node);
+    auto& used_values = is<ListItemMarkerBox>(node)
+        ? m_layout_state.get_mutable(node)
+        : m_layout_state.create(node, m_layout_input.containing_block_constraints.percentage_basis_width, m_layout_input.containing_block_constraints.percentage_basis_height);
+
     auto const& computed_values = node.computed_values();
 
-    used_values.margin_top = computed_values.margin().top().to_px_or_zero(node, m_containing_block_used_values.content_width());
-    used_values.margin_bottom = computed_values.margin().bottom().to_px_or_zero(node, m_containing_block_used_values.content_width());
+    auto containing_block_width = m_layout_input.containing_block_constraints.percentage_basis_width.value_or(0);
 
-    used_values.margin_left = computed_values.margin().left().to_px_or_zero(node, m_containing_block_used_values.content_width());
+    used_values.margin_top = computed_values.margin().top().to_px_or_zero(containing_block_width);
+    used_values.margin_bottom = computed_values.margin().bottom().to_px_or_zero(containing_block_width);
+
+    used_values.margin_left = computed_values.margin().left().to_px_or_zero(containing_block_width);
     used_values.border_left = computed_values.border_left().width;
-    used_values.padding_left = computed_values.padding().left().to_px_or_zero(node, m_containing_block_used_values.content_width());
+    used_values.padding_left = computed_values.padding().left().to_px_or_zero(containing_block_width);
 
-    used_values.margin_right = computed_values.margin().right().to_px_or_zero(node, m_containing_block_used_values.content_width());
+    used_values.margin_right = computed_values.margin().right().to_px_or_zero(containing_block_width);
     used_values.border_right = computed_values.border_right().width;
-    used_values.padding_right = computed_values.padding().right().to_px_or_zero(node, m_containing_block_used_values.content_width());
+    used_values.padding_right = computed_values.padding().right().to_px_or_zero(containing_block_width);
 
     used_values.border_top = computed_values.border_top().width;
     used_values.border_bottom = computed_values.border_bottom().width;
-    used_values.padding_bottom = computed_values.padding().bottom().to_px_or_zero(node, m_containing_block_used_values.content_width());
-    used_values.padding_top = computed_values.padding().top().to_px_or_zero(node, m_containing_block_used_values.content_width());
+    used_values.padding_bottom = computed_values.padding().bottom().to_px_or_zero(containing_block_width);
+    used_values.padding_top = computed_values.padding().top().to_px_or_zero(containing_block_width);
 
     m_extra_leading_metrics->margin += used_values.margin_left;
     m_extra_leading_metrics->border += used_values.border_left;
@@ -58,7 +95,7 @@ void InlineLevelIterator::enter_node_with_box_model_metrics(Layout::NodeWithStyl
     // Now's our chance to resolve the inset properties for this node.
     m_inline_formatting_context.compute_inset(node, m_inline_formatting_context.content_box_rect(m_containing_block_used_values).size());
 
-    m_box_model_node_stack.append(node);
+    m_box_model_node_stack.append(&node);
 }
 
 void InlineLevelIterator::exit_node_with_box_model_metrics()
@@ -66,7 +103,7 @@ void InlineLevelIterator::exit_node_with_box_model_metrics()
     if (!m_extra_trailing_metrics.has_value())
         m_extra_trailing_metrics = ExtraBoxMetrics {};
 
-    auto& node = m_box_model_node_stack.last();
+    auto& node = *m_box_model_node_stack.last();
     auto& used_values = m_layout_state.get_mutable(node);
 
     m_extra_trailing_metrics->margin += used_values.margin_right;
@@ -76,13 +113,16 @@ void InlineLevelIterator::exit_node_with_box_model_metrics()
     m_box_model_node_stack.take_last();
 }
 
-// This is similar to Layout::Node::next_in_pre_order() but will not descend into inline-block nodes.
+// This is similar to Layout::Node::next_in_pre_order() but will not descend into inline-block or interrupting block-level nodes.
 Layout::Node const* InlineLevelIterator::next_inline_node_in_pre_order(Layout::Node const& current, Layout::Node const* stay_within)
 {
     if (current.first_child()
-        && current.first_child()->display().is_inline_outside()
-        && current.display().is_flow_inside()
-        && !current.is_replaced_box()) {
+        && (current.first_child()->is_inline()
+            || is_inline_flow_interrupting_block(*current.first_child())
+            || current.first_child()->is_out_of_flow(m_inline_formatting_context))
+        && as<NodeWithStyle>(current).display().is_flow_inside()
+        && !is_inline_flow_interrupting_block(current)
+        && !current.is_atomic_inline()) {
         if (!current.is_box() || !static_cast<Box const&>(current).is_out_of_flow(m_inline_formatting_context))
             return current.first_child();
     }
@@ -115,52 +155,49 @@ void InlineLevelIterator::compute_next()
     if (m_next_node == nullptr)
         return;
     do {
-        m_next_node = next_inline_node_in_pre_order(*m_next_node, m_containing_block);
+        m_next_node = next_inline_node_in_pre_order(*m_next_node, &m_containing_block);
         if (m_next_node && m_next_node->is_svg_mask_box()) {
             // NOTE: It is possible to encounter SVGMaskBox nodes while doing layout of formatting context established by <foreignObject> with a mask.
             //       We should skip and let SVGFormattingContext take care of them.
             m_next_node = m_next_node->next_sibling();
         }
-    } while (m_next_node && (!m_next_node->is_inline() && !m_next_node->is_out_of_flow(m_inline_formatting_context)));
+    } while (m_next_node && (!m_next_node->is_inline() && !m_next_node->is_out_of_flow(m_inline_formatting_context) && !is_inline_flow_interrupting_block(*m_next_node)));
 }
 
 void InlineLevelIterator::skip_to_next()
 {
     if (m_next_node
         && is<Layout::NodeWithStyleAndBoxModelMetrics>(*m_next_node)
-        && m_next_node->display().is_flow_inside()
+        && m_next_node->is_inline()
+        && static_cast<Layout::NodeWithStyleAndBoxModelMetrics const&>(*m_next_node).display().is_flow_inside()
         && !m_next_node->is_out_of_flow(m_inline_formatting_context)
-        && !m_next_node->is_replaced_box())
+        && !m_next_node->is_atomic_inline())
         enter_node_with_box_model_metrics(static_cast<Layout::NodeWithStyleAndBoxModelMetrics const&>(*m_next_node));
 
     m_current_node = m_next_node;
     compute_next();
 }
 
-Optional<InlineLevelIterator::Item> InlineLevelIterator::next()
+Optional<InlineLevelIterator::Item&> InlineLevelIterator::next()
 {
-    if (m_lookahead_items.is_empty())
-        return next_without_lookahead();
-    return m_lookahead_items.dequeue();
+    if (m_next_item_index >= m_items.size())
+        return {};
+    return m_items[m_next_item_index++];
 }
 
 CSSPixels InlineLevelIterator::next_non_whitespace_sequence_width()
 {
     CSSPixels next_width = 0;
-    for (;;) {
-        auto next_item_opt = next_without_lookahead();
-        if (!next_item_opt.has_value())
+    for (size_t i = m_next_item_index; i < m_items.size(); ++i) {
+        auto const& next_item = m_items[i];
+        if (next_item.type == InlineLevelIterator::Item::Type::ForcedBreak || next_item.type == InlineLevelIterator::Item::Type::BlockLevelBox)
             break;
-        m_lookahead_items.enqueue(next_item_opt.release_value());
-        auto& next_item = m_lookahead_items.tail();
-        if (next_item.type == InlineLevelIterator::Item::Type::ForcedBreak)
-            break;
-        if (next_item.node->computed_values().text_wrap_mode() == CSS::TextWrapMode::Wrap) {
+        if (next_item.style_source().computed_values().text_wrap_mode() == CSS::TextWrapMode::Wrap) {
             if (next_item.type != InlineLevelIterator::Item::Type::Text)
                 break;
             if (next_item.is_collapsible_whitespace)
                 break;
-            auto& next_text_node = as<Layout::TextNode>(*(next_item.node));
+            auto const& next_text_node = as<Layout::TextNode>(*(next_item.node));
             auto next_view = next_text_node.text_for_rendering().substring_view(next_item.offset_in_node, next_item.length_in_node);
             if (next_view.is_ascii_whitespace())
                 break;
@@ -174,20 +211,22 @@ Gfx::GlyphRun::TextType InlineLevelIterator::resolve_text_direction_from_context
 {
     VERIFY(m_text_node_context.has_value());
 
+    // Search forward in the pre-generated chunks array to find the next chunk with known direction.
+    // Since chunks are pre-generated, this is just O(1) array access per iteration.
     Optional<Gfx::GlyphRun::TextType> next_known_direction;
-    for (size_t i = 0;; ++i) {
-        auto peek = m_text_node_context->chunk_iterator.peek(i);
-        if (!peek.has_value())
-            break;
-        if (peek->text_type == Gfx::GlyphRun::TextType::Ltr || peek->text_type == Gfx::GlyphRun::TextType::Rtl) {
-            next_known_direction = peek->text_type;
+    auto const& chunks = m_text_node_context->chunk_list->chunks;
+    for (size_t i = m_text_node_context->next_chunk_index; i < chunks.size(); ++i) {
+        auto const& chunk = chunks[i];
+        if (chunk.text_type == Gfx::GlyphRun::TextType::Ltr || chunk.text_type == Gfx::GlyphRun::TextType::Rtl) {
+            next_known_direction = chunk.text_type;
             break;
         }
     }
 
     auto last_known_direction = m_text_node_context->last_known_direction;
+
     if (last_known_direction.has_value() && next_known_direction.has_value() && *last_known_direction != *next_known_direction) {
-        switch (m_containing_block->computed_values().direction()) {
+        switch (m_containing_block.computed_values().direction()) {
         case CSS::Direction::Ltr:
             return Gfx::GlyphRun::TextType::Ltr;
         case CSS::Direction::Rtl:
@@ -203,289 +242,7 @@ Gfx::GlyphRun::TextType InlineLevelIterator::resolve_text_direction_from_context
     return Gfx::GlyphRun::TextType::ContextDependent;
 }
 
-HashMap<StringView, u8> InlineLevelIterator::shape_features_map() const
-{
-    HashMap<StringView, u8> features;
-
-    auto& computed_values = m_current_node->computed_values();
-
-    // 6.4 https://drafts.csswg.org/css-fonts/#font-variant-ligatures-prop
-    auto ligature_or_null = computed_values.font_variant_ligatures();
-
-    auto disable_all_ligatures = [&]() {
-        features.set("liga"sv, 0);
-        features.set("clig"sv, 0);
-        features.set("dlig"sv, 0);
-        features.set("hlig"sv, 0);
-        features.set("calt"sv, 0);
-    };
-
-    if (ligature_or_null.has_value()) {
-        auto ligature = ligature_or_null.release_value();
-        if (ligature.none) {
-            // Specifies that all types of ligatures and contextual forms covered by this property are explicitly disabled.
-            disable_all_ligatures();
-        } else {
-            switch (ligature.common) {
-            case Gfx::FontVariantLigatures::Common::Common:
-                // Enables display of common ligatures (OpenType features: liga, clig).
-                features.set("liga"sv, 1);
-                features.set("clig"sv, 1);
-                break;
-            case Gfx::FontVariantLigatures::Common::NoCommon:
-                // Disables display of common ligatures (OpenType features: liga, clig).
-                features.set("liga"sv, 0);
-                features.set("clig"sv, 0);
-                break;
-            case Gfx::FontVariantLigatures::Common::Unset:
-                break;
-            }
-
-            switch (ligature.discretionary) {
-            case Gfx::FontVariantLigatures::Discretionary::Discretionary:
-                // Enables display of discretionary ligatures (OpenType feature: dlig).
-                features.set("dlig"sv, 1);
-                break;
-            case Gfx::FontVariantLigatures::Discretionary::NoDiscretionary:
-                // Disables display of discretionary ligatures (OpenType feature: dlig).
-                features.set("dlig"sv, 0);
-                break;
-            case Gfx::FontVariantLigatures::Discretionary::Unset:
-                break;
-            }
-
-            switch (ligature.historical) {
-            case Gfx::FontVariantLigatures::Historical::Historical:
-                // Enables display of historical ligatures (OpenType feature: hlig).
-                features.set("hlig"sv, 1);
-                break;
-            case Gfx::FontVariantLigatures::Historical::NoHistorical:
-                // Disables display of historical ligatures (OpenType feature: hlig).
-                features.set("hlig"sv, 0);
-                break;
-            case Gfx::FontVariantLigatures::Historical::Unset:
-                break;
-            }
-
-            switch (ligature.contextual) {
-            case Gfx::FontVariantLigatures::Contextual::Contextual:
-                // Enables display of contextual ligatures (OpenType feature: calt).
-                features.set("calt"sv, 1);
-                break;
-            case Gfx::FontVariantLigatures::Contextual::NoContextual:
-                // Disables display of contextual ligatures (OpenType feature: calt).
-                features.set("calt"sv, 0);
-                break;
-            case Gfx::FontVariantLigatures::Contextual::Unset:
-                break;
-            }
-        }
-    } else if (computed_values.text_rendering() == CSS::TextRendering::Optimizespeed) {
-        // AD-HOC: Disable ligatures if font-variant-ligatures is set to normal and text rendering is set to optimize speed.
-        disable_all_ligatures();
-    } else {
-        // A value of normal specifies that common default features are enabled, as described in detail in the next section.
-        features.set("liga"sv, 1);
-        features.set("clig"sv, 1);
-    }
-
-    // 6.5 https://drafts.csswg.org/css-fonts/#font-variant-position-prop
-    switch (computed_values.font_variant_position()) {
-    case CSS::FontVariantPosition::Normal:
-        // None of the features listed below are enabled.
-        break;
-    case CSS::FontVariantPosition::Sub:
-        // Enables display of subscripts (OpenType feature: subs).
-        features.set("subs"sv, 1);
-        break;
-    case CSS::FontVariantPosition::Super:
-        // Enables display of superscripts (OpenType feature: sups).
-        features.set("sups"sv, 1);
-        break;
-    default:
-        break;
-    }
-
-    // 6.6 https://drafts.csswg.org/css-fonts/#font-variant-caps-prop
-    switch (computed_values.font_variant_caps()) {
-    case CSS::FontVariantCaps::Normal:
-        // None of the features listed below are enabled.
-        break;
-    case CSS::FontVariantCaps::SmallCaps:
-        // Enables display of small capitals (OpenType feature: smcp). Small-caps glyphs typically use the form of uppercase letters but are reduced to the size of lowercase letters.
-        features.set("smcp"sv, 1);
-        break;
-    case CSS::FontVariantCaps::AllSmallCaps:
-        // Enables display of small capitals for both upper and lowercase letters (OpenType features: c2sc, smcp).
-        features.set("c2sc"sv, 1);
-        features.set("smcp"sv, 1);
-        break;
-    case CSS::FontVariantCaps::PetiteCaps:
-        // Enables display of petite capitals (OpenType feature: pcap).
-        features.set("pcap"sv, 1);
-        break;
-    case CSS::FontVariantCaps::AllPetiteCaps:
-        // Enables display of petite capitals for both upper and lowercase letters (OpenType features: c2pc, pcap).
-        features.set("c2pc"sv, 1);
-        features.set("pcap"sv, 1);
-        break;
-    case CSS::FontVariantCaps::Unicase:
-        // Enables display of mixture of small capitals for uppercase letters with normal lowercase letters (OpenType feature: unic).
-        features.set("unic"sv, 1);
-        break;
-    case CSS::FontVariantCaps::TitlingCaps:
-        // Enables display of titling capitals (OpenType feature: titl).
-        features.set("titl"sv, 1);
-        break;
-    default:
-        break;
-    }
-
-    // 6.7 https://drafts.csswg.org/css-fonts/#font-variant-numeric-prop
-    auto numeric_or_null = computed_values.font_variant_numeric();
-    if (numeric_or_null.has_value()) {
-        auto numeric = numeric_or_null.release_value();
-        if (numeric.figure == Gfx::FontVariantNumeric::Figure::Oldstyle) {
-            // Enables display of old-style numerals (OpenType feature: onum).
-            features.set("onum"sv, 1);
-        } else if (numeric.figure == Gfx::FontVariantNumeric::Figure::Lining) {
-            // Enables display of lining numerals (OpenType feature: lnum).
-            features.set("lnum"sv, 1);
-        }
-
-        if (numeric.spacing == Gfx::FontVariantNumeric::Spacing::Proportional) {
-            // Enables display of proportional numerals (OpenType feature: pnum).
-            features.set("pnum"sv, 1);
-        } else if (numeric.spacing == Gfx::FontVariantNumeric::Spacing::Tabular) {
-            // Enables display of tabular numerals (OpenType feature: tnum).
-            features.set("tnum"sv, 1);
-        }
-
-        if (numeric.fraction == Gfx::FontVariantNumeric::Fraction::Diagonal) {
-            // Enables display of diagonal fractions (OpenType feature: frac).
-            features.set("frac"sv, 1);
-        } else if (numeric.fraction == Gfx::FontVariantNumeric::Fraction::Stacked) {
-            // Enables display of stacked fractions (OpenType feature: afrc).
-            features.set("afrc"sv, 1);
-            features.set("afrc"sv, 1);
-        }
-
-        if (numeric.ordinal) {
-            // Enables display of letter forms used with ordinal numbers (OpenType feature: ordn).
-            features.set("ordn"sv, 1);
-        }
-        if (numeric.slashed_zero) {
-            // Enables display of slashed zeros (OpenType feature: zero).
-            features.set("zero"sv, 1);
-        }
-    }
-
-    // 6.10 https://drafts.csswg.org/css-fonts/#font-variant-east-asian-prop
-    auto east_asian_or_null = computed_values.font_variant_east_asian();
-    if (east_asian_or_null.has_value()) {
-        auto east_asian = east_asian_or_null.release_value();
-        switch (east_asian.variant) {
-        case Gfx::FontVariantEastAsian::Variant::Jis78:
-            // Enables display of JIS78 forms (OpenType feature: jp78).
-            features.set("jp78"sv, 1);
-            break;
-        case Gfx::FontVariantEastAsian::Variant::Jis83:
-            // Enables display of JIS83 forms (OpenType feature: jp83).
-            features.set("jp83"sv, 1);
-            break;
-        case Gfx::FontVariantEastAsian::Variant::Jis90:
-            // Enables display of JIS90 forms (OpenType feature: jp90).
-            features.set("jp90"sv, 1);
-            break;
-        case Gfx::FontVariantEastAsian::Variant::Jis04:
-            // Enables display of JIS04 forms (OpenType feature: jp04).
-            features.set("jp04"sv, 1);
-            break;
-        case Gfx::FontVariantEastAsian::Variant::Simplified:
-            // Enables display of simplified forms (OpenType feature: smpl).
-            features.set("smpl"sv, 1);
-            break;
-        case Gfx::FontVariantEastAsian::Variant::Traditional:
-            // Enables display of traditional forms (OpenType feature: trad).
-            features.set("trad"sv, 1);
-            break;
-        default:
-            break;
-        }
-        switch (east_asian.width) {
-        case Gfx::FontVariantEastAsian::Width::FullWidth:
-            // Enables display of full-width forms (OpenType feature: fwid).
-            features.set("fwid"sv, 1);
-            break;
-        case Gfx::FontVariantEastAsian::Width::Proportional:
-            // Enables display of proportional-width forms (OpenType feature: pwid).
-            features.set("pwid"sv, 1);
-            break;
-        default:
-            break;
-        }
-        if (east_asian.ruby) {
-            // Enables display of ruby forms (OpenType feature: ruby).
-            features.set("ruby"sv, 1);
-        }
-    }
-
-    // FIXME: vkrn should be enabled for vertical text.
-    switch (computed_values.font_kerning()) {
-    case CSS::FontKerning::Auto:
-        // AD-HOC: Disable kerning if font-kerning is set to normal and text rendering is set to optimize speed.
-        features.set("kern"sv, computed_values.text_rendering() != CSS::TextRendering::Optimizespeed ? 1 : 0);
-        break;
-    case CSS::FontKerning::Normal:
-        features.set("kern"sv, 1);
-        break;
-    case CSS::FontKerning::None:
-        features.set("kern"sv, 0);
-        break;
-    default:
-        break;
-    }
-
-    return features;
-}
-
-Gfx::ShapeFeatures InlineLevelIterator::create_and_merge_font_features() const
-{
-    HashMap<StringView, u8> merged_features;
-    auto& computed_values = m_inline_formatting_context.containing_block().computed_values();
-
-    // https://www.w3.org/TR/css-fonts-3/#feature-precedence
-
-    // FIXME 1. Font features enabled by default, including features required for a given script.
-
-    // FIXME 2. If the font is defined via an @font-face rule, the font features implied by the font-feature-settings descriptor in the @font-face rule.
-
-    // 3. Font features implied by the value of the ‘font-variant’ property, the related ‘font-variant’ subproperties and any other CSS property that uses OpenType features (e.g. the ‘font-kerning’ property).
-    merged_features.update(shape_features_map());
-
-    // FIXME 4. Feature settings determined by properties other than ‘font-variant’ or ‘font-feature-settings’. For example, setting a non-default value for the ‘letter-spacing’ property disables common ligatures.
-
-    // 5. Font features implied by the value of ‘font-feature-settings’ property.
-    CSS::CalculationResolutionContext calculation_context { .length_resolution_context = CSS::Length::ResolutionContext::for_layout_node(*m_current_node.ptr()) };
-    auto font_feature_settings = computed_values.font_feature_settings();
-    if (font_feature_settings.has_value()) {
-        auto const& feature_settings = font_feature_settings.value();
-        for (auto const& [key, feature_value] : feature_settings) {
-            merged_features.set(key, feature_value.resolved(calculation_context).value_or(0));
-        }
-    }
-
-    Gfx::ShapeFeatures shape_features;
-    shape_features.ensure_capacity(merged_features.size());
-
-    for (auto& it : merged_features) {
-        shape_features.unchecked_append({ { it.key[0], it.key[1], it.key[2], it.key[3] }, static_cast<u32>(it.value) });
-    }
-
-    return shape_features;
-}
-
-Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead()
+Optional<InlineLevelIterator::Item> InlineLevelIterator::generate_next_item()
 {
     if (!m_current_node)
         return {};
@@ -494,24 +251,57 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
         if (!m_text_node_context.has_value())
             enter_text_node(*text_node);
 
-        auto chunk_opt = m_text_node_context->chunk_iterator.next();
-        if (!chunk_opt.has_value()) {
-            m_text_node_context = {};
-            skip_to_next();
-            return next_without_lookahead();
+        // Track chunk position locally
+        bool is_first_chunk = (m_text_node_context->next_chunk_index == 0);
+
+        // Get the next chunk from the pre-generated array
+        Optional<TextNode::Chunk> chunk_opt;
+        auto const& chunks = m_text_node_context->chunk_list->chunks;
+        if (m_text_node_context->next_chunk_index < chunks.size()) {
+            chunk_opt = chunks[m_text_node_context->next_chunk_index++];
         }
 
-        if (!m_text_node_context->chunk_iterator.peek(0).has_value())
-            m_text_node_context->is_last_chunk = true;
+        bool is_last_chunk = (m_text_node_context->next_chunk_index >= chunks.size());
+
+        auto is_empty_editable = false;
+        if (!chunk_opt.has_value()) {
+            auto const is_only_chunk = is_first_chunk && is_last_chunk;
+            if (is_only_chunk && text_node->text_for_rendering().is_empty()) {
+                if (auto const* dom_text = text_node->dom_text()) {
+                    if (auto const* shadow_root = as_if<DOM::ShadowRoot>(dom_text->root()))
+                        if (auto const* form_associated_element = as_if<HTML::FormAssociatedTextControlElement>(shadow_root->host()))
+                            is_empty_editable = form_associated_element->text_control_to_html_element().is_mutable();
+                    is_empty_editable |= dom_text->parent() && dom_text->parent()->is_editing_host();
+                }
+            }
+
+            if (is_empty_editable) {
+                // Create an empty chunk for editable empty text fields
+                chunk_opt = TextNode::Chunk {
+                    .view = {},
+                    .font = text_node->parent()->computed_values().font_list().first(),
+                    .is_all_whitespace = true,
+                    .text_type = Gfx::GlyphRun::TextType::Common,
+                };
+                // Advance the index so the next call will move to the next node
+                m_text_node_context->next_chunk_index = 1;
+            } else {
+                m_text_node_context = {};
+                m_previous_chunk_can_break_after = false;
+                skip_to_next();
+                return generate_next_item();
+            }
+        }
 
         auto& chunk = chunk_opt.value();
         auto text_type = chunk.text_type;
-        if (text_type == Gfx::GlyphRun::TextType::Ltr || text_type == Gfx::GlyphRun::TextType::Rtl)
+        if (text_type == Gfx::GlyphRun::TextType::Ltr || text_type == Gfx::GlyphRun::TextType::Rtl) {
             m_text_node_context->last_known_direction = text_type;
+        }
 
-        auto do_respect_linebreak = m_text_node_context->chunk_iterator.should_respect_linebreaks();
+        auto do_respect_linebreak = m_text_node_context->should_respect_linebreaks;
         if (do_respect_linebreak && chunk.has_breaking_newline) {
-            m_text_node_context->is_last_chunk = true;
+            is_last_chunk = true;
             if (chunk.is_all_whitespace)
                 text_type = Gfx::GlyphRun::TextType::EndPadding;
         }
@@ -522,33 +312,22 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
         if (do_respect_linebreak && chunk.has_breaking_newline)
             return Item { .type = Item::Type::ForcedBreak };
 
-        auto letter_spacing = text_node->computed_values().letter_spacing();
+        auto letter_spacing = text_node->parent()->computed_values().letter_spacing();
         // FIXME: We should apply word spacing to all word-separator characters not just breaking tabs
-        auto word_spacing = text_node->computed_values().word_spacing();
+        auto word_spacing = text_node->parent()->computed_values().word_spacing();
 
         auto x = 0.0f;
         if (chunk.has_breaking_tab) {
-            CSSPixels accumulated_width;
-
-            // make sure to account for any fragments that take up a portion of the measured tab stop distance
-            auto fragments = m_containing_block_used_values.line_boxes.last().fragments();
-            for (auto const& frag : fragments) {
-                accumulated_width += frag.width();
-            }
+            // Use the accumulated width we've been tracking during pre-generation.
+            // This accounts for items that would appear before this tab on the same line.
+            CSSPixels accumulated_width = m_accumulated_width_for_tabs;
 
             // https://drafts.csswg.org/css-text/#tab-size-property
-            CSS::CalculationResolutionContext calculation_context { .length_resolution_context = CSS::Length::ResolutionContext::for_layout_node(*text_node) };
-            auto tab_size = text_node->computed_values().tab_size();
-            CSSPixels tab_width;
-            tab_width = tab_size.visit(
-                [&](CSS::LengthOrCalculated const& t) -> CSSPixels {
-                    return t.resolved(calculation_context)
-                        .map([&](auto& it) { return it.to_px(*text_node); })
-                        .value_or(0);
+            auto tab_width = text_node->parent()->computed_values().tab_size().visit(
+                [&](CSSPixels const& css_pixels) -> CSSPixels {
+                    return css_pixels;
                 },
-                [&](CSS::NumberOrCalculated const& n) -> CSSPixels {
-                    auto tab_number = n.resolved(calculation_context).value_or(0);
-
+                [&](double tab_number) -> CSSPixels {
                     return CSSPixels::nearest_value_for(tab_number * (chunk.font->glyph_width(' ') + word_spacing.to_float() + letter_spacing.to_float()));
                 });
 
@@ -575,14 +354,13 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
             x = tab_stop_dist.to_float();
         }
 
-        auto shape_features = create_and_merge_font_features();
-        auto glyph_run = Gfx::shape_text({ x, 0 }, letter_spacing.to_float(), chunk.view, chunk.font, text_type, shape_features);
+        auto glyph_run = Gfx::shape_text({ x, 0 }, letter_spacing.to_float(), chunk.view, chunk.font, text_type);
 
         CSSPixels chunk_width = CSSPixels::nearest_value_for(glyph_run->width() + x);
 
         // NOTE: We never consider `content: ""` to be collapsible whitespace.
-        bool is_generated_empty_string = text_node->is_generated() && chunk.length == 0;
-        auto collapse_whitespace = m_text_node_context->chunk_iterator.should_collapse_whitespace();
+        bool is_generated_empty_string = is_empty_editable || (text_node->is_generated_for_pseudo_element() && chunk.length == 0);
+        auto collapse_whitespace = m_text_node_context->should_collapse_whitespace;
 
         Item item {
             .type = Item::Type::Text,
@@ -592,23 +370,30 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
             .length_in_node = chunk.length,
             .width = chunk_width,
             .is_collapsible_whitespace = collapse_whitespace && chunk.is_all_whitespace && !is_generated_empty_string,
+            .can_break_before = m_previous_chunk_can_break_after,
         };
 
-        add_extra_box_model_metrics_to_item(item, m_text_node_context->is_first_chunk, m_text_node_context->is_last_chunk);
+        m_previous_chunk_can_break_after = chunk.can_break_after;
+
+        add_extra_box_model_metrics_to_item(item, is_first_chunk, is_last_chunk);
         return item;
     }
 
-    if (m_current_node->is_absolutely_positioned()) {
-        auto& node = *m_current_node;
+    auto const& current_node_with_style = as<NodeWithStyle>(*m_current_node);
+    if (current_node_with_style.is_absolutely_positioned()) {
+        auto const& node = *m_current_node;
+        auto has_unattached_inline_start_edges = m_extra_leading_metrics.has_value()
+            && (m_extra_leading_metrics->margin != 0 || m_extra_leading_metrics->border != 0 || m_extra_leading_metrics->padding != 0);
         skip_to_next();
         return Item {
             .type = Item::Type::AbsolutelyPositionedElement,
             .node = &node,
+            .preceded_by_unattached_inline_start_edges = has_unattached_inline_start_edges,
         };
     }
 
-    if (m_current_node->is_floating()) {
-        auto& node = *m_current_node;
+    if (current_node_with_style.is_floating()) {
+        auto const& node = *m_current_node;
         skip_to_next();
         return Item {
             .type = Item::Type::FloatingElement,
@@ -617,7 +402,7 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
     }
 
     if (is<Layout::BreakNode>(*m_current_node)) {
-        auto& node = *m_current_node;
+        auto const& node = *m_current_node;
         skip_to_next();
         return Item {
             .type = Item::Type::ForcedBreak,
@@ -625,24 +410,39 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
         };
     }
 
-    if (is<Layout::ListItemMarkerBox>(*m_current_node)) {
+    if (m_current_node->is_fragmented_inline()) {
         skip_to_next();
-        return next_without_lookahead();
+        return generate_next_item();
+    }
+
+    if (is<Layout::ListItemMarkerBox>(*m_current_node)) {
+        auto const* list_item = as_if<ListItemBox>(m_current_node->parent());
+        if (!list_item || !list_item->is_fragmented_inline()) {
+            skip_to_next();
+            return generate_next_item();
+        }
     }
 
     if (!is<Layout::Box>(*m_current_node)) {
         skip_to_next();
-        return next_without_lookahead();
+        return generate_next_item();
     }
 
-    if (is<Layout::ReplacedBox>(*m_current_node)) {
-        auto& replaced_box = static_cast<Layout::ReplacedBox const&>(*m_current_node);
-        // FIXME: This const_cast is gross.
-        const_cast<Layout::ReplacedBox&>(replaced_box).prepare_for_replaced_layout();
+    auto const& box = as<Layout::Box>(*m_current_node);
+    if (is_inline_flow_interrupting_block(box)) {
+        skip_to_next();
+        return Item {
+            .type = Item::Type::BlockLevelBox,
+            .node = &box,
+        };
     }
 
-    auto& box = as<Layout::Box>(*m_current_node);
-    auto& box_state = m_layout_state.get(box);
+    auto const& box_state = [&]() -> LayoutState::UsedValues const& {
+        if (is<ListItemMarkerBox>(box)
+            || (!m_box_model_node_stack.is_empty() && m_box_model_node_stack.last() == &box))
+            return m_layout_state.get_mutable(box);
+        return m_layout_state.create(box, m_layout_input.containing_block_constraints.percentage_basis_width, m_layout_input.containing_block_constraints.percentage_basis_height);
+    }();
     m_inline_formatting_context.dimension_box_on_line(box, m_layout_mode);
 
     auto item = Item {
@@ -665,17 +465,23 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
 
 void InlineLevelIterator::enter_text_node(Layout::TextNode const& text_node)
 {
-    auto white_space_collapse = text_node.computed_values().white_space_collapse();
-    auto text_wrap_mode = text_node.computed_values().text_wrap_mode();
+    auto white_space_collapse = text_node.parent()->computed_values().white_space_collapse();
+    auto text_wrap_mode = text_node.parent()->computed_values().text_wrap_mode();
 
     // https://drafts.csswg.org/css-text-4/#collapse
     bool do_wrap_lines = text_wrap_mode == CSS::TextWrapMode::Wrap;
     bool do_respect_linebreaks = first_is_one_of(white_space_collapse, CSS::WhiteSpaceCollapse::Preserve, CSS::WhiteSpaceCollapse::PreserveBreaks, CSS::WhiteSpaceCollapse::BreakSpaces);
 
+    auto const& chunks = text_node.chunks_for_layout(do_wrap_lines, do_respect_linebreaks);
+
     m_text_node_context = TextNodeContext {
-        .is_first_chunk = true,
-        .is_last_chunk = false,
-        .chunk_iterator = TextNode::ChunkIterator { text_node, do_wrap_lines, do_respect_linebreaks },
+        // OPTIMIZATION: The chunk list is cached by the TextNode and only read by this iterator, so keep a pointer
+        //               to it instead of copying every chunk when entering a text node.
+        .chunk_list = &chunks,
+        .next_chunk_index = 0,
+        .should_collapse_whitespace = chunks.should_collapse_whitespace,
+        .should_wrap_lines = do_wrap_lines,
+        .should_respect_linebreaks = do_respect_linebreaks,
     };
 }
 

@@ -40,7 +40,6 @@
     __JS_ENUMERATE(Promise, promise, PromisePrototype, PromiseConstructor, void)                                                               \
     __JS_ENUMERATE(RegExpObject, regexp, RegExpPrototype, RegExpConstructor, void)                                                             \
     __JS_ENUMERATE(Set, set, SetPrototype, SetConstructor, void)                                                                               \
-    __JS_ENUMERATE(ShadowRealm, shadow_realm, ShadowRealmPrototype, ShadowRealmConstructor, void)                                              \
     __JS_ENUMERATE(SharedArrayBuffer, shared_array_buffer, SharedArrayBufferPrototype, SharedArrayBufferConstructor, void)                     \
     __JS_ENUMERATE(StringObject, string, StringPrototype, StringConstructor, void)                                                             \
     __JS_ENUMERATE(SuppressedError, suppressed_error, SuppressedErrorPrototype, SuppressedErrorConstructor, void)                              \
@@ -146,25 +145,34 @@
     __JS_ENUMERATE(IgnoreCase, ignoreCase, ignore_case, i)    \
     __JS_ENUMERATE(Multiline, multiline, multiline, m)        \
     __JS_ENUMERATE(DotAll, dotAll, dot_all, s)                \
-    __JS_ENUMERATE(UnicodeSets, unicodeSets, unicode_sets, v) \
     __JS_ENUMERATE(Unicode, unicode, unicode, u)              \
+    __JS_ENUMERATE(UnicodeSets, unicodeSets, unicode_sets, v) \
     __JS_ENUMERATE(Sticky, sticky, sticky, y)
 
 namespace JS {
 
-class ASTNode;
+enum class Strict : u8 {
+    No,
+    Yes,
+};
+
+enum class ThisBindingStatus : u8 {
+    Lexical,
+    Initialized,
+    Uninitialized,
+};
+
 class Accessor;
 class Agent;
 struct AsyncGeneratorRequest;
 class BigInt;
 class BoundFunction;
 class BuiltinIterator;
-struct CachedSourceRange;
 class Cell;
-class ClassExpression;
 struct ClassFieldDefinition;
 class Completion;
 class Console;
+class ConsoleClient;
 class CyclicModule;
 class DeclarativeEnvironment;
 struct DisposeCapability;
@@ -172,35 +180,26 @@ struct DisposableResource;
 class ECMAScriptFunctionObject;
 class Environment;
 class Error;
+class ErrorData;
 class ErrorType;
 struct ExecutionContext;
 struct ExportEntry;
-class ExportStatement;
-class Expression;
-class ForStatement;
 class FunctionEnvironment;
-class FunctionNode;
-struct FunctionParameter;
-class FunctionParameters;
 class GlobalEnvironment;
 class GlobalObject;
 struct GraphLoadingState;
 struct ImportEntry;
-class ImportStatement;
-class Identifier;
 class Intrinsics;
 class IteratorRecord;
-class MemberExpression;
-class MetaProperty;
 class ModuleEnvironment;
 class Module;
 struct ModuleRequest;
 class NativeFunction;
+class RawNativeFunction;
+class NativeJavaScriptBackedFunction;
 class ObjectEnvironment;
-class Parser;
 struct ParserError;
 class PrimitiveString;
-class Program;
 class PromiseCapability;
 class PromiseReaction;
 class PropertyAttributes;
@@ -208,10 +207,9 @@ class PropertyDescriptor;
 class PropertyKey;
 class Realm;
 class Reference;
-class ScopeNode;
 class Script;
 class Shape;
-class Statement;
+class SharedFunctionInstanceData;
 class StringOrSymbol;
 class SourceCode;
 struct SourceRange;
@@ -223,10 +221,9 @@ class PrototypeChainValidity;
 class Value;
 class WrappedFunction;
 enum class DeclarationKind;
-struct AlreadyResolved;
 class JobCallback;
 struct ModuleRequest;
-struct ModuleWithSpecifier;
+struct LoadedModuleRequest;
 
 // Not included in JS_ENUMERATE_NATIVE_OBJECTS due to missing distinct prototype
 class ProxyObject;
@@ -299,17 +296,14 @@ JS_ENUMERATE_TEMPORAL_OBJECTS
 class Now;
 class Temporal;
 
-struct CalendarDate;
 struct CalendarFields;
 struct DateDuration;
 struct InternalDuration;
-struct ISODate;
 struct ISODateTime;
 struct ISOYearMonth;
 struct ParseResult;
 struct PartialDuration;
 struct Time;
-struct TimeZone;
 struct TimeZoneOffset;
 
 };
@@ -317,16 +311,16 @@ struct TimeZoneOffset;
 template<typename T>
 requires(!IsLvalueReference<T>)
 class ThrowCompletionOr;
+using NativeFunctionPointer = ThrowCompletionOr<Value> (*)(VM&);
 
 namespace Bytecode {
 
-class BasicBlock;
 enum class Builtin : u8;
 class Executable;
 class Generator;
 class Instruction;
-class Interpreter;
 class Operand;
+struct PropertyLookupCache;
 class RegexTable;
 class Register;
 

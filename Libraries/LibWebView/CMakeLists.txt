@@ -1,26 +1,44 @@
-include(fontconfig)
-
 set(SOURCES
     Application.cpp
     Attribute.cpp
     Autocomplete.cpp
+    AutocompleteMuxer.cpp
+    AutocompleteRanker.cpp
+    AutocompleteService.cpp
+    BookmarkStore.cpp
+    CanonicalNavigable.cpp
+    CanonicalTraversable.cpp
     BrowserProcess.cpp
+    CompositorClient.cpp
+    CompositorConnection.cpp
+    CompositorHostBase.cpp
     ConsoleOutput.cpp
     CookieJar.cpp
-    Database.cpp
+    DictionaryLookup.cpp
     DOMNodeProperties.cpp
+    DownloadPresentation.cpp
+    FileDownloader.cpp
     HeadlessWebView.cpp
     HelperProcess.cpp
+    HistoryDebug.cpp
+    HistoryStore.cpp
+    HSTSStore.cpp
     Menu.cpp
     Mutation.cpp
-    Plugins/FontPlugin.cpp
+    Omnibox.cpp
+    OmniboxEngagement.cpp
     Plugins/ImageCodecPlugin.cpp
+    PrivateBrowsing.cpp
     Process.cpp
     ProcessHandle.cpp
     ProcessManager.cpp
+    ProcessMonitor.cpp
+    Profile.cpp
     SearchEngine.cpp
+    SessionHistory.cpp
     Settings.cpp
     SiteIsolation.cpp
+    SiteIsolationManager.cpp
     SourceHighlighter.cpp
     StorageJar.cpp
     URL.cpp
@@ -29,26 +47,28 @@ set(SOURCES
     ViewImplementation.cpp
     WebContentClient.cpp
     WebUI.cpp
+    WebUI/BookmarksUI.cpp
+    WebUI/DownloadsUI.cpp
+    WebUI/HistoryUI.cpp
     WebUI/ProcessesUI.cpp
     WebUI/SettingsUI.cpp
+    WebUI/VersionUI.cpp
+    WebWorkerClient.cpp
+    WorkerProcessManager.cpp
 )
 
 if (APPLE)
-    list(APPEND SOURCES MachPortServer.cpp)
+    list(APPEND SOURCES
+        PlatformColorsMacOS.cpp
+    )
 endif()
 
 set(GENERATED_SOURCES ${CURRENT_LIB_GENERATED})
 
-embed_as_string(
-    "NativeStyleSheetSource.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Native.css"
-    "NativeStyleSheetSource.cpp"
-    "native_stylesheet_source"
-    NAMESPACE "WebView"
-)
-
 compile_ipc(UIProcessServer.ipc UIProcessServerEndpoint.h)
 compile_ipc(UIProcessClient.ipc UIProcessClientEndpoint.h)
+
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/Services/Compositor)
 
 if (NOT APPLE AND NOT CMAKE_INSTALL_LIBEXECDIR STREQUAL "libexec")
     set_source_files_properties(Utilities.cpp PROPERTIES COMPILE_DEFINITIONS LADYBIRD_LIBEXECDIR="${CMAKE_INSTALL_LIBEXECDIR}")
@@ -56,6 +76,10 @@ endif()
 
 set(GENERATED_SOURCES
     ${GENERATED_SOURCES}
+    ../../Services/Compositor/CompositorControlClientEndpoint.h
+    ../../Services/Compositor/CompositorControlServerEndpoint.h
+    ../../Services/Compositor/CompositorWebContentClientEndpoint.h
+    ../../Services/Compositor/CompositorWebContentServerEndpoint.h
     ../../Services/RequestServer/RequestClientEndpoint.h
     ../../Services/RequestServer/RequestServerEndpoint.h
     ../../Services/WebContent/WebContentClientEndpoint.h
@@ -64,47 +88,27 @@ set(GENERATED_SOURCES
     ../../Services/WebContent/WebDriverServerEndpoint.h
     ../../Services/WebContent/WebUIClientEndpoint.h
     ../../Services/WebContent/WebUIServerEndpoint.h
-    NativeStyleSheetSource.cpp
     UIProcessClientEndpoint.h
     UIProcessServerEndpoint.h
 )
 
-ladybird_lib(LibWebView webview EXPLICIT_SYMBOL_EXPORT)
-target_link_libraries(LibWebView PRIVATE LibCore LibDevTools LibFileSystem LibGfx LibImageDecoderClient LibIPC LibRequests LibJS LibWeb LibUnicode LibURL LibSyntax LibTextCodec)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/Compositor/CompositorControlClient.ipc ${CMAKE_BINARY_DIR}/Services/Compositor/CompositorControlClientEndpoint.h)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/Compositor/CompositorControlServer.ipc ${CMAKE_BINARY_DIR}/Services/Compositor/CompositorControlServerEndpoint.h)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/Compositor/CompositorWebContentClient.ipc ${CMAKE_BINARY_DIR}/Services/Compositor/CompositorWebContentClientEndpoint.h)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/Compositor/CompositorWebContentServer.ipc ${CMAKE_BINARY_DIR}/Services/Compositor/CompositorWebContentServerEndpoint.h)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/WebContent/WebContentClient.ipc ${CMAKE_BINARY_DIR}/Services/WebContent/WebContentClientEndpoint.h)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/WebContent/WebContentServer.ipc ${CMAKE_BINARY_DIR}/Services/WebContent/WebContentServerEndpoint.h)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/WebContent/WebDriverClient.ipc ${CMAKE_BINARY_DIR}/Services/WebContent/WebDriverClientEndpoint.h)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/WebContent/WebDriverServer.ipc ${CMAKE_BINARY_DIR}/Services/WebContent/WebDriverServerEndpoint.h)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/WebContent/WebUIClient.ipc ${CMAKE_BINARY_DIR}/Services/WebContent/WebUIClientEndpoint.h)
+compile_ipc(${LADYBIRD_SOURCE_DIR}/Services/WebContent/WebUIServer.ipc ${CMAKE_BINARY_DIR}/Services/WebContent/WebUIServerEndpoint.h)
 
-if (APPLE)
-    target_link_libraries(LibWebView PRIVATE LibThreading)
-endif()
+ladybird_lib(LibWebView webview EXPLICIT_SYMBOL_EXPORT)
+target_link_libraries(LibWebView PRIVATE LibCore LibCrypto LibDatabase LibDevTools LibFileSystem LibGfx LibHTTP LibImageDecoderClient LibIPC LibRequests LibJS LibMedia LibWeb LibUnicode LibURL LibSync LibSyntax LibTextCodec LibThreading)
 
 # Third-party
-find_package(SQLite3 REQUIRED)
-target_link_libraries(LibWebView PRIVATE SQLite::SQLite3)
-
 if (HAS_FONTCONFIG)
     target_link_libraries(LibWebView PRIVATE Fontconfig::Fontconfig)
-endif()
-
-add_library(LibWebViewPlatform INTERFACE)
-if (ENABLE_QT)
-    add_library(LibWebViewQt STATIC
-        EventLoop/EventLoopImplementationQt.cpp
-        EventLoop/EventLoopImplementationQtEventTarget.cpp
-    )
-
-    set_target_properties(LibWebViewQt PROPERTIES AUTOMOC ON AUTORCC OFF AUTOUIC OFF)
-    find_package(Qt6 REQUIRED COMPONENTS Core)
-    target_link_libraries(LibWebViewQt PUBLIC Qt::Core)
-    if (WIN32)
-        find_package(pthread REQUIRED)
-        target_include_directories(LibWebViewQt PRIVATE $<BUILD_INTERFACE:${PTHREAD_INCLUDE_DIR}>)
-    endif()
-    target_link_libraries(LibWebViewPlatform INTERFACE LibWebViewQt)
-elseif (APPLE)
-    add_library(LibWebViewCocoa STATIC
-        EventLoop/EventLoopImplementationMacOS.mm
-    )
-    target_link_libraries(LibWebViewCocoa PUBLIC "-framework Cocoa")
-    target_link_libraries(LibWebViewPlatform INTERFACE LibWebViewCocoa)
 endif()
 
 if (ENABLE_INSTALL_HEADERS)

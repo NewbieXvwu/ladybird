@@ -7,7 +7,7 @@
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/Iterator.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/URLSearchParamsIteratorPrototype.h>
+#include <LibWeb/Bindings/URLSearchParams.h>
 #include <LibWeb/DOMURL/URLSearchParamsIterator.h>
 
 namespace Web::Bindings {
@@ -16,7 +16,7 @@ template<>
 void Intrinsics::create_web_prototype_and_constructor<URLSearchParamsIteratorPrototype>(JS::Realm& realm)
 {
     auto prototype = realm.create<URLSearchParamsIteratorPrototype>(realm);
-    m_prototypes.set("URLSearchParamsIterator"_fly_string, prototype);
+    m_prototypes.set("URLSearchParamsIterator"_utf16_fly_string, prototype);
 }
 
 }

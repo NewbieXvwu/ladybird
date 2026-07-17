@@ -7,27 +7,29 @@
 #pragma once
 
 #include <LibWeb/Layout/SVGSVGBox.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
+#include <LibWeb/Painting/SVGGraphicsPaintable.h>
 
 namespace Web::Painting {
 
-class SVGSVGPaintable final : public PaintableBox {
-    GC_CELL(SVGSVGPaintable, PaintableBox);
-    GC_DECLARE_ALLOCATOR(SVGSVGPaintable);
-
+class SVGSVGPaintable final : public Paintable {
 public:
-    static GC::Ref<SVGSVGPaintable> create(Layout::SVGSVGBox const&);
+    static NonnullRefPtr<SVGSVGPaintable> create(Layout::SVGSVGBox const&);
+    virtual StringView class_name() const override { return "SVGSVGPaintable"sv; }
 
-    Layout::SVGSVGBox const& layout_box() const;
+    static void paint_svg_box(DisplayListRecordingContext& context, Paintable const& svg_box, PaintPhase phase);
+    static void paint_descendants(DisplayListRecordingContext& context, Paintable const& paintable, PaintPhase phase);
 
-    static void paint_svg_box(DisplayListRecordingContext& context, PaintableBox const& svg_box, PaintPhase phase);
-    static void paint_descendants(DisplayListRecordingContext& context, PaintableBox const& paintable, PaintPhase phase);
+    void set_computed_transforms(SVGGraphicsPaintable::ComputedTransforms computed_transforms) { m_computed_transforms = computed_transforms; }
+    SVGGraphicsPaintable::ComputedTransforms const& computed_transforms() const { return m_computed_transforms; }
 
 protected:
     SVGSVGPaintable(Layout::SVGSVGBox const&);
 
 private:
     virtual bool is_svg_svg_paintable() const final { return true; }
+
+    SVGGraphicsPaintable::ComputedTransforms m_computed_transforms;
 };
 
 template<>

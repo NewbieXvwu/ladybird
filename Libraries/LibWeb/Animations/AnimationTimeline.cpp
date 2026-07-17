@@ -6,7 +6,7 @@
 
 #include <LibWeb/Animations/Animation.h>
 #include <LibWeb/Animations/AnimationTimeline.h>
-#include <LibWeb/Bindings/AnimationTimelinePrototype.h>
+#include <LibWeb/Bindings/AnimationTimeline.h>
 #include <LibWeb/DOM/Document.h>
 
 namespace Web::Animations {
@@ -14,7 +14,7 @@ namespace Web::Animations {
 GC_DEFINE_ALLOCATOR(AnimationTimeline);
 
 // https://drafts.csswg.org/web-animations-1/#dom-animationtimeline-currenttime
-Optional<double> AnimationTimeline::current_time() const
+Optional<TimeValue> AnimationTimeline::current_time() const
 {
     // Returns the current time for this timeline or null if this timeline is inactive.
     if (is_inactive())
@@ -22,31 +22,41 @@ Optional<double> AnimationTimeline::current_time() const
     return m_current_time;
 }
 
-void AnimationTimeline::set_current_time(Optional<double> value)
+void AnimationTimeline::set_current_time(Optional<TimeValue> value)
 {
-    if (value == m_current_time)
-        return;
-
     if (m_is_monotonically_increasing && m_current_time.has_value() && (!value.has_value() || *value < *m_current_time)) {
         dbgln("AnimationTimeline::set_current_time({}): monotonically increasing timeline can only move forward", value);
         return;
     }
+
     m_current_time = value;
 
-    // The loop might modify the content of m_associated_animations, so let's iterate over a copy.
-    auto temporary_copy = GC::RootVector<GC::Ref<Animation>>(vm().heap());
-    temporary_copy.extend(m_associated_animations.values());
-    for (auto& animation : temporary_copy)
-        animation->notify_timeline_time_did_change();
+    update_associated_animations();
 }
 
-void AnimationTimeline::set_associated_document(GC::Ptr<DOM::Document> document)
+void AnimationTimeline::update_associated_animations()
 {
-    if (document)
-        document->associate_with_timeline(*this);
-    if (m_associated_document)
-        m_associated_document->disassociate_with_timeline(*this);
-    m_associated_document = document;
+    // https://drafts.csswg.org/web-animations-1/#animation-frame-loop
+    // Note: Due to the hierarchical nature of the timing model, updating the current time of a timeline also involves:
+    // - Updating the current time of any animations associated with the timeline.
+    // - Running the update an animation's finished state procedure for any animations whose current time has been
+    //   updated.
+    // - Queueing animation events for any such animations.
+    // NB: Since we dispatch events for all animations regardless of whether they have a timeline we handle them all together in Document::update_animations_and_send_events()
+    for (auto& animation : m_associated_animations)
+        animation.update();
+}
+
+// https://drafts.csswg.org/web-animations-2/#timeline-duration
+NullableCSSNumberish AnimationTimeline::duration_for_bindings() const
+{
+    // The duration of a timeline gives the maximum value a timeline may generate for its current time. This value is
+    // used to calculate the intrinsic iteration duration for the target effect of an animation that is associated with
+    // the timeline when the effect’s iteration duration is "auto". The value is computed such that the effect fills the
+    // available time. For a monotonic timeline, there is no upper bound on current time, and timeline duration is
+    // unresolved. For a non-monotonic (e.g. scroll) timeline, the duration has a fixed upper bound. In this case, the
+    // timeline is a progress-based timeline, and its timeline duration is 100%.
+    return NullableCSSNumberish::from_optional_css_numberish_time(realm(), duration());
 }
 
 // https://drafts.csswg.org/web-animations-1/#timeline
@@ -56,28 +66,32 @@ bool AnimationTimeline::is_inactive() const
     return !m_current_time.has_value();
 }
 
-AnimationTimeline::AnimationTimeline(JS::Realm& realm)
+AnimationTimeline::AnimationTimeline(JS::Realm& realm, GC::Ref<DOM::Document> document)
     : Bindings::PlatformObject(realm)
+    , m_associated_document(document)
 {
 }
 
 void AnimationTimeline::finalize()
 {
-    if (m_associated_document)
-        m_associated_document->disassociate_with_timeline(*this);
+    Base::finalize();
+    m_associated_document->disassociate_with_timeline(*this);
 }
 
 void AnimationTimeline::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(AnimationTimeline);
     Base::initialize(realm);
+    m_associated_document->associate_with_timeline(*this);
 }
 
 void AnimationTimeline::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_associated_document);
-    visitor.visit(m_associated_animations);
+    // We intentionally don't visit m_associated_animations here to avoid keeping Animations alive solely because they
+    // are associated with a timeline. Animations are disassociated from timelines in Animation::finalize() so we don't
+    // need to worry about dangling references.
 }
 
 }

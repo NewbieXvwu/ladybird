@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,7 +8,11 @@
 
 #include <AK/NonnullOwnPtr.h>
 #include <AK/String.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16StringBuilder.h>
 #include <AK/Vector.h>
+#include <LibGC/Ptr.h>
+#include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::CSS {
@@ -75,41 +79,75 @@ constexpr StringView to_string(MatchResult result)
     VERIFY_NOT_REACHED();
 }
 
+struct BooleanExpressionEvaluationContext {
+    GC::Ptr<DOM::Document const> document { nullptr };
+    GC::Ptr<DOM::Element const> query_container { nullptr };
+    Optional<DOM::AbstractElement> style_query_element {};
+    Optional<Parser::GuardedSubstitutionContexts&> guarded_contexts {};
+    bool* did_evaluate_attr_tainted_style_query { nullptr };
+};
+
+struct ContainerQueryFeatureRequirements {
+    bool requires_width_container : 1 { false };
+    bool requires_height_container : 1 { false };
+    bool requires_inline_size_container : 1 { false };
+    bool requires_block_size_container : 1 { false };
+    bool requires_style_container : 1 { false };
+    bool requires_scroll_state_container : 1 { false };
+    bool has_unknown_or_unsupported_feature : 1 { false };
+
+    bool contains_size_feature() const
+    {
+        return requires_width_container
+            || requires_height_container
+            || requires_inline_size_container
+            || requires_block_size_container;
+    }
+
+    bool contains_style_feature() const
+    {
+        return requires_style_container;
+    }
+};
+
 // The contents of this file implement the `<boolean-expr>` concept.
 // https://drafts.csswg.org/css-values-5/#typedef-boolean-expr
 class BooleanExpression {
 public:
     virtual ~BooleanExpression() = default;
 
-    bool evaluate_to_boolean(HTML::Window const*) const;
+    bool evaluate_to_boolean(BooleanExpressionEvaluationContext const&) const;
     static void indent(StringBuilder& builder, int levels);
 
-    virtual MatchResult evaluate(HTML::Window const*) const = 0;
-    virtual String to_string() const = 0;
+    virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const = 0;
+    virtual void collect_container_query_feature_requirements(ContainerQueryFeatureRequirements&) const { }
+    Utf16String to_string() const;
+    virtual void serialize_to(Utf16StringBuilder&) const = 0;
     virtual void dump(StringBuilder&, int indent_levels = 0) const = 0;
 };
 
 // https://www.w3.org/TR/mediaqueries-4/#typedef-general-enclosed
 class GeneralEnclosed final : public BooleanExpression {
 public:
-    static NonnullOwnPtr<GeneralEnclosed> create(String serialized_contents, MatchResult matches = MatchResult::Unknown)
+    static NonnullOwnPtr<GeneralEnclosed> create(Utf16String serialized_contents, MatchResult matches = MatchResult::Unknown)
     {
         return adopt_own(*new GeneralEnclosed(move(serialized_contents), matches));
     }
     virtual ~GeneralEnclosed() override = default;
 
-    virtual MatchResult evaluate(HTML::Window const*) const override { return m_matches; }
-    virtual String to_string() const override { return m_serialized_contents; }
+    virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override { return m_matches; }
+    virtual void collect_container_query_feature_requirements(ContainerQueryFeatureRequirements&) const override;
+    virtual void serialize_to(Utf16StringBuilder&) const override;
     virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
 private:
-    GeneralEnclosed(String serialized_contents, MatchResult matches)
+    GeneralEnclosed(Utf16String serialized_contents, MatchResult matches)
         : m_serialized_contents(move(serialized_contents))
         , m_matches(matches)
     {
     }
 
-    String m_serialized_contents;
+    Utf16String m_serialized_contents;
     MatchResult m_matches;
 };
 
@@ -121,8 +159,9 @@ public:
     }
     virtual ~BooleanNotExpression() override = default;
 
-    virtual MatchResult evaluate(HTML::Window const*) const override;
-    virtual String to_string() const override;
+    virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
+    virtual void collect_container_query_feature_requirements(ContainerQueryFeatureRequirements&) const override;
+    virtual void serialize_to(Utf16StringBuilder&) const override;
     virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
 private:
@@ -142,8 +181,9 @@ public:
     }
     virtual ~BooleanExpressionInParens() override = default;
 
-    virtual MatchResult evaluate(HTML::Window const*) const override;
-    virtual String to_string() const override;
+    virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
+    virtual void collect_container_query_feature_requirements(ContainerQueryFeatureRequirements&) const override;
+    virtual void serialize_to(Utf16StringBuilder&) const override;
     virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
 private:
@@ -163,8 +203,9 @@ public:
     }
     virtual ~BooleanAndExpression() override = default;
 
-    virtual MatchResult evaluate(HTML::Window const*) const override;
-    virtual String to_string() const override;
+    virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
+    virtual void collect_container_query_feature_requirements(ContainerQueryFeatureRequirements&) const override;
+    virtual void serialize_to(Utf16StringBuilder&) const override;
     virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
 private:
@@ -184,8 +225,9 @@ public:
     }
     virtual ~BooleanOrExpression() override = default;
 
-    virtual MatchResult evaluate(HTML::Window const*) const override;
-    virtual String to_string() const override;
+    virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
+    virtual void collect_container_query_feature_requirements(ContainerQueryFeatureRequirements&) const override;
+    virtual void serialize_to(Utf16StringBuilder&) const override;
     virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
 private:
@@ -197,12 +239,33 @@ private:
     Vector<NonnullOwnPtr<BooleanExpression>> m_children;
 };
 
+class ConstantBooleanExpression final : public BooleanExpression {
+public:
+    static NonnullOwnPtr<ConstantBooleanExpression> create(MatchResult value)
+    {
+        return adopt_own(*new ConstantBooleanExpression(value));
+    }
+    virtual ~ConstantBooleanExpression() override = default;
+
+    virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override { return m_value; }
+    virtual void serialize_to(Utf16StringBuilder&) const override;
+    virtual void dump(StringBuilder&, int indent_levels = 0) const override;
+
+private:
+    ConstantBooleanExpression(MatchResult value)
+        : m_value(value)
+    {
+    }
+
+    MatchResult m_value;
+};
+
 }
 
 template<>
 struct AK::Formatter<Web::CSS::BooleanExpression> : AK::Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Web::CSS::BooleanExpression const& expression)
     {
-        return Formatter<StringView>::format(builder, expression.to_string());
+        return Formatter<StringView>::format(builder, expression.to_string().to_utf8());
     }
 };

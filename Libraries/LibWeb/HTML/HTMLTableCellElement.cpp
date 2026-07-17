@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLTableCellElementPrototype.h>
+#include <LibWeb/Bindings/HTMLTableCellElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
@@ -13,6 +13,7 @@
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
+#include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/HTMLCollection.h>
 #include <LibWeb/HTML/HTMLTableCellElement.h>
@@ -37,7 +38,7 @@ void HTMLTableCellElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-bool HTMLTableCellElement::is_presentational_hint(FlyString const& name) const
+bool HTMLTableCellElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -52,49 +53,42 @@ bool HTMLTableCellElement::is_presentational_hint(FlyString const& name) const
         HTML::AttributeNames::width);
 }
 
-void HTMLTableCellElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void HTMLTableCellElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
-    for_each_attribute([&](auto& name, auto& value) {
+    Base::apply_presentational_hints(properties);
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == HTML::AttributeNames::bgcolor) {
             // https://html.spec.whatwg.org/multipage/rendering.html#tables-2:rules-for-parsing-a-legacy-colour-value
             auto color = parse_legacy_color_value(value);
             if (color.has_value())
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BackgroundColor, CSS::ColorStyleValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy));
+                properties.append({ .property_id = CSS::PropertyID::BackgroundColor, .value = CSS::ColorStyleValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy) });
             return;
         }
         if (name == HTML::AttributeNames::valign) {
             if (auto parsed_value = parse_css_value(CSS::Parser::ParsingParams { document() }, value, CSS::PropertyID::VerticalAlign))
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::VerticalAlign, parsed_value.release_nonnull());
+                properties.append({ .property_id = CSS::PropertyID::VerticalAlign, .value = parsed_value.release_nonnull() });
             return;
         }
         if (name == HTML::AttributeNames::align) {
-            if (value.equals_ignoring_ascii_case("center"sv) || value.equals_ignoring_ascii_case("middle"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::LibwebCenter));
-            } else if (value.equals_ignoring_ascii_case("left"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::LibwebLeft));
-            } else if (value.equals_ignoring_ascii_case("right"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, CSS::KeywordStyleValue::create(CSS::Keyword::LibwebRight));
-            } else {
-                if (auto parsed_value = parse_css_value(CSS::Parser::ParsingParams { document() }, value, CSS::PropertyID::TextAlign))
-                    cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextAlign, parsed_value.release_nonnull());
-            }
+            if (auto parsed_value = parse_table_child_element_align_value(value))
+                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = parsed_value.release_nonnull() });
             return;
         }
         if (name == HTML::AttributeNames::width) {
             if (auto parsed_value = parse_nonzero_dimension_value(value))
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Width, parsed_value.release_nonnull());
+                properties.append({ .property_id = CSS::PropertyID::Width, .value = parsed_value.release_nonnull() });
             return;
         } else if (name == HTML::AttributeNames::height) {
             if (auto parsed_value = parse_nonzero_dimension_value(value))
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Height, parsed_value.release_nonnull());
+                properties.append({ .property_id = CSS::PropertyID::Height, .value = parsed_value.release_nonnull() });
             return;
         } else if (name == HTML::AttributeNames::background) {
             // https://html.spec.whatwg.org/multipage/rendering.html#tables-2:encoding-parsing-and-serializing-a-url
             if (auto parsed_value = document().encoding_parse_url(value); parsed_value.has_value())
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BackgroundImage, CSS::ImageStyleValue::create(*parsed_value));
+                properties.append({ .property_id = CSS::PropertyID::BackgroundImage, .value = CSS::StyleValueList::create({ CSS::ImageStyleValue::create(*parsed_value) }, CSS::StyleValueList::Separator::Comma) });
             return;
         } else if (name == HTML::AttributeNames::nowrap) {
-            cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::TextWrapMode, CSS::KeywordStyleValue::create(CSS::Keyword::Nowrap));
+            properties.append({ .property_id = CSS::PropertyID::TextWrapMode, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Nowrap) });
             return;
         }
     });
@@ -104,10 +98,10 @@ void HTMLTableCellElement::apply_presentational_hints(GC::Ref<CSS::CascadedPrope
         return;
 
     if (auto padding = table_element->cellpadding(); padding.has_value()) {
-        cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::PaddingTop, CSS::LengthStyleValue::create(CSS::Length::make_px(*padding)));
-        cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::PaddingBottom, CSS::LengthStyleValue::create(CSS::Length::make_px(*padding)));
-        cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::PaddingLeft, CSS::LengthStyleValue::create(CSS::Length::make_px(*padding)));
-        cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::PaddingRight, CSS::LengthStyleValue::create(CSS::Length::make_px(*padding)));
+        properties.append({ .property_id = CSS::PropertyID::PaddingTop, .value = CSS::LengthStyleValue::create(CSS::Length::make_px(*padding)) });
+        properties.append({ .property_id = CSS::PropertyID::PaddingBottom, .value = CSS::LengthStyleValue::create(CSS::Length::make_px(*padding)) });
+        properties.append({ .property_id = CSS::PropertyID::PaddingLeft, .value = CSS::LengthStyleValue::create(CSS::Length::make_px(*padding)) });
+        properties.append({ .property_id = CSS::PropertyID::PaddingRight, .value = CSS::LengthStyleValue::create(CSS::Length::make_px(*padding)) });
     }
 
     auto border = table_element->border();
@@ -115,9 +109,9 @@ void HTMLTableCellElement::apply_presentational_hints(GC::Ref<CSS::CascadedPrope
     if (!border)
         return;
     auto apply_border_style = [&](CSS::PropertyID style_property, CSS::PropertyID width_property, CSS::PropertyID color_property) {
-        cascaded_properties->set_property_from_presentational_hint(style_property, CSS::KeywordStyleValue::create(CSS::Keyword::Inset));
-        cascaded_properties->set_property_from_presentational_hint(width_property, CSS::LengthStyleValue::create(CSS::Length::make_px(1)));
-        cascaded_properties->set_property_from_presentational_hint(color_property, table_element->computed_properties()->property(color_property));
+        properties.append({ .property_id = style_property, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Inset) });
+        properties.append({ .property_id = width_property, .value = CSS::LengthStyleValue::create(CSS::Length::make_px(1)) });
+        properties.append({ .property_id = color_property, .value = table_element->computed_values()->computed_style_value(color_property).release_nonnull() });
     };
     apply_border_style(CSS::PropertyID::BorderLeftStyle, CSS::PropertyID::BorderLeftWidth, CSS::PropertyID::BorderLeftColor);
     apply_border_style(CSS::PropertyID::BorderTopStyle, CSS::PropertyID::BorderTopWidth, CSS::PropertyID::BorderTopColor);
@@ -129,13 +123,14 @@ void HTMLTableCellElement::apply_presentational_hints(GC::Ref<CSS::CascadedPrope
 // https://html.spec.whatwg.org/multipage/tables.html#algorithm-for-processing-rows
 WebIDL::UnsignedLong HTMLTableCellElement::col_span() const
 {
+    // If the current cell has a colspan attribute, then parse that attribute's value, and let colspan be the result.
+    // If parsing that value failed, or returned zero, or if the attribute is absent, then let colspan be 1, instead.
     auto col_span_attribute = get_attribute(HTML::AttributeNames::colspan);
     if (!col_span_attribute.has_value())
         return 1;
 
     auto optional_value_digits = Web::HTML::parse_non_negative_integer_digits(*col_span_attribute);
 
-    // If parsing that value failed, or returned zero, or if the attribute is absent, then let colspan be 1, instead.
     if (!optional_value_digits.has_value())
         return 1;
 
@@ -143,7 +138,7 @@ WebIDL::UnsignedLong HTMLTableCellElement::col_span() const
     if (optional_value == 0)
         return 1;
 
-    // NOTE: If there is no value at this point the value must be larger than NumericLimits<i64>::max(), so return the maximum value of 1000.
+    // NB: If there is no value at this point the value must be larger than NumericLimits<i64>::max(), so return the maximum value of 1000.
     if (!optional_value.has_value())
         return 1000;
 
@@ -157,22 +152,23 @@ WebIDL::UnsignedLong HTMLTableCellElement::col_span() const
     return value;
 }
 
-WebIDL::ExceptionOr<void> HTMLTableCellElement::set_col_span(WebIDL::UnsignedLong value)
+void HTMLTableCellElement::set_col_span(WebIDL::UnsignedLong value)
 {
     if (value > 2147483647)
         value = 1;
-    return set_attribute(HTML::AttributeNames::colspan, String::number(value));
+    set_attribute_value(HTML::AttributeNames::colspan, Utf16String::number(value));
 }
 
 // This implements step 9 in the spec here:
 // https://html.spec.whatwg.org/multipage/tables.html#algorithm-for-processing-rows
 WebIDL::UnsignedLong HTMLTableCellElement::row_span() const
 {
+    // If the current cell has a rowspan attribute, then parse that attribute's value, and let rowspan be the result.
+    // If parsing that value failed or if the attribute is absent, then let rowspan be 1, instead.
     auto row_span_attribute = get_attribute(HTML::AttributeNames::rowspan);
     if (!row_span_attribute.has_value())
         return 1;
 
-    // If parsing that value failed or if the attribute is absent, then let rowspan be 1, instead.
     auto optional_value_digits = Web::HTML::parse_non_negative_integer_digits(*row_span_attribute);
     if (!optional_value_digits.has_value())
         return 1;
@@ -180,18 +176,18 @@ WebIDL::UnsignedLong HTMLTableCellElement::row_span() const
     auto optional_value = optional_value_digits->to_number<i64>(TrimWhitespace::No);
 
     // If rowspan is greater than 65534, let it be 65534 instead.
-    // NOTE: If there is no value at this point the value must be larger than NumericLimits<i64>::max(), so return the maximum value of 65534.
+    // NB: If there is no value at this point the value must be larger than NumericLimits<i64>::max(), so return the maximum value of 65534.
     if (!optional_value.has_value() || *optional_value > 65534)
         return 65534;
 
     return *optional_value;
 }
 
-WebIDL::ExceptionOr<void> HTMLTableCellElement::set_row_span(WebIDL::UnsignedLong value)
+void HTMLTableCellElement::set_row_span(WebIDL::UnsignedLong value)
 {
     if (value > 2147483647)
         value = 1;
-    return set_attribute(HTML::AttributeNames::rowspan, String::number(value));
+    set_attribute_value(HTML::AttributeNames::rowspan, Utf16String::number(value));
 }
 
 // https://html.spec.whatwg.org/multipage/tables.html#dom-tdth-cellindex
@@ -221,10 +217,10 @@ Optional<ARIA::Role> HTMLTableCellElement::default_role() const
             // tests at https://wpt.fyi/results/html-aam/table-roles.html require doing these ancestor checks — and
             // implementing them causes the behavior to match that of other engines.
             // https://w3c.github.io/html-aam/#el-th-columnheader
-            if (get_attribute(HTML::AttributeNames::scope) == "columnheader" || ancestor->local_name() == TagNames::thead)
+            if (get_attribute(HTML::AttributeNames::scope) == u"columnheader"sv || ancestor->local_name() == TagNames::thead)
                 return ARIA::Role::columnheader;
             // https://w3c.github.io/html-aam/#el-th-rowheader
-            if (get_attribute(HTML::AttributeNames::scope) == "rowheader" || ancestor->local_name() == TagNames::tbody)
+            if (get_attribute(HTML::AttributeNames::scope) == u"rowheader"sv || ancestor->local_name() == TagNames::tbody)
                 return ARIA::Role::rowheader;
         }
     }

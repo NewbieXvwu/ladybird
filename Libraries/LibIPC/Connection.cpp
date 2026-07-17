@@ -7,8 +7,6 @@
  */
 
 #include <AK/Vector.h>
-#include <LibCore/Socket.h>
-#include <LibCore/Timer.h>
 #include <LibIPC/Connection.h>
 #include <LibIPC/Message.h>
 #include <LibIPC/Stub.h>
@@ -20,12 +18,9 @@ ConnectionBase::ConnectionBase(IPC::Stub& local_stub, NonnullOwnPtr<Transport> t
     , m_transport(move(transport))
     , m_local_endpoint_magic(local_endpoint_magic)
 {
-    m_responsiveness_timer = Core::Timer::create_single_shot(3000, [this] { may_have_become_unresponsive(); });
-
     m_transport->set_up_read_hook([this] {
         NonnullRefPtr protect = *this;
-        // FIXME: Do something about errors.
-        (void)drain_messages_from_peer();
+        drain_messages_from_peer();
         handle_messages();
     });
 }
@@ -39,19 +34,19 @@ bool ConnectionBase::is_open() const
 
 ErrorOr<void> ConnectionBase::post_message(Message const& message)
 {
-    return post_message(TRY(message.encode()));
+    auto buffer = TRY(message.encode());
+    return post_message(buffer);
 }
 
-ErrorOr<void> ConnectionBase::post_message(MessageBuffer buffer)
+ErrorOr<void> ConnectionBase::post_message(MessageBuffer& buffer)
 {
     // NOTE: If this connection is being shut down, but has not yet been destroyed,
     //       the socket will be closed. Don't try to send more messages.
     if (!m_transport->is_open())
         return Error::from_string_literal("Trying to post_message during IPC shutdown");
 
-    MUST(buffer.transfer_message(*m_transport));
+    TRY(buffer.transfer_message(*m_transport));
 
-    m_responsiveness_timer->start();
     return {};
 }
 
@@ -74,6 +69,9 @@ void ConnectionBase::handle_messages()
         if (message->endpoint_magic() != m_local_endpoint_magic)
             continue;
 
+        if (!is_open())
+            dbgln("Handling message while connection closed: {}", message->message_name());
+
         auto handler_result = m_local_stub.handle(move(message));
         if (handler_result.is_error()) {
             dbgln("IPC::ConnectionBase::handle_messages: {}", handler_result.error());
@@ -95,35 +93,44 @@ void ConnectionBase::wait_for_transport_to_become_readable()
     m_transport->wait_until_readable();
 }
 
-ErrorOr<void> ConnectionBase::drain_messages_from_peer()
+ConnectionBase::PeerEOF ConnectionBase::drain_messages_from_peer()
 {
+    bool parse_error = false;
     auto schedule_shutdown = m_transport->read_as_many_messages_as_possible_without_blocking([&](auto&& raw_message) {
-        if (auto message = try_parse_message(raw_message.bytes, raw_message.fds)) {
+        auto bytes = raw_message.bytes.bytes();
+        if (auto message = try_parse_message(bytes, raw_message.attachments)) {
             m_unprocessed_messages.append(message.release_nonnull());
         } else {
-            dbgln("Failed to parse IPC message {:hex-dump}", raw_message.bytes);
-            VERIFY_NOT_REACHED();
+            dbgln("Failed to parse IPC message {:hex-dump}", bytes);
+            parse_error = true;
         }
     });
 
+    if (parse_error) {
+        dbgln("IPC::ConnectionBase ({:p}): Disconnecting misbehaving peer due to malformed message", this);
+        schedule_shutdown = Transport::ShouldShutdown::Yes;
+    }
+
     if (!m_unprocessed_messages.is_empty()) {
-        m_responsiveness_timer->stop();
-        did_become_responsive();
         deferred_invoke([this] {
             handle_messages();
         });
-    } else if (schedule_shutdown == Transport::ShouldShutdown::Yes) {
+    }
+
+    if (schedule_shutdown == Transport::ShouldShutdown::Yes) {
         deferred_invoke([this] {
             shutdown();
         });
-        return Error::from_string_literal("IPC connection EOF");
+        return PeerEOF::Yes;
     }
 
-    return {};
+    return PeerEOF::No;
 }
 
 OwnPtr<IPC::Message> ConnectionBase::wait_for_specific_endpoint_message_impl(u32 endpoint_magic, int message_id)
 {
+    bool peer_disconnected_during_wait = false;
+
     for (;;) {
         // Double check we don't already have the event waiting for us.
         // Otherwise we might end up blocked for a while for no reason.
@@ -139,9 +146,31 @@ OwnPtr<IPC::Message> ConnectionBase::wait_for_specific_endpoint_message_impl(u32
             break;
 
         wait_for_transport_to_become_readable();
-        if (drain_messages_from_peer().is_error())
+        if (drain_messages_from_peer() == PeerEOF::Yes) {
+            peer_disconnected_during_wait = true;
             break;
+        }
     }
+
+    dbgln("Failed to receive message_id: {}", message_id);
+
+    if (!m_unprocessed_messages.is_empty()) {
+        dbgln("Transport shutdown with unprocessed messages left: {}", m_unprocessed_messages.size());
+        for (size_t i = 0; i < m_unprocessed_messages.size(); ++i) {
+            auto& message = m_unprocessed_messages[i];
+            dbgln(" Message {:03} is: {:2}-{}", i, message->message_id(), message->message_name());
+        }
+    }
+
+    if (peer_disconnected_during_wait) {
+        // Don't dispatch any remaining queued messages here. wait_for_specific_endpoint_message_impl can be entered
+        // from any sync IPC call — including from inside a constructor whose members are still being initialized. (See
+        // issue #9582. PageHost's constructor issues a sync IPC before ConnectionFromClient::m_page_host has been
+        // assigned.) Re-entering arbitrary handlers from here can hit uninitialized state and crash. shutdown() closes
+        // the transport and calls die(). That exits processes cleanly — the same as queued close_server message would.
+        shutdown();
+    }
+
     return {};
 }
 

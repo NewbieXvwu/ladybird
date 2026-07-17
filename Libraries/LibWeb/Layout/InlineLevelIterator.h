@@ -8,6 +8,7 @@
 
 #include <AK/Noncopyable.h>
 #include <LibWeb/Layout/BlockContainer.h>
+#include <LibWeb/Layout/LayoutInput.h>
 #include <LibWeb/Layout/LayoutState.h>
 #include <LibWeb/Layout/TextNode.h>
 
@@ -25,12 +26,13 @@ public:
         enum class Type {
             Text,
             Element,
+            BlockLevelBox,
             ForcedBreak,
             AbsolutelyPositionedElement,
             FloatingElement,
         };
         Type type {};
-        GC::Ptr<Layout::Node const> node {};
+        Layout::Node const* node { nullptr };
         RefPtr<Gfx::GlyphRun> glyph_run {};
         size_t offset_in_node { 0 };
         size_t length_in_node { 0 };
@@ -42,20 +44,35 @@ public:
         CSSPixels margin_start { 0.0f };
         CSSPixels margin_end { 0.0f };
         bool is_collapsible_whitespace { false };
+        bool can_break_before { false };
+        // An enclosing inline box was entered with non-zero start-edge margin/border/padding that
+        // hasn't attached to any fragment yet. Only set for AbsolutelyPositionedElement items.
+        bool preceded_by_unattached_inline_start_edges { false };
 
         CSSPixels border_box_width() const
         {
             return border_start + padding_start + width + padding_end + border_end;
         }
+
+        NodeWithStyle const& style_source() const
+        {
+            VERIFY(node);
+            if (auto const* node_with_style = as_if<NodeWithStyle>(*node))
+                return *node_with_style;
+            return *node->parent();
+        }
     };
 
-    InlineLevelIterator(Layout::InlineFormattingContext&, LayoutState&, Layout::BlockContainer const& containing_block, LayoutState::UsedValues const& containing_block_used_values, LayoutMode);
+    InlineLevelIterator(Layout::InlineFormattingContext&, LayoutState&, Layout::BlockContainer const& containing_block, LayoutState::UsedValues const& containing_block_used_values, LayoutInput const&, LayoutMode);
 
-    Optional<Item> next();
+    Optional<Item&> next();
     CSSPixels next_non_whitespace_sequence_width();
 
+    Vector<NodeWithStyleAndBoxModelMetrics const*> take_visited_fragmented_inlines() { return move(m_visited_fragmented_inlines); }
+
 private:
-    Optional<Item> next_without_lookahead();
+    void generate_all_items();
+    Optional<Item> generate_next_item();
     Gfx::GlyphRun::TextType resolve_text_direction_from_context();
     void skip_to_next();
     void compute_next();
@@ -67,23 +84,23 @@ private:
 
     void add_extra_box_model_metrics_to_item(Item&, bool add_leading_metrics, bool add_trailing_metrics);
 
-    HashMap<StringView, u8> shape_features_map() const;
-    Gfx::ShapeFeatures create_and_merge_font_features() const;
-
     Layout::Node const* next_inline_node_in_pre_order(Layout::Node const& current, Layout::Node const* stay_within);
 
     Layout::InlineFormattingContext& m_inline_formatting_context;
     Layout::LayoutState& m_layout_state;
-    GC::Ref<BlockContainer const> m_containing_block;
+    BlockContainer const& m_containing_block;
     LayoutState::UsedValues const& m_containing_block_used_values;
-    GC::Ptr<Layout::Node const> m_current_node;
-    GC::Ptr<Layout::Node const> m_next_node;
+    LayoutInput const& m_layout_input;
+    Layout::Node const* m_current_node { nullptr };
+    Layout::Node const* m_next_node { nullptr };
     LayoutMode const m_layout_mode;
 
     struct TextNodeContext {
-        bool is_first_chunk {};
-        bool is_last_chunk {};
-        TextNode::ChunkIterator chunk_iterator;
+        TextNode::ChunkList const* chunk_list { nullptr };
+        size_t next_chunk_index { 0 };
+        bool should_collapse_whitespace {};
+        bool should_wrap_lines {};
+        bool should_respect_linebreaks {};
         Optional<Gfx::GlyphRun::TextType> last_known_direction {};
     };
 
@@ -98,8 +115,17 @@ private:
     Optional<ExtraBoxMetrics> m_extra_leading_metrics;
     Optional<ExtraBoxMetrics> m_extra_trailing_metrics;
 
-    Vector<GC::Ref<NodeWithStyleAndBoxModelMetrics const>> m_box_model_node_stack;
-    Queue<InlineLevelIterator::Item> m_lookahead_items;
+    Vector<NodeWithStyleAndBoxModelMetrics const*> m_box_model_node_stack;
+    Vector<NodeWithStyleAndBoxModelMetrics const*> m_visited_fragmented_inlines;
+
+    // Pre-generated items for O(1) iteration and lookahead.
+    Vector<Item> m_items;
+    size_t m_next_item_index { 0 };
+
+    // Accumulated width tracking for tab calculations during pre-generation.
+    CSSPixels m_accumulated_width_for_tabs { 0 };
+
+    bool m_previous_chunk_can_break_after { false };
 };
 
 }

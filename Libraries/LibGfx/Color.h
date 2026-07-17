@@ -13,11 +13,14 @@
 #include <AK/Forward.h>
 #include <AK/Math.h>
 #include <AK/StdLibExtras.h>
+#include <LibGfx/ColorConversion.h>
 #include <LibIPC/Forward.h>
 
 namespace Gfx {
 
-typedef u32 ARGB32;
+// Named after in memory-order (little-endian)
+// e.g. 0xAARRGGBB
+using BGRA8888 = u32;
 
 enum class AlphaType {
     Premultiplied,
@@ -139,79 +142,47 @@ public:
 
     static constexpr Color branded_color(BrandedColor);
 
-    static constexpr Color from_rgb(unsigned rgb) { return Color(rgb | 0xff000000); }
-    static constexpr Color from_argb(unsigned argb) { return Color(argb); }
-    static constexpr Color from_abgr(unsigned abgr)
+    static constexpr Color from_bgrx(unsigned bgrx) { return Color(bgrx | 0xff000000); }
+    static constexpr Color from_bgra(unsigned bgra) { return Color(bgra); }
+    static constexpr Color from_rgba(unsigned rgba)
     {
-        unsigned argb = (abgr & 0xff00ff00) | ((abgr & 0xff0000) >> 16) | ((abgr & 0xff) << 16);
-        return Color::from_argb(argb);
+        unsigned bgra = (rgba & 0xff00ff00) | ((rgba & 0xff0000) >> 16) | ((rgba & 0xff) << 16);
+        return Color::from_bgra(bgra);
     }
-    static constexpr Color from_bgr(unsigned bgr) { return Color::from_abgr(bgr | 0xff000000); }
+    static constexpr Color from_rgbx(unsigned rgbx) { return Color::from_rgba(rgbx | 0xff000000); }
 
     static constexpr Color from_yuv(YUV const& yuv) { return from_yuv(yuv.y, yuv.u, yuv.v); }
     static constexpr Color from_yuv(float y, float u, float v)
     {
-        // https://www.itu.int/rec/R-REC-BT.1700-0-200502-I/en Table 4, Items 8 and 9 arithmetically inverted
-        float r = y + v / 0.877f;
-        float b = y + u / 0.493f;
-        float g = (y - 0.299f * r - 0.114f * b) / 0.587f;
-        r = clamp(r, 0.0f, 1.0f);
-        g = clamp(g, 0.0f, 1.0f);
-        b = clamp(b, 0.0f, 1.0f);
-
-        return { static_cast<u8>(floorf(r * 255.0f)), static_cast<u8>(floorf(g * 255.0f)), static_cast<u8>(floorf(b * 255.0f)) };
+        auto srgb = yuv_to_srgb({ y, u, v });
+        return {
+            static_cast<u8>(floorf(srgb[0] * 255.0f)),
+            static_cast<u8>(floorf(srgb[1] * 255.0f)),
+            static_cast<u8>(floorf(srgb[2] * 255.0f)),
+        };
     }
 
-    // https://www.itu.int/rec/R-REC-BT.1700-0-200502-I/en Table 4
     constexpr YUV to_yuv() const
     {
-        float r = red() / 255.0f;
-        float g = green() / 255.0f;
-        float b = blue() / 255.0f;
-        // Item 8
-        float y = 0.299f * r + 0.587f * g + 0.114f * b;
-        // Item 9
-        float u = 0.493f * (b - y);
-        float v = 0.877f * (r - y);
-        y = clamp(y, 0.0f, 1.0f);
-        u = clamp(u, -1.0f, 1.0f);
-        v = clamp(v, -1.0f, 1.0f);
-        return { y, u, v };
+        auto yuv = srgb_to_yuv({ red() / 255.0f, green() / 255.0f, blue() / 255.0f });
+        return { yuv[0], yuv[1], yuv[2] };
     }
 
     static constexpr Color from_hsl(float h_degrees, float s, float l) { return from_hsla(h_degrees, s, l, 1.0); }
     static constexpr Color from_hsla(float h_degrees, float s, float l, float a)
     {
-        // Algorithm from https://www.w3.org/TR/css-color-3/#hsl-color
-
-        float h = fmodf(h_degrees, 360.0f);
-        if (h < 0.0)
-            h += 360.0f;
-
-        s = clamp(s, 0.0f, 1.0f);
-        l = clamp(l, 0.0f, 1.0f);
-        a = clamp(a, 0.0f, 1.0f);
-
-        auto to_rgb = [](float h, float s, float l, float offset) {
-            float k = fmodf(offset + h / 30.0f, 12.0f);
-            float a = s * min(l, 1.0f - l);
-            return l - a * max(-1.0f, min(min(k - 3.0f, 9.0f - k), 1.0f));
-        };
-
-        float r = to_rgb(h, s, l, 0.0f);
-        float g = to_rgb(h, s, l, 8.0f);
-        float b = to_rgb(h, s, l, 4.0f);
-
-        u8 r_u8 = clamp(lroundf(r * 255.0f), 0, 255);
-        u8 g_u8 = clamp(lroundf(g * 255.0f), 0, 255);
-        u8 b_u8 = clamp(lroundf(b * 255.0f), 0, 255);
-        u8 a_u8 = clamp(lroundf(a * 255.0f), 0, 255);
+        auto srgb = hsl_to_srgb({ h_degrees, clamp(s, 0.0f, 1.0f), clamp(l, 0.0f, 1.0f), a });
+        u8 r_u8 = clamp(lroundf(srgb[0] * 255.0f), 0, 255);
+        u8 g_u8 = clamp(lroundf(srgb[1] * 255.0f), 0, 255);
+        u8 b_u8 = clamp(lroundf(srgb[2] * 255.0f), 0, 255);
+        u8 a_u8 = clamp(lroundf(srgb.alpha() * 255.0f), 0, 255);
         return Color(r_u8, g_u8, b_u8, a_u8);
     }
 
     static Color from_a98rgb(float r, float g, float b, float alpha = 1.0f);
     static Color from_display_p3(float r, float g, float b, float alpha = 1.0f);
     static Color from_lab(float L, float a, float b, float alpha = 1.0f);
+    static Color from_linear_display_p3(float r, float g, float b, float alpha = 1.0f);
     static Color from_linear_srgb(float r, float g, float b, float alpha = 1.0f);
     static Color from_pro_photo_rgb(float r, float g, float b, float alpha = 1.0f);
     static Color from_rec2020(float r, float g, float b, float alpha = 1.0f);
@@ -221,19 +192,8 @@ public:
     // https://bottosson.github.io/posts/oklab/
     static constexpr Color from_oklab(float L, float a, float b, float alpha = 1.0f)
     {
-        float l = L + 0.3963377774f * a + 0.2158037573f * b;
-        float m = L - 0.1055613458f * a - 0.0638541728f * b;
-        float s = L - 0.0894841775f * a - 1.2914855480f * b;
-
-        l = l * l * l;
-        m = m * m * m;
-        s = s * s * s;
-
-        float red = 4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s;
-        float green = -1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s;
-        float blue = -0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s;
-
-        return from_linear_srgb(red, green, blue, alpha);
+        auto linear = oklab_to_linear_srgb({ L, a, b, alpha });
+        return from_linear_srgb(linear[0], linear[1], linear[2], linear.alpha());
     }
 
     constexpr Oklab to_premultiplied_oklab()
@@ -249,23 +209,9 @@ public:
     // https://bottosson.github.io/posts/oklab/
     constexpr Oklab to_oklab()
     {
-        auto srgb_to_linear = [](float c) {
-            return c >= 0.04045f ? pow((c + 0.055f) / 1.055f, 2.4f) : c / 12.92f;
-        };
-
-        float r = srgb_to_linear(red() / 255.f);
-        float g = srgb_to_linear(green() / 255.f);
-        float b = srgb_to_linear(blue() / 255.f);
-
-        float l = cbrtf(0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b);
-        float m = cbrtf(0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b);
-        float s = cbrtf(0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b);
-
-        return {
-            0.2104542553f * l + 0.7936177850f * m - 0.0040720468f * s,
-            1.9779984951f * l - 2.4285922050f * m + 0.4505937099f * s,
-            0.0259040371f * l + 0.7827717662f * m - 0.8086757660f * s,
-        };
+        auto linear = srgb_to_linear_srgb({ red() / 255.0f, green() / 255.0f, blue() / 255.0f });
+        auto oklab = linear_srgb_to_oklab(linear);
+        return { oklab[0], oklab[1], oklab[2] };
     }
 
     constexpr u8 red() const { return (m_value >> 16) & 0xff; }
@@ -313,28 +259,6 @@ public:
         Color color_with_alpha = Color(m_value);
         color_with_alpha.set_alpha(alpha, alpha_type);
         return color_with_alpha;
-    }
-
-    constexpr Color to_premultiplied() const
-    {
-        u32 a = alpha();
-        u8 r = static_cast<u8>((red() * a + 127) / 255);
-        u8 g = static_cast<u8>((green() * a + 127) / 255);
-        u8 b = static_cast<u8>((blue() * a + 127) / 255);
-        return Color(r, g, b, a);
-    }
-
-    constexpr Color to_unpremultiplied() const
-    {
-        u32 a = alpha();
-        if (a == 0)
-            return Color(0, 0, 0, 0);
-        if (a == 255)
-            return *this;
-        u8 r = static_cast<u8>(min(255u, (red() * 255u + a / 2) / a));
-        u8 g = static_cast<u8>(min(255u, (green() * 255u + a / 2) / a));
-        u8 b = static_cast<u8>(min(255u, (blue() * 255u + a / 2) / a));
-        return Color(r, g, b, a);
     }
 
     constexpr Color blend(Color source) const
@@ -400,25 +324,8 @@ public:
         return delta_alpha * delta_alpha / (2.0f * 255 * 255) + rgb_distance * alpha() * other.alpha() / (255 * 255);
     }
 
-    constexpr u8 luminosity() const
-    {
-        return round_to<u8>(red() * 0.2126f + green() * 0.7152f + blue() * 0.0722f);
-    }
-
-    constexpr float contrast_ratio(Color other)
-    {
-        auto l1 = luminosity();
-        auto l2 = other.luminosity();
-        auto darkest = min(l1, l2) / 255.;
-        auto brightest = max(l1, l2) / 255.;
-        return (brightest + 0.05) / (darkest + 0.05);
-    }
-
-    constexpr Color to_grayscale() const
-    {
-        auto gray = luminosity();
-        return Color(gray, gray, gray, alpha());
-    }
+    double relative_luminance() const;
+    double contrast_ratio(Color other) const;
 
     constexpr Color sepia(float amount = 1.0f) const
     {
@@ -485,7 +392,7 @@ public:
         return Color(((other.m_value ^ m_value) & 0x00ffffff) | (m_value & 0xff000000));
     }
 
-    constexpr ARGB32 value() const { return m_value; }
+    constexpr BGRA8888 value() const { return m_value; }
 
     constexpr bool operator==(Color other) const
     {
@@ -501,46 +408,25 @@ public:
     String to_string_without_alpha() const;
     Utf16String to_utf16_string_without_alpha() const;
 
+    void serialize_a_srgb_value(StringBuilder&) const;
+    String serialize_a_srgb_value() const;
+
     ByteString to_byte_string() const;
     ByteString to_byte_string_without_alpha() const;
     static Optional<Color> from_string(StringView);
     static Optional<Color> from_utf16_string(Utf16View const&);
     static Optional<Color> from_named_css_color_string(StringView);
+    static Optional<Color> from_named_css_color_string(Utf16View const&);
 
     constexpr HSV to_hsv() const
     {
-        HSV hsv;
-        double r = static_cast<double>(red()) / 255.0;
-        double g = static_cast<double>(green()) / 255.0;
-        double b = static_cast<double>(blue()) / 255.0;
-        double max = AK::max(AK::max(r, g), b);
-        double min = AK::min(AK::min(r, g), b);
-        double chroma = max - min;
+        auto hsv = srgb_to_hsv({ red() / 255.0f, green() / 255.0f, blue() / 255.0f });
 
-        if (!chroma)
-            hsv.hue = 0.0;
-        else if (max == r)
-            hsv.hue = (60.0 * ((g - b) / chroma)) + 360.0;
-        else if (max == g)
-            hsv.hue = (60.0 * ((b - r) / chroma)) + 120.0;
-        else
-            hsv.hue = (60.0 * ((r - g) / chroma)) + 240.0;
+        VERIFY(hsv[0] >= 0.0f && hsv[0] < 360.0f);
+        VERIFY(hsv[1] >= 0.0f && hsv[1] <= 1.0f);
+        VERIFY(hsv[2] >= 0.0f && hsv[2] <= 1.0f);
 
-        if (hsv.hue >= 360.0)
-            hsv.hue -= 360.0;
-
-        if (!max)
-            hsv.saturation = 0;
-        else
-            hsv.saturation = chroma / max;
-
-        hsv.value = max;
-
-        VERIFY(hsv.hue >= 0.0 && hsv.hue < 360.0);
-        VERIFY(hsv.saturation >= 0.0 && hsv.saturation <= 1.0);
-        VERIFY(hsv.value >= 0.0 && hsv.value <= 1.0);
-
-        return hsv;
+        return { hsv[0], hsv[1], hsv[2] };
     }
 
     static constexpr Color from_hsv(double hue, double saturation, double value)
@@ -554,71 +440,22 @@ public:
         VERIFY(hsv.saturation >= 0.0 && hsv.saturation <= 1.0);
         VERIFY(hsv.value >= 0.0 && hsv.value <= 1.0);
 
-        double hue = hsv.hue;
-        double saturation = hsv.saturation;
-        double value = hsv.value;
-
-        int high = static_cast<int>(hue / 60.0) % 6;
-        double f = (hue / 60.0) - high;
-        double c1 = value * (1.0 - saturation);
-        double c2 = value * (1.0 - saturation * f);
-        double c3 = value * (1.0 - saturation * (1.0 - f));
-
-        double r = 0;
-        double g = 0;
-        double b = 0;
-
-        switch (high) {
-        case 0:
-            r = value;
-            g = c3;
-            b = c1;
-            break;
-        case 1:
-            r = c2;
-            g = value;
-            b = c1;
-            break;
-        case 2:
-            r = c1;
-            g = value;
-            b = c3;
-            break;
-        case 3:
-            r = c1;
-            g = c2;
-            b = value;
-            break;
-        case 4:
-            r = c3;
-            g = c1;
-            b = value;
-            break;
-        case 5:
-            r = value;
-            g = c1;
-            b = c2;
-            break;
-        }
-
-        auto out_r = static_cast<u8>(round(r * 255));
-        auto out_g = static_cast<u8>(round(g * 255));
-        auto out_b = static_cast<u8>(round(b * 255));
+        auto srgb = hsv_to_srgb({ static_cast<float>(hsv.hue), static_cast<float>(hsv.saturation), static_cast<float>(hsv.value) });
+        auto out_r = static_cast<u8>(round(srgb[0] * 255));
+        auto out_g = static_cast<u8>(round(srgb[1] * 255));
+        auto out_b = static_cast<u8>(round(srgb[2] * 255));
         return Color(out_r, out_g, out_b);
     }
 
-    constexpr Color suggested_foreground_color() const
-    {
-        return luminosity() < 128 ? Color::White : Color::Black;
-    }
+    Color suggested_foreground_color() const;
 
 private:
-    constexpr explicit Color(ARGB32 argb)
+    constexpr explicit Color(BGRA8888 argb)
         : m_value(argb)
     {
     }
 
-    ARGB32 m_value { 0 };
+    BGRA8888 m_value { 0 };
 };
 
 constexpr Color::Color(NamedColor named)
@@ -713,41 +550,41 @@ constexpr Color Color::branded_color(BrandedColor color)
 {
     // clang-format off
     switch (color) {
-    case BrandedColor::Indigo10:     return from_rgb(0xa5'a6'f2);
-    case BrandedColor::Indigo20:     return from_rgb(0x8a'88'eb);
-    case BrandedColor::Indigo30:     return from_rgb(0x68'51'd6);
-    case BrandedColor::Indigo40:     return from_rgb(0x55'3f'c4);
-    case BrandedColor::Indigo50:     return from_rgb(0x4d'37'b8);
-    case BrandedColor::Indigo60:     return from_rgb(0x3c'28'a1);
-    case BrandedColor::Indigo80:     return from_rgb(0x30'1f'82);
-    case BrandedColor::Indigo100:    return from_rgb(0x2a'13'73);
-    case BrandedColor::Indigo300:    return from_rgb(0x26'0f'73);
-    case BrandedColor::Indigo500:    return from_rgb(0x1d'0c'59);
-    case BrandedColor::Indigo900:    return from_rgb(0x19'0c'4a);
+    case BrandedColor::Indigo10:     return from_bgrx(0xa5'a6'f2);
+    case BrandedColor::Indigo20:     return from_bgrx(0x8a'88'eb);
+    case BrandedColor::Indigo30:     return from_bgrx(0x68'51'd6);
+    case BrandedColor::Indigo40:     return from_bgrx(0x55'3f'c4);
+    case BrandedColor::Indigo50:     return from_bgrx(0x4d'37'b8);
+    case BrandedColor::Indigo60:     return from_bgrx(0x3c'28'a1);
+    case BrandedColor::Indigo80:     return from_bgrx(0x30'1f'82);
+    case BrandedColor::Indigo100:    return from_bgrx(0x2a'13'73);
+    case BrandedColor::Indigo300:    return from_bgrx(0x26'0f'73);
+    case BrandedColor::Indigo500:    return from_bgrx(0x1d'0c'59);
+    case BrandedColor::Indigo900:    return from_bgrx(0x19'0c'4a);
 
-    case BrandedColor::Violet10:     return from_rgb(0xe0'd4'ff);
-    case BrandedColor::Violet20:     return from_rgb(0xca'b5'ff);
-    case BrandedColor::Violet30:     return from_rgb(0xc3'ab'ff);
-    case BrandedColor::Violet40:     return from_rgb(0xb4'96'ff);
-    case BrandedColor::Violet50:     return from_rgb(0xab'8e'f5);
-    case BrandedColor::Violet60:     return from_rgb(0x9d'7c'f2);
-    case BrandedColor::Violet80:     return from_rgb(0x93'6f'ed);
-    case BrandedColor::Violet100:    return from_rgb(0x8a'64'e5);
-    case BrandedColor::Violet300:    return from_rgb(0x82'57'e6);
-    case BrandedColor::Violet500:    return from_rgb(0x7a'4c'e6);
-    case BrandedColor::Violet900:    return from_rgb(0x6a'39'db);
+    case BrandedColor::Violet10:     return from_bgrx(0xe0'd4'ff);
+    case BrandedColor::Violet20:     return from_bgrx(0xca'b5'ff);
+    case BrandedColor::Violet30:     return from_bgrx(0xc3'ab'ff);
+    case BrandedColor::Violet40:     return from_bgrx(0xb4'96'ff);
+    case BrandedColor::Violet50:     return from_bgrx(0xab'8e'f5);
+    case BrandedColor::Violet60:     return from_bgrx(0x9d'7c'f2);
+    case BrandedColor::Violet80:     return from_bgrx(0x93'6f'ed);
+    case BrandedColor::Violet100:    return from_bgrx(0x8a'64'e5);
+    case BrandedColor::Violet300:    return from_bgrx(0x82'57'e6);
+    case BrandedColor::Violet500:    return from_bgrx(0x7a'4c'e6);
+    case BrandedColor::Violet900:    return from_bgrx(0x6a'39'db);
 
-    case BrandedColor::SlateBlue10:  return from_rgb(0xcb'e0'f7);
-    case BrandedColor::SlateBlue20:  return from_rgb(0xc1'd9'f5);
-    case BrandedColor::SlateBlue30:  return from_rgb(0xb6'd2'f2);
-    case BrandedColor::SlateBlue40:  return from_rgb(0xa8'c8'ed);
-    case BrandedColor::SlateBlue50:  return from_rgb(0x97'bc'e6);
-    case BrandedColor::SlateBlue60:  return from_rgb(0x86'ad'd9);
-    case BrandedColor::SlateBlue80:  return from_rgb(0x77'a1'd1);
-    case BrandedColor::SlateBlue100: return from_rgb(0x6d'98'cc);
-    case BrandedColor::SlateBlue300: return from_rgb(0x5c'8e'cc);
-    case BrandedColor::SlateBlue500: return from_rgb(0x54'84'bf);
-    case BrandedColor::SlateBlue900: return from_rgb(0x48'72'a3);
+    case BrandedColor::SlateBlue10:  return from_bgrx(0xcb'e0'f7);
+    case BrandedColor::SlateBlue20:  return from_bgrx(0xc1'd9'f5);
+    case BrandedColor::SlateBlue30:  return from_bgrx(0xb6'd2'f2);
+    case BrandedColor::SlateBlue40:  return from_bgrx(0xa8'c8'ed);
+    case BrandedColor::SlateBlue50:  return from_bgrx(0x97'bc'e6);
+    case BrandedColor::SlateBlue60:  return from_bgrx(0x86'ad'd9);
+    case BrandedColor::SlateBlue80:  return from_bgrx(0x77'a1'd1);
+    case BrandedColor::SlateBlue100: return from_bgrx(0x6d'98'cc);
+    case BrandedColor::SlateBlue300: return from_bgrx(0x5c'8e'cc);
+    case BrandedColor::SlateBlue500: return from_bgrx(0x54'84'bf);
+    case BrandedColor::SlateBlue900: return from_bgrx(0x48'72'a3);
     }
     // clang-format on
 
@@ -765,7 +602,7 @@ class Traits<Color> : public DefaultTraits<Color> {
 public:
     static unsigned hash(Color const& color)
     {
-        return int_hash(color.value());
+        return u32_hash(color.value());
     }
 };
 

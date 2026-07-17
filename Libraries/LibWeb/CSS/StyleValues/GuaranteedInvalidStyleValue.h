@@ -15,17 +15,19 @@ class GuaranteedInvalidStyleValue final : public StyleValueWithDefaultOperators<
 public:
     static ValueComparingNonnullRefPtr<GuaranteedInvalidStyleValue> create()
     {
-        static ValueComparingNonnullRefPtr<GuaranteedInvalidStyleValue> instance = adopt_ref(*new (nothrow) GuaranteedInvalidStyleValue());
+        static auto& instance = adopt_ref(*new (nothrow) GuaranteedInvalidStyleValue()).leak_ref();
         return instance;
     }
     virtual ~GuaranteedInvalidStyleValue() override = default;
-    virtual String to_string(SerializationMode) const override { return {}; }
+    virtual void serialize(StringBuilder&, SerializationMode) const override { }
     virtual Vector<Parser::ComponentValue> tokenize() const override
     {
         return { Parser::ComponentValue { Parser::GuaranteedInvalidValue {} } };
     }
 
     bool properties_equal(GuaranteedInvalidStyleValue const&) const { return true; }
+
+    virtual bool is_computationally_independent() const override { VERIFY_NOT_REACHED(); }
 
 private:
     GuaranteedInvalidStyleValue()

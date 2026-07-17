@@ -21,7 +21,7 @@ public:
     static GC::Ref<DOMPoint> construct_impl(JS::Realm&, double x = 0, double y = 0, double z = 0, double w = 1);
     static GC::Ref<DOMPoint> create(JS::Realm&);
 
-    static GC::Ref<DOMPoint> from_point(JS::VM&, DOMPointInit const&);
+    static GC::Ref<DOMPoint> from_point(JS::VM&, Bindings::DOMPointInit const&);
 
     virtual ~DOMPoint() override;
 
@@ -34,8 +34,6 @@ public:
     void set_y(double y) { m_y = y; }
     void set_z(double z) { m_z = z; }
     void set_w(double w) { m_w = w; }
-
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::DOMPoint; }
 
 private:
     DOMPoint(JS::Realm&, double x, double y, double z, double w);

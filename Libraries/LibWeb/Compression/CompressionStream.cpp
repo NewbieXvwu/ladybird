@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibCompress/Brotli.h>
 #include <LibCompress/Deflate.h>
 #include <LibCompress/Gzip.h>
 #include <LibCompress/Zlib.h>
@@ -31,6 +32,8 @@ WebIDL::ExceptionOr<GC::Ref<CompressionStream>> CompressionStream::construct_imp
 
     auto compressor = [&, input_stream = MaybeOwned<Stream> { *input_stream }]() mutable -> ErrorOr<Compressor> {
         switch (format) {
+        case Bindings::CompressionFormat::Brotli:
+            return TRY(Compress::BrotliCompressor::create(move(input_stream)));
         case Bindings::CompressionFormat::Deflate:
             return TRY(Compress::ZlibCompressor::create(move(input_stream)));
         case Bindings::CompressionFormat::DeflateRaw:
@@ -43,7 +46,7 @@ WebIDL::ExceptionOr<GC::Ref<CompressionStream>> CompressionStream::construct_imp
     }();
 
     if (compressor.is_error())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Unable to create compressor: {}", compressor.error())) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Unable to create compressor: {}", compressor.error()) };
 
     // 5. Set this's transform to a new TransformStream.
     // NOTE: We do this first so that we may store it as nonnull in the GenericTransformStream.
@@ -111,15 +114,15 @@ WebIDL::ExceptionOr<void> CompressionStream::compress_and_enqueue_chunk(JS::Valu
 
     // 1. If chunk is not a BufferSource type, then throw a TypeError.
     if (!WebIDL::is_buffer_source_type(chunk))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Chunk is not a BufferSource type"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Chunk is not a BufferSource type"_utf16 };
 
     // 2. Let buffer be the result of compressing chunk with cs's format and context.
     auto maybe_buffer = [&]() -> ErrorOr<ByteBuffer> {
         auto chunk_buffer = TRY(WebIDL::get_buffer_source_copy(chunk.as_object()));
-        return compress(move(chunk_buffer), Finish::No);
+        return compress(chunk_buffer, Finish::No);
     }();
     if (maybe_buffer.is_error())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Unable to compress chunk: {}", maybe_buffer.error())) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Unable to compress chunk: {}", maybe_buffer.error()) };
 
     auto buffer = maybe_buffer.release_value();
 
@@ -144,7 +147,7 @@ WebIDL::ExceptionOr<void> CompressionStream::compress_flush_and_enqueue()
     // 1. Let buffer be the result of compressing an empty input with cs's format and context, with the finish flag.
     auto maybe_buffer = compress({}, Finish::Yes);
     if (maybe_buffer.is_error())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Unable to compress flush: {}", maybe_buffer.error())) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Unable to compress flush: {}", maybe_buffer.error()) };
 
     auto buffer = maybe_buffer.release_value();
 

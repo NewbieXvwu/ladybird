@@ -4,22 +4,23 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/CSSMarginRulePrototype.h>
+#include <LibWeb/Bindings/CSSMarginRule.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSMarginRule.h>
 #include <LibWeb/CSS/CSSStyleProperties.h>
+#include <LibWeb/Dump.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::CSS {
 
 GC_DEFINE_ALLOCATOR(CSSMarginRule);
 
-GC::Ref<CSSMarginRule> CSSMarginRule::create(JS::Realm& realm, FlyString name, GC::Ref<CSSStyleProperties> style)
+GC::Ref<CSSMarginRule> CSSMarginRule::create(JS::Realm& realm, Utf16FlyString name, GC::Ref<CSSStyleProperties> style)
 {
     return realm.create<CSSMarginRule>(realm, move(name), style);
 }
 
-CSSMarginRule::CSSMarginRule(JS::Realm& realm, FlyString name, GC::Ref<CSSStyleProperties> style)
+CSSMarginRule::CSSMarginRule(JS::Realm& realm, Utf16FlyString name, GC::Ref<CSSStyleProperties> style)
     : CSSRule(realm, Type::Margin)
     , m_name(name.to_ascii_lowercase())
     , m_style(style)
@@ -33,18 +34,18 @@ void CSSMarginRule::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-String CSSMarginRule::serialized() const
+Utf16String CSSMarginRule::serialized() const
 {
     // AD-HOC: There is currently no spec for serializing CSSMarginRule.
-    StringBuilder builder;
+    Utf16StringBuilder builder;
     builder.appendff("@{} {{ ", m_name);
     if (m_style->length() > 0) {
         builder.append(m_style->serialized());
-        builder.append(' ');
+        builder.append_ascii(' ');
     }
-    builder.append('}');
+    builder.append_ascii('}');
 
-    return builder.to_string_without_validation();
+    return builder.to_string();
 }
 
 void CSSMarginRule::visit_edges(Visitor& visitor)
@@ -53,25 +54,34 @@ void CSSMarginRule::visit_edges(Visitor& visitor)
     visitor.visit(m_style);
 }
 
-// https://drafts.csswg.org/css-page-3/#syntax-page-selector
-bool is_margin_rule_name(StringView name)
+void CSSMarginRule::dump(StringBuilder& builder, int indent_levels) const
 {
-    return name.equals_ignoring_ascii_case("top-left-corner"sv)
-        || name.equals_ignoring_ascii_case("top-left"sv)
-        || name.equals_ignoring_ascii_case("top-center"sv)
-        || name.equals_ignoring_ascii_case("top-right"sv)
-        || name.equals_ignoring_ascii_case("top-right-corner"sv)
-        || name.equals_ignoring_ascii_case("bottom-left-corner"sv)
-        || name.equals_ignoring_ascii_case("bottom-left"sv)
-        || name.equals_ignoring_ascii_case("bottom-center"sv)
-        || name.equals_ignoring_ascii_case("bottom-right"sv)
-        || name.equals_ignoring_ascii_case("bottom-right-corner"sv)
-        || name.equals_ignoring_ascii_case("left-top"sv)
-        || name.equals_ignoring_ascii_case("left-middle"sv)
-        || name.equals_ignoring_ascii_case("left-bottom"sv)
-        || name.equals_ignoring_ascii_case("right-top"sv)
-        || name.equals_ignoring_ascii_case("right-middle"sv)
-        || name.equals_ignoring_ascii_case("right-bottom"sv);
+    Base::dump(builder, indent_levels);
+
+    dump_indent(builder, indent_levels + 1);
+    builder.appendff("Name: {}\n", name());
+    dump_style_properties(builder, style(), indent_levels + 1);
+}
+
+// https://drafts.csswg.org/css-page-3/#syntax-page-selector
+bool is_margin_rule_name(Utf16View name)
+{
+    return name.equals_ignoring_ascii_case(u"top-left-corner"sv)
+        || name.equals_ignoring_ascii_case(u"top-left"sv)
+        || name.equals_ignoring_ascii_case(u"top-center"sv)
+        || name.equals_ignoring_ascii_case(u"top-right"sv)
+        || name.equals_ignoring_ascii_case(u"top-right-corner"sv)
+        || name.equals_ignoring_ascii_case(u"bottom-left-corner"sv)
+        || name.equals_ignoring_ascii_case(u"bottom-left"sv)
+        || name.equals_ignoring_ascii_case(u"bottom-center"sv)
+        || name.equals_ignoring_ascii_case(u"bottom-right"sv)
+        || name.equals_ignoring_ascii_case(u"bottom-right-corner"sv)
+        || name.equals_ignoring_ascii_case(u"left-top"sv)
+        || name.equals_ignoring_ascii_case(u"left-middle"sv)
+        || name.equals_ignoring_ascii_case(u"left-bottom"sv)
+        || name.equals_ignoring_ascii_case(u"right-top"sv)
+        || name.equals_ignoring_ascii_case(u"right-middle"sv)
+        || name.equals_ignoring_ascii_case(u"right-bottom"sv);
 }
 
 }

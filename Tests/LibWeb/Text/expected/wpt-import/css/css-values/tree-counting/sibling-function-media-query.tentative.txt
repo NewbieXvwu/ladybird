@@ -1,0 +1,9 @@
+Harness status: OK
+
+Found 4 tests
+
+4 Pass
+Pass	Should be parseable: '(width > calc(0px * sibling-index()))'
+Pass	Should be unknown: '(width > calc(0px * sibling-index()))'
+Pass	Should be parseable: '(width > calc(0px * sibling-count()))'
+Pass	Should be unknown: '(width > calc(0px * sibling-count()))'

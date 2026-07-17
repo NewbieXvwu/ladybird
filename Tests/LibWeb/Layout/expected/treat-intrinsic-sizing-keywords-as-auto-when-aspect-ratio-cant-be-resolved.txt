@@ -1,4 +1,4 @@
-Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] children: not-inline
+Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children: not-inline
   BlockContainer <html> at [0,0] [0+0+0 800 0+0+0] [0+0+0 800 0+0+0] [BFC] children: not-inline
     BlockContainer <body> at [8,8] [8+0+0 784 0+0+8] [8+0+0 784 0+0+8] children: inline
       frag 0 from SVGSVGBox start: 0, length: 0, rect: [8,8 784x784] baseline: 784
@@ -11,5 +11,5 @@ ViewportPaintable (Viewport<#document>) [0,0 800x600] overflow: [0,0 800x800]
       SVGSVGPaintable (SVGSVGBox<svg>) [8,8 784x784]
         SVGPathPaintable (SVGGeometryBox<rect>) [8,8 392x392]
 
-SC for Viewport<#document> [0,0 800x600] [children: 1] (z-index: auto)
- SC for BlockContainer<HTML> [0,0 800x800] [children: 0] (z-index: auto)
+SC for Viewport<#document> [0,0 800x600] (z-index: auto)
+ SC for BlockContainer<HTML> [0,0 800x800] (z-index: auto)

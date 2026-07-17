@@ -1,0 +1,64 @@
+Program (script) @1:1
+├─ VariableDeclaration (let) @1:1
+│  └─ VariableDeclarator @1:1
+│     ├─ Identifier "a" [global] (let) @1:5
+│     └─ TaggedTemplateLiteral @1:9
+│        ├─ tag
+│        │  └─ MemberExpression @1:15
+│        │     ├─ Identifier "String" [global] @1:9
+│        │     └─ Identifier "raw" @1:16
+│        └─ template
+│           └─ TemplateLiteral @1:19
+│              └─ StringLiteral "foo
+bar" @1:28
+├─ FunctionDeclaration "tag" @3:1
+│  ├─ parameters
+│  │  └─ Identifier "strings" [argument:0] @3:14
+│  └─ body
+│     └─ FunctionBody @4:5
+│        └─ ReturnStatement @4:5
+│           └─ MemberExpression [computed] @4:19
+│              ├─ Identifier "strings" [argument:0] @4:12
+│              └─ NumericLiteral 0 @4:20
+├─ VariableDeclaration (let) @7:1
+│  └─ VariableDeclarator @7:1
+│     ├─ Identifier "b" [global] (let) @7:5
+│     └─ TaggedTemplateLiteral @7:9
+│        ├─ tag
+│        │  └─ Identifier "tag" [global] @7:9
+│        └─ template
+│           └─ TemplateLiteral @7:12
+│              └─ StringLiteral "hello" @7:18
+├─ FunctionDeclaration "chain" @9:1
+│  ├─ parameters
+│  │  └─ Identifier "s" @9:16
+│  └─ body
+│     └─ FunctionBody @10:5
+│        └─ ReturnStatement @10:5
+│           └─ FunctionExpression "" @10:12
+│              ├─ parameters
+│              │  └─ Identifier "s2" [argument:0] @10:22
+│              └─ body
+│                 └─ FunctionBody @11:9
+│                    └─ ReturnStatement @11:9
+│                       └─ BinaryExpression (+) @11:21
+│                          ├─ MemberExpression [computed] @11:17
+│                          │  ├─ Identifier "s" @11:16
+│                          │  └─ NumericLiteral 0 @11:18
+│                          └─ MemberExpression [computed] @11:25
+│                             ├─ Identifier "s2" [argument:0] @11:23
+│                             └─ NumericLiteral 0 @11:26
+└─ VariableDeclaration (let) @15:1
+   └─ VariableDeclarator @15:1
+      ├─ Identifier "c" [global] (let) @15:5
+      └─ TaggedTemplateLiteral @15:9
+         ├─ tag
+         │  └─ TaggedTemplateLiteral @15:9
+         │     ├─ tag
+         │     │  └─ Identifier "chain" [global] @15:9
+         │     └─ template
+         │        └─ TemplateLiteral @15:14
+         │           └─ StringLiteral "hello" @15:20
+         └─ template
+            └─ TemplateLiteral @15:21
+               └─ StringLiteral "world" @15:27

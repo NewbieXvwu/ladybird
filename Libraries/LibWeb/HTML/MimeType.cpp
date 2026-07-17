@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/MimeTypePrototype.h>
+#include <LibWeb/Bindings/MimeType.h>
 #include <LibWeb/HTML/MimeType.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
@@ -14,7 +14,7 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(MimeType);
 
-MimeType::MimeType(JS::Realm& realm, String type)
+MimeType::MimeType(JS::Realm& realm, Utf16FlyString type)
     : Bindings::PlatformObject(realm)
     , m_type(move(type))
 {
@@ -29,26 +29,24 @@ void MimeType::initialize(JS::Realm& realm)
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#concept-mimetype-type
-String const& MimeType::type() const
+Utf16FlyString const& MimeType::type() const
 {
     // The MimeType interface's type getter steps are to return this's type.
     return m_type;
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-mimetype-description
-String MimeType::description() const
+Utf16FlyString MimeType::description() const
 {
     // The MimeType interface's description getter steps are to return "Portable Document Format".
-    static String description_string = "Portable Document Format"_string;
-    return description_string;
+    return "Portable Document Format"_utf16_fly_string;
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-mimetype-suffixes
-String const& MimeType::suffixes() const
+Utf16FlyString MimeType::suffixes() const
 {
     // The MimeType interface's suffixes getter steps are to return "pdf".
-    static String suffixes_string = "pdf"_string;
-    return suffixes_string;
+    return "pdf"_utf16_fly_string;
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-mimetype-enabledplugin

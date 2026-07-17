@@ -19,7 +19,7 @@ class SVGLinearGradientElement : public SVGGradientElement {
 public:
     virtual ~SVGLinearGradientElement() override = default;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     virtual Optional<Painting::PaintStyle> to_gfx_paint_style(SVGPaintContext const&) const override;
 
@@ -34,7 +34,7 @@ protected:
     virtual void initialize(JS::Realm&) override;
 
 private:
-    GC::Ptr<SVGLinearGradientElement const> linked_linear_gradient(HashTable<SVGGradientElement const*>& seen_gradients) const
+    GC::Ptr<SVGLinearGradientElement const> linked_linear_gradient(GC::RootHashTable<SVGGradientElement const*>& seen_gradients) const
     {
         if (auto gradient = linked_gradient(seen_gradients); gradient && is<SVGLinearGradientElement>(*gradient))
             return &as<SVGLinearGradientElement>(*gradient);
@@ -46,17 +46,15 @@ private:
     NumberPercentage end_x() const;
     NumberPercentage end_y() const;
 
-    NumberPercentage start_x_impl(HashTable<SVGGradientElement const*>& seen_gradients) const;
-    NumberPercentage start_y_impl(HashTable<SVGGradientElement const*>& seen_gradients) const;
-    NumberPercentage end_x_impl(HashTable<SVGGradientElement const*>& seen_gradients) const;
-    NumberPercentage end_y_impl(HashTable<SVGGradientElement const*>& seen_gradients) const;
+    NumberPercentage start_x_impl(GC::RootHashTable<SVGGradientElement const*>& seen_gradients) const;
+    NumberPercentage start_y_impl(GC::RootHashTable<SVGGradientElement const*>& seen_gradients) const;
+    NumberPercentage end_x_impl(GC::RootHashTable<SVGGradientElement const*>& seen_gradients) const;
+    NumberPercentage end_y_impl(GC::RootHashTable<SVGGradientElement const*>& seen_gradients) const;
 
     Optional<NumberPercentage> m_x1;
     Optional<NumberPercentage> m_y1;
     Optional<NumberPercentage> m_x2;
     Optional<NumberPercentage> m_y2;
-
-    mutable RefPtr<Painting::SVGLinearGradientPaintStyle> m_paint_style;
 };
 
 }

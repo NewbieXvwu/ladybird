@@ -1,6 +1,3 @@
-#import <SVG/SVGGraphicsElement.idl>
-#import <SVG/SVGURIReference.idl>
-
 // https://svgwg.org/svg2-draft/embedded.html#InterfaceSVGImageElement
 [Exposed=Window]
 interface SVGImageElement : SVGGraphicsElement {
@@ -9,7 +6,7 @@ interface SVGImageElement : SVGGraphicsElement {
     [SameObject] readonly attribute SVGAnimatedLength width;
     [SameObject] readonly attribute SVGAnimatedLength height;
     [FIXME, SameObject] readonly attribute SVGAnimatedPreserveAspectRatio preserveAspectRatio;
-    [Reflect=crossorigin, Enumerated=CORSSettingsAttribute] attribute DOMString? crossOrigin;
+    [Reflect=crossorigin, Enumerated=CORSSettingsAttribute] attribute Utf16DOMString? crossOrigin;
 };
 
 SVGImageElement includes SVGURIReference;

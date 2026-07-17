@@ -1,0 +1,34 @@
+$bacf2c68 resolve-this-caching.js:4:1
+  Registers: 7
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] GetGlobal dst:reg6, `foo`
+  [  10] Call dst:reg5, callee:reg6, this_value:Undefined, foo
+  [  30] End value:reg5
+
+
+foo$1d0ffb84 resolve-this-caching.js:2:5
+  Registers: 7
+  Blocks:    1
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] NewFunction dst:reg6, shared_function_data_index:0
+  [  18] Call dst:reg5, callee:reg6, this_value:Undefined
+  [  38] Return value:reg5
+
+
+$93a5ab2a resolve-this-caching.js:2:13
+  Registers: 8
+  Blocks:    1
+
+block0:
+  [   0] ResolveThisBinding
+  [   8] GetById dst:reg5, base:this, `x` (this.x)
+  [  20] GetById dst:reg6, base:this, `y` (this.y)
+  [  38] Add dst:reg7, lhs:reg5, rhs:reg6
+  [  48] Return value:reg7

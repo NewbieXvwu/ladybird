@@ -9,6 +9,16 @@
         content: "hi";
         background-color: cyan;
     }
+    ::after {
+        content: "bye";
+        color: green;
+    }
+    #foo::first-letter {
+        color: red;
+    }
+    #foo::selection {
+        background-color: blue;
+    }
 </style>
 <div id="foo"></div>
 <script>
@@ -16,6 +26,9 @@
         const foo = document.getElementById("foo");
         const style = getComputedStyle(foo);
         const beforeStyle = getComputedStyle(foo, "::before");
+        const afterStyle = getComputedStyle(foo, "::after");
+        const firstLetterStyle = getComputedStyle(foo, "::first-letter");
+        const selectionStyle = getComputedStyle(foo, "::selection");
         const propertyValues = [
             "color",
             "background-color",
@@ -28,5 +41,12 @@
         for (const property of propertyValues) {
             println(`  ${property}: ${beforeStyle.getPropertyValue(property)}`);
         }
+        println("#foo::after:");
+        println(`  content: ${afterStyle.getPropertyValue("content")}`);
+        println(`  color: ${afterStyle.getPropertyValue("color")}`);
+        println("#foo::first-letter:");
+        println(`  color: ${firstLetterStyle.getPropertyValue("color")}`);
+        println("#foo::selection:");
+        println(`  background-color: ${selectionStyle.getPropertyValue("background-color")}`);
     });
 </script>

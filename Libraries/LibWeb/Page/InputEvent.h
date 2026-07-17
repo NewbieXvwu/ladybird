@@ -24,7 +24,7 @@ struct BrowserInputData {
 };
 
 struct WEB_API KeyEvent {
-    enum class Type {
+    enum class Type : u8 {
         KeyDown,
         KeyUp,
     };
@@ -36,18 +36,18 @@ struct WEB_API KeyEvent {
     UIEvents::KeyModifier modifiers { UIEvents::KeyModifier::Mod_None };
     u32 code_point { 0 };
     bool repeat { false };
+    bool should_insert_text { false };
 
     OwnPtr<BrowserInputData> browser_data;
 };
 
 struct WEB_API MouseEvent {
-    enum class Type {
+    enum class Type : u8 {
         MouseDown,
         MouseUp,
         MouseMove,
         MouseLeave,
         MouseWheel,
-        DoubleClick,
     };
 
     MouseEvent clone_without_browser_data() const;
@@ -58,14 +58,16 @@ struct WEB_API MouseEvent {
     UIEvents::MouseButton button { UIEvents::MouseButton::None };
     UIEvents::MouseButton buttons { UIEvents::MouseButton::None };
     UIEvents::KeyModifier modifiers { UIEvents::KeyModifier::Mod_None };
-    int wheel_delta_x { 0 };
-    int wheel_delta_y { 0 };
+    double wheel_delta_x { 0 };
+    double wheel_delta_y { 0 };
+    int click_count { 0 };
 
     OwnPtr<BrowserInputData> browser_data;
+    bool async_scroll_performed_default_action { false };
 };
 
 struct WEB_API DragEvent {
-    enum class Type {
+    enum class Type : u8 {
         DragStart,
         DragMove,
         DragEnd,
@@ -85,7 +87,13 @@ struct WEB_API DragEvent {
     OwnPtr<BrowserInputData> browser_data;
 };
 
-using InputEvent = Variant<KeyEvent, MouseEvent, DragEvent>;
+struct WEB_API PinchEvent {
+    Web::DevicePixelPoint position;
+    UIEvents::KeyModifier modifiers { UIEvents::KeyModifier::Mod_None };
+    double scale_delta;
+};
+
+using InputEvent = Variant<KeyEvent, MouseEvent, DragEvent, PinchEvent>;
 
 struct QueuedInputEvent {
     u64 page_id { 0 };
@@ -114,5 +122,11 @@ WEB_API ErrorOr<void> encode(Encoder&, Web::DragEvent const&);
 
 template<>
 WEB_API ErrorOr<Web::DragEvent> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::PinchEvent const&);
+
+template<>
+WEB_API ErrorOr<Web::PinchEvent> decode(Decoder&);
 
 }

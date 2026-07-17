@@ -1,0 +1,6 @@
+Harness status: OK
+
+Found 1 tests
+
+1 Pass
+Pass	Focus events fire on disabled form-associated custom elements with delegatesFocus

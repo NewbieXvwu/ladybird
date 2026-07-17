@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/Export.h>
 
 namespace Web::UIEvents::EventNames {
@@ -42,9 +42,10 @@ namespace Web::UIEvents::EventNames {
     __ENUMERATE_UI_EVENT(pointerrawupdate)   \
     __ENUMERATE_UI_EVENT(pointerup)          \
     __ENUMERATE_UI_EVENT(resize)             \
+    __ENUMERATE_UI_EVENT(textInput)          \
     __ENUMERATE_UI_EVENT(wheel)
 
-#define __ENUMERATE_UI_EVENT(name) extern WEB_API FlyString name;
+#define __ENUMERATE_UI_EVENT(name) extern WEB_API Utf16FlyString const& name;
 ENUMERATE_UI_EVENTS
 #undef __ENUMERATE_UI_EVENT
 

@@ -26,7 +26,9 @@ public:
     static WebIDL::ExceptionOr<GC::Ref<Text>> construct_impl(JS::Realm& realm, Utf16String data);
 
     // ^Node
-    virtual FlyString node_name() const override { return "#text"_fly_string; }
+    virtual Utf16FlyString node_name() const override { return "#text"_utf16_fly_string; }
+
+    virtual Node& slottable_as_node() override { return *this; }
 
     Optional<size_t> max_length() const { return m_max_length; }
     void set_max_length(Optional<size_t> max_length) { m_max_length = move(max_length); }

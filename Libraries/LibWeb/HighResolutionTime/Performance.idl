@@ -1,13 +1,4 @@
-#import <DOM/EventTarget.idl>
-#import <HighResolutionTime/DOMHighResTimeStamp.idl>
-#import <NavigationTiming/PerformanceExtensions.idl>
-#import <NavigationTiming/PerformanceNavigation.idl>
-#import <NavigationTiming/PerformanceTiming.idl>
-#import <PerformanceTimeline/PerformanceEntry.idl>
-#import <UserTiming/PerformanceMark.idl>
-#import <UserTiming/PerformanceMeasure.idl>
-
-// https://www.w3.org/TR/performance-timeline/#dom-performanceentrylist
+// https://w3c.github.io/performance-timeline/#typedefdef-performanceentrylist
 typedef sequence<PerformanceEntry> PerformanceEntryList;
 
 // https://w3c.github.io/hr-time/#sec-performance
@@ -19,10 +10,10 @@ interface Performance : EventTarget {
 
     // https://w3c.github.io/user-timing/#extensions-performance-interface
     // "User Timing" extensions to the Performance interface
-    PerformanceMark mark(DOMString markName, optional PerformanceMarkOptions markOptions = {});
-    undefined clearMarks(optional DOMString markName);
-    PerformanceMeasure measure(DOMString measureName, optional (DOMString or PerformanceMeasureOptions) startOrMeasureOptions = {}, optional DOMString endMark);
-    undefined clearMeasures(optional DOMString measureName);
+    PerformanceMark mark(Utf16DOMString markName, optional PerformanceMarkOptions markOptions = {});
+    undefined clearMarks(optional Utf16DOMString markName);
+    PerformanceMeasure measure(Utf16DOMString measureName, optional (Utf16DOMString or PerformanceMeasureOptions) startOrMeasureOptions = {}, optional Utf16DOMString endMark);
+    undefined clearMeasures(optional Utf16DOMString measureName);
 
     // https://w3c.github.io/resource-timing/#sec-extensions-performance-interface
     // "Resource Timing" extensions to the Performance interface
@@ -30,9 +21,9 @@ interface Performance : EventTarget {
     undefined setResourceTimingBufferSize(unsigned long maxSize);
     attribute EventHandler onresourcetimingbufferfull;
 
-    // https://www.w3.org/TR/performance-timeline/#extensions-to-the-performance-interface
+    // https://w3c.github.io/performance-timeline/#extensions-to-the-performance-interface
     // "Performance Timeline" extensions to the Performance interface
     PerformanceEntryList getEntries();
-    PerformanceEntryList getEntriesByType(DOMString type);
-    PerformanceEntryList getEntriesByName(DOMString name, optional DOMString type);
+    PerformanceEntryList getEntriesByType([Utf16FlyString] Utf16DOMString type);
+    PerformanceEntryList getEntriesByName(Utf16DOMString name, optional [Utf16FlyString] Utf16DOMString type);
 };

@@ -7,6 +7,7 @@
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/AggregateError.h>
 #include <LibJS/Runtime/Array.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/PromiseCapability.h>
 #include <LibJS/Runtime/PromiseResolvingElementFunctions.h>
@@ -25,6 +26,11 @@ void PromiseValueList::visit_edges(Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_values);
+}
+
+size_t PromiseValueList::external_memory_size() const
+{
+    return vector_external_memory_size(m_values);
 }
 
 PromiseResolvingElementFunction::PromiseResolvingElementFunction(size_t index, PromiseValueList& values, GC::Ref<PromiseCapability const> capability, RemainingElements& remaining_elements, Object& prototype)
@@ -111,7 +117,7 @@ ThrowCompletionOr<Value> PromiseAllSettledResolveElementFunction::resolve_elemen
     auto object = Object::create(realm, realm.intrinsics().object_prototype());
 
     // 10. Perform ! CreateDataPropertyOrThrow(obj, "status", "fulfilled").
-    MUST(object->create_data_property_or_throw(vm.names.status, PrimitiveString::create(vm, "fulfilled"_string)));
+    MUST(object->create_data_property_or_throw(vm.names.status, PrimitiveString::create(vm, "fulfilled"_utf16_fly_string)));
 
     // 11. Perform ! CreateDataPropertyOrThrow(obj, "value", x).
     MUST(object->create_data_property_or_throw(vm.names.value, vm.argument(0)));
@@ -152,7 +158,7 @@ ThrowCompletionOr<Value> PromiseAllSettledRejectElementFunction::resolve_element
     auto object = Object::create(realm, realm.intrinsics().object_prototype());
 
     // 10. Perform ! CreateDataPropertyOrThrow(obj, "status", "rejected").
-    MUST(object->create_data_property_or_throw(vm.names.status, PrimitiveString::create(vm, "rejected"_string)));
+    MUST(object->create_data_property_or_throw(vm.names.status, PrimitiveString::create(vm, "rejected"_utf16_fly_string)));
 
     // 11. Perform ! CreateDataPropertyOrThrow(obj, "reason", x).
     MUST(object->create_data_property_or_throw(vm.names.reason, vm.argument(0)));
@@ -200,7 +206,8 @@ ThrowCompletionOr<Value> PromiseAnyRejectElementFunction::resolve_element()
 
         // b. Perform ! DefinePropertyOrThrow(error, "errors", PropertyDescriptor { [[Configurable]]: true, [[Enumerable]]: false, [[Writable]]: true, [[Value]]: CreateArrayFromList(errors) }).
         auto errors_array = Array::create_from(realm, m_values->values());
-        MUST(error->define_property_or_throw(vm.names.errors, { .value = errors_array, .writable = true, .enumerable = false, .configurable = true }));
+        PropertyDescriptor descriptor { .value = errors_array, .writable = true, .enumerable = false, .configurable = true };
+        MUST(error->define_property_or_throw(vm.names.errors, descriptor));
 
         // c. Return ? Call(promiseCapability.[[Reject]], undefined, « error »).
         return JS::call(vm, *m_capability->reject(), js_undefined(), error);

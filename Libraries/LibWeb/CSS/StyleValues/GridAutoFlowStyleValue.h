@@ -27,8 +27,10 @@ public:
     [[nodiscard]] bool is_column() const { return !m_row; }
     [[nodiscard]] bool is_dense() const { return m_dense; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
     bool properties_equal(GridAutoFlowStyleValue const& other) const { return m_row == other.m_row && m_dense == other.m_dense; }
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     explicit GridAutoFlowStyleValue(Axis axis, Dense dense)

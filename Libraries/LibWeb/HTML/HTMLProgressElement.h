@@ -20,17 +20,17 @@ public:
     virtual ~HTMLProgressElement() override;
 
     double value() const;
-    WebIDL::ExceptionOr<void> set_value(double);
+    void set_value(double);
 
     WebIDL::Double max() const;
-    WebIDL::ExceptionOr<void> set_max(WebIDL::Double value);
+    void set_max(WebIDL::Double value);
 
     double position() const;
 
     // ^HTMLElement
     virtual void inserted() override;
 
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
     // https://html.spec.whatwg.org/multipage/forms.html#category-label
     virtual bool is_labelable() const override { return true; }

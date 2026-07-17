@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGfx/Bitmap.h>
 #include <LibWeb/HTML/DataTransfer.h>
 #include <LibWeb/HTML/DragDataStore.h>
 
@@ -24,7 +25,7 @@ DragDataStore::~DragDataStore() = default;
 bool DragDataStore::has_text_item() const
 {
     for (auto const& item : m_item_list) {
-        if (item.kind == DragDataStoreItem::Kind::Text && item.type_string == "text/plain"sv)
+        if (item.kind == DragDataStoreItem::Kind::Text && item.type_string == u"text/plain"sv)
             return true;
     }
 

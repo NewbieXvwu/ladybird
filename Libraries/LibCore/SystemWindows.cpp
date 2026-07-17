@@ -6,50 +6,26 @@
  * Copyright (c) 2023, Cameron Youell <cameronyouell@gmail.com>
  * Copyright (c) 2024-2025, stasoid <stasoid@yahoo.com>
  * Copyright (c) 2025, ayeteadoe <ayeteadoe@gmail.com>
+ * Copyright (c) 2026, Gregory Bertilson <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Array.h>
 #include <AK/ByteString.h>
-#include <AK/ScopeGuard.h>
+#include <AK/Checked.h>
+#include <LibCore/MappedFile.h>
 #include <LibCore/Process.h>
+#include <LibCore/SocketAddress.h>
 #include <LibCore/System.h>
 #include <direct.h>
-#include <sys/mman.h>
 
 #include <AK/Windows.h>
+#include <ws2tcpip.h>
 
 namespace Core::System {
 
 int windows_socketpair(SOCKET socks[2], int make_overlapped);
-
-static void invalid_parameter_handler(wchar_t const*, wchar_t const*, wchar_t const*, unsigned int, uintptr_t)
-{
-}
-
-static int init_crt_and_wsa()
-{
-    WSADATA wsa;
-    WORD version = MAKEWORD(2, 2);
-    int rc = WSAStartup(version, &wsa);
-    VERIFY(!rc && wsa.wVersion == version);
-
-    // Make _get_osfhandle return -1 instead of crashing on invalid fd in release (debug still __debugbreak's)
-    _set_invalid_parameter_handler(invalid_parameter_handler);
-    return 0;
-}
-
-static auto dummy = init_crt_and_wsa();
-
-ErrorOr<int> open(StringView path, int options, mode_t mode)
-{
-    ByteString str = path;
-    int fd = _open(str.characters(), options | O_BINARY | _O_OBTAIN_DIR, mode);
-    if (fd < 0)
-        return Error::from_syscall("open"sv, errno);
-    ScopeGuard guard = [&] { _close(fd); };
-    return dup(_get_osfhandle(fd));
-}
 
 ErrorOr<void> close(int handle)
 {
@@ -63,60 +39,10 @@ ErrorOr<void> close(int handle)
     return {};
 }
 
-ErrorOr<ssize_t> read(int handle, Bytes buffer)
+ErrorOr<void> set_socket_blocking(int socket, bool enabled)
 {
-    DWORD n_read = 0;
-    if (!ReadFile(to_handle(handle), buffer.data(), buffer.size(), &n_read, NULL))
-        return Error::from_windows_error();
-    return n_read;
-}
-
-ErrorOr<ssize_t> write(int handle, ReadonlyBytes buffer)
-{
-    DWORD n_written = 0;
-    if (!WriteFile(to_handle(handle), buffer.data(), buffer.size(), &n_written, NULL))
-        return Error::from_windows_error();
-    return n_written;
-}
-
-ErrorOr<off_t> lseek(int handle, off_t offset, int origin)
-{
-    static_assert(FILE_BEGIN == SEEK_SET && FILE_CURRENT == SEEK_CUR && FILE_END == SEEK_END, "SetFilePointerEx origin values are incompatible with lseek");
-    LARGE_INTEGER new_pointer = {};
-    if (!SetFilePointerEx(to_handle(handle), { .QuadPart = offset }, &new_pointer, origin))
-        return Error::from_windows_error();
-    return new_pointer.QuadPart;
-}
-
-ErrorOr<void> ftruncate(int handle, off_t length)
-{
-    auto position = TRY(lseek(handle, 0, SEEK_CUR));
-    ScopeGuard restore_position = [&] { MUST(lseek(handle, position, SEEK_SET)); };
-
-    TRY(lseek(handle, length, SEEK_SET));
-
-    if (!SetEndOfFile(to_handle(handle)))
-        return Error::from_windows_error();
-    return {};
-}
-
-ErrorOr<struct stat> fstat(int handle)
-{
-    struct stat st = {};
-    int fd = _open_osfhandle(TRY(dup(handle)), 0);
-    ScopeGuard guard = [&] { _close(fd); };
-    if (::fstat(fd, &st) < 0)
-        return Error::from_syscall("fstat"sv, errno);
-    return st;
-}
-
-ErrorOr<void> ioctl(int fd, unsigned request, ...)
-{
-    va_list ap;
-    va_start(ap, request);
-    u_long arg = va_arg(ap, FlatPtr);
-    va_end(ap);
-    if (::ioctlsocket(fd, request, &arg) == SOCKET_ERROR)
+    u_long value = enabled ? 0 : 1;
+    if (::ioctlsocket(socket, FIONBIO, &value) == SOCKET_ERROR)
         return Error::from_windows_error();
     return {};
 }
@@ -134,85 +60,42 @@ ErrorOr<ByteString> getcwd()
 
 ErrorOr<void> chdir(StringView path)
 {
-    if (path.is_null())
-        return Error::from_errno(EFAULT);
-
     ByteString path_string = path;
     if (::_chdir(path_string.characters()) < 0)
         return Error::from_syscall("chdir"sv, errno);
     return {};
 }
 
-ErrorOr<struct stat> stat(StringView path)
+ErrorOr<void*> reserve_address_space(size_t size)
 {
-    if (path.is_null())
-        return Error::from_syscall("stat"sv, EFAULT);
-
-    struct stat st = {};
-    ByteString path_string = path;
-    if (::stat(path_string.characters(), &st) < 0)
-        return Error::from_syscall("stat"sv, errno);
-    return st;
-}
-
-ErrorOr<void> rmdir(StringView path)
-{
-    if (path.is_null())
-        return Error::from_errno(EFAULT);
-
-    ByteString path_string = path;
-    if (_rmdir(path_string.characters()) < 0)
-        return Error::from_syscall("rmdir"sv, errno);
-    return {};
-}
-
-ErrorOr<void> unlink(StringView path)
-{
-    if (path.is_null())
-        return Error::from_errno(EFAULT);
-
-    ByteString path_string = path;
-    if (_unlink(path_string.characters()) < 0)
-        return Error::from_syscall("unlink"sv, errno);
-    return {};
-}
-
-ErrorOr<void> mkdir(StringView path, mode_t)
-{
-    ByteString str = path;
-    if (_mkdir(str.characters()) < 0)
-        return Error::from_syscall("mkdir"sv, errno);
-    return {};
-}
-
-ErrorOr<int> openat(int, StringView, int, mode_t)
-{
-    dbgln("Core::System::openat() is not implemented");
-    VERIFY_NOT_REACHED();
-}
-
-ErrorOr<struct stat> fstatat(int, StringView, int)
-{
-    dbgln("Core::System::fstatat() is not implemented");
-    VERIFY_NOT_REACHED();
-}
-
-ErrorOr<void*> mmap(void* address, size_t size, int protection, int flags, int file_handle, off_t offset, size_t alignment, StringView)
-{
-    // custom alignment is not supported
-    VERIFY(!alignment);
-    int fd = _open_osfhandle(TRY(dup(file_handle)), 0);
-    ScopeGuard guard = [&] { _close(fd); };
-    void* ptr = ::mmap(address, size, protection, flags, fd, offset);
-    if (ptr == MAP_FAILED)
-        return Error::from_syscall("mmap"sv, errno);
+    void* ptr = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
+    if (!ptr)
+        return Error::from_windows_error();
     return ptr;
 }
 
-ErrorOr<void> munmap(void* address, size_t size)
+ErrorOr<void> commit_memory(void* address, size_t size)
 {
-    if (::munmap(address, size) < 0)
-        return Error::from_syscall("munmap"sv, errno);
+    if (!VirtualAlloc(address, size, MEM_COMMIT, PAGE_READWRITE))
+        return Error::from_windows_error();
+    return {};
+}
+
+ErrorOr<void> decommit_memory(void* address, size_t size)
+{
+    if (size == 0)
+        return {};
+    if (!VirtualFree(address, size, MEM_DECOMMIT))
+        return Error::from_windows_error();
+    return {};
+}
+
+ErrorOr<void> release_address_space(void* address, size_t size)
+{
+    // VirtualFree with MEM_RELEASE requires size == 0 and frees the entire reservation.
+    (void)size;
+    if (!VirtualFree(address, 0, MEM_RELEASE))
+        return Error::from_windows_error();
     return {};
 }
 
@@ -227,10 +110,10 @@ ErrorOr<int> dup(int handle)
         return Error::from_windows_error(ERROR_INVALID_HANDLE);
     }
     if (is_socket(handle)) {
-        WSAPROTOCOL_INFO pi = {};
-        if (WSADuplicateSocket(handle, GetCurrentProcessId(), &pi))
+        WSAPROTOCOL_INFOW pi = {};
+        if (WSADuplicateSocketW(handle, GetCurrentProcessId(), &pi))
             return Error::from_windows_error();
-        SOCKET socket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, &pi, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+        SOCKET socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, &pi, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
         if (socket == INVALID_SOCKET)
             return Error::from_windows_error();
         return socket;
@@ -270,17 +153,39 @@ ErrorOr<int> accept(int sockfd, struct sockaddr* addr, socklen_t* addr_size)
     return fd;
 }
 
-ErrorOr<ssize_t> sendto(int sockfd, void const* source, size_t source_length, int flags, struct sockaddr const* destination, socklen_t destination_length)
+ErrorOr<void> connect(int sockfd, struct sockaddr const* address, socklen_t address_length)
 {
-    auto sent = ::sendto(sockfd, static_cast<char const*>(source), source_length, flags, destination, destination_length);
+    if (::connect(sockfd, address, address_length) == SOCKET_ERROR)
+        return Error::from_windows_error();
+    return {};
+}
+
+ErrorOr<size_t> send(int sockfd, ReadonlyBytes data, int flags)
+{
+    auto sent = ::send(sockfd, reinterpret_cast<char const*>(data.data()), static_cast<int>(data.size()), flags);
+
+    if (sent == SOCKET_ERROR) {
+        auto error = WSAGetLastError();
+
+        return error == WSAEWOULDBLOCK
+            ? Error::from_errno(EWOULDBLOCK)
+            : Error::from_windows_error(error);
+    }
+
+    return sent;
+}
+
+ErrorOr<size_t> sendto(int sockfd, ReadonlyBytes data, int flags, struct sockaddr const* destination, socklen_t destination_length)
+{
+    auto sent = ::sendto(sockfd, reinterpret_cast<char const*>(data.data()), static_cast<int>(data.size()), flags, destination, destination_length);
     if (sent == SOCKET_ERROR)
         return Error::from_windows_error();
     return sent;
 }
 
-ErrorOr<ssize_t> recvfrom(int sockfd, void* buffer, size_t buffer_length, int flags, struct sockaddr* address, socklen_t* address_length)
+ErrorOr<size_t> recvfrom(int sockfd, Bytes buffer, int flags, struct sockaddr* address, socklen_t* address_length)
 {
-    auto received = ::recvfrom(sockfd, static_cast<char*>(buffer), buffer_length, flags, address, address_length);
+    auto received = ::recvfrom(sockfd, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), flags, address, address_length);
     if (received == SOCKET_ERROR)
         return Error::from_windows_error();
     return received;
@@ -348,6 +253,20 @@ ErrorOr<void> set_close_on_exec(int handle, bool enabled)
     return {};
 }
 
+ErrorOr<Array<int, 2>> pipe2(int flags)
+{
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = (flags & O_CLOEXEC) ? FALSE : TRUE;
+
+    HANDLE read_handle = nullptr;
+    HANDLE write_handle = nullptr;
+    if (!CreatePipe(&read_handle, &write_handle, &sa, 0))
+        return Error::from_windows_error();
+
+    return Array<int, 2> { to_fd(read_handle), to_fd(write_handle) };
+}
+
 ErrorOr<bool> isatty(int handle)
 {
     return GetFileType(to_handle(handle)) == FILE_TYPE_CHAR;
@@ -377,11 +296,16 @@ ErrorOr<AddressInfoVector> getaddrinfo(char const* nodename, char const* servnam
     return AddressInfoVector { move(addresses), results };
 }
 
-ErrorOr<void> connect(int socket, struct sockaddr const* address, socklen_t address_length)
+ErrorOr<size_t> transfer_file_through_socket(int source_fd, int target_fd, size_t source_offset, size_t source_length)
 {
-    if (::connect(socket, address, address_length) == SOCKET_ERROR)
-        return Error::from_windows_error();
-    return {};
+    // FIXME: We could use TransmitFile (https://learn.microsoft.com/en-us/windows/win32/api/mswsock/nf-mswsock-transmitfile)
+    //        here. But in order to transmit a subset of the file, we have to use overlapped IO.
+
+    if (!AK::is_within_range<off_t>(source_offset))
+        return Error::from_errno(EOVERFLOW);
+
+    auto mapped_file = TRY(MappedFile::map_from_fd_range_and_close(TRY(dup(source_fd)), {}, static_cast<off_t>(source_offset), source_length));
+    return send(target_fd, mapped_file->bytes(), 0);
 }
 
 }

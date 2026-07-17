@@ -115,9 +115,6 @@ TEST_CASE(promise_map_already_resolved)
     EXPECT_EQ(result.value(), 42);
 }
 
-// FIXME: Support EventLoop::WaitMode::PollForEvents on Windows, otherwise ThreadedPromise::await() blocks forever
-
-#if !defined(AK_OS_WINDOWS)
 TEST_CASE(threaded_promise_instantly_resolved)
 {
     Core::EventLoop loop;
@@ -128,7 +125,7 @@ TEST_CASE(threaded_promise_instantly_resolved)
 
     auto promise = Core::ThreadedPromise<int>::create();
 
-    auto thread = Threading::Thread::construct([&, promise] {
+    auto thread = Threading::Thread::construct("PromiseResolver"sv, [&, promise] {
         thread_id = pthread_self();
         promise->resolve(42);
         return 0;
@@ -158,14 +155,14 @@ TEST_CASE(threaded_promise_resolved_later)
 {
     Core::EventLoop loop;
 
-    IGNORE_USE_IN_ESCAPING_LAMBDA bool unblock_thread = false;
+    IGNORE_USE_IN_ESCAPING_LAMBDA Atomic<bool> unblock_thread = false;
     bool resolved = false;
     bool rejected = true;
     Optional<pthread_t> thread_id;
 
     auto promise = Core::ThreadedPromise<int>::create();
 
-    auto thread = Threading::Thread::construct([&, promise] {
+    auto thread = Threading::Thread::construct("PromiseResolver"sv, [&, promise] {
         thread_id = pthread_self();
         while (!unblock_thread)
             MUST(Core::System::sleep_ms(5));
@@ -222,5 +219,3 @@ TEST_CASE(threaded_promise_synchronously_resolved)
     EXPECT(resolved);
     EXPECT(!rejected);
 }
-
-#endif

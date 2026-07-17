@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2023, Luke Wilde <lukew@serenityos.org>
+ * Copyright (c) 2025, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,7 +8,7 @@
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibJS/Runtime/Iterator.h>
 #include <LibJS/Runtime/ValueInlines.h>
-#include <LibWeb/Bindings/CustomElementRegistryPrototype.h>
+#include <LibWeb/Bindings/CustomElementRegistry.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/ShadowRoot.h>
@@ -22,6 +23,15 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(CustomElementRegistry);
 GC_DEFINE_ALLOCATOR(CustomElementDefinition);
+
+// https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry
+GC::Ref<CustomElementRegistry> CustomElementRegistry::construct_impl(JS::Realm& realm)
+{
+    // The new CustomElementRegistry() constructor steps are to set this's is scoped to true.
+    auto registry = realm.create<CustomElementRegistry>(realm);
+    registry->m_is_scoped = true;
+    return registry;
+}
 
 CustomElementRegistry::CustomElementRegistry(JS::Realm& realm)
     : Bindings::PlatformObject(realm)
@@ -50,27 +60,28 @@ static JS::ThrowCompletionOr<GC::Ref<WebIDL::CallbackType>> convert_value_to_cal
     // FIXME: De-duplicate this from the IDL generator.
     // 1. If the result of calling IsCallable(V) is false and the conversion to an IDL value is not being performed due to V being assigned to an attribute whose type is a nullable callback function that is annotated with [LegacyTreatNonObjectAsNull], then throw a TypeError.
     if (!value.is_function())
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAFunction, value.to_string_without_side_effects());
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAFunction, value);
 
     // 2. Return the IDL callback function type value that represents a reference to the same object that V represents, with the incumbent realm as the callback context.
     return vm.heap().allocate<WebIDL::CallbackType>(value.as_object(), HTML::incumbent_realm());
 }
 
 // https://webidl.spec.whatwg.org/#es-sequence
-static JS::ThrowCompletionOr<Vector<String>> convert_value_to_sequence_of_strings(JS::VM& vm, JS::Value value)
+template<typename T, typename Converter>
+static JS::ThrowCompletionOr<Vector<T>> convert_value_to_sequence(JS::VM& vm, JS::Value value, Converter converter)
 {
     // FIXME: De-duplicate this from the IDL generator.
     // An ECMAScript value V is converted to an IDL sequence<T> value as follows:
     // 1. If V is not an Object, throw a TypeError.
     if (!value.is_object())
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObject, value.to_string_without_side_effects());
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObject, value);
 
     // 2. Let method be ? GetMethod(V, @@iterator).
     auto method = TRY(value.get_method(vm, vm.well_known_symbol_iterator()));
 
     // 3. If method is undefined, throw a TypeError.
     if (!method)
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotIterable, value.to_string_without_side_effects());
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotIterable, value);
 
     // 4. Return the result of creating a sequence from V and method.
 
@@ -81,7 +92,7 @@ static JS::ThrowCompletionOr<Vector<String>> convert_value_to_sequence_of_string
     auto iterator = TRY(JS::get_iterator_from_method(vm, value, *method));
 
     // 2. Initialize i to be 0.
-    Vector<String> sequence_of_strings;
+    Vector<T> sequence;
 
     // 3. Repeat
     for (;;) {
@@ -90,51 +101,73 @@ static JS::ThrowCompletionOr<Vector<String>> convert_value_to_sequence_of_string
 
         // 2. If next is false, then return an IDL sequence value of type sequence<T> of length i, where the value of the element at index j is Sj.
         if (!next.has<JS::IterationResult>())
-            return sequence_of_strings;
+            return sequence;
 
         // 3. Let nextItem be ? IteratorValue(next).
         auto next_item = TRY(next.get<JS::IterationResult>().value);
 
         // 4. Initialize Si to the result of converting nextItem to an IDL value of type T.
-
-        // https://webidl.spec.whatwg.org/#es-DOMString
-        // An ECMAScript value V is converted to an IDL DOMString value by running the following algorithm:
-        // 1. If V is null and the conversion is to an IDL type associated with the [LegacyNullToEmptyString] extended attribute, then return the DOMString value that represents the empty string.
-        // NOTE: This doesn't apply.
-
-        // 2. Let x be ? ToString(V).
-        // 3. Return the IDL DOMString value that represents the same sequence of code units as the one the ECMAScript String value x represents.
-        auto string_value = TRY(next_item.to_string(vm));
-
-        sequence_of_strings.append(move(string_value));
+        sequence.append(TRY(converter(next_item)));
 
         // 5. Set i to i + 1.
     }
 }
 
+static JS::ThrowCompletionOr<Utf16String> convert_value_to_dom_string(JS::VM& vm, JS::Value value)
+{
+    // https://webidl.spec.whatwg.org/#es-DOMString
+    // An ECMAScript value V is converted to an IDL DOMString value by running the following algorithm:
+    // 1. If V is null and the conversion is to an IDL type associated with the [LegacyNullToEmptyString] extended attribute, then return the DOMString value that represents the empty string.
+    // NOTE: This doesn't apply.
+
+    // 2. Let x be ? ToString(V).
+    // 3. Return the IDL DOMString value that represents the same sequence of code units as the one the ECMAScript String value x represents.
+    return TRY(value.to_utf16_string(vm));
+}
+
+static JS::ThrowCompletionOr<Vector<Utf16String>> convert_value_to_sequence_of_strings(JS::VM& vm, JS::Value value)
+{
+    return convert_value_to_sequence<Utf16String>(vm, value, [&](auto next_item) -> JS::ThrowCompletionOr<Utf16String> {
+        return TRY(convert_value_to_dom_string(vm, next_item));
+    });
+}
+
+static JS::ThrowCompletionOr<Vector<Utf16FlyString>> convert_value_to_sequence_of_fly_strings(JS::VM& vm, JS::Value value)
+{
+    return convert_value_to_sequence<Utf16FlyString>(vm, value, [&](auto next_item) -> JS::ThrowCompletionOr<Utf16FlyString> {
+        if (next_item.is_string())
+            return Utf16FlyString::from_utf16(next_item.as_string().utf16_string_view());
+
+        auto string = TRY(convert_value_to_dom_string(vm, next_item));
+        return Utf16FlyString::from_utf16(string.utf16_view());
+    });
+}
+
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-define
-JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, WebIDL::CallbackType* constructor, ElementDefinitionOptions options)
+JS::ThrowCompletionOr<void> CustomElementRegistry::define(Utf16FlyString const& name, WebIDL::CallbackType* constructor, Bindings::ElementDefinitionOptions const& options)
 {
     auto& realm = this->realm();
     auto& vm = this->vm();
 
     // 1. If IsConstructor(constructor) is false, then throw a TypeError.
     if (!JS::Value(constructor->callback).is_constructor())
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAConstructor, JS::Value(constructor->callback).to_string_without_side_effects());
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAConstructor, JS::Value(constructor->callback));
 
     // 2. If name is not a valid custom element name, then throw a "SyntaxError" DOMException.
     if (!is_valid_custom_element_name(name))
-        return JS::throw_completion(WebIDL::SyntaxError::create(realm, Utf16String::formatted("'{}' is not a valid custom element name", name)));
+        return JS::throw_completion(WebIDL::SyntaxError::create(realm, Utf16String::formatted("'{}' is not a valid custom element name", name.to_utf16_string())));
 
-    // 3. If this's custom element definition set contains an item with name name, then throw a "NotSupportedError" DOMException.
+    // 3. If this's custom element definition set contains an item with name name, then throw a "NotSupportedError"
+    //    DOMException.
     auto existing_definition_with_name_iterator = m_custom_element_definitions.find_if([&name](auto const& definition) {
         return definition->name() == name;
     });
 
     if (existing_definition_with_name_iterator != m_custom_element_definitions.end())
-        return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("A custom element with name '{}' is already defined", name)));
+        return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("A custom element with name '{}' is already defined", name.to_utf16_string())));
 
-    // 4. If this's custom element definition set contains an item with constructor constructor, then throw a "NotSupportedError" DOMException.
+    // 4. If this's custom element definition set contains an item with constructor constructor, then throw a
+    //    "NotSupportedError" DOMException.
     auto existing_definition_with_constructor_iterator = m_custom_element_definitions.find_if([&constructor](auto const& definition) {
         return definition->constructor().callback == constructor->callback;
     });
@@ -143,24 +176,27 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
         return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "The given constructor is already in use by another custom element"_utf16));
 
     // 5. Let localName be name.
-    String local_name = name;
+    auto local_name = name;
 
     // 6. Let extends be options["extends"] if it exists; otherwise null.
     auto& extends = options.extends;
 
     // 7. If extends is not null:
     if (extends.has_value()) {
-        // 1. If extends is a valid custom element name, then throw a "NotSupportedError" DOMException.
+        // 1. If this's is scoped is true, then throw a "NotSupportedError" DOMException.
+        if (m_is_scoped)
+            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "Cannot define a custom element that extends another in a scoped registry"_utf16));
+
+        // 2. If extends is a valid custom element name, then throw a "NotSupportedError" DOMException.
         if (is_valid_custom_element_name(extends.value()))
-            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("'{}' is a custom element name, only non-custom elements can be extended", extends.value())));
+            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("'{}' is a custom element name, only non-custom elements can be extended", extends->to_utf16_string())));
 
-        // 2. If the element interface for extends and the HTML namespace is HTMLUnknownElement
-        //    (e.g., if extends does not indicate an element definition in this specification),
-        //    then throw a "NotSupportedError" DOMException.
+        // 3. If the element interface for extends and the HTML namespace is HTMLUnknownElement (e.g., if extends does
+        //    not indicate an element definition in this specification), then throw a "NotSupportedError" DOMException.
         if (DOM::is_unknown_html_element(extends.value()))
-            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("'{}' is an unknown HTML element", extends.value())));
+            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("'{}' is an unknown HTML element", extends->to_utf16_string())));
 
-        // 3. Set localName to extends.
+        // 4. Set localName to extends.
         local_name = extends.value();
     }
 
@@ -181,37 +217,34 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
     bool disable_shadow = false;
 
     // 13. Let observedAttributes be an empty sequence<DOMString>.
-    Vector<String> observed_attributes;
-
-    // NOTE: This is not in the spec, but is required because of how we catch the exception by using a lambda, meaning we need to define this
-    //       variable outside of it to use it later.
-    OrderedHashMap<FlyString, GC::Root<WebIDL::CallbackType>> lifecycle_callbacks;
+    Vector<Utf16FlyString> observed_attributes;
 
     // 14. Run the following steps while catching any exceptions:
+    OrderedHashMap<Utf16FlyString, GC::Root<WebIDL::CallbackType>> lifecycle_callbacks;
     auto get_definition_attributes_from_constructor = [&]() -> JS::ThrowCompletionOr<void> {
         // 1. Let prototype be ? Get(constructor, "prototype").
         auto prototype_value = TRY(constructor->callback->get(vm.names.prototype));
 
         // 2. If prototype is not an Object, then throw a TypeError exception.
-        if (!prototype_value.is_object())
-            return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObject, prototype_value.to_string_without_side_effects());
+        auto prototype = prototype_value.as_if<JS::Object>();
+        if (!prototype)
+            return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObject, prototype_value);
 
-        auto& prototype = prototype_value.as_object();
-
-        // 3. Let lifecycleCallbacks be the ordered map «[ "connectedCallback" → null, "disconnectedCallback" → null, "adoptedCallback" → null,
-        //    "connectedMoveCallback" → null, "attributeChangedCallback" → null ]».
+        // 3. Let lifecycleCallbacks be the ordered map «[ "connectedCallback" → null, "disconnectedCallback" → null,
+        //    "connectedMoveCallback" → null, "adoptedCallback" → null, "attributeChangedCallback" → null ]».
         lifecycle_callbacks.set(CustomElementReactionNames::connectedCallback, {});
         lifecycle_callbacks.set(CustomElementReactionNames::disconnectedCallback, {});
-        lifecycle_callbacks.set(CustomElementReactionNames::adoptedCallback, {});
         lifecycle_callbacks.set(CustomElementReactionNames::connectedMoveCallback, {});
+        lifecycle_callbacks.set(CustomElementReactionNames::adoptedCallback, {});
         lifecycle_callbacks.set(CustomElementReactionNames::attributeChangedCallback, {});
 
         // 4. For each callbackName of the keys of lifecycleCallbacks:
-        for (auto const& callback_name : { CustomElementReactionNames::connectedCallback, CustomElementReactionNames::disconnectedCallback, CustomElementReactionNames::adoptedCallback, CustomElementReactionNames::connectedMoveCallback, CustomElementReactionNames::attributeChangedCallback }) {
-            // 1. Let callbackValue be ? Get(prototype, callbackName).
-            auto callback_value = TRY(prototype.get(Utf16FlyString::from_utf8(callback_name)));
+        for (auto const& callback_name : { CustomElementReactionNames::connectedCallback, CustomElementReactionNames::disconnectedCallback, CustomElementReactionNames::connectedMoveCallback, CustomElementReactionNames::adoptedCallback, CustomElementReactionNames::attributeChangedCallback }) {
 
-            // 2. If callbackValue is not undefined, then set the value of the entry in lifecycleCallbacks with key callbackName to the result of
+            // 1. Let callbackValue be ? Get(prototype, callbackName).
+            auto callback_value = TRY(prototype->get(callback_name));
+
+            // 2. If callbackValue is not undefined, then set lifecycleCallbacks[callbackName] to the result of
             //    converting callbackValue to the Web IDL Function callback type.
             if (!callback_value.is_undefined()) {
                 auto callback = TRY(convert_value_to_callback_function(vm, callback_value));
@@ -226,28 +259,29 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
             // 1. Let observedAttributesIterable be ? Get(constructor, "observedAttributes").
             auto observed_attributes_iterable = TRY(constructor->callback->get(vm.names.observedAttributes));
 
-            // 2. If observedAttributesIterable is not undefined, then set observedAttributes to the result of converting observedAttributesIterable
-            //    to a sequence<DOMString>. Rethrow any exceptions from the conversion.
+            // 2. If observedAttributesIterable is not undefined, then set observedAttributes to the result of
+            //    converting observedAttributesIterable to a sequence<DOMString>. Rethrow any exceptions from the
+            //    conversion.
             if (!observed_attributes_iterable.is_undefined())
-                observed_attributes = TRY(convert_value_to_sequence_of_strings(vm, observed_attributes_iterable));
+                observed_attributes = TRY(convert_value_to_sequence_of_fly_strings(vm, observed_attributes_iterable));
         }
 
         // 6. Let disabledFeatures be an empty sequence<DOMString>.
-        Vector<String> disabled_features;
+        Vector<Utf16String> disabled_features;
 
         // 7. Let disabledFeaturesIterable be ? Get(constructor, "disabledFeatures").
         auto disabled_features_iterable = TRY(constructor->callback->get(vm.names.disabledFeatures));
 
-        // 8. If disabledFeaturesIterable is not undefined, then set disabledFeatures to the result of converting disabledFeaturesIterable to a
-        //    sequence<DOMString>. Rethrow any exceptions from the conversion.
+        // 8. If disabledFeaturesIterable is not undefined, then set disabledFeatures to the result of converting
+        //    disabledFeaturesIterable to a sequence<DOMString>. Rethrow any exceptions from the conversion.
         if (!disabled_features_iterable.is_undefined())
             disabled_features = TRY(convert_value_to_sequence_of_strings(vm, disabled_features_iterable));
 
         // 9. If disabledFeatures contains "internals", then set disableInternals to true.
-        disable_internals = disabled_features.contains_slow("internals"sv);
+        disable_internals = disabled_features.contains_slow(u"internals"sv);
 
         // 10. If disabledFeatures contains "shadow", then set disableShadow to true.
-        disable_shadow = disabled_features.contains_slow("shadow"sv);
+        disable_shadow = disabled_features.contains_slow(u"shadow"sv);
 
         // 11. Let formAssociatedValue be ? Get( constructor, "formAssociated").
         auto form_associated_value = TRY(constructor->callback->get(vm.names.formAssociated));
@@ -255,15 +289,15 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
         // 12. Set formAssociated to the result of converting formAssociatedValue to a boolean.
         form_associated = form_associated_value.to_boolean();
 
-        // 13. If formAssociated is true, then for each callbackName of « "formAssociatedCallback", "formResetCallback", "formDisabledCallback",
-        //     "formStateRestoreCallback" »:
+        // 13. If formAssociated is true, then for each callbackName of « "formAssociatedCallback",
+        //     "formResetCallback", "formDisabledCallback", "formStateRestoreCallback" »:
         if (form_associated) {
             for (auto const& callback_name : { CustomElementReactionNames::formAssociatedCallback, CustomElementReactionNames::formResetCallback, CustomElementReactionNames::formDisabledCallback, CustomElementReactionNames::formStateRestoreCallback }) {
                 // 1. Let callbackValue be ? Get(prototype, callbackName).
-                auto callback_value = TRY(prototype.get(Utf16FlyString::from_utf8(callback_name)));
+                auto callback_value = TRY(prototype->get(callback_name));
 
-                // 2. If callbackValue is not undefined, then set lifecycleCallbacks[callbackName] to the result of converting callbackValue
-                //    to the Web IDL Function callback type.
+                // 2. If callbackValue is not undefined, then set lifecycleCallbacks[callbackName] to the result of
+                //    converting callbackValue to the Web IDL Function callback type.
                 if (!callback_value.is_undefined())
                     lifecycle_callbacks.set(callback_name, TRY(convert_value_to_callback_function(vm, callback_value)));
             }
@@ -274,46 +308,36 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
 
     auto maybe_exception = get_definition_attributes_from_constructor();
 
-    //     Then, regardless of whether the above steps threw an exception or not: set this's element definition is running to false.
+    //     Then, regardless of whether the above steps threw an exception or not: set this's element definition is
+    //     running to false.
     m_element_definition_is_running = false;
 
     //     Finally, if the steps threw an exception, rethrow that exception.
     if (maybe_exception.is_throw_completion())
         return maybe_exception.release_error();
 
-    // 15. Let definition be a new custom element definition with name name, local name localName, constructor constructor,
-    //     observed attributes observedAttributes, lifecycle callbacks lifecycleCallbacks, form-associated formAssociated,
-    //     disable internals disableInternals, and disable shadow disableShadow.
+    // 15. Let definition be a new custom element definition with name name, local name localName, constructor
+    //     constructor, observed attributes observedAttributes, lifecycle callbacks lifecycleCallbacks, form-associated
+    //     formAssociated, disable internals disableInternals, and disable shadow disableShadow.
     auto definition = CustomElementDefinition::create(realm, name, local_name, *constructor, move(observed_attributes), move(lifecycle_callbacks), form_associated, disable_internals, disable_shadow);
 
     // 16. Append definition to this's custom element definition set.
     m_custom_element_definitions.append(definition);
 
-    // 17. Let document be this's relevant global object's associated Document.
-    auto& document = as<HTML::Window>(relevant_global_object(*this)).associated_document();
+    // 17. If this's is scoped is true, then for each document of this's scoped document set:
+    //     upgrade particular elements within a document given this, document, definition, and localName.
+    if (m_is_scoped) {
+        for (auto& document : m_scoped_documents)
+            document.upgrade_particular_elements(*this, definition, local_name);
+    }
+    // 18. Otherwise, upgrade particular elements within a document given this, this's relevant global object's
+    //     associated Document, definition, localName, and name.
+    else {
+        auto& document = as<HTML::Window>(relevant_global_object(*this)).associated_document();
+        document.upgrade_particular_elements(*this, definition, local_name, name);
+    }
 
-    // 18. Let upgradeCandidates be all elements that are shadow-including descendants of document, whose namespace is the HTML namespace
-    //     and whose local name is localName, in shadow-including tree order.
-    //     Additionally, if extends is non-null, only include elements whose is value is equal to name.
-    Vector<GC::Root<DOM::Element>> upgrade_candidates;
-
-    document.for_each_shadow_including_descendant([&](DOM::Node& inclusive_descendant) {
-        if (!is<DOM::Element>(inclusive_descendant))
-            return TraversalDecision::Continue;
-
-        auto& inclusive_descendant_element = static_cast<DOM::Element&>(inclusive_descendant);
-
-        if (inclusive_descendant_element.namespace_uri() == Namespace::HTML && inclusive_descendant_element.local_name() == local_name && (!extends.has_value() || inclusive_descendant_element.is_value() == name))
-            upgrade_candidates.append(GC::make_root(inclusive_descendant_element));
-
-        return TraversalDecision::Continue;
-    });
-
-    // 19. For each element element of upgradeCandidates, enqueue a custom element upgrade reaction given element and definition.
-    for (auto& element : upgrade_candidates)
-        element->enqueue_a_custom_element_upgrade_reaction(definition);
-
-    // 20. If this's when-defined promise map[name] exists:
+    // 19. If this's when-defined promise map[name] exists:
     auto promise_when_defined_iterator = m_when_defined_promise_map.find(name);
     if (promise_when_defined_iterator != m_when_defined_promise_map.end()) {
         // 1. Resolve this's when-defined promise map[name] with constructor.
@@ -327,7 +351,7 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
 }
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-get
-Variant<GC::Root<WebIDL::CallbackType>, Empty> CustomElementRegistry::get(String const& name) const
+Variant<GC::Ref<WebIDL::CallbackType>, Empty> CustomElementRegistry::get(Utf16FlyString const& name) const
 {
     // 1. If this's custom element definition set contains an item with name name, then return that item's constructor.
     auto existing_definition_iterator = m_custom_element_definitions.find_if([&name](auto const& definition) {
@@ -335,38 +359,38 @@ Variant<GC::Root<WebIDL::CallbackType>, Empty> CustomElementRegistry::get(String
     });
 
     if (!existing_definition_iterator.is_end())
-        return GC::make_root((*existing_definition_iterator)->constructor());
+        return GC::Ref { (*existing_definition_iterator)->constructor() };
 
     // 2. Return undefined.
     return Empty {};
 }
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-getname
-Optional<String> CustomElementRegistry::get_name(GC::Root<WebIDL::CallbackType> const& constructor) const
+Optional<Utf16String> CustomElementRegistry::get_name(GC::Ref<WebIDL::CallbackType> constructor) const
 {
     // 1. If this's custom element definition set contains an item with constructor constructor, then return that item's name.
     auto existing_definition_iterator = m_custom_element_definitions.find_if([&constructor](auto const& definition) {
-        return definition->constructor().callback == constructor.cell()->callback;
+        return definition->constructor().callback == constructor->callback;
     });
 
     if (!existing_definition_iterator.is_end())
-        return (*existing_definition_iterator)->name();
+        return (*existing_definition_iterator)->name().to_utf16_string();
 
     // 2. Return null.
     return {};
 }
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-whendefined
-WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> CustomElementRegistry::when_defined(String const& name)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> CustomElementRegistry::when_defined(Utf16FlyString const& name)
 {
     auto& realm = this->realm();
 
     // 1. If name is not a valid custom element name, then return a promise rejected with a "SyntaxError" DOMException.
     if (!is_valid_custom_element_name(name))
-        return WebIDL::create_rejected_promise(realm, WebIDL::SyntaxError::create(realm, Utf16String::formatted("'{}' is not a valid custom element name", name)));
+        return WebIDL::create_rejected_promise(realm, WebIDL::SyntaxError::create(realm, Utf16String::formatted("'{}' is not a valid custom element name", name.to_utf16_string())));
 
     // 2. If this's custom element definition set contains an item with name name, then return a promise resolved with that item's constructor.
-    auto existing_definition_iterator = m_custom_element_definitions.find_if([&name](GC::Root<CustomElementDefinition> const& definition) {
+    auto existing_definition_iterator = m_custom_element_definitions.find_if([&name](auto const& definition) {
         return definition->name() == name;
     });
 
@@ -391,27 +415,80 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> CustomElementRegistry::when_define
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-upgrade
 void CustomElementRegistry::upgrade(GC::Ref<DOM::Node> root) const
 {
-    // 1. Let candidates be a list of all of root's shadow-including inclusive descendant elements, in shadow-including tree order.
-    Vector<GC::Root<DOM::Element>> candidates;
-
-    root->for_each_shadow_including_inclusive_descendant([&](DOM::Node& inclusive_descendant) {
-        if (!is<DOM::Element>(inclusive_descendant))
+    // 1. For each shadow-including inclusive descendant candidate of root, in shadow-including tree order:
+    root->for_each_shadow_including_inclusive_descendant([&](DOM::Node& candidate) {
+        // 1. If candidate is not an Element node, then continue.
+        auto* element = as_if<DOM::Element>(candidate);
+        if (!element)
             return TraversalDecision::Continue;
 
-        auto& inclusive_descendant_element = static_cast<DOM::Element&>(inclusive_descendant);
-        candidates.append(GC::make_root(inclusive_descendant_element));
+        // 2. If candidate's custom element registry is not this, then continue.
+        if (element->custom_element_registry() != this)
+            return TraversalDecision::Continue;
+
+        // 3. Try to upgrade candidate.
+        element->try_to_upgrade();
+        return TraversalDecision::Continue;
+    });
+}
+
+// https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-initialize
+WebIDL::ExceptionOr<void> CustomElementRegistry::initialize_for_bindings(GC::Ref<DOM::Node> root)
+{
+    // 1. If this's is scoped is false and either root is a Document node or root's node document's custom element
+    //    registry is not this, then throw a "NotSupportedError" DOMException.
+    if (!is_scoped() && (root->is_document() || root->document().custom_element_registry() != this))
+        return WebIDL::NotSupportedError::create(realm(), "CustomElementRegistry must either be scoped or the document's custom element registry."_utf16);
+
+    // 2. If root is a Document node whose custom element registry is null, then set root's custom element registry to
+    //    this.
+    if (auto* document = as_if<DOM::Document>(*root); document && !document->custom_element_registry())
+        document->set_custom_element_registry(this);
+
+    // 3. Otherwise, if root is a ShadowRoot node whose custom element registry is null, then set root's custom element
+    //    registry to this.
+    else if (auto* shadow_root = as_if<DOM::ShadowRoot>(*root); shadow_root && !shadow_root->custom_element_registry())
+        shadow_root->set_custom_element_registry(this);
+
+    // 4. For each inclusive descendant inclusiveDescendant of root, in tree order:
+    root->for_each_in_inclusive_subtree([this](auto& inclusive_descendant) {
+        // 1. If inclusiveDescendant is not an Element node, then continue.
+        auto* element = as_if<DOM::Element>(inclusive_descendant);
+        if (!element)
+            return TraversalDecision::Continue;
+
+        // 2. If inclusiveDescendant's custom element registry is null:
+        if (!element->custom_element_registry()) {
+            // 1. Set inclusiveDescendant's custom element registry to this.
+            element->set_custom_element_registry(this);
+
+            // 2. If this's is scoped is true, then append inclusiveDescendant's node document to this's scoped
+            //    document set.
+            if (m_is_scoped)
+                append_scoped_document(element->document());
+        }
+
+        // 3. If inclusiveDescendant's custom element registry is not this, then continue.
+        if (element->custom_element_registry() != this)
+            return TraversalDecision::Continue;
+
+        // 4. Try to upgrade inclusiveDescendant.
+        element->try_to_upgrade();
 
         return TraversalDecision::Continue;
     });
 
-    // 2. For each candidate of candidates, try to upgrade candidate.
-    for (auto& candidate : candidates)
-        candidate->try_to_upgrade();
+    return {};
 }
 
-GC::Ptr<CustomElementDefinition> CustomElementRegistry::get_definition_with_name_and_local_name(String const& name, String const& local_name) const
+void CustomElementRegistry::append_scoped_document(GC::Ref<DOM::Document> document)
 {
-    auto definition_iterator = m_custom_element_definitions.find_if([&](GC::Root<CustomElementDefinition> const& definition) {
+    m_scoped_documents.set(document);
+}
+
+GC::Ptr<CustomElementDefinition> CustomElementRegistry::get_definition_with_name_and_local_name(Utf16FlyString const& name, Utf16FlyString const& local_name) const
+{
+    auto definition_iterator = m_custom_element_definitions.find_if([&](auto const& definition) {
         return definition->name() == name && definition->local_name() == local_name;
     });
 
@@ -420,11 +497,67 @@ GC::Ptr<CustomElementDefinition> CustomElementRegistry::get_definition_with_name
 
 GC::Ptr<CustomElementDefinition> CustomElementRegistry::get_definition_from_new_target(JS::FunctionObject const& new_target) const
 {
-    auto definition_iterator = m_custom_element_definitions.find_if([&](GC::Root<CustomElementDefinition> const& definition) {
+    auto definition_iterator = m_custom_element_definitions.find_if([&](auto const& definition) {
         return definition->constructor().callback.ptr() == &new_target;
     });
 
     return definition_iterator.is_end() ? nullptr : definition_iterator->ptr();
+}
+
+// https://html.spec.whatwg.org/multipage/custom-elements.html#look-up-a-custom-element-registry
+GC::Ptr<CustomElementRegistry> look_up_a_custom_element_registry(DOM::Node const& node)
+{
+    // To look up a custom element registry, given a Node object node:
+    // 1. If node is an Element object, then return node's custom element registry.
+    if (auto* element = as_if<DOM::Element>(node))
+        return element->custom_element_registry();
+
+    // 2. If node is a ShadowRoot object, then return node's custom element registry.
+    if (auto* shadow_root = as_if<DOM::ShadowRoot>(node))
+        return shadow_root->custom_element_registry();
+
+    // 3. If node is a Document object, then return node's custom element registry.
+    if (auto* document = as_if<DOM::Document>(node))
+        return document->custom_element_registry();
+
+    // 4. Return null.
+    return nullptr;
+}
+
+// https://html.spec.whatwg.org/multipage/custom-elements.html#look-up-a-custom-element-definition
+GC::Ptr<CustomElementDefinition> look_up_a_custom_element_definition(GC::Ptr<CustomElementRegistry> registry, Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& local_name, Optional<Utf16FlyString> const& is)
+{
+    // 1. If registry is null, then return null.
+    if (!registry)
+        return nullptr;
+
+    // 2. If namespace is not the HTML namespace, then return null.
+    if (namespace_ != Namespace::HTML)
+        return nullptr;
+
+    // 3. If registry's custom element definition set contains an item with name and local name both equal to
+    //    localName, then return that item.
+    if (auto maybe_definition = registry->get_definition_with_name_and_local_name(local_name, local_name))
+        return maybe_definition;
+
+    // 4. If registry's custom element definition set contains an item with name equal to is and local name equal to
+    //    localName, then return that item.
+    // 5. Return null.
+
+    // NB: If `is` has no value, it can never match as custom element definitions always have a name and localName
+    //     (i.e. not stored as Optional<String>)
+    if (!is.has_value())
+        return nullptr;
+
+    return registry->get_definition_with_name_and_local_name(is.value(), local_name);
+}
+
+// https://dom.spec.whatwg.org/#is-a-global-custom-element-registry
+bool is_a_global_custom_element_registry(GC::Ptr<CustomElementRegistry> registry)
+{
+    // Null or a CustomElementRegistry object registry is a global custom element registry if registry is non-null and
+    // registry’s is scoped is false.
+    return registry && !registry->is_scoped();
 }
 
 }

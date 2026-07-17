@@ -1,9 +1,7 @@
-#import <UIEvents/MouseEvent.idl>
-
-// https://www.w3.org/TR/uievents/#idl-wheelevent
+// https://w3c.github.io/pointerevents/#idl-wheelevent
 [Exposed=Window]
 interface WheelEvent : MouseEvent {
-    constructor(DOMString type, optional WheelEventInit eventInitDict = {});
+    constructor([Utf16FlyString] Utf16DOMString type, optional WheelEventInit eventInitDict = {});
 
     // DeltaModeCode
     const unsigned long DOM_DELTA_PIXEL = 0x00;
@@ -14,12 +12,21 @@ interface WheelEvent : MouseEvent {
     readonly attribute double deltaY;
     readonly attribute double deltaZ;
     readonly attribute unsigned long deltaMode;
+
+    // Non-standard legacy MouseWheelEvent API replaced by standard WheelEvent API.
+    readonly attribute long wheelDeltaX;
+    readonly attribute long wheelDeltaY;
+    readonly attribute long wheelDelta;
 };
 
-// https://www.w3.org/TR/uievents/#idl-wheeleventinit
+// https://w3c.github.io/pointerevents/#idl-wheeleventinit
 dictionary WheelEventInit : MouseEventInit {
     double deltaX = 0;
     double deltaY = 0;
     double deltaZ = 0;
     unsigned long deltaMode = 0;
+
+    // Non-standard legacy members that we still support for backward compatibility.
+    long wheelDeltaX = 0;
+    long wheelDeltaY = 0;
 };

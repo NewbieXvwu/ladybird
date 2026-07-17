@@ -13,6 +13,7 @@
 #include <AK/Tuple.h>
 #include <AK/Vector.h>
 #include <LibWasm/Forward.h>
+#include <LibWasm/TypeSystem.h>
 #include <LibWasm/Types.h>
 
 namespace Wasm {
@@ -22,17 +23,25 @@ struct Context {
         RedBlackTree<size_t, FunctionIndex> tree;
     };
 
-    COWVector<FunctionType> types;
+    COWVector<TypeSection::Type> types;
+    COWVector<DefinedType const*> canonical_types;
     COWVector<FunctionType> functions;
+    COWVector<Optional<TypeIndex>> function_type_indices;
+    COWVector<StructType> structs;
+    COWVector<ArrayType> arrays;
     COWVector<TableType> tables;
     COWVector<MemoryType> memories;
     COWVector<GlobalType> globals;
     COWVector<ValueType> elements;
     COWVector<bool> datas;
     COWVector<ValueType> locals;
+    COWVector<TagType> tags;
     Optional<u32> data_count;
     RefPtr<RefRBTree> references { make_ref_counted<RefRBTree>() };
     size_t imported_function_count { 0 };
+    size_t current_function_parameter_count { 0 };
+
+    TypeContext type_context() const { return TypeContext { canonical_types.span() }; }
 };
 
 struct ValidationError : public Error {
@@ -68,9 +77,10 @@ public:
     ErrorOr<void, ValidationError> validate(MemorySection const&);
     ErrorOr<void, ValidationError> validate(TableSection const&);
     ErrorOr<void, ValidationError> validate(CodeSection const&);
+    ErrorOr<void, ValidationError> validate(TagSection const&);
     ErrorOr<void, ValidationError> validate(FunctionSection const&) { return {}; }
     ErrorOr<void, ValidationError> validate(DataCountSection const&) { return {}; }
-    ErrorOr<void, ValidationError> validate(TypeSection const&) { return {}; }
+    ErrorOr<void, ValidationError> validate(TypeSection const&);
     ErrorOr<void, ValidationError> validate(CustomSection const&) { return {}; }
 
     ErrorOr<void, ValidationError> validate(TypeIndex index) const
@@ -87,10 +97,10 @@ public:
         return Errors::invalid("FunctionIndex"sv);
     }
 
-    ErrorOr<void, ValidationError> validate(MemoryIndex index) const
+    ErrorOr<MemoryType, ValidationError> validate(MemoryIndex index) const
     {
         if (index.value() < m_context.memories.size())
-            return {};
+            return m_context.memories[index.value()];
         return Errors::invalid("MemoryIndex"sv);
     }
 
@@ -122,18 +132,25 @@ public:
         return Errors::invalid("LabelIndex"sv);
     }
 
-    ErrorOr<void, ValidationError> validate(LocalIndex index) const
+    ErrorOr<LocalIndex, ValidationError> validate(LocalIndex index) const
     {
         if (index.value() < m_context.locals.size())
-            return {};
+            return index;
         return Errors::invalid("LocalIndex"sv);
     }
 
-    ErrorOr<void, ValidationError> validate(TableIndex index) const
+    ErrorOr<TableType, ValidationError> validate(TableIndex index) const
     {
         if (index.value() < m_context.tables.size())
-            return {};
+            return m_context.tables[index.value()];
         return Errors::invalid("TableIndex"sv);
+    }
+
+    ErrorOr<void, ValidationError> validate(TagIndex index) const
+    {
+        if (index.value() < m_context.tags.size())
+            return {};
+        return Errors::invalid("TagIndex"sv);
     }
 
     enum class FrameKind {
@@ -142,6 +159,7 @@ public:
         If,
         Else,
         Function,
+        TryTable,
     };
 
     struct Frame {
@@ -150,6 +168,9 @@ public:
         size_t initial_size;
         // Stack polymorphism is handled with this field
         bool unreachable { false };
+        // Height of the local-initialization undo log when this frame was entered.
+        // https://webassembly.github.io/spec/core/appendix/algorithm.html
+        size_t local_init_log_height { 0 };
 
         Vector<ValueType> const& labels() const
         {
@@ -181,18 +202,35 @@ public:
         bool is_numeric() const { return !is_known || concrete_type.is_numeric(); }
         bool is_reference() const { return !is_known || concrete_type.is_reference(); }
 
+        static bool is_subtype_of(ValueType const& concrete, ValueType const& expected)
+        {
+            if (concrete == expected)
+                return true;
+            // A typed function reference (ref [$null] $t) is a subtype of (ref [$null] func) when nullability is compatible.
+            if (expected.kind() == ValueType::FunctionReference && concrete.is_typeuse()
+                && (expected.is_nullable() || !concrete.is_nullable()))
+                return true;
+            // A non-nullable reference is a subtype of its nullable counterpart.
+            if (expected.is_nullable() && !concrete.is_nullable()) {
+                auto nullable_concrete = concrete;
+                nullable_concrete.set_nullable(true);
+                return nullable_concrete == expected;
+            }
+            return false;
+        }
+
         bool operator==(ValueType const& other) const
         {
-            if (is_known)
-                return concrete_type == other;
-            return true;
+            if (!is_known)
+                return true;
+            return is_subtype_of(concrete_type, other);
         }
 
         bool operator==(StackEntry const& other) const
         {
-            if (is_known && other.is_known)
-                return other.concrete_type == concrete_type;
-            return true;
+            if (!is_known || !other.is_known)
+                return true;
+            return is_subtype_of(concrete_type, other.concrete_type);
         }
 
         ValueType concrete_type;
@@ -206,10 +244,15 @@ public:
         friend struct AK::Formatter;
 
     public:
-        explicit Stack(Vector<Frame> const& frames)
+        explicit Stack(Vector<Frame, 16>&&, TypeContext const&) = delete;
+
+        explicit Stack(Vector<Frame, 16> const& frames, TypeContext const& type_context)
             : m_frames(frames)
+            , m_type_context(type_context)
         {
         }
+
+        TypeContext const& type_context() const { return m_type_context; }
 
         bool is_empty() const { return m_entries.is_empty(); }
         auto& last() const { return m_entries.last(); }
@@ -240,7 +283,7 @@ public:
         ErrorOr<StackEntry, ValidationError> take(ValueType type, SourceLocation location = SourceLocation::current())
         {
             auto type_on_stack = TRY(take_last());
-            if (type_on_stack != type)
+            if (type_on_stack.is_known && !matches_value_type(type_on_stack.concrete_type, type, m_type_context))
                 return Errors::invalid("stack state"sv, type, type_on_stack, location);
 
             return type_on_stack;
@@ -261,17 +304,18 @@ public:
             return {};
         }
 
-        Vector<StackEntry> release_vector()
+        Vector<StackEntry, 8> release_vector()
         {
             m_max_known_size = 0;
-            return exchange(m_entries, Vector<StackEntry> {});
+            return exchange(m_entries, {});
         }
 
         size_t max_known_size() const { return m_max_known_size; }
 
     private:
-        Vector<StackEntry> m_entries;
-        Vector<Frame> const& m_frames;
+        Vector<StackEntry, 8> m_entries;
+        Vector<Frame, 16> const& m_frames;
+        TypeContext m_type_context;
         size_t m_max_known_size { 0 };
     };
 
@@ -285,12 +329,30 @@ public:
     ErrorOr<void, ValidationError> validate_instruction(Instruction const&, Stack& stack, bool& is_constant);
 
     // Types
-    ErrorOr<void, ValidationError> validate(Limits const&, u64 bound); // n <= bound && m? <= bound
+    ErrorOr<void, ValidationError> validate(Limits const&, Optional<u64> bound); // n <= bound && m? <= bound
     ErrorOr<FunctionType, ValidationError> validate(BlockType const&);
-    ErrorOr<void, ValidationError> validate(FunctionType const&) { return {}; }
+    ErrorOr<void, ValidationError> validate(FunctionType const&);
+    ErrorOr<void, ValidationError> validate(StructType const&);
+    ErrorOr<void, ValidationError> validate(ArrayType const&);
     ErrorOr<void, ValidationError> validate(TableType const&);
     ErrorOr<void, ValidationError> validate(MemoryType const&);
-    ErrorOr<void, ValidationError> validate(GlobalType const&) { return {}; }
+    ErrorOr<void, ValidationError> validate(GlobalType const&);
+    ErrorOr<void, ValidationError> validate(TagType const&);
+    ErrorOr<void, ValidationError> validate(ValueType const&);
+    ErrorOr<void, ValidationError> validate(TypeSection::Type const&, size_t this_type_index);
+
+    // Proposal 'memory64'
+    ErrorOr<void, ValidationError> take_memory_address(Stack& stack, MemoryType const& memory, Instruction::MemoryArgument const& arg)
+    {
+        if (memory.limits().address_type() == AddressType::I64) {
+            TRY((stack.take<ValueType::I64>()));
+        } else {
+            if (arg.offset > NumericLimits<u32>::max())
+                return Errors::out_of_bounds("memory op offset"sv, arg.offset, 0, NumericLimits<u32>::max());
+            TRY((stack.take<ValueType::I32>()));
+        }
+        return {};
+    }
 
 private:
     explicit Validator(Context context)
@@ -298,8 +360,20 @@ private:
     {
     }
 
+    ErrorOr<void, ValidationError> validate_struct_get(Stack&, Instruction const&, bool requires_packed);
+    ErrorOr<FieldType, ValidationError> array_field_type(TypeIndex, StringView instruction_name, bool requires_mutable);
+    ErrorOr<void, ValidationError> validate_array_get(Stack&, Instruction const&, bool requires_packed);
+    ErrorOr<void, ValidationError> validate_ref_test_or_cast(Stack&, Instruction const&);
+    ErrorOr<void, ValidationError> validate_br_on_cast(Stack&, Instruction const&, bool branch_on_failure);
+
     struct Errors {
-        static ValidationError invalid(StringView name) { return ByteString::formatted("Invalid {}", name); }
+        static ValidationError invalid(StringView name, SourceLocation location = SourceLocation::current())
+        {
+            if constexpr (WASM_VALIDATOR_DEBUG)
+                return ByteString::formatted("Invalid {} in {}", name, find_instruction_name(location));
+            else
+                return ByteString::formatted("Invalid {}", name);
+        }
 
         template<typename Expected, typename Given>
         static ValidationError invalid(StringView name, Expected expected, Given given, SourceLocation location = SourceLocation::current())
@@ -359,8 +433,30 @@ private:
         static ByteString find_instruction_name(SourceLocation const&);
     };
 
+    // https://webassembly.github.io/spec/core/valid/conventions.html#local-types
+    void push_frame(Frame frame)
+    {
+        frame.local_init_log_height = m_local_init_log.size();
+        m_frames.append(move(frame));
+        m_max_frame_size = max(m_max_frame_size, m_frames.size());
+    }
+    void mark_local_initialized(u32 local_index)
+    {
+        if (m_local_initialized[local_index])
+            return;
+        m_local_initialized[local_index] = true;
+        m_local_init_log.append(local_index);
+    }
+    void roll_back_local_initializations(size_t log_height)
+    {
+        while (m_local_init_log.size() > log_height)
+            m_local_initialized[m_local_init_log.take_last()] = false;
+    }
+
     Context m_context;
-    Vector<Frame> m_frames;
+    Vector<Frame, 16> m_frames;
+    Vector<bool> m_local_initialized;
+    Vector<u32> m_local_init_log;
     size_t m_max_frame_size { 0 };
     COWVector<GlobalType> m_globals_without_internal_globals;
 };
@@ -372,7 +468,7 @@ struct AK::Formatter<Wasm::Validator::StackEntry> : public AK::Formatter<StringV
     ErrorOr<void> format(FormatBuilder& builder, Wasm::Validator::StackEntry const& value)
     {
         if (value.is_known)
-            return Formatter<StringView>::format(builder, Wasm::ValueType::kind_name(value.concrete_type.kind()));
+            return Formatter<StringView>::format(builder, value.concrete_type.kind_name());
 
         return Formatter<StringView>::format(builder, "<unknown>"sv);
     }
@@ -390,7 +486,7 @@ template<>
 struct AK::Formatter<Wasm::ValueType> : public AK::Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Wasm::ValueType const& value)
     {
-        return Formatter<StringView>::format(builder, Wasm::ValueType::kind_name(value.kind()));
+        return Formatter<StringView>::format(builder, value.kind_name());
     }
 };
 
@@ -399,5 +495,13 @@ struct AK::Formatter<Wasm::ValidationError> : public AK::Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Wasm::ValidationError const& error)
     {
         return Formatter<StringView>::format(builder, error.error_string);
+    }
+};
+
+template<>
+struct AK::Formatter<Wasm::TypeSection::Type> : public AK::Formatter<StringView> {
+    ErrorOr<void> format(FormatBuilder& builder, Wasm::TypeSection::Type const& type)
+    {
+        return Formatter<StringView>::format(builder, type.name());
     }
 };

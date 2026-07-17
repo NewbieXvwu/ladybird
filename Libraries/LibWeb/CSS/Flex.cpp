@@ -7,6 +7,8 @@
 #include <LibWeb/CSS/Flex.h>
 #include <LibWeb/CSS/Percentage.h>
 #include <LibWeb/CSS/Serialize.h>
+#include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FlexStyleValue.h>
 
 namespace Web::CSS {
 
@@ -21,24 +23,39 @@ Flex Flex::make_fr(double value)
     return { value, FlexUnit::Fr };
 }
 
+Flex Flex::from_style_value(NonnullRefPtr<StyleValue const> const& value)
+{
+    if (value->is_flex())
+        return value->as_flex().flex();
+
+    if (value->is_calculated())
+        return value->as_calculated().resolve_flex({}).value();
+
+    VERIFY_NOT_REACHED();
+}
+
 Flex Flex::percentage_of(Percentage const& percentage) const
 {
     return Flex { percentage.as_fraction() * m_value, m_unit };
 }
 
-String Flex::to_string(SerializationMode serialization_mode) const
+void Flex::serialize(StringBuilder& builder, SerializationMode serialization_mode) const
 {
     // https://drafts.csswg.org/cssom/#serialize-a-css-value
     // AD-HOC: No spec definition, so copy the other <dimension> definitions
     if (serialization_mode == SerializationMode::ResolvedValue) {
-        StringBuilder builder;
         serialize_a_number(builder, to_fr());
         builder.append("fr"sv);
-        return builder.to_string_without_validation();
+        return;
     }
-    StringBuilder builder;
     serialize_a_number(builder, raw_value());
     builder.append(unit_name());
+}
+
+String Flex::to_string(SerializationMode serialization_mode) const
+{
+    StringBuilder builder;
+    serialize(builder, serialization_mode);
     return builder.to_string_without_validation();
 }
 

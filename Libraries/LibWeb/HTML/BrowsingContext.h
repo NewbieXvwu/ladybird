@@ -27,12 +27,12 @@ public:
         GC::Ref<DOM::Document> document;
     };
 
-    static WebIDL::ExceptionOr<BrowsingContextAndDocument> create_a_new_browsing_context_and_document(GC::Ref<Page> page, GC::Ptr<DOM::Document> creator, GC::Ptr<DOM::Element> embedder, GC::Ref<BrowsingContextGroup> group);
-    static WebIDL::ExceptionOr<BrowsingContextAndDocument> create_a_new_auxiliary_browsing_context_and_document(GC::Ref<Page> page, GC::Ref<HTML::BrowsingContext> opener);
+    static BrowsingContextAndDocument create_a_new_browsing_context_and_document(GC::Ref<Page> page, GC::Ptr<DOM::Document> creator, GC::Ptr<DOM::Element> embedder, GC::Ref<BrowsingContextGroup> group);
+    static BrowsingContextAndDocument create_a_new_auxiliary_browsing_context_and_document(GC::Ref<Page> page, GC::Ref<HTML::BrowsingContext> opener);
 
     virtual ~BrowsingContext() override;
 
-    GC::Ref<TraversableNavigable> top_level_traversable() const;
+    GC::Ref<LocalTraversableNavigable> top_level_traversable() const;
 
     bool is_ancestor_of(BrowsingContext const&) const;
     bool is_familiar_with(BrowsingContext const&) const;
@@ -42,6 +42,7 @@ public:
 
     DOM::Document const* active_document() const;
     DOM::Document* active_document();
+    void set_active_document(GC::Ptr<DOM::Document>);
 
     HTML::WindowProxy* window_proxy();
     HTML::WindowProxy const* window_proxy() const;
@@ -93,6 +94,8 @@ private:
     // https://html.spec.whatwg.org/multipage/document-sequences.html#browsing-context
     GC::Ptr<WindowProxy> m_window_proxy;
 
+    GC::Ptr<DOM::Document> m_active_document;
+
     // https://html.spec.whatwg.org/multipage/browsers.html#opener-browsing-context
     GC::Ptr<BrowsingContext> m_opener_browsing_context;
 
@@ -116,11 +119,6 @@ private:
 
     // https://html.spec.whatwg.org/multipage/browsers.html#tlbc-group
     GC::Ptr<BrowsingContextGroup> m_group;
-
-    GC::Ptr<BrowsingContext> m_first_child;
-    GC::Ptr<BrowsingContext> m_last_child;
-    GC::Ptr<BrowsingContext> m_next_sibling;
-    GC::Ptr<BrowsingContext> m_previous_sibling;
 };
 
 URL::Origin determine_the_origin(Optional<URL::URL const&>, SandboxingFlagSet, Optional<URL::Origin> source_origin);

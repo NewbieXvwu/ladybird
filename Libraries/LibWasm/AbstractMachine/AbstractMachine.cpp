@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Checked.h>
 #include <AK/Enumerate.h>
+#include <AK/NeverDestroyed.h>
+#include <AK/SaturatingMath.h>
+#include <LibGC/Heap.h>
+#include <LibSync/MutexProtected.h>
 #include <LibWasm/AbstractMachine/AbstractMachine.h>
 #include <LibWasm/AbstractMachine/BytecodeInterpreter.h>
 #include <LibWasm/AbstractMachine/Configuration.h>
@@ -14,26 +19,535 @@
 
 namespace Wasm {
 
+static auto& module_stats()
+{
+    static NeverDestroyed<Sync::MutexProtected<Vector<ModuleStats>>> stats;
+    return *stats;
+}
+
+void record_module_stats(ModuleStats stats)
+{
+    module_stats().with_locked([&](auto& v) {
+        v.append(move(stats));
+    });
+}
+
+void dump_module_stats()
+{
+    module_stats().with_locked([&](auto& v) {
+        if (v.is_empty()) {
+            warnln("wasm-stats: no modules compiled yet");
+            return;
+        }
+
+        warnln("wasm-stats: {} module(s) compiled", v.size());
+        warnln("wasm-stats:   hash      input KiB  parse ms  validate ms  cl ms  cl blob KiB  funcs   tu fns   tu pts  cache");
+
+        AK::Duration total_parse;
+        AK::Duration total_validate;
+        AK::Duration total_cranelift;
+        size_t total_input = 0;
+        size_t total_blob = 0;
+        size_t total_hits = 0;
+        size_t total_tier_up_functions = 0;
+        size_t total_tier_up_checkpoints = 0;
+
+        for (auto const& s : v) {
+            StringBuilder hash_prefix;
+            for (size_t i = 0; i < 4; ++i)
+                hash_prefix.appendff("{:02x}", s.wasm_hash[i]);
+
+            warnln("wasm-stats:   {}  {:>9}  {:>8}  {:>11}  {:>5}  {:>11}  {:>5}  {:>7}  {:>7}  {}",
+                hash_prefix.to_byte_string(),
+                s.input_size_bytes / 1024,
+                s.parse_time.to_milliseconds(),
+                s.validate_time.to_milliseconds(),
+                s.cranelift_time.to_milliseconds(),
+                s.cranelift_blob_size_bytes / 1024,
+                s.function_count,
+                s.tier_up_function_count,
+                s.tier_up_checkpoint_count,
+                s.cache_hit ? "HIT" : "miss");
+
+            total_parse = total_parse + s.parse_time;
+            total_validate = total_validate + s.validate_time;
+            total_cranelift = total_cranelift + s.cranelift_time;
+            total_input += s.input_size_bytes;
+            total_blob += s.cranelift_blob_size_bytes;
+            total_tier_up_functions += s.tier_up_function_count;
+            total_tier_up_checkpoints += s.tier_up_checkpoint_count;
+            if (s.cache_hit)
+                ++total_hits;
+        }
+
+        warnln("wasm-stats:   ----      {:>9}  {:>8}  {:>11}  {:>5}  {:>11}  {:>5}  {:>7}  {:>7}  hits={}",
+            total_input / 1024,
+            total_parse.to_milliseconds(),
+            total_validate.to_milliseconds(),
+            total_cranelift.to_milliseconds(),
+            total_blob / 1024,
+            ""sv,
+            total_tier_up_functions,
+            total_tier_up_checkpoints,
+            total_hits);
+    });
+}
+
+GC_DEFINE_ALLOCATOR(StructInstance);
+GC_DEFINE_ALLOCATOR(ArrayInstance);
+
+void StructInstance::visit_edges(Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    for (auto& field : m_fields) {
+        if (auto* cell = field.gc_cell())
+            visitor.visit(cell);
+    }
+}
+
+void ArrayInstance::visit_edges(Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    for (auto& element : m_elements) {
+        if (auto* cell = element.gc_cell())
+            visitor.visit(cell);
+    }
+}
+
+void AbstractMachine::adopt_heap(GC::Heap& heap)
+{
+    VERIFY(!m_heap);
+    m_heap = &heap;
+    m_store.set_heap(heap);
+    m_roots_provider = make<RootsProvider>(heap, m_store);
+}
+
+void AbstractMachine::create_own_heap()
+{
+    m_owned_heap = make<GC::Heap>([](auto&) { }, GC::Heap::BecomeProcessDefault::No);
+    adopt_heap(*m_owned_heap);
+}
+
+void AbstractMachine::RootsProvider::for_each_conservative_range(AK::Function<void(ReadonlySpan<FlatPtr>)> const& callback) const
+{
+    static_assert(sizeof(Value) % sizeof(FlatPtr) == 0);
+    auto report_values = [&](Value const* data, size_t count) {
+        if (count == 0)
+            return;
+        callback({ reinterpret_cast<FlatPtr const*>(data), count * (sizeof(Value) / sizeof(FlatPtr)) });
+    };
+    auto report_references = [&](ReadonlySpan<Reference> references) {
+        if (references.is_empty())
+            return;
+        callback({ reinterpret_cast<FlatPtr const*>(references.data()), references.size() * (sizeof(Reference) / sizeof(FlatPtr)) });
+    };
+
+    for (auto* configuration : m_store.active_configurations()) {
+        // Scan up to capacity, not just size.
+        report_values(configuration->value_stack().data(), configuration->value_stack().capacity());
+        report_values(configuration->regs.data(), configuration->regs.size());
+        report_values(configuration->m_current_call_record.data(), configuration->m_current_call_record.size());
+        for (auto& arguments : configuration->m_call_argument_freelist)
+            report_values(arguments.data(), arguments.capacity());
+        for (auto& frame : configuration->m_frame_stack) {
+            if (frame.owns_locals())
+                report_values(frame.locals_data(), frame.owned_locals().size());
+        }
+    }
+
+    for (auto& table : m_store.tables())
+        report_references(table.elements().span());
+    for (auto& element : m_store.elements())
+        report_references(element.references().span());
+    for (auto& global : m_store.globals())
+        report_values(&global.value(), 1);
+    for (auto& exception : m_store.exceptions())
+        report_values(exception.params().data(), exception.params().size());
+}
+
+MemoryBuffer::~MemoryBuffer()
+{
+    clear();
+}
+
+MemoryBuffer::MemoryBuffer(MemoryBuffer&& other)
+    : m_size(exchange(other.m_size, 0))
+    , m_reserved_capacity(exchange(other.m_reserved_capacity, 0))
+    , m_handle(exchange(other.m_handle, {}))
+    , m_storage_offset(exchange(other.m_storage_offset, GC::PrimitiveStorage::invalid_offset))
+{
+}
+
+MemoryBuffer& MemoryBuffer::operator=(MemoryBuffer&& other)
+{
+    if (this != &other) {
+        clear();
+        m_size = exchange(other.m_size, 0);
+        m_reserved_capacity = exchange(other.m_reserved_capacity, 0);
+        m_handle = exchange(other.m_handle, {});
+        m_storage_offset = exchange(other.m_storage_offset, GC::PrimitiveStorage::invalid_offset);
+    }
+    return *this;
+}
+
+void MemoryBuffer::clear()
+{
+    if (m_handle.is_valid())
+        GC::PrimitiveStorage::the().free(m_handle);
+    m_reserved_capacity = 0;
+    m_size = 0;
+    m_handle = {};
+    m_storage_offset = GC::PrimitiveStorage::invalid_offset;
+}
+
+void MemoryBuffer::update_storage_offset()
+{
+    m_storage_offset = GC::PrimitiveStorage::the().offset(m_handle);
+}
+
+ErrorOr<void> MemoryBuffer::try_reserve(size_t capacity)
+{
+    if (m_handle.is_valid()) {
+        if (capacity <= m_reserved_capacity)
+            return {};
+        TRY(GC::PrimitiveStorage::the().try_reserve(m_handle, capacity));
+        m_reserved_capacity = GC::PrimitiveStorage::the().capacity(m_handle);
+        update_storage_offset();
+        return {};
+    }
+
+    m_handle = TRY(GC::PrimitiveStorage::the().try_reserve(0, capacity, GC::PrimitiveStorage::ZeroFillNewBytes::Yes));
+    m_reserved_capacity = capacity;
+    update_storage_offset();
+    return {};
+}
+
+ErrorOr<void> MemoryBuffer::try_resize(size_t new_size)
+{
+    VERIFY(new_size >= m_size);
+    if (m_handle.is_valid()) {
+        TRY(GC::PrimitiveStorage::the().try_resize(m_handle, new_size, GC::PrimitiveStorage::ZeroFillNewBytes::Yes));
+        m_reserved_capacity = GC::PrimitiveStorage::the().capacity(m_handle);
+        m_size = new_size;
+        update_storage_offset();
+        return {};
+    }
+
+    if (new_size == 0)
+        return {};
+
+    auto capacity = max(new_size, m_reserved_capacity);
+    m_handle = TRY(GC::PrimitiveStorage::the().try_reserve(new_size, capacity, GC::PrimitiveStorage::ZeroFillNewBytes::Yes));
+    m_reserved_capacity = capacity;
+    m_size = new_size;
+    update_storage_offset();
+    return {};
+}
+
+ErrorOr<void> MemoryBuffer::try_resize(size_t new_size, size_t reserved_capacity)
+{
+    VERIFY(new_size >= m_size);
+    VERIFY(new_size <= reserved_capacity);
+    if (m_handle.is_valid()) {
+        TRY(GC::PrimitiveStorage::the().try_resize_and_reserve(m_handle, new_size, reserved_capacity, GC::PrimitiveStorage::ZeroFillNewBytes::Yes));
+        m_reserved_capacity = GC::PrimitiveStorage::the().capacity(m_handle);
+        m_size = new_size;
+        update_storage_offset();
+        return {};
+    }
+
+    if (reserved_capacity == 0)
+        return {};
+
+    m_handle = TRY(GC::PrimitiveStorage::the().try_reserve(new_size, reserved_capacity, GC::PrimitiveStorage::ZeroFillNewBytes::Yes));
+    m_reserved_capacity = reserved_capacity;
+    m_size = new_size;
+    update_storage_offset();
+    return {};
+}
+
+size_t MemoryBuffer::contiguous_bytes_from(size_t offset, size_t count) const
+{
+    if (count == 0 || m_storage_offset == GC::PrimitiveStorage::invalid_offset)
+        return count;
+    auto caged_offset = GC::PrimitiveStorage::mask_offset(m_storage_offset + offset);
+    return min(count, GC::PrimitiveStorage::default_cage_size - caged_offset);
+}
+
+size_t MemoryBuffer::contiguous_bytes_before(size_t offset, size_t count) const
+{
+    if (count == 0 || m_storage_offset == GC::PrimitiveStorage::invalid_offset)
+        return count;
+    VERIFY(offset > 0);
+    auto caged_offset = GC::PrimitiveStorage::mask_offset(m_storage_offset + offset - 1);
+    return min(count, caged_offset + 1);
+}
+
+void MemoryBuffer::copy_to(size_t offset, Bytes destination) const
+{
+    VERIFY(offset <= size());
+    VERIFY(destination.size() <= size() - offset);
+
+    size_t copied = 0;
+    while (copied < destination.size()) {
+        auto chunk_size = contiguous_bytes_from(offset + copied, destination.size() - copied);
+        __builtin_memcpy(destination.data() + copied, offset_pointer(offset + copied), chunk_size);
+        copied += chunk_size;
+    }
+}
+
+void MemoryBuffer::copy_from(MemoryBuffer const& source, size_t source_offset, size_t destination_offset, size_t count)
+{
+    VERIFY(source_offset <= source.size());
+    VERIFY(count <= source.size() - source_offset);
+    VERIFY(destination_offset <= size());
+    VERIFY(count <= size() - destination_offset);
+
+    if (&source == this) {
+        move_data(destination_offset, source_offset, count);
+        return;
+    }
+
+    size_t copied = 0;
+    while (copied < count) {
+        auto source_chunk_size = source.contiguous_bytes_from(source_offset + copied, count - copied);
+        auto destination_chunk_size = contiguous_bytes_from(destination_offset + copied, count - copied);
+        auto chunk_size = min(source_chunk_size, destination_chunk_size);
+        __builtin_memcpy(offset_pointer(destination_offset + copied), source.offset_pointer(source_offset + copied), chunk_size);
+        copied += chunk_size;
+    }
+}
+
+void MemoryBuffer::fill(size_t offset, u8 value, size_t count)
+{
+    VERIFY(offset <= size());
+    VERIFY(count <= size() - offset);
+
+    size_t filled = 0;
+    while (filled < count) {
+        auto chunk_size = contiguous_bytes_from(offset + filled, count - filled);
+        __builtin_memset(offset_pointer(offset + filled), value, chunk_size);
+        filled += chunk_size;
+    }
+}
+
+void MemoryBuffer::overwrite(size_t offset, void const* source, size_t count)
+{
+    VERIFY(offset <= size());
+    VERIFY(count <= size() - offset);
+
+    auto const* source_bytes = static_cast<u8 const*>(source);
+    size_t copied = 0;
+    while (copied < count) {
+        auto chunk_size = contiguous_bytes_from(offset + copied, count - copied);
+        __builtin_memcpy(offset_pointer(offset + copied), source_bytes + copied, chunk_size);
+        copied += chunk_size;
+    }
+}
+
+void MemoryBuffer::move_data(size_t destination_offset, size_t source_offset, size_t count)
+{
+    VERIFY(destination_offset <= size());
+    VERIFY(count <= size() - destination_offset);
+    VERIFY(source_offset <= size());
+    VERIFY(count <= size() - source_offset);
+
+    if (count == 0 || destination_offset == source_offset)
+        return;
+
+    if (source_offset < destination_offset && destination_offset < source_offset + count) {
+        size_t remaining = count;
+        while (remaining > 0) {
+            auto source_chunk_size = contiguous_bytes_before(source_offset + remaining, remaining);
+            auto destination_chunk_size = contiguous_bytes_before(destination_offset + remaining, remaining);
+            auto chunk_size = min(source_chunk_size, destination_chunk_size);
+            remaining -= chunk_size;
+            __builtin_memmove(offset_pointer(destination_offset + remaining), offset_pointer(source_offset + remaining), chunk_size);
+        }
+        return;
+    }
+
+    size_t copied = 0;
+    while (copied < count) {
+        auto source_chunk_size = contiguous_bytes_from(source_offset + copied, count - copied);
+        auto destination_chunk_size = contiguous_bytes_from(destination_offset + copied, count - copied);
+        auto chunk_size = min(source_chunk_size, destination_chunk_size);
+        __builtin_memmove(offset_pointer(destination_offset + copied), offset_pointer(source_offset + copied), chunk_size);
+        copied += chunk_size;
+    }
+}
+
+bool MemoryBuffer::contains_virtual_address(void const* address) const
+{
+    if (!m_handle.is_valid())
+        return false;
+    return GC::PrimitiveStorage::the().contains(m_handle, address);
+}
+
+static ErrorOr<size_t> size_from_page_count(u64 pages)
+{
+    Checked<size_t> size { pages };
+    size *= Constants::page_size;
+    if (size.has_overflow())
+        return Error::from_errno(ENOMEM);
+    return size.value();
+}
+
+static ErrorOr<size_t> maximum_memory_size(MemoryType const& type)
+{
+    auto supported_max_pages = type.limits().address_type() == AddressType::I32 ? Constants::wasm32_max_pages : Constants::wasm64_max_pages;
+    auto max_pages = min(type.limits().max().value_or(supported_max_pages), supported_max_pages);
+    return size_from_page_count(max_pages);
+}
+
+static ErrorOr<size_t> initial_memory_reservation_size(MemoryType const& type)
+{
+    auto maximum_size = TRY(maximum_memory_size(type));
+    auto initial_size = TRY(size_from_page_count(type.limits().min()));
+    if (initial_size > maximum_size)
+        return Error::from_errno(ENOMEM);
+
+    if (type.limits().max().has_value())
+        return maximum_size;
+
+    if (type.limits().address_type() != AddressType::I32)
+        return initial_size;
+
+    return min(max(initial_size, static_cast<size_t>(Constants::wasm32_default_memory_reservation_size)), maximum_size);
+}
+
+static size_t grown_memory_reservation_size(size_t current_capacity, size_t required_size, size_t maximum_size)
+{
+    auto new_capacity = max(current_capacity, static_cast<size_t>(Constants::wasm32_default_memory_reservation_size));
+    while (new_capacity < required_size) {
+        if (new_capacity > maximum_size / 2) {
+            new_capacity = maximum_size;
+            break;
+        }
+        new_capacity *= 2;
+    }
+    return min(max(new_capacity, required_size), maximum_size);
+}
+
+ErrorOr<MemoryInstance> MemoryInstance::create(MemoryType const& type)
+{
+    MemoryInstance instance { type };
+
+    auto reserved_capacity = TRY(initial_memory_reservation_size(type));
+    TRY(instance.m_data.try_reserve(reserved_capacity));
+
+    auto initial_size = TRY(size_from_page_count(type.limits().min()));
+    if (!instance.grow(initial_size, GrowType::No))
+        return Error::from_string_literal("Failed to grow to requested size");
+
+    return { move(instance) };
+}
+
+MemoryInstance::MemoryInstance(MemoryType const& type)
+    : m_type(type)
+{
+}
+
+bool MemoryInstance::grow(size_t size_to_grow, GrowType grow_type, InhibitGrowCallback inhibit_callback)
+{
+    if (size_to_grow == 0)
+        return true;
+
+    auto maximum_size = maximum_memory_size(m_type);
+    if (maximum_size.is_error())
+        return false;
+
+    Checked<size_t> new_size { m_data.size() };
+    new_size += size_to_grow;
+    if (new_size.has_overflow() || new_size.value() > maximum_size.value())
+        return false;
+
+    auto new_capacity = m_data.capacity();
+    if (new_size.value() > new_capacity)
+        new_capacity = m_type.limits().max().has_value()
+            ? maximum_size.value()
+            : grown_memory_reservation_size(new_capacity, new_size.value(), maximum_size.value());
+
+    if (m_data.try_resize(new_size.value(), new_capacity).is_error())
+        return false;
+    if (inhibit_callback == InhibitGrowCallback::No && successful_grow_hook)
+        successful_grow_hook();
+
+    if (grow_type == GrowType::Yes)
+        m_type = MemoryType { Limits(m_type.limits().address_type(), m_type.limits().min() + size_to_grow / Constants::page_size, m_type.limits().max()) };
+
+    return true;
+}
+
+Vector<CompiledFunctionEntry> const& ModuleInstance::compiled_fn_table(Store& store) const
+{
+    if (m_compiled_fn_table_built)
+        return m_compiled_fn_table;
+
+    auto count = m_functions.size();
+    if (count == 0) {
+        m_compiled_fn_table_built = true;
+        return m_compiled_fn_table;
+    }
+
+    m_compiled_fn_table.resize_with_default_value_and_keep_capacity(count, {});
+    auto* entries = m_compiled_fn_table.data();
+
+    // Since we asynchronously compile the code to native, we'll need to rebuild this table incrementally until all functions have been compiled.
+    bool all_ready = true;
+    for (size_t i = 0; i < count; i++) {
+        auto* instance = store.unsafe_get(m_functions[i]);
+        auto* wasm_fn = instance->get_pointer<WasmFunction>();
+        if (!wasm_fn)
+            continue;
+        if (auto src = wasm_fn->module_ref(); src && !src->has_attempted_cranelift_compilation())
+            all_ready = false;
+        auto& ci = wasm_fn->code().func().body().compiled_instructions;
+        auto native = cranelift_entry_acquire(ci);
+        if (native == 0)
+            continue;
+
+        auto& entry = entries[i];
+        entry.handler_ptr = native;
+        entry.dispatches_ptr = bit_cast<FlatPtr>(ci.dispatches.data());
+        entry.src_dst_ptr = bit_cast<FlatPtr>(ci.src_dst_mappings.data());
+        entry.first_insn = ci.dispatches[0].instruction;
+        entry.expression = &wasm_fn->code().func().body();
+        entry.module = &wasm_fn->module();
+        entry.total_local_count = static_cast<u32>(wasm_fn->code().func().total_local_count());
+        entry.arity = static_cast<u32>(wasm_fn->type().results().size());
+        entry.max_call_rec_size = static_cast<u32>(ci.max_call_rec_size);
+    }
+    m_compiled_fn_table_built = all_ready;
+    return m_compiled_fn_table;
+}
+
 Optional<FunctionAddress> Store::allocate(ModuleInstance& instance, Module const& module, CodeSection::Code const& code, TypeIndex type_index)
 {
     FunctionAddress address { m_functions.size() };
     if (type_index.value() >= instance.types().size())
         return {};
 
-    auto& type = instance.types()[type_index.value()];
-    m_functions.empend(WasmFunction { type, instance, module, code });
+    auto& type = instance.types()[type_index.value()].function();
+    auto const* defined_type = instance.canonical_types()[type_index.value()];
+    m_functions.empend(WasmFunction { type, defined_type, instance, module, code });
     return address;
 }
 
 Optional<FunctionAddress> Store::allocate(HostFunction&& function)
 {
     FunctionAddress address { m_functions.size() };
+    if (!function.defined_type())
+        function.set_defined_type(canonicalize_type(TypeSection::Type { FunctionType { function.type() } }, TypeContext {}));
     m_functions.empend(HostFunction { move(function) });
     return address;
 }
 
 Optional<TableAddress> Store::allocate(TableType const& type)
 {
+    if (type.limits().min() > Constants::max_allowed_table_size)
+        return {};
+
     TableAddress address { m_tables.size() };
     Vector<Reference> elements;
     elements.ensure_capacity(type.limits().min());
@@ -48,10 +562,14 @@ Optional<MemoryAddress> Store::allocate(MemoryType const& type)
 {
     MemoryAddress address { m_memories.size() };
     auto instance = MemoryInstance::create(type);
+    if (instance.is_error() && m_heap) {
+        m_heap->collect_garbage();
+        instance = MemoryInstance::create(type);
+    }
     if (instance.is_error())
         return {};
 
-    m_memories.append(instance.release_value());
+    m_memories.append(make<MemoryInstance>(instance.release_value()));
     return address;
 }
 
@@ -76,12 +594,31 @@ Optional<ElementAddress> Store::allocate(ValueType const& type, Vector<Reference
     return address;
 }
 
+Optional<TagAddress> Store::allocate(FunctionType const& type, DefinedType const* defined_type, TagType::Flags flags)
+{
+    TagAddress address { m_tags.size() };
+    m_tags.append({ type, defined_type, flags });
+    return address;
+}
+
+Optional<ExceptionAddress> Store::allocate(TagAddress tag_address, Vector<Value> params)
+{
+    ExceptionAddress address { m_exceptions.size() };
+    m_exceptions.append(ExceptionInstance { tag_address, move(params) });
+    return address;
+}
+
 FunctionInstance* Store::get(FunctionAddress address)
 {
     auto value = address.value();
     if (m_functions.size() <= value)
         return nullptr;
-    return &m_functions[value];
+    auto& instance = m_functions[value];
+    if (auto const* wasm = instance.get_pointer<WasmFunction>()) {
+        if (!wasm->try_module())
+            return nullptr;
+    }
+    return &instance;
 }
 
 Module const* Store::get_module_for(Wasm::FunctionAddress address)
@@ -90,6 +627,14 @@ Module const* Store::get_module_for(Wasm::FunctionAddress address)
     if (!function || function->has<HostFunction>())
         return nullptr;
     return function->get<WasmFunction>().module_ref().ptr();
+}
+
+RefPtr<ModuleInstance const> Store::get_module_instance_for(FunctionAddress address)
+{
+    auto* function = get(address);
+    if (!function || function->has<HostFunction>())
+        return nullptr;
+    return function->get<WasmFunction>().try_module();
 }
 
 TableInstance* Store::get(TableAddress address)
@@ -105,7 +650,7 @@ MemoryInstance* Store::get(MemoryAddress address)
     auto value = address.value();
     if (m_memories.size() <= value)
         return nullptr;
-    return &m_memories[value];
+    return m_memories[value].ptr();
 }
 
 GlobalInstance* Store::get(GlobalAddress address)
@@ -132,7 +677,23 @@ DataInstance* Store::get(DataAddress address)
     return &m_datas[value];
 }
 
-ErrorOr<void, ValidationError> AbstractMachine::validate(Module& module)
+TagInstance* Store::get(TagAddress address)
+{
+    auto value = address.value();
+    if (m_tags.size() <= value)
+        return nullptr;
+    return &m_tags[value];
+}
+
+ExceptionInstance* Store::get(ExceptionAddress address)
+{
+    auto value = address.value();
+    if (m_exceptions.size() <= value)
+        return nullptr;
+    return &m_exceptions[value];
+}
+
+ErrorOr<void, ValidationError> AbstractMachine::validate(Module& module, Optional<CompileCacheConfig> cache_config, CompileToNative compile_to_native)
 {
     if (module.validation_status() != Module::ValidationStatus::Unchecked) {
         if (module.validation_status() == Module::ValidationStatus::Valid)
@@ -141,28 +702,49 @@ ErrorOr<void, ValidationError> AbstractMachine::validate(Module& module)
         return ValidationError { module.validation_error() };
     }
 
-    auto result = Validator {}.validate(module);
+    Validator validator;
+    auto result = validator.validate(module);
     if (result.is_error()) {
         module.set_validation_error(result.error().error_string);
         return result.release_error();
+    }
+
+    if (compile_to_native == CompileToNative::Yes && module.try_begin_cranelift_compilation()) {
+        if (cache_config.has_value())
+            module.set_cranelift_cache_config(cache_config.release_value());
+        compile_module_to_native(module);
+        module.finish_cranelift_compilation();
     }
 
     return {};
 }
 InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<ExternValue> externs)
 {
+    // FIXME: Only create a heap if we actually have GC used in the module.
+    heap();
+
     if (auto result = validate(const_cast<Module&>(module)); result.is_error())
         return InstantiationError { ByteString::formatted("Validation failed: {}", result.error()) };
 
-    auto main_module_instance_pointer = make<ModuleInstance>();
+    auto main_module_instance_pointer = adopt_ref(*new ModuleInstance);
+    main_module_instance_pointer->cached_minimum_call_record_allocation_size = module.minimum_call_record_allocation_size();
     auto& main_module_instance = *main_module_instance_pointer;
 
     main_module_instance.types() = module.type_section().types();
+    main_module_instance.canonical_types() = module.canonical_types();
 
     Vector<Value> global_values;
     Vector<Vector<Reference>> elements;
-    ModuleInstance auxiliary_instance;
+    auto auxiliary_instance_ptr = adopt_ref(*new ModuleInstance);
+    auto& auxiliary_instance = *auxiliary_instance_ptr;
 
+    auxiliary_instance.cached_minimum_call_record_allocation_size = module.minimum_call_record_allocation_size();
+    auxiliary_instance.types() = module.type_section().types();
+    auxiliary_instance.canonical_types() = module.canonical_types();
+
+    // https://webassembly.github.io/spec/core/exec/modules.html#instantiation
+    // https://webassembly.github.io/spec/core/valid/matching.html#external-types
+    TypeContext const import_type_context { module.canonical_types().span() };
     for (auto [i, import_] : enumerate(module.import_section().imports())) {
         auto extern_ = externs.at(i);
         auto invalid = import_.description().visit(
@@ -170,7 +752,7 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
                 if (!extern_.has<MemoryAddress>())
                     return "Expected memory import"sv;
                 auto other_mem_type = m_store.get(extern_.get<MemoryAddress>())->type();
-                if (other_mem_type.limits().is_subset_of(mem_type.limits()))
+                if (matches_memory_type(other_mem_type, mem_type))
                     return {};
                 return ByteString::formatted("Memory import and extern do not match: {}-{} vs {}-{}", mem_type.limits().min(), mem_type.limits().max(), other_mem_type.limits().min(), other_mem_type.limits().max());
             },
@@ -178,8 +760,7 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
                 if (!extern_.has<TableAddress>())
                     return "Expected table import"sv;
                 auto other_table_type = m_store.get(extern_.get<TableAddress>())->type();
-                if (table_type.element_type() == other_table_type.element_type()
-                    && other_table_type.limits().is_subset_of(table_type.limits()))
+                if (matches_table_type(other_table_type, table_type, TypeContext {}, import_type_context))
                     return {};
 
                 return ByteString::formatted("Table import and extern do not match: {}-{} vs {}-{}", table_type.limits().min(), table_type.limits().max(), other_table_type.limits().min(), other_table_type.limits().max());
@@ -188,8 +769,7 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
                 if (!extern_.has<GlobalAddress>())
                     return "Expected global import"sv;
                 auto other_global_type = m_store.get(extern_.get<GlobalAddress>())->type();
-                if (global_type.type() == other_global_type.type()
-                    && global_type.is_mutable() == other_global_type.is_mutable())
+                if (matches_global_type(other_global_type, global_type, TypeContext {}, import_type_context))
                     return {};
                 return "Global import and extern do not match"sv;
             },
@@ -203,15 +783,33 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
                     return ByteString::formatted("Function import and extern do not match, parameters: {} vs {}", type.parameters(), other_type.parameters());
                 return {};
             },
+            [&](TagType const& type) -> Optional<ByteString> {
+                if (!extern_.has<TagAddress>())
+                    return "Expected tag import"sv;
+                auto other_tag_instance = m_store.get(extern_.get<TagAddress>());
+                if (other_tag_instance->flags() != type.flags())
+                    return "Tag import and extern do not match"sv;
+
+                auto const* defined_type = module.canonical_types()[type.type().value()];
+                if (other_tag_instance->defined_type() && defined_type) {
+                    if (!matches_tag_type(*other_tag_instance->defined_type(), *defined_type))
+                        return "Tag import and extern do not match"sv;
+                    return {};
+                }
+
+                auto& this_type = module.type_section().types()[type.type().value()];
+                if (other_tag_instance->type().parameters() != this_type.function().parameters())
+                    return "Tag import and extern do not match"sv;
+                return {};
+            },
             [&](TypeIndex type_index) -> Optional<ByteString> {
                 if (!extern_.has<FunctionAddress>())
                     return "Expected function import"sv;
-                auto other_type = m_store.get(extern_.get<FunctionAddress>())->visit([&](WasmFunction const& wasm_func) { return wasm_func.type(); }, [&](HostFunction const& host_func) { return host_func.type(); });
-                auto& type = module.type_section().types()[type_index.value()];
-                if (type.results() != other_type.results())
-                    return ByteString::formatted("Function import and extern do not match, results: {} vs {}", type.results(), other_type.results());
-                if (type.parameters() != other_type.parameters())
-                    return ByteString::formatted("Function import and extern do not match, parameters: {} vs {}", type.parameters(), other_type.parameters());
+                auto const* other_defined_type = m_store.get(extern_.get<FunctionAddress>())->visit([&](WasmFunction const& wasm_func) { return wasm_func.defined_type(); }, [&](HostFunction const& host_func) { return host_func.defined_type(); });
+                auto const* defined_type = module.canonical_types()[type_index.value()];
+                VERIFY(other_defined_type && defined_type);
+                if (!matches_defined_type(*other_defined_type, *defined_type))
+                    return ByteString::formatted("Function import and extern do not match: {} vs {}", module.type_section().types()[type_index.value()].name(), other_defined_type->sub_type().name());
                 return {};
             });
         if (invalid.has_value())
@@ -245,19 +843,36 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
         Configuration config { m_store };
         if (m_should_limit_instruction_count)
             config.enable_instruction_count_limit();
-        config.set_frame(Frame {
+        config.set_frame(IsTailcall::No,
             auxiliary_instance,
-            Vector<Value> {},
+            Vector<Value, ArgumentsStaticSize> {},
             entry.expression(),
-            1,
-        });
+            1uz);
         auto result = config.execute(interpreter);
         if (result.is_trap())
             return InstantiationError { "Global instantiation trapped", move(result.trap()) };
         global_values.append(result.values().first());
+        auto addr = m_store.allocate(entry.type(), result.values().first()).release_value();
+        auxiliary_instance.globals().append(addr);
     }
 
-    if (auto result = allocate_all_initial_phase(module, main_module_instance, externs, global_values, module_functions); result.has_value())
+    Vector<Value> table_initial_values;
+    for (auto& table : module.table_section().tables()) {
+        Configuration config { m_store };
+        if (m_should_limit_instruction_count)
+            config.enable_instruction_count_limit();
+        config.set_frame(IsTailcall::No,
+            auxiliary_instance,
+            Vector<Value, ArgumentsStaticSize> {},
+            table.initializer(),
+            1uz);
+        auto result = config.execute(interpreter);
+        if (result.is_trap())
+            return InstantiationError { "Table initializer trapped", move(result.trap()) };
+        table_initial_values.append(result.values().first());
+    }
+
+    if (auto result = allocate_all_initial_phase(module, main_module_instance, externs, global_values, table_initial_values, module_functions); result.has_value())
         return result.release_value();
 
     for (auto& segment : module.element_section().segments()) {
@@ -266,12 +881,12 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
             Configuration config { m_store };
             if (m_should_limit_instruction_count)
                 config.enable_instruction_count_limit();
-            config.set_frame(Frame {
-                auxiliary_instance,
-                Vector<Value> {},
+            // https://webassembly.github.io/spec/core/exec/modules.html#instantiation
+            config.set_frame(IsTailcall::No,
+                main_module_instance,
+                Vector<Value, ArgumentsStaticSize> {},
                 entry,
-                entry.instructions().size() - 1,
-            });
+                1uz);
             auto result = config.execute(interpreter);
             if (result.is_trap())
                 return InstantiationError { "Element section initialisation trapped", move(result.trap()) };
@@ -291,6 +906,8 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
     for (auto& segment : module.element_section().segments()) {
         auto current_index = index;
         ++index;
+        if (current_index >= main_module_instance.elements().size())
+            return InstantiationError { "Invalid element referenced by active element segment" };
         auto active_ptr = segment.mode.get_pointer<ElementSection::Active>();
         auto elem_instance = m_store.get(main_module_instance.elements()[current_index]);
         if (!active_ptr) {
@@ -298,34 +915,39 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
                 *elem_instance = ElementInstance(elem_instance->type(), {});
             continue;
         }
+        if (active_ptr->index.value() >= main_module_instance.tables().size())
+            return InstantiationError { "Invalid table referenced by active element segment" };
         Configuration config { m_store };
         if (m_should_limit_instruction_count)
             config.enable_instruction_count_limit();
-        config.set_frame(Frame {
-            auxiliary_instance,
-            Vector<Value> {},
+        config.set_frame(IsTailcall::No,
+            main_module_instance,
+            Vector<Value, ArgumentsStaticSize> {},
             active_ptr->expression,
-            1,
-        });
+            1uz);
         auto result = config.execute(interpreter);
         if (result.is_trap())
             return InstantiationError { "Element section initialisation trapped", move(result.trap()) };
-        auto d = result.values().first().to<i32>();
         auto table_instance = m_store.get(main_module_instance.tables()[active_ptr->index.value()]);
-        if (current_index >= main_module_instance.elements().size())
-            return InstantiationError { "Invalid element referenced by active element segment" };
         if (!table_instance || !elem_instance)
             return InstantiationError { "Invalid element referenced by active element segment" };
 
-        Checked<size_t> total_size = elem_instance->references().size();
-        total_size.saturating_add(d);
+        auto d = result.values().first().to<u64>();
+        if (table_instance->type().limits().address_type() == AddressType::I32)
+            d = static_cast<u32>(d);
 
-        if (total_size.value() > table_instance->elements().size())
+        auto total_size = saturating_add<u64>(elem_instance->references().size(), d);
+
+        if (total_size > table_instance->elements().size())
             return InstantiationError { "Table instantiation out of bounds" };
 
         size_t i = 0;
-        for (auto it = elem_instance->references().begin(); it < elem_instance->references().end(); ++i, ++it)
-            table_instance->elements()[i + d] = *it;
+        for (auto it = elem_instance->references().begin(); it < elem_instance->references().end(); ++i, ++it) {
+            RefPtr<ModuleInstance const> anchor;
+            if (auto const* func = it->ref().template get_pointer<Reference::Func>())
+                anchor = m_store.get_module_instance_for(func->address);
+            table_instance->set_element(i + d, *it, move(anchor));
+        }
         // Drop element
         *m_store.get(main_module_instance.elements()[current_index]) = ElementInstance(elem_instance->type(), {});
     }
@@ -336,16 +958,14 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
                 Configuration config { m_store };
                 if (m_should_limit_instruction_count)
                     config.enable_instruction_count_limit();
-                config.set_frame(Frame {
-                    auxiliary_instance,
-                    Vector<Value> {},
+                config.set_frame(IsTailcall::No,
+                    main_module_instance,
+                    Vector<Value, ArgumentsStaticSize> {},
                     data.offset,
-                    1,
-                });
+                    1uz);
                 auto result = config.execute(interpreter);
                 if (result.is_trap())
                     return InstantiationError { "Data section initialisation trapped", move(result.trap()) };
-                size_t offset = result.values().first().to<u64>();
                 if (main_module_instance.memories().size() <= data.index.value()) {
                     return InstantiationError {
                         ByteString::formatted("Data segment referenced out-of-bounds memory ({}) of max {} entries",
@@ -360,6 +980,9 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
 
                 auto address = main_module_instance.memories()[data.index.value()];
                 auto instance = m_store.get(address);
+                u64 offset = result.values().first().to<u64>();
+                if (instance->type().limits().address_type() == AddressType::I32)
+                    offset = static_cast<u32>(offset);
                 Checked<size_t> checked_offset = data.init.size();
                 checked_offset += offset;
                 if (checked_offset.has_overflow() || checked_offset > instance->size()) {
@@ -397,7 +1020,7 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
     return InstantiationResult { move(main_module_instance_pointer) };
 }
 
-Optional<InstantiationError> AbstractMachine::allocate_all_initial_phase(Module const& module, ModuleInstance& module_instance, Vector<ExternValue>& externs, Vector<Value>& global_values, Vector<FunctionAddress>& own_functions)
+Optional<InstantiationError> AbstractMachine::allocate_all_initial_phase(Module const& module, ModuleInstance& module_instance, Vector<ExternValue>& externs, Vector<Value>& global_values, Vector<Value>& table_initial_values, Vector<FunctionAddress>& own_functions)
 {
     Optional<InstantiationError> result;
 
@@ -406,35 +1029,57 @@ Optional<InstantiationError> AbstractMachine::allocate_all_initial_phase(Module 
             [&](FunctionAddress const& address) { module_instance.functions().append(address); },
             [&](TableAddress const& address) { module_instance.tables().append(address); },
             [&](MemoryAddress const& address) { module_instance.memories().append(address); },
-            [&](GlobalAddress const& address) { module_instance.globals().append(address); });
+            [&](GlobalAddress const& address) { module_instance.globals().append(address); },
+            [&](TagAddress const& address) { module_instance.tags().append(address); });
     }
 
     module_instance.functions().extend(own_functions);
 
-    // FIXME: What if this fails?
+    // https://webassembly.github.io/spec/core/valid/conventions.html#aux-clostype
+    TypeContext const module_type_context { module.canonical_types().span() };
 
-    for (auto& table : module.table_section().tables()) {
-        auto table_address = m_store.allocate(table.type());
-        VERIFY(table_address.has_value());
+    for (auto [table_index, table] : enumerate(module.table_section().tables())) {
+        auto table_address = m_store.allocate(TableType { canonicalized(table.type().element_type(), module_type_context), table.type().limits() });
+        if (!table_address.has_value())
+            return InstantiationError { "Failed to allocate a table instance" };
         module_instance.tables().append(*table_address);
+
+        auto reference = table_initial_values[table_index].to<Reference>();
+        if (!reference.ref().has<Reference::Null>()) {
+            auto* table_instance = m_store.get(*table_address);
+            RefPtr<ModuleInstance const> anchor;
+            if (reference.ref().has<Reference::Func>())
+                anchor = &module_instance;
+            for (size_t i = 0; i < table_instance->elements().size(); ++i)
+                table_instance->set_element(i, reference, anchor);
+        }
     }
 
     for (auto& memory : module.memory_section().memories()) {
         auto memory_address = m_store.allocate(memory.type());
-        VERIFY(memory_address.has_value());
+        if (!memory_address.has_value())
+            return InstantiationError { "Failed to allocate a memory instance" };
         module_instance.memories().append(*memory_address);
     }
 
     size_t index = 0;
     for (auto& entry : module.global_section().entries()) {
-        auto address = m_store.allocate(entry.type(), move(global_values[index]));
+        auto address = m_store.allocate(GlobalType { canonicalized(entry.type().type(), module_type_context), entry.type().is_mutable() }, move(global_values[index]));
         VERIFY(address.has_value());
         module_instance.globals().append(*address);
         index++;
     }
 
+    for (auto& entry : module.tag_section().tags()) {
+        auto& type = module.type_section().types()[entry.type().value()];
+        auto const* defined_type = module.canonical_types()[entry.type().value()];
+        auto address = m_store.allocate(type.function(), defined_type, entry.flags());
+        VERIFY(address.has_value());
+        module_instance.tags().append(*address);
+    }
+
     for (auto& entry : module.export_section().entries()) {
-        Variant<FunctionAddress, TableAddress, MemoryAddress, GlobalAddress, Empty> address {};
+        Variant<FunctionAddress, TableAddress, MemoryAddress, GlobalAddress, TagAddress, Empty> address {};
         entry.description().visit(
             [&](FunctionIndex const& index) {
                 if (module_instance.functions().size() > index.value())
@@ -459,6 +1104,12 @@ Optional<InstantiationError> AbstractMachine::allocate_all_initial_phase(Module 
                     address = GlobalAddress { module_instance.globals()[index.value()] };
                 else
                     dbgln("Failed to export '{}', the exported address ({}) was out of bounds (min: 0, max: {})", entry.name(), index.value(), module_instance.globals().size());
+            },
+            [&](TagIndex const& index) {
+                if (module_instance.tags().size() > index.value())
+                    address = TagAddress { module_instance.tags()[index.value()] };
+                else
+                    dbgln("Failed to export '{}', the exported address ({}) was out of bounds (min: 0, max: {})", entry.name(), index.value(), module_instance.tags().size());
             });
 
         if (address.has<Empty>()) {
@@ -468,7 +1119,7 @@ Optional<InstantiationError> AbstractMachine::allocate_all_initial_phase(Module 
 
         module_instance.exports().append(ExportInstance {
             entry.name(),
-            move(address).downcast<FunctionAddress, TableAddress, MemoryAddress, GlobalAddress>(),
+            move(address).downcast<FunctionAddress, TableAddress, MemoryAddress, GlobalAddress, TagAddress>(),
         });
     }
 
@@ -500,7 +1151,9 @@ Result AbstractMachine::invoke(Interpreter& interpreter, FunctionAddress address
     Configuration configuration { m_store };
     if (m_should_limit_instruction_count)
         configuration.enable_instruction_count_limit();
-    return configuration.call(interpreter, address, move(arguments));
+
+    Vector<Value, ArgumentsStaticSize> args = move(arguments);
+    return configuration.call(interpreter, address, args);
 }
 
 void Linker::link(ModuleInstance const& instance)

@@ -2,6 +2,7 @@
  * Copyright (c) 2024, Jelle Raaijmakers <jelle@ladybird.org>
  * Copyright (c) 2024, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  * Copyright (c) 2024, Luke Wilde <luke@ladybird.org>
+ * Copyright (c) 2025, Undefine <undefine@undefine.pl>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -18,14 +19,19 @@ class WebGLBuffer final : public WebGLObject {
     GC_DECLARE_ALLOCATOR(WebGLBuffer);
 
 public:
-    static GC::Ref<WebGLBuffer> create(JS::Realm& realm, WebGLRenderingContextBase& context, GLuint handle);
+    static GC::Ref<WebGLBuffer> create(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase> context, GLuint handle);
 
     virtual ~WebGLBuffer();
 
+    bool is_compatible_with(GLenum target);
+
 protected:
-    explicit WebGLBuffer(JS::Realm&, WebGLRenderingContextBase&, GLuint handle);
+    explicit WebGLBuffer(JS::Realm&, GC::Ref<WebGLRenderingContextBase>, GLuint handle);
 
     virtual void initialize(JS::Realm&) override;
+
+private:
+    Optional<GLenum> m_target;
 };
 
 }

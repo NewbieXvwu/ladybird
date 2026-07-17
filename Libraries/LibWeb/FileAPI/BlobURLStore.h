@@ -6,8 +6,8 @@
 
 #pragma once
 
-#include <AK/HashMap.h>
-#include <AK/String.h>
+#include <AK/Utf16String.h>
+#include <LibGC/ConservativeHashMap.h>
 #include <LibGC/Ptr.h>
 #include <LibGC/Root.h>
 #include <LibURL/URL.h>
@@ -17,21 +17,22 @@ namespace Web::FileAPI {
 
 // https://w3c.github.io/FileAPI/#blob-url-entry
 struct BlobURLEntry {
-    using Object = Variant<GC::Root<Blob>, GC::Root<MediaSourceExtensions::MediaSource>>;
+    using Object = Variant<GC::Ref<Blob>, GC::Ref<MediaSourceExtensions::MediaSource>>;
 
     Object object;
-    GC::Root<HTML::EnvironmentSettingsObject> environment;
+    GC::Ref<HTML::EnvironmentSettingsObject> environment;
 };
 
 // https://w3c.github.io/FileAPI/#BlobURLStore
-using BlobURLStore = HashMap<String, BlobURLEntry>;
+using BlobURLStore = GC::ConservativeHashMap<Utf16String, BlobURLEntry>;
 
 BlobURLStore& blob_url_store();
 ErrorOr<Utf16String> generate_new_blob_url();
 ErrorOr<Utf16String> add_entry_to_blob_url_store(BlobURLEntry::Object);
 bool check_for_same_partition_blob_url_usage(URL::BlobURLEntry const&, GC::Ref<HTML::Environment>);
-struct NavigationEnvironment { };
-WEB_API Optional<URL::BlobURLEntry::Object> obtain_a_blob_object(URL::BlobURLEntry const&, Variant<GC::Ref<HTML::Environment>, NavigationEnvironment> environment);
+struct TopLevelNavigation { };
+struct TopLevelSelfFetch { };
+WEB_API Optional<URL::BlobURLEntry::Object> obtain_a_blob_object(URL::BlobURLEntry const&, Variant<GC::Ref<HTML::Environment>, TopLevelNavigation, TopLevelSelfFetch> environment);
 void remove_entry_from_blob_url_store(URL::URL const& url);
 Optional<BlobURLEntry const&> resolve_a_blob_url(URL::URL const&);
 

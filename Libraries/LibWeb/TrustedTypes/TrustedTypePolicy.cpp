@@ -10,7 +10,11 @@
 #include <LibJS/Runtime/Realm.h>
 #include <LibJS/Runtime/Value.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/DOM/Document.h>
+#include <LibWeb/HTML/TagNames.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
+#include <LibWeb/Namespace.h>
+#include <LibWeb/SVG/TagNames.h>
 #include <LibWeb/TrustedTypes/RequireTrustedTypesForDirective.h>
 #include <LibWeb/TrustedTypes/TrustedHTML.h>
 #include <LibWeb/TrustedTypes/TrustedScript.h>
@@ -24,10 +28,12 @@ namespace Web::TrustedTypes {
 
 GC_DEFINE_ALLOCATOR(TrustedTypePolicy);
 
-TrustedTypePolicy::TrustedTypePolicy(JS::Realm& realm, Utf16String const& name, TrustedTypePolicyOptions const& options)
+TrustedTypePolicy::TrustedTypePolicy(JS::Realm& realm, Utf16String const& name, Bindings::TrustedTypePolicyOptions const& options)
     : PlatformObject(realm)
     , m_name(name)
-    , m_options(options)
+    , m_create_html(options.create_html)
+    , m_create_script(options.create_script)
+    , m_create_script_url(options.create_script_url)
 {
 }
 
@@ -35,6 +41,14 @@ void TrustedTypePolicy::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(TrustedTypePolicy);
     Base::initialize(realm);
+}
+
+void TrustedTypePolicy::visit_edges(Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    visitor.visit(m_create_html);
+    visitor.visit(m_create_script);
+    visitor.visit(m_create_script_url);
 }
 
 Utf16String to_string(TrustedTypeName trusted_type_name)
@@ -51,7 +65,7 @@ Utf16String to_string(TrustedTypeName trusted_type_name)
     }
 }
 // https://w3c.github.io/trusted-types/dist/spec/#dom-trustedtypepolicy-createhtml
-WebIDL::ExceptionOr<GC::Root<TrustedHTML>> TrustedTypePolicy::create_html(Utf16String const& input, GC::RootVector<JS::Value> const& arguments)
+WebIDL::ExceptionOr<GC::Ref<TrustedHTML>> TrustedTypePolicy::create_html(Utf16String const& input, GC::RootVector<JS::Value> const& arguments)
 {
     // 1. Returns the result of executing the Create a Trusted Type algorithm, with the following arguments:
     //    policy
@@ -63,11 +77,11 @@ WebIDL::ExceptionOr<GC::Root<TrustedHTML>> TrustedTypePolicy::create_html(Utf16S
     //    arguments
     //      arguments
     auto const trusted_type = TRY(create_a_trusted_type(TrustedTypeName::TrustedHTML, input, arguments));
-    return trusted_type.get<GC::Root<TrustedHTML>>();
+    return trusted_type.get<GC::Ref<TrustedHTML>>();
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#dom-trustedtypepolicy-createscript
-WebIDL::ExceptionOr<GC::Root<TrustedScript>> TrustedTypePolicy::create_script(Utf16String const& input, GC::RootVector<JS::Value> const& arguments)
+WebIDL::ExceptionOr<GC::Ref<TrustedScript>> TrustedTypePolicy::create_script(Utf16String const& input, GC::RootVector<JS::Value> const& arguments)
 {
     // 1. Returns the result of executing the Create a Trusted Type algorithm, with the following arguments:
     //    policy
@@ -79,11 +93,11 @@ WebIDL::ExceptionOr<GC::Root<TrustedScript>> TrustedTypePolicy::create_script(Ut
     //    arguments
     //      arguments
     auto const trusted_type = TRY(create_a_trusted_type(TrustedTypeName::TrustedScript, input, arguments));
-    return trusted_type.get<GC::Root<TrustedScript>>();
+    return trusted_type.get<GC::Ref<TrustedScript>>();
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#dom-trustedtypepolicy-createscripturl
-WebIDL::ExceptionOr<GC::Root<TrustedScriptURL>> TrustedTypePolicy::create_script_url(Utf16String const& input, GC::RootVector<JS::Value> const& arguments)
+WebIDL::ExceptionOr<GC::Ref<TrustedScriptURL>> TrustedTypePolicy::create_script_url(Utf16String const& input, GC::RootVector<JS::Value> const& arguments)
 {
     // 1. Returns the result of executing the Create a Trusted Type algorithm, with the following arguments:
     //    policy
@@ -95,7 +109,7 @@ WebIDL::ExceptionOr<GC::Root<TrustedScriptURL>> TrustedTypePolicy::create_script
     //    arguments
     //      arguments
     auto const trusted_type = TRY(create_a_trusted_type(TrustedTypeName::TrustedScriptURL, input, arguments));
-    return trusted_type.get<GC::Root<TrustedScriptURL>>();
+    return trusted_type.get<GC::Ref<TrustedScriptURL>>();
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#create-a-trusted-type-algorithm
@@ -130,17 +144,17 @@ TrustedTypesVariants TrustedTypePolicy::create_a_trusted_type(TrustedTypeName tr
     // 5. Return a new instance of an interface with a type name trustedTypeName, with its associated data value set to dataString.
     switch (trusted_type_name) {
     case TrustedTypeName::TrustedHTML:
-        return realm.create<TrustedHTML>(realm, move(data_string));
+        return TrustedType { realm.create<TrustedHTML>(realm, move(data_string)) };
     case TrustedTypeName::TrustedScript:
-        return realm.create<TrustedScript>(realm, move(data_string));
+        return TrustedType { realm.create<TrustedScript>(realm, move(data_string)) };
     case TrustedTypeName::TrustedScriptURL:
-        return realm.create<TrustedScriptURL>(realm, move(data_string));
+        return TrustedType { realm.create<TrustedScriptURL>(realm, move(data_string)) };
     default:
         VERIFY_NOT_REACHED();
     }
 }
 
-// https://w3c.github.io/trusted-types/dist/spec/#abstract-opdef-get-trusted-type-policy-value
+// https://w3c.github.io/trusted-types/dist/spec/#get-trusted-type-policy-value
 WebIDL::ExceptionOr<JS::Value> TrustedTypePolicy::get_trusted_type_policy_value(TrustedTypeName trusted_type_name, Utf16String const& value, GC::RootVector<JS::Value> const& values, ThrowIfCallbackMissing throw_if_missing)
 {
     auto& vm = this->vm();
@@ -150,13 +164,13 @@ WebIDL::ExceptionOr<JS::Value> TrustedTypePolicy::get_trusted_type_policy_value(
     GC::Ptr<WebIDL::CallbackType> function;
     switch (trusted_type_name) {
     case TrustedTypeName::TrustedHTML:
-        function = m_options.create_html;
+        function = m_create_html;
         break;
     case TrustedTypeName::TrustedScript:
-        function = m_options.create_script;
+        function = m_create_script;
         break;
     case TrustedTypeName::TrustedScriptURL:
-        function = m_options.create_script_url;
+        function = m_create_script_url;
         break;
     default:
         VERIFY_NOT_REACHED();
@@ -166,14 +180,14 @@ WebIDL::ExceptionOr<JS::Value> TrustedTypePolicy::get_trusted_type_policy_value(
     if (!function) {
         // 1. If throwIfMissing throw a TypeError.
         if (throw_if_missing == ThrowIfCallbackMissing::Yes)
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Trying to create a trusted type without a callback"_string };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Trying to create a trusted type without a callback"_utf16 };
 
         // 2. Else return null
         return JS::js_null();
     }
 
     // 4. Let args be << value >>.
-    GC::RootVector<JS::Value> args(heap());
+    GC::RootVector<JS::Value> args;
     args.append(JS::PrimitiveString::create(vm, value));
 
     // 5. Append each item in arguments to args.
@@ -187,7 +201,7 @@ WebIDL::ExceptionOr<JS::Value> TrustedTypePolicy::get_trusted_type_policy_value(
 }
 
 // https://www.w3.org/TR/trusted-types/#process-value-with-a-default-policy-algorithm
-WebIDL::ExceptionOr<Optional<TrustedType>> process_value_with_a_default_policy(TrustedTypeName trusted_type_name, JS::Object& global, Variant<GC::Root<TrustedHTML>, GC::Root<TrustedScript>, GC::Root<TrustedScriptURL>, Utf16String> input, InjectionSink sink)
+WebIDL::ExceptionOr<Optional<TrustedType>> process_value_with_a_default_policy(TrustedTypeName trusted_type_name, JS::Object& global, Variant<GC::Ref<TrustedHTML>, GC::Ref<TrustedScript>, GC::Ref<TrustedScriptURL>, Utf16String> input, InjectionSink sink)
 {
     auto& vm = global.vm();
     auto& realm = HTML::relevant_realm(global);
@@ -213,7 +227,7 @@ WebIDL::ExceptionOr<Optional<TrustedType>> process_value_with_a_default_policy(T
     //    throwIfMissing:
     //      false
     //  3. If the algorithm threw an error, rethrow the error and abort the following steps.
-    auto arguments = GC::RootVector<JS::Value>(vm.heap());
+    auto arguments = GC::RootVector<JS::Value> {};
     arguments.append(JS::PrimitiveString::create(vm, to_string(trusted_type_name)));
     arguments.append(JS::PrimitiveString::create(vm, to_string(sink)));
     auto policy_value = TRY(default_policy->get_trusted_type_policy_value(
@@ -245,30 +259,30 @@ WebIDL::ExceptionOr<Optional<TrustedType>> process_value_with_a_default_policy(T
     //  6. Return a new instance of an interface with a type name trustedTypeName, with its associated data value set to dataString.
     switch (trusted_type_name) {
     case TrustedTypeName::TrustedHTML:
-        return realm.create<TrustedHTML>(realm, move(data_string));
+        return TrustedType { realm.create<TrustedHTML>(realm, move(data_string)) };
     case TrustedTypeName::TrustedScript:
-        return realm.create<TrustedScript>(realm, move(data_string));
+        return TrustedType { realm.create<TrustedScript>(realm, move(data_string)) };
     case TrustedTypeName::TrustedScriptURL:
-        return realm.create<TrustedScriptURL>(realm, move(data_string));
+        return TrustedType { realm.create<TrustedScriptURL>(realm, move(data_string)) };
     }
     VERIFY_NOT_REACHED();
 }
 
 // https://www.w3.org/TR/trusted-types/#get-trusted-type-compliant-string-algorithm
-WebIDL::ExceptionOr<Utf16String> get_trusted_type_compliant_string(TrustedTypeName expected_type, JS::Object& global, Variant<GC::Root<TrustedHTML>, GC::Root<TrustedScript>, GC::Root<TrustedScriptURL>, Utf16String> input, InjectionSink sink, String sink_group)
+WebIDL::ExceptionOr<Utf16String> get_trusted_type_compliant_string(TrustedTypeName expected_type, JS::Object& global, Variant<GC::Ref<TrustedHTML>, GC::Ref<TrustedScript>, GC::Ref<TrustedScriptURL>, Utf16String> input, InjectionSink sink, Utf16View sink_group)
 {
     // 1. If input is an instance of expectedType, return stringified input and abort these steps.
     switch (expected_type) {
     case TrustedTypeName::TrustedHTML:
-        if (auto* const value = input.get_pointer<GC::Root<TrustedHTML>>(); value)
+        if (auto* const value = input.get_pointer<GC::Ref<TrustedHTML>>(); value)
             return (*value)->to_string();
         break;
     case TrustedTypeName::TrustedScript:
-        if (auto* const value = input.get_pointer<GC::Root<TrustedScript>>(); value)
+        if (auto* const value = input.get_pointer<GC::Ref<TrustedScript>>(); value)
             return (*value)->to_string();
         break;
     case TrustedTypeName::TrustedScriptURL:
-        if (auto* const value = input.get_pointer<GC::Root<TrustedScriptURL>>(); value)
+        if (auto* const value = input.get_pointer<GC::Ref<TrustedScriptURL>>(); value)
             return (*value)->to_string();
         break;
     }
@@ -318,7 +332,7 @@ WebIDL::ExceptionOr<Utf16String> get_trusted_type_compliant_string(TrustedTypeNa
         }
 
         // 3. Throw a TypeError and abort further steps.
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Sink {} of type {} requires a TrustedType to be used", to_string(sink), sink_group)) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Sink {} of type {} requires a TrustedType to be used", to_string(sink), sink_group) };
     }
 
     // 7. Assert: convertedInput is an instance of expectedType.
@@ -327,17 +341,83 @@ WebIDL::ExceptionOr<Utf16String> get_trusted_type_compliant_string(TrustedTypeNa
     return converted_input.value().visit([&]<typename Type>(Type const& trusted_type) {
         switch (expected_type) {
         case TrustedTypeName::TrustedHTML:
-            VERIFY(IsSame<Type, GC::Root<TrustedHTML>>);
+            VERIFY(IsSame<Type, GC::Ref<TrustedHTML>>);
             break;
         case TrustedTypeName::TrustedScript:
-            VERIFY(IsSame<Type, GC::Root<TrustedScript>>);
+            VERIFY(IsSame<Type, GC::Ref<TrustedScript>>);
             break;
         case TrustedTypeName::TrustedScriptURL:
-            VERIFY(IsSame<Type, GC::Root<TrustedScriptURL>>);
+            VERIFY(IsSame<Type, GC::Ref<TrustedScriptURL>>);
             break;
         }
         return trusted_type->to_string();
     });
+}
+
+// https://w3c.github.io/trusted-types/dist/spec/#validate-attribute-mutation
+WebIDL::ExceptionOr<Utf16String> get_trusted_types_compliant_attribute_value(Utf16FlyString const& attribute_name, Optional<Utf16FlyString> attribute_ns, DOM::Element const& element, Variant<GC::Ref<TrustedHTML>, GC::Ref<TrustedScript>, GC::Ref<TrustedScriptURL>, Utf16String> const& new_value)
+{
+    // 1. If attributeNs is the empty string, set attributeNs to null.
+    if (attribute_ns.has_value() && attribute_ns.value().is_empty())
+        attribute_ns.clear();
+
+    // 2. Set attributeData to the result of Get Trusted Type data for attribute algorithm, with the following arguments:
+    //    element
+    //    attributeName
+    //    attributeNs
+    auto const attribute_data = get_trusted_type_data_for_attribute(
+        element_interface(
+            element.local_name(),
+            element.namespace_uri().value_or(Namespace::HTML)),
+        attribute_name,
+        attribute_ns);
+
+    // 3. If attributeData is null, then:
+    if (!attribute_data.has_value()) {
+        // 1. If newValue is a string, return newValue.
+        if (new_value.has<Utf16String>())
+            return new_value.get<Utf16String>();
+
+        // 2. Assert: newValue is TrustedHTML or TrustedScript or TrustedScriptURL.
+        VERIFY(new_value.has<GC::Ref<TrustedHTML>>() || new_value.has<GC::Ref<TrustedScript>>() || new_value.has<GC::Ref<TrustedScriptURL>>());
+
+        // 3. Return value’s associated data.
+        // FIXME: This is badly worded in the spec it should say "Return stringified newvalues's"
+        return new_value.downcast<TrustedType>().visit([](auto& value) { return value->to_string(); });
+    }
+
+    // 4. Let expectedType be the value of the fourth member of attributeData.
+    auto const expected_type = attribute_data->trusted_type;
+
+    // 5. Let sink be the value of the fifth member of attributeData.
+    auto const sink = attribute_data->sink;
+
+    // 6. Return the result of executing Get Trusted Type compliant string with the following arguments:
+    //      expectedType
+    //      newValue as input
+    //      element’s node document’s relevant global object as global
+    //      sink
+    //      'script' as sinkGroup
+    return get_trusted_type_compliant_string(
+        expected_type,
+        HTML::relevant_global_object(element.document()),
+        new_value,
+        sink,
+        Script.view());
+}
+
+ElementInterface element_interface(Utf16FlyString const& local_name, Utf16FlyString const& element_ns)
+{
+    // FIXME: We don't have a method in ElementFactory that can give us the interface name but these are all the cases
+    // we care about in the table in get_trusted_type_data_for_attribute function
+    if (local_name == HTML::TagNames::iframe && element_ns == Namespace::HTML)
+        return { "HTMLIFrameElement"_utf16, element_ns };
+    if (local_name == HTML::TagNames::script && element_ns == Namespace::HTML)
+        return { "HTMLScriptElement"_utf16, element_ns };
+    if (local_name == SVG::TagNames::script && element_ns == Namespace::SVG)
+        return { "SVGScriptElement"_utf16, element_ns };
+
+    return { "Element"_utf16, element_ns };
 }
 
 }

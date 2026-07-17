@@ -6,17 +6,25 @@
 
 #pragma once
 
-#include <AK/ByteBuffer.h>
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/HashTable.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/StackInfo.h>
 #include <AK/UFixedBigInt.h>
+#include <AK/Weakable.h>
+#include <LibGC/Cell.h>
+#include <LibGC/CellAllocator.h>
+#include <LibGC/ConservativeRangeProvider.h>
+#include <LibGC/Heap.h>
+#include <LibGC/PrimitiveStorage.h>
 #include <LibWasm/Export.h>
+#include <LibWasm/TypeSystem.h>
 #include <LibWasm/Types.h>
 
 namespace Wasm {
+
+constexpr inline size_t ArgumentsStaticSize = 3;
 
 class Configuration;
 class Result;
@@ -38,6 +46,8 @@ AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, GlobalAddress, Arithmetic, Comparison, 
 AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, ElementAddress, Arithmetic, Comparison, Increment);
 AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, DataAddress, Arithmetic, Comparison, Increment);
 AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, MemoryAddress, Arithmetic, Comparison, Increment);
+AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, TagAddress, Arithmetic, Comparison, Increment);
+AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, ExceptionAddress, Arithmetic, Comparison, Increment);
 
 // FIXME: These should probably be made generic/virtual if/when we decide to do something more
 //        fancy than just a dumb interpreter.
@@ -53,8 +63,20 @@ public:
     struct Extern {
         ExternAddress address;
     };
+    struct Exception {
+        ExceptionAddress address;
+    };
+    // https://webassembly.github.io/spec/core/exec/runtime.html#values
+    // ref.i31 i31: an unboxed 31-bit scalar reference.
+    struct I31 {
+        u32 value; // using only low 31 bits
+    };
+    // A reference to a structure or array instance (a GC::Cell, see StructInstance and ArrayInstance below).
+    struct GcObject {
+        GC::Ptr<GC::Cell> ptr;
+    };
 
-    using RefType = Variant<Null, Func, Extern>;
+    using RefType = Variant<Null, Func, Extern, Exception, I31, GcObject>;
     explicit Reference(RefType ref)
         : m_ref(move(ref))
     {
@@ -72,6 +94,8 @@ private:
 
 class Value {
 public:
+    Value() = default;
+
     explicit Value(ValueType type)
         : m_value(u128())
     {
@@ -81,14 +105,32 @@ public:
         case ValueType::F32:
         case ValueType::F64:
         case ValueType::V128:
+        case ValueType::I8:
+        case ValueType::I16:
             break;
         case ValueType::FunctionReference:
-            // ref.null funcref
+        case ValueType::NoFunctionReference:
+            // ref.null func | ref.null nofunc
             m_value = u128(0, 2);
             break;
         case ValueType::ExternReference:
-            // ref.null externref
+        case ValueType::NoExternReference:
+            // ref.null extern | ref.null noextern
             m_value = u128(0, 3);
+            break;
+        case ValueType::ExceptionReference:
+        case ValueType::NoExceptionReference:
+            // ref.null exn | ref.null noexn
+            m_value = u128(0, 4);
+            break;
+        case ValueType::AnyReference:
+        case ValueType::EqReference:
+        case ValueType::I31Reference:
+        case ValueType::StructReference:
+        case ValueType::ArrayReference:
+        case ValueType::NoneReference:
+        case ValueType::TypeUseReference:
+            m_value = u128(0, 8);
             break;
         }
     }
@@ -129,17 +171,55 @@ public:
     {
     }
 
-    explicit Value(Reference ref)
+    explicit Value(Reference const& ref)
     {
         // Reference variant is encoded in the high storage of the u128:
-        // 0: funcref
         // 1: externref
         // 2: null funcref
         // 3: null externref
+        // 4: null exnref
+        // 5: exnref
+        // 6: a gc object
+        // 7: an i31 reference
+        // 8: a null reference in the any hierarchy
+        // 9 | (tag << 8): an "externalized" internal reference (extern.convert_any)
+        // 10: a host externref viewed as a value in the any hierarchy (any.convert_extern)
+        // anything else: funcref, where high is the defining Module* (null for host functions)
         ref.ref().visit(
             [&](Reference::Func const& func) { m_value = u128(bit_cast<u64>(func.address), bit_cast<u64>(func.source_module.ptr())); },
             [&](Reference::Extern const& func) { m_value = u128(bit_cast<u64>(func.address), 1); },
-            [&](Reference::Null const& null) { m_value = u128(0, null.type.kind() == ValueType::Kind::FunctionReference ? 2 : 3); });
+            [&](Reference::Null const& null) {
+                switch (null.type.kind()) {
+                case ValueType::Kind::FunctionReference:
+                case ValueType::Kind::NoFunctionReference:
+                    m_value = u128(0, 2);
+                    break;
+                case ValueType::Kind::ExternReference:
+                case ValueType::Kind::NoExternReference:
+                    m_value = u128(0, 3);
+                    break;
+                case ValueType::Kind::ExceptionReference:
+                case ValueType::Kind::NoExceptionReference:
+                    m_value = u128(0, 4);
+                    break;
+                default:
+                    m_value = u128(0, 8);
+                    break;
+                }
+            },
+            [&](Reference::Exception const& exn) { m_value = u128(bit_cast<u64>(exn.address), 5); },
+            [&](Reference::I31 const& i31) { m_value = u128(static_cast<u64>(i31.value & 0x7fffffff), 7); },
+            [&](Reference::GcObject const& object) { m_value = u128(bit_cast<u64>(object.ptr.ptr()), 6); });
+    }
+
+    // The gc cell behind this value if it holds a gc object reference, otherwise null.
+    GC::Cell* gc_cell() const
+    {
+        // A gc object, either plain (tag 6) or externalized by extern.convert_any (tag 9
+        // wrapping tag 6).
+        if (m_value.high() == 6 || m_value.high() == (9 | (6 << 8)))
+            return bit_cast<GC::Cell*>(m_value.low());
+        return nullptr;
     }
 
     template<SameAs<u128> T>
@@ -175,15 +255,34 @@ public:
             return bit_cast<f64>(m_value.low());
         }
         if constexpr (IsSame<T, Reference>) {
-            switch (m_value.high() & 3) {
-            case 0:
-                return Reference { Reference::Func { bit_cast<FunctionAddress>(m_value.low()), bit_cast<Wasm::Module*>(m_value.high()) } };
+            switch (m_value.high()) {
             case 1:
                 return Reference { Reference::Extern { bit_cast<ExternAddress>(m_value.low()) } };
             case 2:
                 return Reference { Reference::Null { ValueType(ValueType::Kind::FunctionReference) } };
             case 3:
                 return Reference { Reference::Null { ValueType(ValueType::Kind::ExternReference) } };
+            case 4:
+                return Reference { Reference::Null { ValueType(ValueType::Kind::ExceptionReference) } };
+            case 5:
+                return Reference { Reference::Exception { bit_cast<ExceptionAddress>(m_value.low()) } };
+            case 6:
+                return Reference { Reference::GcObject { bit_cast<GC::Cell*>(m_value.low()) } };
+            case 7:
+                return Reference { Reference::I31 { static_cast<u32>(m_value.low()) } };
+            case 8:
+                return Reference { Reference::Null { ValueType(ValueType::Kind::AnyReference) } };
+            case 9 | (6 << 8):
+                // An externalized gc object; boxing drops the extern.convert_any wrapper.
+                return Reference { Reference::GcObject { bit_cast<GC::Cell*>(m_value.low()) } };
+            case 9 | (7 << 8):
+                // An externalized i31; boxing drops the extern.convert_any wrapper.
+                return Reference { Reference::I31 { static_cast<u32>(m_value.low()) } };
+            case 10:
+                // A host externref internalized by any.convert_extern; boxing drops the wrapper.
+                return Reference { Reference::Extern { bit_cast<ExternAddress>(m_value.low()) } };
+            default:
+                return Reference { Reference::Func { bit_cast<FunctionAddress>(m_value.low()), bit_cast<Wasm::Module*>(m_value.high()) } };
             }
         }
         VERIFY_NOT_REACHED();
@@ -195,6 +294,7 @@ private:
     u128 m_value;
 };
 static_assert(IsTriviallyDestructible<Value>);
+static_assert(IsTriviallyConstructible<Value>);
 
 struct ExternallyManagedTrap {
     Array<u8, 64> data;
@@ -207,13 +307,20 @@ struct ExternallyManagedTrap {
     }
 };
 
+// https://webassembly.github.io/spec/core/exec/runtime.html#results
+struct UncaughtException {
+    ExceptionAddress address;
+};
+
 struct Trap {
-    Variant<ByteString, ExternallyManagedTrap> data;
+    Variant<ByteString, ExternallyManagedTrap, UncaughtException> data;
 
     ByteString format() const
     {
         if (auto const* ptr = data.get_pointer<ByteString>())
             return *ptr;
+        if (data.has<UncaughtException>())
+            return "uncaught exception";
         return "<Externally managed Trap Data>";
     }
 
@@ -273,7 +380,22 @@ struct InstantiationError {
     InstantiationErrorSource source { InstantiationErrorSource::Linking };
 };
 
-using ExternValue = Variant<FunctionAddress, TableAddress, MemoryAddress, GlobalAddress>;
+using ExternValue = Variant<FunctionAddress, TableAddress, MemoryAddress, GlobalAddress, TagAddress>;
+
+class Store;
+class ModuleInstance;
+
+struct CompiledFunctionEntry {
+    FlatPtr handler_ptr { 0 };    // 0 = not compiled, use slow path
+    FlatPtr dispatches_ptr { 0 }; // Dispatch const*
+    FlatPtr src_dst_ptr { 0 };    // SourcesAndDestination const*
+    Instruction const* first_insn { nullptr };
+    Expression const* expression { nullptr };
+    ModuleInstance const* module { nullptr };
+    u32 total_local_count { 0 };
+    u32 arity { 0 };
+    u32 max_call_rec_size { 0 };
+};
 
 class ExportInstance {
 public:
@@ -291,18 +413,20 @@ private:
     ExternValue m_value;
 };
 
-class ModuleInstance {
+class WASM_API ModuleInstance : public RefCounted<ModuleInstance>
+    , public Weakable<ModuleInstance> {
 public:
     explicit ModuleInstance(
-        Vector<FunctionType> types, Vector<FunctionAddress> function_addresses, Vector<TableAddress> table_addresses,
-        Vector<MemoryAddress> memory_addresses, Vector<GlobalAddress> global_addresses, Vector<DataAddress> data_addresses,
-        Vector<ExportInstance> exports)
-        : m_types(move(types))
+        Vector<TypeSection::Type> types, Vector<FunctionAddress> function_addresses, Vector<TableAddress> table_addresses, Vector<MemoryAddress> memory_addresses, Vector<GlobalAddress> global_addresses, Vector<DataAddress> data_addresses, Vector<TagAddress> tag_addresses, Vector<TagType> tag_types, Vector<ExportInstance> exports, size_t minimum_call_record_allocation_size)
+        : cached_minimum_call_record_allocation_size(minimum_call_record_allocation_size)
+        , m_types(move(types))
+        , m_tag_types(move(tag_types))
         , m_functions(move(function_addresses))
         , m_tables(move(table_addresses))
         , m_memories(move(memory_addresses))
         , m_globals(move(global_addresses))
         , m_datas(move(data_addresses))
+        , m_tags(move(tag_addresses))
         , m_exports(move(exports))
     {
     }
@@ -310,6 +434,8 @@ public:
     ModuleInstance() = default;
 
     auto& types() const { return m_types; }
+    auto& canonical_types() const { return m_canonical_types; }
+    auto& canonical_types() { return m_canonical_types; }
     auto& functions() const { return m_functions; }
     auto& tables() const { return m_tables; }
     auto& memories() const { return m_memories; }
@@ -317,6 +443,8 @@ public:
     auto& elements() const { return m_elements; }
     auto& datas() const { return m_datas; }
     auto& exports() const { return m_exports; }
+    auto& tags() const { return m_tags; }
+    auto& tag_types() const { return m_tag_types; }
 
     auto& types() { return m_types; }
     auto& functions() { return m_functions; }
@@ -326,43 +454,60 @@ public:
     auto& elements() { return m_elements; }
     auto& datas() { return m_datas; }
     auto& exports() { return m_exports; }
+    auto& tags() { return m_tags; }
+    auto& tag_types() { return m_tag_types; }
+
+    size_t cached_minimum_call_record_allocation_size { 0 };
+
+    Vector<CompiledFunctionEntry> const& compiled_fn_table(Store&) const;
 
 private:
-    Vector<FunctionType> m_types;
+    Vector<TypeSection::Type> m_types;
+    Vector<DefinedType const*> m_canonical_types;
+    Vector<TagType> m_tag_types;
     Vector<FunctionAddress> m_functions;
     Vector<TableAddress> m_tables;
     Vector<MemoryAddress> m_memories;
     Vector<GlobalAddress> m_globals;
     Vector<ElementAddress> m_elements;
     Vector<DataAddress> m_datas;
+    Vector<TagAddress> m_tags;
     Vector<ExportInstance> m_exports;
+
+    mutable Vector<CompiledFunctionEntry> m_compiled_fn_table;
+    mutable bool m_compiled_fn_table_built { false };
 };
 
 class WasmFunction {
 public:
-    explicit WasmFunction(FunctionType const& type, ModuleInstance const& instance, Module const& module, CodeSection::Code const& code)
+    explicit WasmFunction(FunctionType const& type, DefinedType const* defined_type, ModuleInstance const& instance, Module const& module, CodeSection::Code const& code)
         : m_type(type)
+        , m_defined_type(defined_type)
         , m_module(module.make_weak_ptr())
-        , m_module_instance(instance)
-        , m_code(code)
+        , m_module_instance(instance.make_weak_ptr<ModuleInstance const>())
+        , m_code(&code)
     {
     }
 
     auto& type() const { return m_type; }
-    auto& module() const { return m_module_instance; }
-    auto& code() const { return m_code; }
+    // https://webassembly.github.io/spec/core/exec/runtime.html#function-instances
+    DefinedType const* defined_type() const { return m_defined_type; }
+    ModuleInstance const& module() const { return *m_module_instance.strong_ref(); }
+    RefPtr<ModuleInstance const> try_module() const { return m_module_instance.strong_ref(); }
+    auto& code() const { return *m_code; }
     RefPtr<Module const> module_ref() const { return m_module.strong_ref(); }
 
 private:
     FunctionType m_type;
+    DefinedType const* m_defined_type { nullptr };
     WeakPtr<Module const> m_module;
-    ModuleInstance const& m_module_instance;
-    CodeSection::Code const& m_code;
+    WeakPtr<ModuleInstance const> m_module_instance;
+    CodeSection::Code const* m_code;
 };
 
 class HostFunction {
 public:
-    explicit HostFunction(AK::Function<Result(Configuration&, Vector<Value>&)> function, FunctionType const& type, ByteString name)
+    explicit HostFunction(AK::Function<Result(Configuration&, Span<Value>)> function, FunctionType const& type, ByteString name)
         : m_function(move(function))
         , m_type(type)
         , m_name(move(name))
@@ -373,9 +518,14 @@ public:
     auto& type() const { return m_type; }
     auto& name() const { return m_name; }
 
+    // Interned on the store.
+    DefinedType const* defined_type() const { return m_defined_type; }
+    void set_defined_type(DefinedType const* defined_type) { m_defined_type = defined_type; }
+
 private:
-    AK::Function<Result(Configuration&, Vector<Value>&)> m_function;
+    AK::Function<Result(Configuration&, Span<Value>)> m_function;
     FunctionType m_type;
+    DefinedType const* m_defined_type { nullptr };
     ByteString m_name;
 };
 
@@ -387,13 +537,24 @@ public:
         : m_elements(move(elements))
         , m_type(type)
     {
+        m_module_anchors.resize(m_elements.size());
     }
 
     auto& elements() const { return m_elements; }
     auto& elements() { return m_elements; }
     auto& type() const { return m_type; }
 
-    bool grow(u32 size_to_grow, Reference const& fill_value)
+    // MUST use this if a function reference can be stored in the table
+    void set_element(size_t index, Reference ref, RefPtr<ModuleInstance const> module_anchor = {})
+    {
+        m_elements[index] = move(ref);
+        m_module_anchors[index] = move(module_anchor);
+    }
+
+    // Strong ref pinning the element's defining ModuleInstance (null for non-Func).
+    RefPtr<ModuleInstance const> module_anchor_at(size_t index) const { return m_module_anchors[index]; }
+
+    bool grow(u32 size_to_grow, Reference const& fill_value, RefPtr<ModuleInstance const> fill_module_anchor = {})
     {
         if (size_to_grow == 0)
             return true;
@@ -408,35 +569,91 @@ public:
         auto previous_size = m_elements.size();
         if (m_elements.try_resize(new_size).is_error())
             return false;
-        for (size_t i = previous_size; i < m_elements.size(); ++i)
+        if (m_module_anchors.try_resize(new_size).is_error())
+            return false;
+        for (size_t i = previous_size; i < m_elements.size(); ++i) {
             m_elements[i] = fill_value;
+            m_module_anchors[i] = fill_module_anchor;
+        }
 
-        m_type = TableType { m_type.element_type(), Limits(m_type.limits().min() + size_to_grow, m_type.limits().max()) };
+        m_type = TableType { m_type.element_type(), Limits(m_type.limits().address_type(), m_type.limits().min() + size_to_grow, m_type.limits().max()) };
 
         return true;
     }
 
 private:
     Vector<Reference> m_elements;
+    Vector<RefPtr<ModuleInstance const>> m_module_anchors;
     TableType m_type;
 };
 
-class MemoryInstance {
+class WASM_API MemoryBuffer {
 public:
-    static ErrorOr<MemoryInstance> create(MemoryType const& type)
+    MemoryBuffer() = default;
+    ~MemoryBuffer();
+
+    MemoryBuffer(MemoryBuffer&&);
+    MemoryBuffer& operator=(MemoryBuffer&&);
+
+    MemoryBuffer(MemoryBuffer const&) = delete;
+    MemoryBuffer& operator=(MemoryBuffer const&) = delete;
+
+    ErrorOr<void> try_reserve(size_t capacity);
+    ErrorOr<void> try_resize(size_t new_size);
+    ErrorOr<void> try_resize(size_t new_size, size_t reserved_capacity);
+
+    auto size() const { return m_size; }
+    auto capacity() const { return m_reserved_capacity; }
+    auto data() const { return GC::PrimitiveStorage::the().data(m_handle); }
+    auto data() { return GC::PrimitiveStorage::the().data(m_handle); }
+    auto storage_offset() const { return m_storage_offset; }
+    GC::PrimitiveStorageHandle primitive_storage_handle() const { return m_handle; }
+    Bytes bytes() { return { data(), size() }; }
+    ReadonlyBytes bytes() const { return { data(), size() }; }
+    Bytes span() { return bytes(); }
+    ReadonlyBytes span() const { return bytes(); }
+    u8* offset_pointer(size_t offset)
     {
-        MemoryInstance instance { type };
-
-        if (!instance.grow(type.limits().min() * Constants::page_size, GrowType::No))
-            return Error::from_string_literal("Failed to grow to requested size");
-
-        return { move(instance) };
+        if (m_storage_offset == GC::PrimitiveStorage::invalid_offset)
+            return nullptr;
+        auto* cage_base = GC::PrimitiveStorage::the().cage_base();
+        VERIFY(cage_base);
+        return cage_base + GC::PrimitiveStorage::mask_offset(m_storage_offset + offset);
     }
+    u8 const* offset_pointer(size_t offset) const { return const_cast<MemoryBuffer&>(*this).offset_pointer(offset); }
+    u8& operator[](size_t index) { return *offset_pointer(index); }
+    u8 const& operator[](size_t index) const { return *offset_pointer(index); }
+    size_t contiguous_bytes_from(size_t offset, size_t count) const;
+    size_t contiguous_bytes_before(size_t offset, size_t count) const;
+    void copy_to(size_t offset, Bytes destination) const;
+    void copy_from(MemoryBuffer const& source, size_t source_offset, size_t destination_offset, size_t count);
+    void fill(size_t offset, u8 value, size_t count);
+    void overwrite(size_t offset, void const* source, size_t count);
+    void move_data(size_t destination_offset, size_t source_offset, size_t count);
+    bool contains_virtual_address(void const* address) const;
+
+    static constexpr size_t size_offset() { return __builtin_offsetof(MemoryBuffer, m_size); }
+    static constexpr size_t storage_offset_offset() { return __builtin_offsetof(MemoryBuffer, m_storage_offset); }
+
+private:
+    void clear();
+    void update_storage_offset();
+
+    size_t m_size { 0 };
+    size_t m_reserved_capacity { 0 };
+    GC::PrimitiveStorageHandle m_handle;
+    size_t m_storage_offset { GC::PrimitiveStorage::invalid_offset };
+};
+
+class WASM_API MemoryInstance {
+public:
+    static ErrorOr<MemoryInstance> create(MemoryType const& type);
 
     auto& type() const { return m_type; }
-    auto size() const { return m_size; }
+    auto size() const { return m_data.size(); }
     auto& data() const { return m_data; }
     auto& data() { return m_data; }
+    bool contains_virtual_address(void const* address) const { return m_data.contains_virtual_address(address); }
 
     enum class InhibitGrowCallback {
         No,
@@ -448,52 +665,17 @@ public:
         Yes,
     };
 
-    bool grow(size_t size_to_grow, GrowType grow_type = GrowType::Yes, InhibitGrowCallback inhibit_callback = InhibitGrowCallback::No)
-    {
-        if (size_to_grow == 0)
-            return true;
-        u64 new_size = m_data.size() + size_to_grow;
-        // Can't grow past 2^16 pages.
-        if (new_size >= Constants::page_size * 65536)
-            return false;
-        if (auto max = m_type.limits().max(); max.has_value()) {
-            if (max.value() * Constants::page_size < new_size)
-                return false;
-        }
-        auto previous_size = m_size;
-        if (m_data.try_resize(new_size).is_error())
-            return false;
-        m_size = new_size;
-        // The spec requires that we zero out everything on grow
-        __builtin_memset(m_data.offset_pointer(previous_size), 0, size_to_grow);
-
-        // NOTE: This exists because wasm-js-api wants to execute code after a successful grow,
-        //       See [this issue](https://github.com/WebAssembly/spec/issues/1635) for more details.
-        if (inhibit_callback == InhibitGrowCallback::No && successful_grow_hook)
-            successful_grow_hook();
-
-        if (grow_type == GrowType::Yes) {
-            // Grow the memory's type. We do this when encountering a `memory.grow`.
-            //
-            // See relevant spec link:
-            // https://www.w3.org/TR/wasm-core-2/#growing-memories%E2%91%A0
-            m_type = MemoryType { Limits(m_type.limits().min() + size_to_grow / Constants::page_size, m_type.limits().max()) };
-        }
-
-        return true;
-    }
+    bool grow(size_t size_to_grow, GrowType grow_type = GrowType::Yes, InhibitGrowCallback inhibit_callback = InhibitGrowCallback::No);
 
     Function<void()> successful_grow_hook;
 
+    static constexpr size_t data_offset() { return __builtin_offsetof(MemoryInstance, m_data); }
+
 private:
-    explicit MemoryInstance(MemoryType const& type)
-        : m_type(type)
-    {
-    }
+    explicit MemoryInstance(MemoryType const& type);
 
     MemoryType m_type;
-    size_t m_size { 0 };
-    ByteBuffer m_data;
+    MemoryBuffer m_data;
 };
 
 class GlobalInstance {
@@ -552,6 +734,88 @@ private:
     Vector<Reference> m_references;
 };
 
+class TagInstance {
+public:
+    TagInstance(FunctionType const& type, DefinedType const* defined_type, TagType::Flags flags)
+        : m_type(type)
+        , m_defined_type(defined_type)
+        , m_flags(flags)
+    {
+    }
+
+    auto& type() const { return m_type; }
+    // https://webassembly.github.io/spec/core/exec/runtime.html#tag-instances
+    DefinedType const* defined_type() const { return m_defined_type; }
+    auto flags() const { return m_flags; }
+
+private:
+    FunctionType m_type;
+    DefinedType const* m_defined_type { nullptr };
+    TagType::Flags m_flags;
+};
+
+// https://webassembly.github.io/spec/core/exec/runtime.html#exception-instances
+class ExceptionInstance {
+public:
+    explicit ExceptionInstance(TagAddress tag, Vector<Value> params)
+        : m_tag(tag)
+        , m_params(move(params))
+    {
+    }
+
+    auto tag() const { return m_tag; }
+    auto& params() const { return m_params; }
+
+private:
+    TagAddress m_tag;
+    Vector<Value> m_params;
+};
+
+// https://webassembly.github.io/spec/core/exec/runtime.html#aggregate-instances
+class WASM_API StructInstance final : public GC::Cell {
+    GC_CELL(StructInstance, GC::Cell);
+    GC_DECLARE_ALLOCATOR(StructInstance);
+
+public:
+    DefinedType const& type() const { return *m_type; }
+    ReadonlySpan<Value> fields() const { return m_fields; }
+    Span<Value> fields() { return m_fields; }
+
+private:
+    StructInstance(DefinedType const& type, Vector<Value> fields)
+        : m_type(&type)
+        , m_fields(move(fields))
+    {
+    }
+
+    virtual void visit_edges(Visitor&) override;
+
+    DefinedType const* m_type { nullptr };
+    Vector<Value> m_fields;
+};
+
+class WASM_API ArrayInstance final : public GC::Cell {
+    GC_CELL(ArrayInstance, GC::Cell);
+    GC_DECLARE_ALLOCATOR(ArrayInstance);
+
+public:
+    DefinedType const& type() const { return *m_type; }
+    ReadonlySpan<Value> elements() const { return m_elements; }
+    Span<Value> elements() { return m_elements; }
+
+private:
+    ArrayInstance(DefinedType const& type, Vector<Value> elements)
+        : m_type(&type)
+        , m_elements(move(elements))
+    {
+    }
+
+    virtual void visit_edges(Visitor&) override;
+
+    DefinedType const* m_type { nullptr };
+    Vector<Value> m_elements;
+};
+
 class WASM_API Store {
 public:
     Store() = default;
@@ -563,72 +827,135 @@ public:
     Optional<DataAddress> allocate_data(Vector<u8>);
     Optional<GlobalAddress> allocate(GlobalType const&, Value);
     Optional<ElementAddress> allocate(ValueType const&, Vector<Reference>);
+    Optional<TagAddress> allocate(FunctionType const&, DefinedType const*, TagType::Flags);
+    Optional<ExceptionAddress> allocate(TagAddress, Vector<Value>);
 
     Module const* get_module_for(FunctionAddress);
+    RefPtr<ModuleInstance const> get_module_instance_for(FunctionAddress); // Obtains strong ref for module.
     FunctionInstance* get(FunctionAddress);
     TableInstance* get(TableAddress);
     MemoryInstance* get(MemoryAddress);
     GlobalInstance* get(GlobalAddress);
     DataInstance* get(DataAddress);
     ElementInstance* get(ElementAddress);
+    TagInstance* get(TagAddress);
+    ExceptionInstance* get(ExceptionAddress);
 
-    MemoryInstance* unsafe_get(MemoryAddress address) { return &m_memories.data()[address.value()]; }
+    ALWAYS_INLINE FunctionInstance* unsafe_get(FunctionAddress address) { return &m_functions.data()[address.value()]; }
+    ALWAYS_INLINE MemoryInstance* unsafe_get(MemoryAddress address) { return m_memories.data()[address.value()].ptr(); }
+
+    GC::Heap& heap() { return *m_heap; }
+    void set_heap(GC::Heap& heap) { m_heap = &heap; }
+
+    void register_configuration(Badge<Configuration>, Configuration& configuration) { m_active_configurations.set(&configuration); }
+    void unregister_configuration(Badge<Configuration>, Configuration& configuration) { m_active_configurations.remove(&configuration); }
+    auto& active_configurations() const { return m_active_configurations; }
+
+    auto& tables() const { return m_tables; }
+    auto& globals() const { return m_globals; }
+    auto& elements() const { return m_elements; }
+    auto& exceptions() const { return m_exceptions; }
 
 private:
     Vector<FunctionInstance> m_functions;
     Vector<TableInstance> m_tables;
-    Vector<MemoryInstance> m_memories;
+    Vector<NonnullOwnPtr<MemoryInstance>> m_memories;
     Vector<GlobalInstance> m_globals;
     Vector<ElementInstance> m_elements;
     Vector<DataInstance> m_datas;
+    Vector<TagInstance> m_tags;
+    Vector<ExceptionInstance> m_exceptions;
+
+    GC::Heap* m_heap { nullptr };
+    HashTable<Configuration*> m_active_configurations;
 };
 
 class Label {
 public:
-    explicit Label(size_t arity, InstructionPointer continuation, size_t stack_height)
+    explicit Label(size_t arity, InstructionPointer continuation, size_t stack_height, Instruction const* try_table_instruction = nullptr)
         : m_arity(arity)
         , m_stack_height(stack_height)
         , m_continuation(continuation)
+        , m_try_table_instruction(try_table_instruction)
     {
     }
 
     auto continuation() const { return m_continuation; }
     auto arity() const { return m_arity; }
     auto stack_height() const { return m_stack_height; }
+    // https://webassembly.github.io/spec/core/exec/instructions.html#exec-try-table
+    Instruction const* try_table_instruction() const { return m_try_table_instruction; }
 
 private:
     size_t m_arity { 0 };
     size_t m_stack_height { 0 };
     InstructionPointer m_continuation { 0 };
+    Instruction const* m_try_table_instruction { nullptr };
 };
 
 class Frame {
 public:
-    explicit Frame(ModuleInstance const& module, Vector<Value> locals, Expression const& expression, size_t arity)
+    // Owning constructor (slow path).
+    explicit Frame(ModuleInstance const& module, Vector<Value, ArgumentsStaticSize> locals, Expression const& expression, size_t arity)
         : m_module(module)
-        , m_locals(move(locals))
+        , m_owned_locals(move(locals))
+        , m_locals_ptr(m_owned_locals.data())
+        , m_expression(expression)
+        , m_arity(arity)
+        , m_owns_locals(true)
+    {
+    }
+
+    // Non-owning constructor (fast path).
+    explicit Frame(ModuleInstance const& module, Value* locals_ptr, Expression const& expression, size_t arity)
+        : m_module(module)
+        , m_locals_ptr(locals_ptr)
         , m_expression(expression)
         , m_arity(arity)
     {
     }
 
+    Frame(Frame&& other)
+        : m_module(other.m_module)
+        , m_owned_locals(move(other.m_owned_locals))
+        , m_locals_ptr(other.m_owns_locals ? m_owned_locals.data() : other.m_locals_ptr)
+        , m_expression(other.m_expression)
+        , m_arity(other.m_arity)
+        , m_label_index(other.m_label_index)
+        , m_owns_locals(other.m_owns_locals)
+        , m_compiled_fn_table(other.m_compiled_fn_table)
+    {
+    }
+
+    Frame& operator=(Frame&&) = delete;
+
+    Frame(Frame const&) = delete;
+    Frame& operator=(Frame const&) = delete;
+
     auto& module() const { return m_module; }
-    auto& locals() const { return m_locals; }
-    auto& locals() { return m_locals; }
+    Value* locals_data() const { return m_locals_ptr; }
+    bool owns_locals() const { return m_owns_locals; }
+    Vector<Value, ArgumentsStaticSize>& owned_locals() { return m_owned_locals; }
     auto& expression() const { return m_expression; }
     auto arity() const { return m_arity; }
     auto label_index() const { return m_label_index; }
     auto& label_index() { return m_label_index; }
 
+    Vector<CompiledFunctionEntry> const* compiled_fn_table() const { return m_compiled_fn_table; }
+    void set_compiled_fn_table(Vector<CompiledFunctionEntry> const* table) { m_compiled_fn_table = table; }
+
 private:
     ModuleInstance const& m_module;
-    Vector<Value> m_locals;
+    Vector<Value, ArgumentsStaticSize> m_owned_locals;
+    Value* m_locals_ptr { nullptr };
     Expression const& m_expression;
     size_t m_arity { 0 };
     size_t m_label_index { 0 };
+    bool m_owns_locals { false };
+    Vector<CompiledFunctionEntry> const* m_compiled_fn_table { nullptr };
 };
 
-using InstantiationResult = AK::ErrorOr<NonnullOwnPtr<ModuleInstance>, InstantiationError>;
+using InstantiationResult = AK::ErrorOr<NonnullRefPtr<ModuleInstance>, InstantiationError>;
 
 struct HostVisitOps {
     Function<void(ExternallyManagedTrap&)> visit_trap;
@@ -636,10 +963,26 @@ struct HostVisitOps {
 
 class WASM_API AbstractMachine {
 public:
-    explicit AbstractMachine() = default;
+    explicit AbstractMachine(GC::Heap* heap = nullptr)
+    {
+        if (heap)
+            adopt_heap(*heap);
+    }
+
+    GC::Heap& heap()
+    {
+        if (!m_heap) [[unlikely]]
+            create_own_heap();
+        return *m_heap;
+    }
+
+    // For embedders that decide on a (shared) heap after constructing the machine. Must
+    // happen before any code runs.
+    bool has_heap() const { return m_heap != nullptr; }
+    void adopt_heap(GC::Heap&);
 
     // Validate a module; permanently sets the module's validity status.
-    ErrorOr<void, ValidationError> validate(Module&);
+    ErrorOr<void, ValidationError> validate(Module&, Optional<CompileCacheConfig> cache_config = {}, CompileToNative = CompileToNative::Yes);
     // Load and instantiate a module, and link it into this interpreter.
     InstantiationResult instantiate(Module const&, Vector<ExternValue>);
     Result invoke(FunctionAddress, Vector<Value>);
@@ -677,9 +1020,29 @@ private:
         return InterpreterHandle(*this, interpreter);
     }
 
-    Optional<InstantiationError> allocate_all_initial_phase(Module const&, ModuleInstance&, Vector<ExternValue>&, Vector<Value>& global_values, Vector<FunctionAddress>& own_functions);
+    Optional<InstantiationError> allocate_all_initial_phase(Module const&, ModuleInstance&, Vector<ExternValue>&, Vector<Value>& global_values, Vector<Value>& table_initial_values, Vector<FunctionAddress>& own_functions);
     Optional<InstantiationError> allocate_all_final_phase(Module const&, ModuleInstance&, Vector<Vector<Reference>>& elements);
+
+    void create_own_heap();
+
+    class RootsProvider final : public GC::ConservativeRangeProvider {
+    public:
+        RootsProvider(GC::Heap& heap, Store& store)
+            : GC::ConservativeRangeProvider(heap)
+            , m_store(store)
+        {
+        }
+
+    private:
+        virtual void for_each_conservative_range(AK::Function<void(ReadonlySpan<FlatPtr>)> const&) const override;
+
+        Store& m_store;
+    };
+
     Store m_store;
+    OwnPtr<GC::Heap> m_owned_heap;
+    GC::Heap* m_heap { nullptr };
+    OwnPtr<RootsProvider> m_roots_provider;
     StackInfo m_stack_info;
     HashTable<Interpreter*> m_active_interpreters;
     bool m_should_limit_instruction_count { false };
@@ -729,4 +1092,9 @@ struct AK::Traits<Wasm::Linker::Name> : public AK::DefaultTraits<Wasm::Linker::N
     static constexpr bool is_trivial() { return false; }
     static unsigned hash(Wasm::Linker::Name const& entry) { return pair_int_hash(entry.module.hash(), entry.name.hash()); }
     static bool equals(Wasm::Linker::Name const& a, Wasm::Linker::Name const& b) { return a.name == b.name && a.module == b.module; }
+};
+
+template<>
+struct AK::Traits<Wasm::Value> : public AK::DefaultTraits<Wasm::Value> {
+    static constexpr bool is_trivial() { return true; }
 };

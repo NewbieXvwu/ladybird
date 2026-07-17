@@ -5,47 +5,42 @@
  */
 
 #include <AK/Array.h>
+#include <AK/CharacterTypes.h>
 #include <LibGC/Heap.h>
 #include <LibJS/Runtime/Realm.h>
+#include <LibTextCodec/Encoder.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/Names.h>
 #include <LibWeb/ContentSecurityPolicy/PolicyList.h>
 #include <LibWeb/ContentSecurityPolicy/Violation.h>
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/Fetching/PendingResponse.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 
 namespace Web::Fetch::Infrastructure {
 
 GC_DEFINE_ALLOCATOR(Request);
 
-Request::Request(GC::Ref<HeaderList> header_list)
-    : m_header_list(header_list)
+GC::Ref<Request> Request::create(JS::VM& vm)
+{
+    return vm.heap().allocate<Request>(HTTP::HeaderList::create());
+}
+
+Request::Request(NonnullRefPtr<HTTP::HeaderList> header_list)
+    : m_header_list(move(header_list))
+    , m_request_time(UnixDateTime::now())
 {
 }
 
 void Request::visit_edges(JS::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_header_list);
     visitor.visit(m_client);
-    m_body.visit(
-        [&](GC::Ref<Body>& body) { visitor.visit(body); },
-        [](auto&) {});
+    visitor.visit(m_body);
     visitor.visit(m_reserved_client);
-    m_traversable_for_user_prompts.visit(
-        [&](GC::Ptr<HTML::EnvironmentSettingsObject> const& value) { visitor.visit(value); },
-        [&](GC::Ptr<HTML::TraversableNavigable> const& value) { visitor.visit(value); },
-        [](auto const&) {});
+    visitor.visit(m_traversable_for_user_prompts);
     visitor.visit(m_pending_responses);
-    m_policy_container.visit(
-        [&](GC::Ref<HTML::PolicyContainer> const& policy_container) { visitor.visit(policy_container); },
-        [](auto const&) {});
-}
-
-GC::Ref<Request> Request::create(JS::VM& vm)
-{
-    return vm.heap().allocate<Request>(HeaderList::create(vm));
+    visitor.visit(m_policy_container);
 }
 
 // https://fetch.spec.whatwg.org/#concept-request-url
@@ -90,18 +85,7 @@ void Request::set_url(URL::URL url)
 // https://fetch.spec.whatwg.org/#request-destination-script-like
 bool Request::destination_is_script_like() const
 {
-    // A request’s destination is script-like if it is "audioworklet", "paintworklet", "script", "serviceworker", "sharedworker", or "worker".
-    static constexpr Array script_like_destinations = {
-        Destination::AudioWorklet,
-        Destination::PaintWorklet,
-        Destination::Script,
-        Destination::ServiceWorker,
-        Destination::SharedWorker,
-        Destination::Worker,
-    };
-    return any_of(script_like_destinations, [this](auto destination) {
-        return m_destination == destination;
-    });
+    return m_destination.has_value() && Infrastructure::destination_is_script_like(*m_destination);
 }
 
 // https://fetch.spec.whatwg.org/#subresource-request
@@ -223,10 +207,11 @@ String Request::serialize_origin() const
 }
 
 // https://fetch.spec.whatwg.org/#byte-serializing-a-request-origin
-ByteBuffer Request::byte_serialize_origin() const
+ByteString Request::byte_serialize_origin() const
 {
-    // Byte-serializing a request origin, given a request request, is to return the result of serializing a request origin with request, isomorphic encoded.
-    return MUST(ByteBuffer::copy(serialize_origin().bytes()));
+    // Byte-serializing a request origin, given a request request, is to return the result of serializing a request
+    // origin with request, isomorphic encoded.
+    return TextCodec::isomorphic_encode(serialize_origin());
 }
 
 // https://fetch.spec.whatwg.org/#concept-request-clone
@@ -275,7 +260,6 @@ GC::Ref<Request> Request::clone(JS::Realm& realm) const
     new_request->set_prevent_no_cache_cache_control_header_modification(m_prevent_no_cache_cache_control_header_modification);
     new_request->set_done(m_done);
     new_request->set_timing_allow_failed(m_timing_allow_failed);
-    new_request->set_buffer_policy(m_buffer_policy);
 
     // 2. If request’s body is non-null, set newRequest’s body to the result of cloning request’s body.
     if (auto const* body = m_body.get_pointer<GC::Ref<Body>>())
@@ -294,24 +278,15 @@ void Request::add_range_header(u64 first, Optional<u64> const& last)
     VERIFY(!last.has_value() || first <= last.value());
 
     // 2. Let rangeValue be `bytes=`.
-    auto range_value = MUST(ByteBuffer::copy("bytes"sv.bytes()));
-
     // 3. Serialize and isomorphic encode first, and append the result to rangeValue.
-    range_value.append(String::number(first).bytes());
-
     // 4. Append 0x2D (-) to rangeValue.
-    range_value.append('-');
-
     // 5. If last is given, then serialize and isomorphic encode it, and append the result to rangeValue.
-    if (last.has_value())
-        range_value.append(String::number(*last).bytes());
+    auto range_value = last.has_value()
+        ? ByteString::formatted("bytes={}-{}", first, *last)
+        : ByteString::formatted("bytes={}-", first);
 
     // 6. Append (`Range`, rangeValue) to request’s header list.
-    auto header = Header {
-        .name = MUST(ByteBuffer::copy("Range"sv.bytes())),
-        .value = move(range_value),
-    };
-    m_header_list->append(move(header));
+    m_header_list->append({ "Range"sv, move(range_value) });
 }
 
 // https://fetch.spec.whatwg.org/#append-a-request-origin-header
@@ -322,21 +297,17 @@ void Request::add_origin_header()
 
     // 2. If request’s response tainting is "cors" or request’s mode is "websocket", then append (`Origin`, serializedOrigin) to request’s header list.
     if (m_response_tainting == ResponseTainting::CORS || m_mode == Mode::WebSocket) {
-        auto header = Header {
-            .name = MUST(ByteBuffer::copy("Origin"sv.bytes())),
-            .value = move(serialized_origin),
-        };
-        m_header_list->append(move(header));
+        m_header_list->append({ "Origin"sv, move(serialized_origin) });
     }
     // 3. Otherwise, if request’s method is neither `GET` nor `HEAD`, then:
-    else if (!StringView { m_method }.is_one_of("GET"sv, "HEAD"sv)) {
+    else if (!m_method.is_one_of("GET"sv, "HEAD"sv)) {
         // 1. If request’s mode is not "cors", then switch on request’s referrer policy:
         if (m_mode != Mode::CORS) {
             switch (m_referrer_policy) {
             // -> "no-referrer"
             case ReferrerPolicy::ReferrerPolicy::NoReferrer:
                 // Set serializedOrigin to `null`.
-                serialized_origin = MUST(ByteBuffer::copy("null"sv.bytes()));
+                serialized_origin = "null"sv;
                 break;
             // -> "no-referrer-when-downgrade"
             // -> "strict-origin"
@@ -346,15 +317,15 @@ void Request::add_origin_header()
             case ReferrerPolicy::ReferrerPolicy::StrictOriginWhenCrossOrigin:
                 // If request’s origin is a tuple origin, its scheme is "https", and request’s current URL’s scheme is
                 // not "https", then set serializedOrigin to `null`.
-                if (m_origin.has<URL::Origin>() && m_origin.get<URL::Origin>().scheme() == "https"sv && current_url().scheme() != "https"sv)
-                    serialized_origin = MUST(ByteBuffer::copy("null"sv.bytes()));
+                if (m_origin.has<URL::Origin>() && !m_origin.get<URL::Origin>().is_opaque() && m_origin.get<URL::Origin>().scheme() == "https"sv && current_url().scheme() != "https"sv)
+                    serialized_origin = "null"sv;
                 break;
             // -> "same-origin"
             case ReferrerPolicy::ReferrerPolicy::SameOrigin:
                 // If request’s origin is not same origin with request’s current URL’s origin, then set serializedOrigin
                 // to `null`.
                 if (m_origin.has<URL::Origin>() && !m_origin.get<URL::Origin>().is_same_origin(current_url().origin()))
-                    serialized_origin = MUST(ByteBuffer::copy("null"sv.bytes()));
+                    serialized_origin = "null"sv;
                 break;
             // -> Otherwise
             default:
@@ -364,11 +335,7 @@ void Request::add_origin_header()
         }
 
         // 2. Append (`Origin`, serializedOrigin) to request’s header list.
-        auto header = Header {
-            .name = MUST(ByteBuffer::copy("Origin"sv.bytes())),
-            .value = move(serialized_origin),
-        };
-        m_header_list->append(move(header));
+        m_header_list->append({ "Origin"sv, move(serialized_origin) });
     }
 }
 
@@ -452,6 +419,81 @@ StringView request_destination_to_string(Request::Destination destination)
     VERIFY_NOT_REACHED();
 }
 
+static Optional<Request::Destination> translate_potential_destination_impl(auto potential_destination)
+{
+    // 1. If potentialDestination is "fetch", then return the empty string.
+    if (potential_destination == "fetch"sv)
+        return {};
+
+    // 2. Assert: potentialDestination is a destination.
+    // 3. Return potentialDestination.
+    if (potential_destination == "audio"sv)
+        return Request::Destination::Audio;
+    if (potential_destination == "audioworklet"sv)
+        return Request::Destination::AudioWorklet;
+    if (potential_destination == "document"sv)
+        return Request::Destination::Document;
+    if (potential_destination == "embed"sv)
+        return Request::Destination::Embed;
+    if (potential_destination == "font"sv)
+        return Request::Destination::Font;
+    if (potential_destination == "frame"sv)
+        return Request::Destination::Frame;
+    if (potential_destination == "iframe"sv)
+        return Request::Destination::IFrame;
+    if (potential_destination == "image"sv)
+        return Request::Destination::Image;
+    if (potential_destination == "json"sv)
+        return Request::Destination::JSON;
+    if (potential_destination == "manifest"sv)
+        return Request::Destination::Manifest;
+    if (potential_destination == "object"sv)
+        return Request::Destination::Object;
+    if (potential_destination == "paintworklet"sv)
+        return Request::Destination::PaintWorklet;
+    if (potential_destination == "report"sv)
+        return Request::Destination::Report;
+    if (potential_destination == "script"sv)
+        return Request::Destination::Script;
+    if (potential_destination == "serviceworker"sv)
+        return Request::Destination::ServiceWorker;
+    if (potential_destination == "sharedworker"sv)
+        return Request::Destination::SharedWorker;
+    if (potential_destination == "style"sv)
+        return Request::Destination::Style;
+    if (potential_destination == "track"sv)
+        return Request::Destination::Track;
+    if (potential_destination == "video"sv)
+        return Request::Destination::Video;
+    if (potential_destination == "webidentity"sv)
+        return Request::Destination::WebIdentity;
+    if (potential_destination == "worker"sv)
+        return Request::Destination::Worker;
+    if (potential_destination == "xslt"sv)
+        return Request::Destination::XSLT;
+    VERIFY_NOT_REACHED();
+}
+
+// https://fetch.spec.whatwg.org/#concept-potential-destination-translate
+Optional<Request::Destination> translate_potential_destination(Utf16View potential_destination)
+{
+    return translate_potential_destination_impl(potential_destination);
+}
+
+// https://fetch.spec.whatwg.org/#request-destination-script-like
+bool destination_is_script_like(Request::Destination destination)
+{
+    // A request’s destination is script-like if it is "audioworklet", "paintworklet", "script", "serviceworker",
+    // "sharedworker", or "worker".
+    return first_is_one_of(destination,
+        Request::Destination::AudioWorklet,
+        Request::Destination::PaintWorklet,
+        Request::Destination::Script,
+        Request::Destination::ServiceWorker,
+        Request::Destination::SharedWorker,
+        Request::Destination::Worker);
+}
+
 StringView request_mode_to_string(Request::Mode mode)
 {
     switch (mode) {
@@ -469,64 +511,82 @@ StringView request_mode_to_string(Request::Mode mode)
     VERIFY_NOT_REACHED();
 }
 
-FlyString initiator_type_to_string(Request::InitiatorType initiator_type)
+Utf16FlyString initiator_type_to_string(Request::InitiatorType initiator_type)
 {
     switch (initiator_type) {
     case Request::InitiatorType::Audio:
-        return "audio"_fly_string;
+        return "audio"_utf16_fly_string;
     case Request::InitiatorType::Beacon:
-        return "beacon"_fly_string;
+        return "beacon"_utf16_fly_string;
     case Request::InitiatorType::Body:
-        return "body"_fly_string;
+        return "body"_utf16_fly_string;
     case Request::InitiatorType::CSS:
-        return "css"_fly_string;
+        return "css"_utf16_fly_string;
     case Request::InitiatorType::EarlyHint:
-        return "early-hints"_fly_string;
+        return "early-hints"_utf16_fly_string;
     case Request::InitiatorType::Embed:
-        return "embed"_fly_string;
+        return "embed"_utf16_fly_string;
     case Request::InitiatorType::Fetch:
-        return "fetch"_fly_string;
+        return "fetch"_utf16_fly_string;
     case Request::InitiatorType::Font:
-        return "font"_fly_string;
+        return "font"_utf16_fly_string;
     case Request::InitiatorType::Frame:
-        return "frame"_fly_string;
+        return "frame"_utf16_fly_string;
     case Request::InitiatorType::IFrame:
-        return "iframe"_fly_string;
+        return "iframe"_utf16_fly_string;
     case Request::InitiatorType::Image:
-        return "image"_fly_string;
+        return "image"_utf16_fly_string;
     case Request::InitiatorType::IMG:
-        return "img"_fly_string;
+        return "img"_utf16_fly_string;
     case Request::InitiatorType::Input:
-        return "input"_fly_string;
+        return "input"_utf16_fly_string;
     case Request::InitiatorType::Link:
-        return "link"_fly_string;
+        return "link"_utf16_fly_string;
     case Request::InitiatorType::Object:
-        return "object"_fly_string;
+        return "object"_utf16_fly_string;
     case Request::InitiatorType::Ping:
-        return "ping"_fly_string;
+        return "ping"_utf16_fly_string;
     case Request::InitiatorType::Script:
-        return "script"_fly_string;
+        return "script"_utf16_fly_string;
     case Request::InitiatorType::Track:
-        return "track"_fly_string;
+        return "track"_utf16_fly_string;
     case Request::InitiatorType::Video:
-        return "video"_fly_string;
+        return "video"_utf16_fly_string;
     case Request::InitiatorType::XMLHttpRequest:
-        return "xmlhttprequest"_fly_string;
+        return "xmlhttprequest"_utf16_fly_string;
     case Request::InitiatorType::Other:
-        return "other"_fly_string;
+        return "other"_utf16_fly_string;
     }
     VERIFY_NOT_REACHED();
 }
 
-Optional<Request::Priority> request_priority_from_string(StringView string)
+static bool equals_ignoring_ascii_case(Utf16View string, StringView ascii_string)
 {
-    if (string.equals_ignoring_ascii_case("high"sv))
+    if (string.length_in_code_units() != ascii_string.length())
+        return false;
+
+    for (size_t i = 0; i < string.length_in_code_units(); ++i) {
+        if (AK::to_ascii_lowercase(string.code_unit_at(i)) != AK::to_ascii_lowercase(ascii_string[i]))
+            return false;
+    }
+
+    return true;
+}
+
+Optional<Request::Priority> request_priority_from_string(Utf16View string)
+{
+    if (equals_ignoring_ascii_case(string, "high"sv))
         return Request::Priority::High;
-    if (string.equals_ignoring_ascii_case("low"sv))
+    if (equals_ignoring_ascii_case(string, "low"sv))
         return Request::Priority::Low;
-    if (string.equals_ignoring_ascii_case("auto"sv))
+    if (equals_ignoring_ascii_case(string, "auto"sv))
         return Request::Priority::Auto;
     return {};
+}
+
+Optional<Request::Priority> request_priority_from_string(Utf16String const& string)
+{
+    return request_priority_from_string(string.utf16_view());
 }
 
 }

@@ -13,13 +13,13 @@ namespace Web::ContentSecurityPolicy::Directives {
 
 GC_DEFINE_ALLOCATOR(StyleSourceAttributeDirective);
 
-StyleSourceAttributeDirective::StyleSourceAttributeDirective(String name, Vector<String> value)
+StyleSourceAttributeDirective::StyleSourceAttributeDirective(Utf16FlyString name, Vector<Utf16String> value)
     : Directive(move(name), move(value))
 {
 }
 
 // https://w3c.github.io/webappsec-csp/#style-src-attr-inline
-Directive::Result StyleSourceAttributeDirective::inline_check(GC::Heap&, GC::Ptr<DOM::Element const> element, InlineType type, GC::Ref<Policy const> policy, String const& source) const
+Directive::Result StyleSourceAttributeDirective::inline_check(GC::Heap&, GC::Ptr<DOM::Element const> element, InlineType type, GC::Ref<Policy const> policy, Utf16View source) const
 {
     // 1. Let name be the result of executing § 6.8.2 Get the effective directive for inline checks on type.
     auto name = get_the_effective_directive_for_inline_checks(type);

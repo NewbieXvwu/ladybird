@@ -8,6 +8,7 @@
 #include <LibCore/Resource.h>
 #include <LibGfx/Palette.h>
 #include <LibGfx/SystemTheme.h>
+#include <LibWebView/PlatformColors.h>
 
 #import <Cocoa/Cocoa.h>
 #import <Interface/Palette.h>
@@ -39,6 +40,9 @@ Core::AnonymousBuffer create_system_palette()
     auto palette = Gfx::Palette(move(palette_impl));
     palette.set_flag(Gfx::FlagRole::IsDark, is_dark);
     palette.set_color(Gfx::ColorRole::Accent, ns_color_to_gfx_color([NSColor controlAccentColor]));
+    palette.set_color(Gfx::ColorRole::Selection, WebView::macos_web_selection_color());
+    palette.set_color(Gfx::ColorRole::InactiveSelection, WebView::macos_web_inactive_selection_color());
+    palette.set_color(Gfx::ColorRole::InactiveSelectionText, WebView::macos_web_inactive_selection_text_color());
     // FIXME: There are more system colors we currently don't use (https://developer.apple.com/documentation/appkit/nscolor/3000782-controlaccentcolor?language=objc)
 
     return theme;

@@ -34,6 +34,13 @@ LineBoxFragment::LineBoxFragment(Node const& layout_node, size_t start, size_t l
     }
 }
 
+NodeWithStyle const& LineBoxFragment::style_source() const
+{
+    if (auto const* node_with_style = as_if<NodeWithStyle>(layout_node()))
+        return *node_with_style;
+    return *layout_node().parent();
+}
+
 CSSPixelPoint LineBoxFragment::offset() const
 {
     if (m_writing_mode != CSS::WritingMode::HorizontalTb)
@@ -116,9 +123,10 @@ void LineBoxFragment::append_glyph_run_ltr(RefPtr<Gfx::GlyphRun> const& glyph_ru
 
     switch (run_direction) {
     case CSS::Direction::Ltr:
-        for (auto& glyph : glyph_run->glyphs()) {
-            glyph.position.translate_by(inline_offset, 0);
-            glyphs.unchecked_append(glyph);
+        for (auto const& glyph : glyph_run->glyphs()) {
+            auto translated = glyph;
+            translated.position.translate_by(inline_offset, 0);
+            glyphs.unchecked_append(translated);
         }
         break;
     case CSS::Direction::Rtl:
@@ -126,9 +134,10 @@ void LineBoxFragment::append_glyph_run_ltr(RefPtr<Gfx::GlyphRun> const& glyph_ru
             if (glyph.position.x() >= m_insert_position)
                 glyph.position.translate_by(run_width.to_float(), 0);
         }
-        for (auto& glyph : glyph_run->glyphs()) {
-            glyph.position.translate_by(m_insert_position, 0);
-            glyphs.unchecked_append(glyph);
+        for (auto const& glyph : glyph_run->glyphs()) {
+            auto translated = glyph;
+            translated.position.translate_by(m_insert_position, 0);
+            glyphs.unchecked_append(translated);
         }
         break;
     }
@@ -156,9 +165,10 @@ void LineBoxFragment::append_glyph_run_rtl(RefPtr<Gfx::GlyphRun> const& glyph_ru
             if (glyph.position.x() >= m_insert_position)
                 glyph.position.translate_by(run_offset, 0);
         }
-        for (auto& glyph : glyph_run->glyphs()) {
-            glyph.position.translate_by(m_insert_position, 0);
-            glyphs.unchecked_append(glyph);
+        for (auto const& glyph : glyph_run->glyphs()) {
+            auto translated = glyph;
+            translated.position.translate_by(m_insert_position, 0);
+            glyphs.unchecked_append(translated);
         }
         break;
     case CSS::Direction::Rtl:
@@ -167,7 +177,7 @@ void LineBoxFragment::append_glyph_run_rtl(RefPtr<Gfx::GlyphRun> const& glyph_ru
                 glyph.position.translate_by(run_offset, 0);
             }
         }
-        for (auto& glyph : glyph_run->glyphs()) {
+        for (auto const& glyph : glyph_run->glyphs()) {
             glyphs.unchecked_append(glyph);
         }
         break;

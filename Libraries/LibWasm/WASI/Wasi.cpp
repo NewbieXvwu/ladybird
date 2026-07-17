@@ -5,6 +5,7 @@
  */
 
 #include <AK/ByteReader.h>
+#include <AK/Checked.h>
 #include <AK/Debug.h>
 #include <AK/FlyString.h>
 #include <AK/Random.h>
@@ -72,6 +73,29 @@ CompatibleValue<T> to_compatible_value(Wasm::Value const& value)
 }
 
 namespace Wasm::Wasi {
+
+static ErrorOr<size_t> checked_byte_count(size_t element_size, Size count)
+{
+    Checked<size_t> byte_count { static_cast<u32>(count) };
+    byte_count *= element_size;
+    if (byte_count.has_overflow())
+        return Error::from_errno(ENOBUFS);
+    return byte_count.value();
+}
+
+static bool memory_range_is_in_bounds(MemoryInstance const& memory, size_t address, size_t byte_count)
+{
+    return address <= memory.size() && byte_count <= memory.size() - address;
+}
+
+static Optional<Bytes> contiguous_memory_bytes(MemoryInstance& memory, size_t address, size_t byte_count)
+{
+    if (!memory_range_is_in_bounds(memory, address, byte_count))
+        return {};
+    if (memory.data().contiguous_bytes_from(address, byte_count) < byte_count)
+        return {};
+    return Bytes { memory.data().offset_pointer(address), byte_count };
+}
 
 void ArgsSizes::serialize_into(Array<Bytes, 2> bytes) const
 {
@@ -230,15 +254,16 @@ ErrorOr<Vector<T>> copy_typed_array(Configuration& configuration, Pointer<T> sou
     if (!memory)
         return Error::from_errno(ENOMEM);
 
-    UnderlyingPointerType address = source.value();
-    auto size = sizeof(T);
-    if (memory->size() < address || memory->size() <= address + (size * count)) {
+    size_t address = source.value();
+    auto byte_count = TRY(checked_byte_count(sizeof(T), count));
+    if (!memory_range_is_in_bounds(*memory, address, byte_count))
         return Error::from_errno(ENOBUFS);
-    }
 
     for (Size i = 0; i < count; i += 1) {
-        values.unchecked_append(T::read_from(Array { ReadonlyBytes { memory->data().bytes().slice(address, size) } }));
-        address += size;
+        u8 bytes[sizeof(T)];
+        memory->data().copy_to(address, { bytes, sizeof(bytes) });
+        values.unchecked_append(T::read_from(Array { ReadonlyBytes { bytes, sizeof(bytes) } }));
+        address += sizeof(T);
     }
 
     return values;
@@ -251,13 +276,13 @@ ErrorOr<void> copy_typed_value_to(Configuration& configuration, T const& value, 
     if (!memory)
         return Error::from_errno(ENOMEM);
 
-    UnderlyingPointerType address = destination.value();
-    auto size = sizeof(T);
-    if (memory->size() < address || memory->size() <= address + size) {
+    size_t address = destination.value();
+    if (!memory_range_is_in_bounds(*memory, address, sizeof(T)))
         return Error::from_errno(ENOBUFS);
-    }
 
-    ABI::serialize(value, Array { Bytes { memory->data().bytes().slice(address, size) } });
+    u8 bytes[sizeof(T)];
+    ABI::serialize(value, Array { Bytes { bytes, sizeof(bytes) } });
+    memory->data().overwrite(address, bytes, sizeof(bytes));
     return {};
 }
 
@@ -268,13 +293,13 @@ ErrorOr<Span<T>> slice_typed_memory(Configuration& configuration, Pointer<T> sou
     if (!memory)
         return Error::from_errno(ENOMEM);
 
-    auto address = source.value();
-    auto size = sizeof(T);
-    if (memory->size() < address || memory->size() <= address + (size * count))
+    size_t address = source.value();
+    auto byte_count = TRY(checked_byte_count(sizeof(T), count));
+    auto bytes = contiguous_memory_bytes(*memory, address, byte_count);
+    if (!bytes.has_value())
         return Error::from_errno(ENOBUFS);
 
-    auto untyped_slice = memory->data().bytes().slice(address, size * count);
-    return Span<T>(untyped_slice.data(), count);
+    return Span<T>(reinterpret_cast<T*>(bytes->data()), static_cast<size_t>(count));
 }
 
 template<typename T>
@@ -284,13 +309,13 @@ ErrorOr<Span<T const>> slice_typed_memory(Configuration& configuration, ConstPoi
     if (!memory)
         return Error::from_errno(ENOMEM);
 
-    auto address = source.value();
-    auto size = sizeof(T);
-    if (memory->size() < address || memory->size() <= address + (size * count))
+    size_t address = source.value();
+    auto byte_count = TRY(checked_byte_count(sizeof(T), count));
+    auto bytes = contiguous_memory_bytes(*memory, address, byte_count);
+    if (!bytes.has_value())
         return Error::from_errno(ENOBUFS);
 
-    auto untyped_slice = memory->data().bytes().slice(address, size * count);
-    return Span<T const>(untyped_slice.data(), count);
+    return Span<T const>(reinterpret_cast<T const*>(bytes->data()), static_cast<size_t>(count));
 }
 
 static ErrorOr<size_t> copy_string_including_terminating_null(Configuration& configuration, StringView string, Pointer<u8> target)
@@ -315,41 +340,29 @@ static FDFlags fd_flags_of(struct stat const& buf);
 
 Vector<AK::String> const& Implementation::arguments() const
 {
-    if (!cache.cached_arguments.has_value()) {
-        cache.cached_arguments.lazy_emplace([&] {
-            if (provide_arguments)
-                return provide_arguments();
-            return Vector<AK::String> {};
-        });
-    }
-
-    return *cache.cached_arguments;
+    return cache.cached_arguments.ensure([&] {
+        if (provide_arguments)
+            return provide_arguments();
+        return Vector<AK::String> {};
+    });
 }
 
 Vector<AK::String> const& Implementation::environment() const
 {
-    if (!cache.cached_environment.has_value()) {
-        cache.cached_environment.lazy_emplace([&] {
-            if (provide_environment)
-                return provide_environment();
-            return Vector<AK::String> {};
-        });
-    }
-
-    return *cache.cached_environment;
+    return cache.cached_environment.ensure([&] {
+        if (provide_environment)
+            return provide_environment();
+        return Vector<AK::String> {};
+    });
 }
 
 Vector<Implementation::MappedPath> const& Implementation::preopened_directories() const
 {
-    if (!cache.cached_preopened_directories.has_value()) {
-        cache.cached_preopened_directories.lazy_emplace([&] {
-            if (provide_preopened_directories)
-                return provide_preopened_directories();
-            return Vector<MappedPath> {};
-        });
-    }
-
-    return *cache.cached_preopened_directories;
+    return cache.cached_preopened_directories.ensure([&] {
+        if (provide_preopened_directories)
+            return provide_preopened_directories();
+        return Vector<MappedPath> {};
+    });
 }
 
 Implementation::Descriptor Implementation::map_fd(FD fd)
@@ -861,10 +874,12 @@ ErrorOr<Result<void>> Implementation::impl$sock_shutdown(Configuration&, FD fd, 
 template<size_t N>
 static Array<Bytes, N> address_spans(Span<Value> values, Configuration& configuration)
 {
-    Array<Bytes, N> result;
-    auto memory = configuration.store().get(MemoryAddress { 0 })->data().span();
-    for (size_t i = 0; i < N; ++i)
-        result[i] = memory.slice(values[i].to<i32>());
+    Array<Bytes, N> result {};
+    auto& memory = configuration.store().get(MemoryAddress { 0 })->data();
+    for (size_t i = 0; i < N; ++i) {
+        if (auto address = static_cast<size_t>(values[i].to<i32>()); address <= memory.size())
+            result[i] = Bytes { memory.offset_pointer(address), memory.contiguous_bytes_from(address, memory.size() - address) };
+    }
     return result;
 }
 
@@ -934,7 +949,7 @@ struct Names {
 ErrorOr<HostFunction> Implementation::function_by_name(StringView name)
 {
     auto name_for_comparison = TRY(FlyString::from_utf8(name));
-    static auto names = TRY(Names::construct());
+    static auto& names = *new Names(TRY(Names::construct()));
 
 #define IMPL(x)                         \
     if (name_for_comparison == names.x) \
@@ -1006,7 +1021,7 @@ struct InvocationOf<impl> {
             return_ty.append(ValueType(ValueType::I32));
 
         return HostFunction(
-            [&self, function_name](Configuration& configuration, Vector<Value>& arguments) -> Wasm::Result {
+            [&self, function_name](Configuration& configuration, Span<Value> arguments) -> Wasm::Result {
                 Tuple args = [&]<typename... Ts, auto... Is>(IndexSequence<Is...>) {
                     return Tuple { ABI::deserialize(ABI::to_compatible_value<Ts>(arguments[Is]))... };
                 }.template operator()<Args...>(MakeIndexSequence<sizeof...(Args)>());
@@ -1030,9 +1045,9 @@ struct InvocationOf<impl> {
                     // Return values are passed as pointers, after the arguments
                     if constexpr (requires { &R::serialize_into; }) {
                         constexpr auto ResultCount = []<auto N>(void (R::*)(Array<Bytes, N>) const) { return N; }(&R::serialize_into);
-                        ABI::serialize(*value.result(), address_spans<ResultCount>(arguments.span().slice(sizeof...(Args)), configuration));
+                        ABI::serialize(*value.result(), address_spans<ResultCount>(arguments.slice(sizeof...(Args)), configuration));
                     } else {
-                        ABI::serialize(*value.result(), address_spans<1>(arguments.span().slice(sizeof...(Args)), configuration));
+                        ABI::serialize(*value.result(), address_spans<1>(arguments.slice(sizeof...(Args)), configuration));
                     }
                 }
                 // Return value is errno, we have nothing to return.
@@ -1224,6 +1239,15 @@ FDFlags fd_flags_of(struct stat const&)
 }
 
 namespace AK {
+
+// Don't remove, needed for dbgln_if WASI_DEBUG above to display arguments
+template<>
+struct Formatter<Wasm::Value> : AK::Formatter<FormatString> {
+    ErrorOr<void> format(FormatBuilder& builder, Wasm::Value const& value)
+    {
+        return Formatter<FormatString>::format(builder, "{}"sv, value.to<u128>());
+    }
+};
 
 template<>
 struct Formatter<Wasm::Wasi::Errno> : AK::Formatter<FormatString> {

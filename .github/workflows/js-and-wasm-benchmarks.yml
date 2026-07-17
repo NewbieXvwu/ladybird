@@ -11,6 +11,7 @@ jobs:
     runs-on: ${{ fromJSON(matrix.runner_labels) }}
     if: ${{ github.repository == 'LadybirdBrowser/ladybird' && github.event.workflow_run.conclusion == 'success' }}
     name: ${{ matrix.os_name }}, ${{ matrix.arch }}
+    container: ${{ fromJSON(matrix.container) }}
 
     strategy:
       fail-fast: false
@@ -19,12 +20,14 @@ jobs:
         arch: ['x86_64']
         package_type: ['Linux-x86_64']
         runner_labels: ['["ubuntu-24.04-internal", "js-benchmarks", "self-hosted"]']
+        container: [&ci_container '{"image":"ghcr.io/ladybirdbrowser/ladybird-ci:2026.07.04"}']
 
         include:
           - os_name: 'macOS'
             arch: 'arm64'
             package_type: 'macOS-arm64'
-            runner_labels: '["macos-15", "js-benchmarks", "self-hosted"]'
+            runner_labels: '["macos-26", "js-benchmarks", "self-hosted"]'
+            container: 'null'
 
     permissions:
       actions: read
@@ -32,22 +35,21 @@ jobs:
 
     steps:
       - name: 'Checkout LadybirdBrowser/js-benchmarks'
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7.0.0
         with:
           repository: LadybirdBrowser/js-benchmarks
           path: js-benchmarks
-          ref: d151be80c96e4f8acb364d3f199c25481b56f287
+          ref: master
 
-      - name: 'Install dependencies'
-        if: ${{ matrix.os_name == 'Linux' }}
+      - name: 'Determine js-benchmarks commit hash'
+        id: js-benchmarks-commit
         shell: bash
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y python3-venv
+          cd js-benchmarks
+          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Download JS repl artifact'
-        id: download-js-artifact
-        uses: dawidd6/action-download-artifact@v11
+        uses: dawidd6/action-download-artifact@v21
         with:
           run_id: ${{ github.event.workflow_run.id }}
           name: ladybird-js-${{ matrix.package_type }}
@@ -59,31 +61,71 @@ jobs:
           cd js-repl
           tar -xvzf ladybird-js-${{ matrix.os_name }}-${{ matrix.arch }}.tar.gz
 
-      - name: 'Download Wasm repl artifact'
-        id: download-wasm-artifact
-        uses: dawidd6/action-download-artifact@v11
+      - name: 'Determine JS repl build commit hash'
+        id: js-build-commit
+        shell: bash
+        run: |
+          commit_hash=$(cat js-repl/COMMIT)
+          echo "sha=${commit_hash}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Download wasm repl artifact'
+        uses: dawidd6/action-download-artifact@v21
         with:
           run_id: ${{ github.event.workflow_run.id }}
           name: ladybird-wasm-${{ matrix.package_type }}
           path: wasm-repl
+          if_no_artifact_found: warn
 
-      - name: 'Extract Wasm repl'
+      - name: 'Extract wasm repl'
+        if: ${{ hashFiles('wasm-repl/*.tar.gz') != '' }}
         shell: bash
         run: |
           cd wasm-repl
           tar -xvzf ladybird-wasm-${{ matrix.os_name }}-${{ matrix.arch }}.tar.gz
 
-      - name: 'Run the JS and Wasm benchmarks'
+      - name: 'Download cranelift-compiler artifact'
+        uses: dawidd6/action-download-artifact@v21
+        with:
+          run_id: ${{ github.event.workflow_run.id }}
+          name: ladybird-cranelift-compiler-${{ matrix.package_type }}
+          path: cranelift-compiler
+          if_no_artifact_found: warn
+
+      - name: 'Install cranelift-compiler next to wasm'
+        if: ${{ hashFiles('cranelift-compiler/cranelift-compiler') != '' && hashFiles('wasm-repl/bin/wasm') != '' }}
+        shell: bash
+        run: |
+          install -m 0755 cranelift-compiler/cranelift-compiler wasm-repl/bin/cranelift-compiler
+
+      - name: 'Run the benchmarks'
         shell: bash
         run: |
           cd js-benchmarks
           python3 -m venv .venv
           source .venv/bin/activate
           python3 -m pip install -r requirements.txt
-          ./run.py --executable=${{ github.workspace }}/js-repl/bin/js --wasm-executable=${{ github.workspace }}/wasm-repl/bin/wasm --iterations=5
+
+          run_options='--iterations=5'
+
+          js_path="${GITHUB_WORKSPACE}/js-repl/bin/js"
+          run_options="${run_options} --executable=${js_path}"
+
+          wasm_path="${GITHUB_WORKSPACE}/wasm-repl/bin/wasm"
+          if [ -x "${wasm_path}" ]; then
+              run_options="${run_options} --wasm-executable=${wasm_path}"
+          else
+              echo "Wasm repl not found; skipping wasm benchmarks."
+          fi
+
+          if [ "${{ github.event.workflow_run.event }}" = "workflow_dispatch" ]; then
+              # Upstream was run manually; we might run into failing benchmarks as a result of older builds.
+              run_options="${run_options} --continue-on-failure"
+          fi
+
+          ./run.py ${run_options}
 
       - name: 'Save results as an artifact'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: js-benchmarks-results-${{ matrix.os_name }}-${{ matrix.arch }}
           path: js-benchmarks/results.json
@@ -93,7 +135,8 @@ jobs:
         shell: bash
         run: |
           echo '{
-              "commit": "${{ github.event.workflow_run.head_sha }}",
+              "commit": "${{ steps.js-build-commit.outputs.sha }}",
+              "benchmarks_commit": "${{ steps.js-benchmarks-commit.outputs.sha }}",
               "os": "${{ matrix.os_name }}",
               "arch": "${{ matrix.arch }}",
               "artifact": "js-benchmarks-results-${{ matrix.os_name }}-${{ matrix.arch }}",

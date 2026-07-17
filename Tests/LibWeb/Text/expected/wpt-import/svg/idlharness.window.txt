@@ -1,9 +1,9 @@
 Harness status: OK
 
-Found 1781 tests
+Found 1780 tests
 
-970 Pass
-811 Fail
+1116 Pass
+664 Fail
 Pass	idl_test setup
 Pass	idl_test validation
 Pass	Partial interface Document: original interface defined
@@ -44,6 +44,8 @@ Pass	Element includes Animatable: member names are unique
 Pass	Document includes GlobalEventHandlers: member names are unique
 Pass	Document includes NonElementParentNode: member names are unique
 Pass	DocumentFragment includes NonElementParentNode: member names are unique
+Pass	Document includes DocumentOrShadowRoot: member names are unique
+Pass	ShadowRoot includes DocumentOrShadowRoot: member names are unique
 Pass	Document includes ParentNode: member names are unique
 Pass	DocumentFragment includes ParentNode: member names are unique
 Pass	Element includes ParentNode: member names are unique
@@ -85,13 +87,13 @@ Fail	SVGGeometryElement interface: operation isPointInFill(optional DOMPointInit
 Fail	SVGGeometryElement interface: operation isPointInStroke(optional DOMPointInit)
 Pass	SVGGeometryElement interface: operation getTotalLength()
 Pass	SVGGeometryElement interface: operation getPointAtLength(float)
-Fail	SVGNumber interface: existence and properties of interface object
-Fail	SVGNumber interface object length
-Fail	SVGNumber interface object name
-Fail	SVGNumber interface: existence and properties of interface prototype object
-Fail	SVGNumber interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGNumber interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGNumber interface: attribute value
+Pass	SVGNumber interface: existence and properties of interface object
+Pass	SVGNumber interface object length
+Pass	SVGNumber interface object name
+Pass	SVGNumber interface: existence and properties of interface prototype object
+Pass	SVGNumber interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGNumber interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGNumber interface: attribute value
 Fail	SVGNumber must be primary interface of objects.svg.createSVGNumber()
 Fail	Stringification of objects.svg.createSVGNumber()
 Fail	SVGNumber interface: objects.svg.createSVGNumber() must inherit property "value" with the proper type
@@ -187,53 +189,53 @@ Fail	SVGAngle interface: objects.svg.createSVGAngle() must inherit property "new
 Fail	SVGAngle interface: calling newValueSpecifiedUnits(unsigned short, float) on objects.svg.createSVGAngle() with too few arguments must throw TypeError
 Fail	SVGAngle interface: objects.svg.createSVGAngle() must inherit property "convertToSpecifiedUnits(unsigned short)" with the proper type
 Fail	SVGAngle interface: calling convertToSpecifiedUnits(unsigned short) on objects.svg.createSVGAngle() with too few arguments must throw TypeError
-Fail	SVGNumberList interface: existence and properties of interface object
-Fail	SVGNumberList interface object length
-Fail	SVGNumberList interface object name
-Fail	SVGNumberList interface: existence and properties of interface prototype object
-Fail	SVGNumberList interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGNumberList interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGNumberList interface: attribute length
-Fail	SVGNumberList interface: attribute numberOfItems
-Fail	SVGNumberList interface: operation clear()
-Fail	SVGNumberList interface: operation initialize(SVGNumber)
-Fail	SVGNumberList interface: operation getItem(unsigned long)
-Fail	SVGNumberList interface: operation insertItemBefore(SVGNumber, unsigned long)
-Fail	SVGNumberList interface: operation replaceItem(SVGNumber, unsigned long)
-Fail	SVGNumberList interface: operation removeItem(unsigned long)
-Fail	SVGNumberList interface: operation appendItem(SVGNumber)
-Fail	SVGNumberList must be primary interface of objects.text.rotate.baseVal
-Fail	Stringification of objects.text.rotate.baseVal
-Fail	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "length" with the proper type
-Fail	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "numberOfItems" with the proper type
-Fail	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "clear()" with the proper type
-Fail	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "initialize(SVGNumber)" with the proper type
-Fail	SVGNumberList interface: calling initialize(SVGNumber) on objects.text.rotate.baseVal with too few arguments must throw TypeError
-Fail	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "getItem(unsigned long)" with the proper type
-Fail	SVGNumberList interface: calling getItem(unsigned long) on objects.text.rotate.baseVal with too few arguments must throw TypeError
-Fail	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "insertItemBefore(SVGNumber, unsigned long)" with the proper type
-Fail	SVGNumberList interface: calling insertItemBefore(SVGNumber, unsigned long) on objects.text.rotate.baseVal with too few arguments must throw TypeError
-Fail	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "replaceItem(SVGNumber, unsigned long)" with the proper type
-Fail	SVGNumberList interface: calling replaceItem(SVGNumber, unsigned long) on objects.text.rotate.baseVal with too few arguments must throw TypeError
-Fail	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "removeItem(unsigned long)" with the proper type
-Fail	SVGNumberList interface: calling removeItem(unsigned long) on objects.text.rotate.baseVal with too few arguments must throw TypeError
-Fail	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "appendItem(SVGNumber)" with the proper type
-Fail	SVGNumberList interface: calling appendItem(SVGNumber) on objects.text.rotate.baseVal with too few arguments must throw TypeError
-Fail	SVGLengthList interface: existence and properties of interface object
-Fail	SVGLengthList interface object length
-Fail	SVGLengthList interface object name
-Fail	SVGLengthList interface: existence and properties of interface prototype object
-Fail	SVGLengthList interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGLengthList interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGLengthList interface: attribute length
-Fail	SVGLengthList interface: attribute numberOfItems
-Fail	SVGLengthList interface: operation clear()
-Fail	SVGLengthList interface: operation initialize(SVGLength)
-Fail	SVGLengthList interface: operation getItem(unsigned long)
-Fail	SVGLengthList interface: operation insertItemBefore(SVGLength, unsigned long)
-Fail	SVGLengthList interface: operation replaceItem(SVGLength, unsigned long)
-Fail	SVGLengthList interface: operation removeItem(unsigned long)
-Fail	SVGLengthList interface: operation appendItem(SVGLength)
+Pass	SVGNumberList interface: existence and properties of interface object
+Pass	SVGNumberList interface object length
+Pass	SVGNumberList interface object name
+Pass	SVGNumberList interface: existence and properties of interface prototype object
+Pass	SVGNumberList interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGNumberList interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGNumberList interface: attribute length
+Pass	SVGNumberList interface: attribute numberOfItems
+Pass	SVGNumberList interface: operation clear()
+Pass	SVGNumberList interface: operation initialize(SVGNumber)
+Pass	SVGNumberList interface: operation getItem(unsigned long)
+Pass	SVGNumberList interface: operation insertItemBefore(SVGNumber, unsigned long)
+Pass	SVGNumberList interface: operation replaceItem(SVGNumber, unsigned long)
+Pass	SVGNumberList interface: operation removeItem(unsigned long)
+Pass	SVGNumberList interface: operation appendItem(SVGNumber)
+Pass	SVGNumberList must be primary interface of objects.text.rotate.baseVal
+Pass	Stringification of objects.text.rotate.baseVal
+Pass	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "length" with the proper type
+Pass	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "numberOfItems" with the proper type
+Pass	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "clear()" with the proper type
+Pass	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "initialize(SVGNumber)" with the proper type
+Pass	SVGNumberList interface: calling initialize(SVGNumber) on objects.text.rotate.baseVal with too few arguments must throw TypeError
+Pass	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "getItem(unsigned long)" with the proper type
+Pass	SVGNumberList interface: calling getItem(unsigned long) on objects.text.rotate.baseVal with too few arguments must throw TypeError
+Pass	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "insertItemBefore(SVGNumber, unsigned long)" with the proper type
+Pass	SVGNumberList interface: calling insertItemBefore(SVGNumber, unsigned long) on objects.text.rotate.baseVal with too few arguments must throw TypeError
+Pass	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "replaceItem(SVGNumber, unsigned long)" with the proper type
+Pass	SVGNumberList interface: calling replaceItem(SVGNumber, unsigned long) on objects.text.rotate.baseVal with too few arguments must throw TypeError
+Pass	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "removeItem(unsigned long)" with the proper type
+Pass	SVGNumberList interface: calling removeItem(unsigned long) on objects.text.rotate.baseVal with too few arguments must throw TypeError
+Pass	SVGNumberList interface: objects.text.rotate.baseVal must inherit property "appendItem(SVGNumber)" with the proper type
+Pass	SVGNumberList interface: calling appendItem(SVGNumber) on objects.text.rotate.baseVal with too few arguments must throw TypeError
+Pass	SVGLengthList interface: existence and properties of interface object
+Pass	SVGLengthList interface object length
+Pass	SVGLengthList interface object name
+Pass	SVGLengthList interface: existence and properties of interface prototype object
+Pass	SVGLengthList interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGLengthList interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGLengthList interface: attribute length
+Pass	SVGLengthList interface: attribute numberOfItems
+Pass	SVGLengthList interface: operation clear()
+Pass	SVGLengthList interface: operation initialize(SVGLength)
+Pass	SVGLengthList interface: operation getItem(unsigned long)
+Pass	SVGLengthList interface: operation insertItemBefore(SVGLength, unsigned long)
+Pass	SVGLengthList interface: operation replaceItem(SVGLength, unsigned long)
+Pass	SVGLengthList interface: operation removeItem(unsigned long)
+Pass	SVGLengthList interface: operation appendItem(SVGLength)
 Fail	SVGStringList interface: existence and properties of interface object
 Fail	SVGStringList interface object length
 Fail	SVGStringList interface object name
@@ -290,14 +292,14 @@ Fail	SVGAnimatedEnumeration must be primary interface of objects.text.lengthAdju
 Fail	Stringification of objects.text.lengthAdjust
 Fail	SVGAnimatedEnumeration interface: objects.text.lengthAdjust must inherit property "baseVal" with the proper type
 Fail	SVGAnimatedEnumeration interface: objects.text.lengthAdjust must inherit property "animVal" with the proper type
-Fail	SVGAnimatedInteger interface: existence and properties of interface object
-Fail	SVGAnimatedInteger interface object length
-Fail	SVGAnimatedInteger interface object name
-Fail	SVGAnimatedInteger interface: existence and properties of interface prototype object
-Fail	SVGAnimatedInteger interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGAnimatedInteger interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGAnimatedInteger interface: attribute baseVal
-Fail	SVGAnimatedInteger interface: attribute animVal
+Pass	SVGAnimatedInteger interface: existence and properties of interface object
+Pass	SVGAnimatedInteger interface object length
+Pass	SVGAnimatedInteger interface object name
+Pass	SVGAnimatedInteger interface: existence and properties of interface prototype object
+Pass	SVGAnimatedInteger interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGAnimatedInteger interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGAnimatedInteger interface: attribute baseVal
+Pass	SVGAnimatedInteger interface: attribute animVal
 Fail	SVGAnimatedInteger must be primary interface of objects.feConvolveMatrix.orderX
 Fail	Stringification of objects.feConvolveMatrix.orderX
 Fail	SVGAnimatedInteger interface: objects.feConvolveMatrix.orderX must inherit property "baseVal" with the proper type
@@ -362,30 +364,30 @@ Pass	SVGAnimatedRect must be primary interface of objects.svg.viewBox
 Pass	Stringification of objects.svg.viewBox
 Fail	SVGAnimatedRect interface: objects.svg.viewBox must inherit property "baseVal" with the proper type
 Fail	SVGAnimatedRect interface: objects.svg.viewBox must inherit property "animVal" with the proper type
-Fail	SVGAnimatedNumberList interface: existence and properties of interface object
-Fail	SVGAnimatedNumberList interface object length
-Fail	SVGAnimatedNumberList interface object name
-Fail	SVGAnimatedNumberList interface: existence and properties of interface prototype object
-Fail	SVGAnimatedNumberList interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGAnimatedNumberList interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGAnimatedNumberList interface: attribute baseVal
-Fail	SVGAnimatedNumberList interface: attribute animVal
-Fail	SVGAnimatedNumberList must be primary interface of objects.text.rotate
-Fail	Stringification of objects.text.rotate
-Fail	SVGAnimatedNumberList interface: objects.text.rotate must inherit property "baseVal" with the proper type
-Fail	SVGAnimatedNumberList interface: objects.text.rotate must inherit property "animVal" with the proper type
-Fail	SVGAnimatedLengthList interface: existence and properties of interface object
-Fail	SVGAnimatedLengthList interface object length
-Fail	SVGAnimatedLengthList interface object name
-Fail	SVGAnimatedLengthList interface: existence and properties of interface prototype object
-Fail	SVGAnimatedLengthList interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGAnimatedLengthList interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGAnimatedLengthList interface: attribute baseVal
-Fail	SVGAnimatedLengthList interface: attribute animVal
-Fail	SVGAnimatedLengthList must be primary interface of objects.text.x
-Fail	Stringification of objects.text.x
-Fail	SVGAnimatedLengthList interface: objects.text.x must inherit property "baseVal" with the proper type
-Fail	SVGAnimatedLengthList interface: objects.text.x must inherit property "animVal" with the proper type
+Pass	SVGAnimatedNumberList interface: existence and properties of interface object
+Pass	SVGAnimatedNumberList interface object length
+Pass	SVGAnimatedNumberList interface object name
+Pass	SVGAnimatedNumberList interface: existence and properties of interface prototype object
+Pass	SVGAnimatedNumberList interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGAnimatedNumberList interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGAnimatedNumberList interface: attribute baseVal
+Pass	SVGAnimatedNumberList interface: attribute animVal
+Pass	SVGAnimatedNumberList must be primary interface of objects.text.rotate
+Pass	Stringification of objects.text.rotate
+Pass	SVGAnimatedNumberList interface: objects.text.rotate must inherit property "baseVal" with the proper type
+Pass	SVGAnimatedNumberList interface: objects.text.rotate must inherit property "animVal" with the proper type
+Pass	SVGAnimatedLengthList interface: existence and properties of interface object
+Pass	SVGAnimatedLengthList interface object length
+Pass	SVGAnimatedLengthList interface object name
+Pass	SVGAnimatedLengthList interface: existence and properties of interface prototype object
+Pass	SVGAnimatedLengthList interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGAnimatedLengthList interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGAnimatedLengthList interface: attribute baseVal
+Pass	SVGAnimatedLengthList interface: attribute animVal
+Pass	SVGAnimatedLengthList must be primary interface of objects.text.x
+Pass	Stringification of objects.text.x
+Pass	SVGAnimatedLengthList interface: objects.text.x must inherit property "baseVal" with the proper type
+Pass	SVGAnimatedLengthList interface: objects.text.x must inherit property "animVal" with the proper type
 Pass	SVGUnitTypes interface: existence and properties of interface object
 Pass	SVGUnitTypes interface object length
 Pass	SVGUnitTypes interface object name
@@ -639,19 +641,19 @@ Fail	ShadowAnimation interface: existence and properties of interface prototype 
 Fail	ShadowAnimation interface: existence and properties of interface prototype object's "constructor" property
 Fail	ShadowAnimation interface: existence and properties of interface prototype object's @@unscopables property
 Fail	ShadowAnimation interface: attribute sourceAnimation
-Fail	SVGSwitchElement interface: existence and properties of interface object
-Fail	SVGSwitchElement interface object length
-Fail	SVGSwitchElement interface object name
-Fail	SVGSwitchElement interface: existence and properties of interface prototype object
-Fail	SVGSwitchElement interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGSwitchElement interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGSwitchElement must be primary interface of objects.switch
-Fail	Stringification of objects.switch
-Fail	SVGGraphicsElement interface: objects.switch must inherit property "transform" with the proper type
-Fail	SVGGraphicsElement interface: objects.switch must inherit property "getBBox(optional SVGBoundingBoxOptions)" with the proper type
-Fail	SVGGraphicsElement interface: calling getBBox(optional SVGBoundingBoxOptions) on objects.switch with too few arguments must throw TypeError
-Fail	SVGGraphicsElement interface: objects.switch must inherit property "getCTM()" with the proper type
-Fail	SVGGraphicsElement interface: objects.switch must inherit property "getScreenCTM()" with the proper type
+Pass	SVGSwitchElement interface: existence and properties of interface object
+Pass	SVGSwitchElement interface object length
+Pass	SVGSwitchElement interface object name
+Pass	SVGSwitchElement interface: existence and properties of interface prototype object
+Pass	SVGSwitchElement interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGSwitchElement interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGSwitchElement must be primary interface of objects.switch
+Pass	Stringification of objects.switch
+Pass	SVGGraphicsElement interface: objects.switch must inherit property "transform" with the proper type
+Pass	SVGGraphicsElement interface: objects.switch must inherit property "getBBox(optional SVGBoundingBoxOptions)" with the proper type
+Pass	SVGGraphicsElement interface: calling getBBox(optional SVGBoundingBoxOptions) on objects.switch with too few arguments must throw TypeError
+Pass	SVGGraphicsElement interface: objects.switch must inherit property "getCTM()" with the proper type
+Pass	SVGGraphicsElement interface: objects.switch must inherit property "getScreenCTM()" with the proper type
 Fail	SVGGraphicsElement interface: objects.switch must inherit property "requiredExtensions" with the proper type
 Fail	SVGGraphicsElement interface: objects.switch must inherit property "systemLanguage" with the proper type
 Pass	SVGElement interface: objects.switch must inherit property "className" with the proper type
@@ -668,11 +670,13 @@ Pass	SVGStyleElement interface: existence and properties of interface prototype 
 Pass	SVGStyleElement interface: attribute type
 Pass	SVGStyleElement interface: attribute media
 Pass	SVGStyleElement interface: attribute title
+Fail	SVGStyleElement interface: attribute disabled
 Pass	SVGStyleElement must be primary interface of objects.style
 Pass	Stringification of objects.style
 Pass	SVGStyleElement interface: objects.style must inherit property "type" with the proper type
 Pass	SVGStyleElement interface: objects.style must inherit property "media" with the proper type
 Pass	SVGStyleElement interface: objects.style must inherit property "title" with the proper type
+Fail	SVGStyleElement interface: objects.style must inherit property "disabled" with the proper type
 Pass	SVGElement interface: objects.style must inherit property "className" with the proper type
 Pass	SVGElement interface: objects.style must inherit property "ownerSVGElement" with the proper type
 Pass	SVGElement interface: objects.style must inherit property "viewportElement" with the proper type
@@ -739,12 +743,12 @@ Pass	SVGTransformList interface: existence and properties of interface prototype
 Pass	SVGTransformList interface: existence and properties of interface prototype object's @@unscopables property
 Pass	SVGTransformList interface: attribute length
 Pass	SVGTransformList interface: attribute numberOfItems
-Fail	SVGTransformList interface: operation clear()
-Fail	SVGTransformList interface: operation initialize(SVGTransform)
+Pass	SVGTransformList interface: operation clear()
+Pass	SVGTransformList interface: operation initialize(SVGTransform)
 Pass	SVGTransformList interface: operation getItem(unsigned long)
-Fail	SVGTransformList interface: operation insertItemBefore(SVGTransform, unsigned long)
-Fail	SVGTransformList interface: operation replaceItem(SVGTransform, unsigned long)
-Fail	SVGTransformList interface: operation removeItem(unsigned long)
+Pass	SVGTransformList interface: operation insertItemBefore(SVGTransform, unsigned long)
+Pass	SVGTransformList interface: operation replaceItem(SVGTransform, unsigned long)
+Pass	SVGTransformList interface: operation removeItem(unsigned long)
 Pass	SVGTransformList interface: operation appendItem(SVGTransform)
 Fail	SVGTransformList interface: operation createSVGTransformFromMatrix(optional DOMMatrix2DInit)
 Fail	SVGTransformList interface: operation consolidate()
@@ -1117,11 +1121,11 @@ Pass	SVGTextPositioningElement interface object name
 Pass	SVGTextPositioningElement interface: existence and properties of interface prototype object
 Pass	SVGTextPositioningElement interface: existence and properties of interface prototype object's "constructor" property
 Pass	SVGTextPositioningElement interface: existence and properties of interface prototype object's @@unscopables property
-Fail	SVGTextPositioningElement interface: attribute x
-Fail	SVGTextPositioningElement interface: attribute y
-Fail	SVGTextPositioningElement interface: attribute dx
-Fail	SVGTextPositioningElement interface: attribute dy
-Fail	SVGTextPositioningElement interface: attribute rotate
+Pass	SVGTextPositioningElement interface: attribute x
+Pass	SVGTextPositioningElement interface: attribute y
+Pass	SVGTextPositioningElement interface: attribute dx
+Pass	SVGTextPositioningElement interface: attribute dy
+Pass	SVGTextPositioningElement interface: attribute rotate
 Pass	SVGTextElement interface: existence and properties of interface object
 Pass	SVGTextElement interface object length
 Pass	SVGTextElement interface object name
@@ -1130,11 +1134,11 @@ Pass	SVGTextElement interface: existence and properties of interface prototype o
 Pass	SVGTextElement interface: existence and properties of interface prototype object's @@unscopables property
 Pass	SVGTextElement must be primary interface of objects.text
 Pass	Stringification of objects.text
-Fail	SVGTextPositioningElement interface: objects.text must inherit property "x" with the proper type
-Fail	SVGTextPositioningElement interface: objects.text must inherit property "y" with the proper type
-Fail	SVGTextPositioningElement interface: objects.text must inherit property "dx" with the proper type
-Fail	SVGTextPositioningElement interface: objects.text must inherit property "dy" with the proper type
-Fail	SVGTextPositioningElement interface: objects.text must inherit property "rotate" with the proper type
+Pass	SVGTextPositioningElement interface: objects.text must inherit property "x" with the proper type
+Pass	SVGTextPositioningElement interface: objects.text must inherit property "y" with the proper type
+Pass	SVGTextPositioningElement interface: objects.text must inherit property "dx" with the proper type
+Pass	SVGTextPositioningElement interface: objects.text must inherit property "dy" with the proper type
+Pass	SVGTextPositioningElement interface: objects.text must inherit property "rotate" with the proper type
 Pass	SVGTextContentElement interface: objects.text must inherit property "LENGTHADJUST_UNKNOWN" with the proper type
 Pass	SVGTextContentElement interface: objects.text must inherit property "LENGTHADJUST_SPACING" with the proper type
 Pass	SVGTextContentElement interface: objects.text must inherit property "LENGTHADJUST_SPACINGANDGLYPHS" with the proper type
@@ -1176,11 +1180,11 @@ Pass	SVGTSpanElement interface: existence and properties of interface prototype 
 Pass	SVGTSpanElement interface: existence and properties of interface prototype object's @@unscopables property
 Pass	SVGTSpanElement must be primary interface of objects.tspan
 Pass	Stringification of objects.tspan
-Fail	SVGTextPositioningElement interface: objects.tspan must inherit property "x" with the proper type
-Fail	SVGTextPositioningElement interface: objects.tspan must inherit property "y" with the proper type
-Fail	SVGTextPositioningElement interface: objects.tspan must inherit property "dx" with the proper type
-Fail	SVGTextPositioningElement interface: objects.tspan must inherit property "dy" with the proper type
-Fail	SVGTextPositioningElement interface: objects.tspan must inherit property "rotate" with the proper type
+Pass	SVGTextPositioningElement interface: objects.tspan must inherit property "x" with the proper type
+Pass	SVGTextPositioningElement interface: objects.tspan must inherit property "y" with the proper type
+Pass	SVGTextPositioningElement interface: objects.tspan must inherit property "dx" with the proper type
+Pass	SVGTextPositioningElement interface: objects.tspan must inherit property "dy" with the proper type
+Pass	SVGTextPositioningElement interface: objects.tspan must inherit property "rotate" with the proper type
 Pass	SVGTextContentElement interface: objects.tspan must inherit property "LENGTHADJUST_UNKNOWN" with the proper type
 Pass	SVGTextContentElement interface: objects.tspan must inherit property "LENGTHADJUST_SPACING" with the proper type
 Pass	SVGTextContentElement interface: objects.tspan must inherit property "LENGTHADJUST_SPACINGANDGLYPHS" with the proper type
@@ -1232,7 +1236,7 @@ Pass	SVGTextPathElement interface: constant TEXTPATH_SPACINGTYPE_AUTO on interfa
 Pass	SVGTextPathElement interface: constant TEXTPATH_SPACINGTYPE_AUTO on interface prototype object
 Pass	SVGTextPathElement interface: constant TEXTPATH_SPACINGTYPE_EXACT on interface object
 Pass	SVGTextPathElement interface: constant TEXTPATH_SPACINGTYPE_EXACT on interface prototype object
-Fail	SVGTextPathElement interface: attribute startOffset
+Pass	SVGTextPathElement interface: attribute startOffset
 Fail	SVGTextPathElement interface: attribute method
 Fail	SVGTextPathElement interface: attribute spacing
 Pass	SVGTextPathElement interface: attribute href
@@ -1244,7 +1248,7 @@ Pass	SVGTextPathElement interface: objects.textPath must inherit property "TEXTP
 Pass	SVGTextPathElement interface: objects.textPath must inherit property "TEXTPATH_SPACINGTYPE_UNKNOWN" with the proper type
 Pass	SVGTextPathElement interface: objects.textPath must inherit property "TEXTPATH_SPACINGTYPE_AUTO" with the proper type
 Pass	SVGTextPathElement interface: objects.textPath must inherit property "TEXTPATH_SPACINGTYPE_EXACT" with the proper type
-Fail	SVGTextPathElement interface: objects.textPath must inherit property "startOffset" with the proper type
+Pass	SVGTextPathElement interface: objects.textPath must inherit property "startOffset" with the proper type
 Fail	SVGTextPathElement interface: objects.textPath must inherit property "method" with the proper type
 Fail	SVGTextPathElement interface: objects.textPath must inherit property "spacing" with the proper type
 Pass	SVGTextPathElement interface: objects.textPath must inherit property "href" with the proper type
@@ -1361,6 +1365,8 @@ Fail	SVGMarkerElement interface: constant SVG_MARKER_ORIENT_AUTO on interface ob
 Fail	SVGMarkerElement interface: constant SVG_MARKER_ORIENT_AUTO on interface prototype object
 Fail	SVGMarkerElement interface: constant SVG_MARKER_ORIENT_ANGLE on interface object
 Fail	SVGMarkerElement interface: constant SVG_MARKER_ORIENT_ANGLE on interface prototype object
+Fail	SVGMarkerElement interface: constant SVG_MARKER_ORIENT_AUTO_START_REVERSE on interface object
+Fail	SVGMarkerElement interface: constant SVG_MARKER_ORIENT_AUTO_START_REVERSE on interface prototype object
 Fail	SVGMarkerElement interface: attribute refX
 Fail	SVGMarkerElement interface: attribute refY
 Fail	SVGMarkerElement interface: attribute markerUnits
@@ -1381,6 +1387,7 @@ Fail	SVGMarkerElement interface: objects.marker must inherit property "SVG_MARKE
 Fail	SVGMarkerElement interface: objects.marker must inherit property "SVG_MARKER_ORIENT_UNKNOWN" with the proper type
 Fail	SVGMarkerElement interface: objects.marker must inherit property "SVG_MARKER_ORIENT_AUTO" with the proper type
 Fail	SVGMarkerElement interface: objects.marker must inherit property "SVG_MARKER_ORIENT_ANGLE" with the proper type
+Fail	SVGMarkerElement interface: objects.marker must inherit property "SVG_MARKER_ORIENT_AUTO_START_REVERSE" with the proper type
 Fail	SVGMarkerElement interface: objects.marker must inherit property "refX" with the proper type
 Fail	SVGMarkerElement interface: objects.marker must inherit property "refY" with the proper type
 Fail	SVGMarkerElement interface: objects.marker must inherit property "markerUnits" with the proper type
@@ -1494,34 +1501,34 @@ Pass	SVGElement interface: objects.stop must inherit property "ownerSVGElement" 
 Pass	SVGElement interface: objects.stop must inherit property "viewportElement" with the proper type
 Fail	SVGElement interface: objects.stop must inherit property "correspondingElement" with the proper type
 Fail	SVGElement interface: objects.stop must inherit property "correspondingUseElement" with the proper type
-Fail	SVGPatternElement interface: existence and properties of interface object
-Fail	SVGPatternElement interface object length
-Fail	SVGPatternElement interface object name
-Fail	SVGPatternElement interface: existence and properties of interface prototype object
-Fail	SVGPatternElement interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGPatternElement interface: existence and properties of interface prototype object's @@unscopables property
+Pass	SVGPatternElement interface: existence and properties of interface object
+Pass	SVGPatternElement interface object length
+Pass	SVGPatternElement interface object name
+Pass	SVGPatternElement interface: existence and properties of interface prototype object
+Pass	SVGPatternElement interface: existence and properties of interface prototype object's "constructor" property
+Pass	SVGPatternElement interface: existence and properties of interface prototype object's @@unscopables property
 Fail	SVGPatternElement interface: attribute patternUnits
 Fail	SVGPatternElement interface: attribute patternContentUnits
 Fail	SVGPatternElement interface: attribute patternTransform
-Fail	SVGPatternElement interface: attribute x
-Fail	SVGPatternElement interface: attribute y
-Fail	SVGPatternElement interface: attribute width
-Fail	SVGPatternElement interface: attribute height
-Fail	SVGPatternElement interface: attribute viewBox
+Pass	SVGPatternElement interface: attribute x
+Pass	SVGPatternElement interface: attribute y
+Pass	SVGPatternElement interface: attribute width
+Pass	SVGPatternElement interface: attribute height
+Pass	SVGPatternElement interface: attribute viewBox
 Fail	SVGPatternElement interface: attribute preserveAspectRatio
-Fail	SVGPatternElement interface: attribute href
-Fail	SVGPatternElement must be primary interface of objects.pattern
-Fail	Stringification of objects.pattern
+Pass	SVGPatternElement interface: attribute href
+Pass	SVGPatternElement must be primary interface of objects.pattern
+Pass	Stringification of objects.pattern
 Fail	SVGPatternElement interface: objects.pattern must inherit property "patternUnits" with the proper type
 Fail	SVGPatternElement interface: objects.pattern must inherit property "patternContentUnits" with the proper type
 Fail	SVGPatternElement interface: objects.pattern must inherit property "patternTransform" with the proper type
-Fail	SVGPatternElement interface: objects.pattern must inherit property "x" with the proper type
-Fail	SVGPatternElement interface: objects.pattern must inherit property "y" with the proper type
-Fail	SVGPatternElement interface: objects.pattern must inherit property "width" with the proper type
-Fail	SVGPatternElement interface: objects.pattern must inherit property "height" with the proper type
-Fail	SVGPatternElement interface: objects.pattern must inherit property "viewBox" with the proper type
+Pass	SVGPatternElement interface: objects.pattern must inherit property "x" with the proper type
+Pass	SVGPatternElement interface: objects.pattern must inherit property "y" with the proper type
+Pass	SVGPatternElement interface: objects.pattern must inherit property "width" with the proper type
+Pass	SVGPatternElement interface: objects.pattern must inherit property "height" with the proper type
+Pass	SVGPatternElement interface: objects.pattern must inherit property "viewBox" with the proper type
 Fail	SVGPatternElement interface: objects.pattern must inherit property "preserveAspectRatio" with the proper type
-Fail	SVGPatternElement interface: objects.pattern must inherit property "href" with the proper type
+Pass	SVGPatternElement interface: objects.pattern must inherit property "href" with the proper type
 Pass	SVGElement interface: objects.pattern must inherit property "className" with the proper type
 Pass	SVGElement interface: objects.pattern must inherit property "ownerSVGElement" with the proper type
 Pass	SVGElement interface: objects.pattern must inherit property "viewportElement" with the proper type
@@ -1559,7 +1566,6 @@ Pass	SVGAElement interface: attribute rel
 Pass	SVGAElement interface: attribute relList
 Pass	SVGAElement interface: attribute hreflang
 Pass	SVGAElement interface: attribute type
-Fail	SVGAElement interface: attribute text
 Pass	SVGAElement interface: attribute referrerPolicy
 Fail	SVGAElement interface: attribute origin
 Fail	SVGAElement interface: attribute protocol
@@ -1581,7 +1587,6 @@ Pass	SVGAElement interface: objects.a must inherit property "rel" with the prope
 Pass	SVGAElement interface: objects.a must inherit property "relList" with the proper type
 Pass	SVGAElement interface: objects.a must inherit property "hreflang" with the proper type
 Pass	SVGAElement interface: objects.a must inherit property "type" with the proper type
-Fail	SVGAElement interface: objects.a must inherit property "text" with the proper type
 Pass	SVGAElement interface: objects.a must inherit property "referrerPolicy" with the proper type
 Fail	SVGAElement interface: objects.a must inherit property "origin" with the proper type
 Fail	SVGAElement interface: objects.a must inherit property "protocol" with the proper type
@@ -1631,7 +1636,7 @@ Fail	TimeEvent interface: existence and properties of interface prototype object
 Fail	TimeEvent interface: existence and properties of interface prototype object's @@unscopables property
 Fail	TimeEvent interface: attribute view
 Fail	TimeEvent interface: attribute detail
-Fail	TimeEvent interface: operation initTimeEvent(DOMString, Window?, long)
+Fail	TimeEvent interface: operation initTimeEvent(DOMString, optional Window?, optional long)
 Pass	SVGAnimationElement interface: existence and properties of interface object
 Pass	SVGAnimationElement interface object length
 Pass	SVGAnimationElement interface object name
@@ -1639,9 +1644,9 @@ Pass	SVGAnimationElement interface: existence and properties of interface protot
 Pass	SVGAnimationElement interface: existence and properties of interface prototype object's "constructor" property
 Pass	SVGAnimationElement interface: existence and properties of interface prototype object's @@unscopables property
 Fail	SVGAnimationElement interface: attribute targetElement
-Fail	SVGAnimationElement interface: attribute onbegin
-Fail	SVGAnimationElement interface: attribute onend
-Fail	SVGAnimationElement interface: attribute onrepeat
+Pass	SVGAnimationElement interface: attribute onbegin
+Pass	SVGAnimationElement interface: attribute onend
+Pass	SVGAnimationElement interface: attribute onrepeat
 Fail	SVGAnimationElement interface: operation getStartTime()
 Fail	SVGAnimationElement interface: operation getCurrentTime()
 Fail	SVGAnimationElement interface: operation getSimpleDuration()
@@ -1778,10 +1783,4 @@ Pass	SVGElement interface: objects.animateTransform must inherit property "owner
 Pass	SVGElement interface: objects.animateTransform must inherit property "viewportElement" with the proper type
 Fail	SVGElement interface: objects.animateTransform must inherit property "correspondingElement" with the proper type
 Fail	SVGElement interface: objects.animateTransform must inherit property "correspondingUseElement" with the proper type
-Fail	SVGDiscardElement interface: existence and properties of interface object
-Fail	SVGDiscardElement interface object length
-Fail	SVGDiscardElement interface object name
-Fail	SVGDiscardElement interface: existence and properties of interface prototype object
-Fail	SVGDiscardElement interface: existence and properties of interface prototype object's "constructor" property
-Fail	SVGDiscardElement interface: existence and properties of interface prototype object's @@unscopables property
 Pass	Document interface: attribute rootElement

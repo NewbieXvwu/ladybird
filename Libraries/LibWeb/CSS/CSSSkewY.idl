@@ -1,0 +1,6 @@
+// https://drafts.css-houdini.org/css-typed-om-1/#cssskewy
+[Exposed=(Window, Worker, PaintWorklet, LayoutWorklet)]
+interface CSSSkewY : CSSTransformComponent {
+    constructor(CSSNumericValue ay);
+    attribute CSSNumericValue ay;
+};

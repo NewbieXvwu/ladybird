@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2023-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -18,16 +18,44 @@ class Application final : public WebView::Application {
 private:
     explicit Application();
 
-    virtual NonnullOwnPtr<Core::EventLoop> create_platform_event_loop() override;
+    virtual bool supports_private_browsing_windows() const override { return true; }
+
+    virtual Core::EventLoop& create_platform_event_loop() override;
 
     virtual Optional<WebView::ViewImplementation&> active_web_view() const override;
+    virtual Vector<WebView::ViewImplementation&> active_window_web_views() const override;
 
-    virtual Optional<ByteString> ask_user_for_download_folder() const override;
+    virtual Optional<WebView::ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const override;
+    virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const override;
+    virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const override;
+    virtual void open_url_in_new_window(URL::URL const&, WebView::IsPrivate) override;
+
+    virtual Optional<ByteString> ask_user_for_download_path(ByteString const& file) const override;
     virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const override;
     virtual void display_error_dialog(StringView error_message) const override;
+    virtual void open_download(WebView::FileDownloader::Download const&) const override;
+    virtual void show_download_in_folder(WebView::FileDownloader::Download const&) const override;
+
+    virtual Utf16String clipboard_text(ClipboardType) const override;
+    virtual Vector<Web::Clipboard::SystemClipboardRepresentation> clipboard_entries() const override;
+    virtual void insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation) override;
+
+    virtual void rebuild_bookmarks_menu() const override;
+    virtual void show_bookmark_context_menu(Gfx::IntPoint, Optional<WebView::BookmarkItem const&>, Optional<String const&> target_folder_id) override;
+    virtual Optional<BookmarkID> bookmark_item_id_for_context_menu() const override;
+    virtual NonnullRefPtr<AddBookmarkPromise> display_add_bookmark_dialog(Optional<String const&> target_folder_id = {}) const override;
+    virtual NonnullRefPtr<BookmarkPromise> display_edit_bookmark_dialog(WebView::BookmarkItem::Bookmark const& current_bookmark) const override;
+    virtual NonnullRefPtr<BookmarkFolderPromise> display_add_bookmark_folder_dialog(Optional<String const&> default_title = {}) const override;
+    virtual NonnullRefPtr<BookmarkFolderPromise> display_edit_bookmark_folder_dialog(WebView::BookmarkItem::Folder const& current_folder) const override;
+
+    virtual void on_devtools_enabled() const override;
+    virtual void on_devtools_disabled() const override;
 };
 
 }
 
 @interface Application : NSApplication
+
+- (BOOL)confirmCancelActiveDownloads;
+
 @end

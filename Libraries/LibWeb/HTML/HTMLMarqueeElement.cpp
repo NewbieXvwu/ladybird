@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLMarqueeElementPrototype.h>
+#include <LibWeb/Bindings/HTMLMarqueeElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
@@ -30,7 +30,7 @@ void HTMLMarqueeElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-bool HTMLMarqueeElement::is_presentational_hint(FlyString const& name) const
+bool HTMLMarqueeElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -43,33 +43,33 @@ bool HTMLMarqueeElement::is_presentational_hint(FlyString const& name) const
         HTML::AttributeNames::width);
 }
 
-void HTMLMarqueeElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void HTMLMarqueeElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
-    HTMLElement::apply_presentational_hints(cascaded_properties);
-    for_each_attribute([&](auto& name, auto& value) {
+    HTMLElement::apply_presentational_hints(properties);
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == HTML::AttributeNames::bgcolor) {
             // https://html.spec.whatwg.org/multipage/rendering.html#the-marquee-element-2:rules-for-parsing-a-legacy-colour-value
             auto color = parse_legacy_color_value(value);
             if (color.has_value())
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BackgroundColor, CSS::ColorStyleValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy));
+                properties.append({ .property_id = CSS::PropertyID::BackgroundColor, .value = CSS::ColorStyleValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy) });
         } else if (name == HTML::AttributeNames::height) {
             // https://html.spec.whatwg.org/multipage/rendering.html#the-marquee-element-2:maps-to-the-dimension-property
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Height, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::Height, .value = *parsed_value });
             }
         } else if (name == HTML::AttributeNames::hspace) {
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginLeft, *parsed_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginRight, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::MarginLeft, .value = *parsed_value });
+                properties.append({ .property_id = CSS::PropertyID::MarginRight, .value = *parsed_value });
             }
         } else if (name == HTML::AttributeNames::vspace) {
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginTop, *parsed_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginBottom, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::MarginTop, .value = *parsed_value });
+                properties.append({ .property_id = CSS::PropertyID::MarginBottom, .value = *parsed_value });
             }
         } else if (name == HTML::AttributeNames::width) {
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::Width, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::Width, .value = *parsed_value });
             }
         }
     });
@@ -87,11 +87,11 @@ WebIDL::UnsignedLong HTMLMarqueeElement::scroll_amount()
 }
 
 // https://html.spec.whatwg.org/multipage/obsolete.html#dom-marquee-scrollamount
-WebIDL::ExceptionOr<void> HTMLMarqueeElement::set_scroll_amount(WebIDL::UnsignedLong value)
+void HTMLMarqueeElement::set_scroll_amount(WebIDL::UnsignedLong value)
 {
     if (value > 2147483647)
         value = 6;
-    return set_attribute(HTML::AttributeNames::scrollamount, String::number(value));
+    set_attribute_value(HTML::AttributeNames::scrollamount, Utf16String::number(value));
 }
 
 // https://html.spec.whatwg.org/multipage/obsolete.html#dom-marquee-scrolldelay
@@ -106,11 +106,11 @@ WebIDL::UnsignedLong HTMLMarqueeElement::scroll_delay()
 }
 
 // https://html.spec.whatwg.org/multipage/obsolete.html#dom-marquee-scrolldelay
-WebIDL::ExceptionOr<void> HTMLMarqueeElement::set_scroll_delay(WebIDL::UnsignedLong value)
+void HTMLMarqueeElement::set_scroll_delay(WebIDL::UnsignedLong value)
 {
     if (value > 2147483647)
         value = 85;
-    return set_attribute(HTML::AttributeNames::scrolldelay, String::number(value));
+    set_attribute_value(HTML::AttributeNames::scrolldelay, Utf16String::number(value));
 }
 
 }

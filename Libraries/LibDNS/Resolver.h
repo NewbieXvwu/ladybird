@@ -11,11 +11,13 @@
 #include <AK/HashTable.h>
 #include <AK/MaybeOwned.h>
 #include <AK/MemoryStream.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/QuickSort.h>
 #include <AK/Random.h>
 #include <AK/StringView.h>
 #include <AK/TemporaryChange.h>
 #include <AK/Time.h>
+#include <LibCore/EventLoop.h>
 #include <LibCore/Promise.h>
 #include <LibCore/Socket.h>
 #include <LibCore/Timer.h>
@@ -23,7 +25,8 @@
 #include <LibCrypto/Curves/EdwardsCurve.h>
 #include <LibCrypto/PK/RSA.h>
 #include <LibDNS/Message.h>
-#include <LibThreading/RWLockProtected.h>
+#include <LibSync/RWLockProtected.h>
+#include <LibThreading/ThreadPool.h>
 
 #define TRY_OR_REJECT_PROMISE(promise, expr)          \
     ({                                                \
@@ -39,22 +42,28 @@ namespace DNS {
 
 // FIXME: Load these keys from a file (likely something trusted by the system, e.g. "whatever systemd does").
 // https://data.iana.org/root-anchors/root-anchors.xml
-static Vector<Messages::Records::DNSKEY> s_root_zone_dnskeys = {
-    {
-        .flags = 257,
-        .protocol = 3,
-        .algorithm = Messages::DNSSEC::Algorithm::RSASHA256,
-        .public_key = decode_base64("AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU="sv).release_value(),
-        .calculated_key_tag = 20326,
-    },
-    {
-        .flags = 256,
-        .protocol = 3,
-        .algorithm = Messages::DNSSEC::Algorithm::RSASHA256,
-        .public_key = decode_base64("AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC6rXTsDc449/cidltpkyGwCJNnOAlFNKF2jBosZBU5eeHspaQWOmOElZsjICMQMC3aeHbGiShvZsx4wMYSjH8e7Vrhbu6irwCzVBApESjbUdpWWmEnhathWu1jo+siFUiRAAxm9qyJNg/wOZqqzL/dL/q8PkcRU5oUKEpUge71M3ej2/7CPqpdVwuMoTvoB+ZOT4YeGyxMvHmbrxlFzGOHOijtzN+u1TQNatX2XBuzZNQ1K+s2CXkPIZo7s6JgZyvaBevYtxPvYLw4z9mR7K2vaF18UYH9Z9GNUUeayffKC73PYc="sv).release_value(),
-        .calculated_key_tag = 38696,
-    },
-};
+static Vector<Messages::Records::DNSKEY> const& root_zone_dnskeys()
+{
+    static NeverDestroyed<Vector<Messages::Records::DNSKEY>> root_zone_dnskeys {
+        Vector<Messages::Records::DNSKEY> {
+            {
+                .flags = 257,
+                .protocol = 3,
+                .algorithm = Messages::DNSSEC::Algorithm::RSASHA256,
+                .public_key = decode_base64("AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU="sv).release_value(),
+                .calculated_key_tag = 20326,
+            },
+            {
+                .flags = 256,
+                .protocol = 3,
+                .algorithm = Messages::DNSSEC::Algorithm::RSASHA256,
+                .public_key = decode_base64("AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC6rXTsDc449/cidltpkyGwCJNnOAlFNKF2jBosZBU5eeHspaQWOmOElZsjICMQMC3aeHbGiShvZsx4wMYSjH8e7Vrhbu6irwCzVBApESjbUdpWWmEnhathWu1jo+siFUiRAAxm9qyJNg/wOZqqzL/dL/q8PkcRU5oUKEpUge71M3ej2/7CPqpdVwuMoTvoB+ZOT4YeGyxMvHmbrxlFzGOHOijtzN+u1TQNatX2XBuzZNQ1K+s2CXkPIZo7s6JgZyvaBevYtxPvYLw4z9mR7K2vaF18UYH9Z9GNUUeayffKC73PYc="sv).release_value(),
+                .calculated_key_tag = 38696,
+            },
+        }
+    };
+    return *root_zone_dnskeys;
+}
 
 class Resolver;
 
@@ -236,21 +245,6 @@ public:
         : m_pending_lookups(make<RedBlackTree<u16, PendingLookup>>())
         , m_create_socket(move(create_socket))
     {
-        m_cache.with_write_locked([&](auto& cache) {
-            auto add_v4v6_entry = [&cache](StringView name_string, IPv4Address v4, IPv6Address v6) {
-                auto name = Messages::DomainName::from_string(name_string);
-                auto ptr = make_ref_counted<LookupResult>(name);
-                ptr->will_add_record_of_type(Messages::ResourceType::A);
-                ptr->will_add_record_of_type(Messages::ResourceType::AAAA);
-                cache.set(name_string, ptr);
-
-                ptr->add_record({ .name = {}, .type = Messages::ResourceType::A, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::A { v4 }, .raw = {} });
-                ptr->add_record({ .name = {}, .type = Messages::ResourceType::AAAA, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::AAAA { v6 }, .raw = {} });
-                ptr->finished_request();
-            };
-
-            add_v4v6_entry("localhost"sv, { 127, 0, 0, 1 }, IPv6Address::loopback());
-        });
     }
 
     NonnullRefPtr<Core::Promise<Empty>> when_socket_ready()
@@ -299,8 +293,12 @@ public:
                 return {};
 
             auto& result = *it->value;
+            // For completed lookups, treat a previously-asked-about type with no records as a hit (negative cache)
+            // — getaddrinfo and async DNS often return only A when the host has no AAAA. In-flight lookups must
+            // still fall through to the join-pending path, so gate on is_done().
+            auto allow_negative_cache = result.is_done();
             for (auto const& type : desired_types) {
-                if (!result.has_record_of_type(type))
+                if (!result.has_record_of_type(type, allow_negative_cache))
                     return {};
             }
 
@@ -346,10 +344,25 @@ public:
 
     NonnullRefPtr<Core::Promise<NonnullRefPtr<LookupResult const>>> lookup(ByteString name, Messages::Class class_, Vector<Messages::ResourceType> desired_types, LookupOptions options = LookupOptions::default_())
     {
+        // Classifies how the lookup was satisfied (cache hit, system-resolver fallback, async query) so the
+        // `wire-dns:` log line below can show where event-loop time went when the synchronous portion is slow.
+        StringView lookup_path = "unknown"sv;
+        Optional<MonotonicTime> lookup_entered_at;
+        if constexpr (REQUESTSERVER_WIRE_DEBUG)
+            lookup_entered_at = MonotonicTime::now();
+        ScopeGuard log_guard = [&] {
+            if constexpr (!REQUESTSERVER_WIRE_DEBUG)
+                return;
+            auto sync_ms = (MonotonicTime::now() - *lookup_entered_at).to_milliseconds();
+            if (sync_ms > 5)
+                dbgln("LibDNS wire-dns: lookup({}) path={} sync={} ms", name, lookup_path, sync_ms);
+        };
+
         flush_cache();
 
         if (options.repeating_lookup && options.repeating_lookup->times_repeated >= 5) {
             dbgln_if(DNS_DEBUG, "DNS: Repeating lookup for {} timed out", name);
+            lookup_path = "repeat-timeout"sv;
             auto promise = options.repeating_lookup->promise;
             promise->reject(Error::from_string_literal("DNS lookup timed out"));
             m_pending_lookups.with_write_locked([&](auto& lookups) {
@@ -367,6 +380,7 @@ public:
                 result->add_record({ .name = {}, .type = Messages::ResourceType::A, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::A { maybe_ipv4.release_value() }, .raw = {} });
                 result->finished_request();
                 promise->resolve(move(result));
+                lookup_path = "literal-ipv4"sv;
                 return promise;
             }
         }
@@ -378,8 +392,25 @@ public:
                 result->add_record({ .name = {}, .type = Messages::ResourceType::AAAA, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::AAAA { maybe_ipv6.release_value() }, .raw = {} });
                 result->finished_request();
                 promise->resolve(move(result));
+                lookup_path = "literal-ipv6"sv;
                 return promise;
             }
+        }
+
+        // https://www.rfc-editor.org/rfc/rfc6761#section-6.3
+        // "localhost" and names within ".localhost" resolve to loopback for address queries and are never sent
+        // upstream; we answer in-process since the host resolver and upstream server are not guaranteed to.
+        if (name == "localhost"sv || name.ends_with(".localhost"sv)) {
+            dbgln_if(DNS_DEBUG, "DNS: Resolving {} as loopback", name);
+            auto result = make_ref_counted<LookupResult>(Messages::DomainName::from_string(name));
+            if (desired_types.contains_slow(Messages::ResourceType::A))
+                result->add_record({ .name = {}, .type = Messages::ResourceType::A, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::A { IPv4Address { 127, 0, 0, 1 } }, .raw = {} });
+            if (desired_types.contains_slow(Messages::ResourceType::AAAA))
+                result->add_record({ .name = {}, .type = Messages::ResourceType::AAAA, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::AAAA { IPv6Address::loopback() }, .raw = {} });
+            result->finished_request();
+            promise->resolve(move(result));
+            lookup_path = "localhost-loopback"sv;
+            return promise;
         }
 
         if (auto result = lookup_in_cache(name, class_, desired_types)) {
@@ -387,6 +418,7 @@ public:
             if (!options.validate_dnssec_locally || result->is_dnssec_validated()) {
                 dbgln_if(DNS_DEBUG, "DNS: Resolved {} from cache", name);
                 promise->resolve(result.release_nonnull());
+                lookup_path = "cache-hit"sv;
                 return promise;
             }
             dbgln_if(DNS_DEBUG, "DNS: Cache entry for {} is not DNSSEC validated (and we expect that), re-resolving", name);
@@ -397,33 +429,86 @@ public:
         if (!has_connection()) {
             if (options.validate_dnssec_locally) {
                 promise->reject(Error::from_string_literal("No connection available to validate DNSSEC"));
+                lookup_path = "no-conn-dnssec-rejected"sv;
                 return promise;
             }
 
-            // Use system resolver
-            // FIXME: Use an underlying resolver instead.
-            dbgln_if(DNS_DEBUG, "Not ready to resolve, using system resolver and skipping cache for {}", name);
-            auto record_or_error = Core::Socket::resolve_host(name, Core::Socket::SocketType::Stream);
-            if (record_or_error.is_error()) {
-                promise->reject(record_or_error.release_error());
+            // FIXME: Use an underlying async resolver instead of getaddrinfo entirely. Until then, see
+            //        PendingSystemResolution for why we split into two parallel workers.
+            dbgln_if(DNS_DEBUG, "Not ready to resolve, dispatching system resolver to ThreadPool for {}", name);
+
+            RefPtr<PendingSystemResolution> our_state;
+            RefPtr<LookupResult> already_finalized_result;
+            m_pending_system_resolutions.with_write_locked(
+                [&](auto& pending) {
+                    if (auto it = pending.find(name); it != pending.end()) {
+                        auto& existing = *it->value;
+                        // Grace timer may have already finalized the resolution while AAAA is still in
+                        // flight; serve the join-pending caller from the existing result. We resolve the
+                        // promise outside this critical section so a synchronous handler can't reenter
+                        // the resolver and deadlock on m_pending_system_resolutions.
+                        if (existing.promise_resolved) {
+                            already_finalized_result = existing.result;
+                            return;
+                        }
+                        existing.waiting_promises.append(promise);
+                        return;
+                    }
+                    auto result = make_ref_counted<LookupResult>(domain_name);
+                    for (auto const& type : desired_types)
+                        result->will_add_record_of_type(type);
+                    auto state = adopt_ref(*new PendingSystemResolution(result));
+                    state->waiting_promises.append(promise);
+                    pending.set(name, state);
+                    our_state = state;
+                });
+
+            if (already_finalized_result) {
+                lookup_path = "system-resolver-join-finalized"sv;
+                if (already_finalized_result->records().is_empty())
+                    promise->reject(Error::from_string_literal("Could not resolve to IPv4 or IPv6 address"));
+                else
+                    promise->resolve(already_finalized_result.release_nonnull());
                 return promise;
             }
-            auto result = make_ref_counted<LookupResult>(domain_name);
-            auto records = record_or_error.release_value();
 
-            for (auto const& record : records) {
-                record.visit(
-                    [&](IPv4Address const& address) {
-                        result->add_record({ .name = {}, .type = Messages::ResourceType::A, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::A { address }, .raw = {} });
-                    },
-                    [&](IPv6Address const& address) {
-                        result->add_record({ .name = {}, .type = Messages::ResourceType::AAAA, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::AAAA { address }, .raw = {} });
+            if (!our_state) {
+                lookup_path = "system-resolver-join-pending"sv;
+                return promise;
+            }
+
+            lookup_path = "system-resolver-bg"sv;
+
+            auto& main_thread_event_loop = Core::EventLoop::current();
+
+            auto submit_worker = [&, this](Core::Socket::AddressFamily family) {
+                Threading::ThreadPool::the().submit(
+                    [this, name, state = our_state, family,
+                        &main_thread_event_loop]() mutable {
+                        auto worker_started_at = MonotonicTime::now();
+                        auto record_or_error = Core::Socket::resolve_host(name, Core::Socket::SocketType::Stream, family);
+                        auto worker_finished_at = MonotonicTime::now();
+                        PendingSystemResolution::SideTiming timing {
+                            .queue_ms = (worker_started_at - state->dispatched_at).to_milliseconds(),
+                            .work_ms = (worker_finished_at - worker_started_at).to_milliseconds(),
+                        };
+
+                        main_thread_event_loop.deferred_invoke(
+                            [this, name, state, family,
+                                record_or_error = move(record_or_error),
+                                timing]() mutable {
+                                handle_system_resolver_completion(name, *state, family, move(record_or_error), timing);
+                            });
                     });
-            }
-            result->finished_request();
-            promise->resolve(result);
+            };
+
+            submit_worker(Core::Socket::AddressFamily::IPv4Only);
+            submit_worker(Core::Socket::AddressFamily::IPv6Only);
+
             return promise;
         }
+
+        lookup_path = "async-query"sv;
 
         auto already_in_cache = false;
         auto result = m_cache.with_write_locked([&](auto& cache) -> NonnullRefPtr<LookupResult> {
@@ -564,6 +649,7 @@ public:
 
         if (cached_entry) {
             dbgln_if(DNS_DEBUG, "DNS::lookup({}) -> Lookup already underway", name);
+            lookup_path = "join-pending"sv;
             auto user_promise = Core::Promise<NonnullRefPtr<LookupResult const>>::construct();
             promise->on_resolution = [user_promise, cached_promise = cached_entry->promise](auto& result) {
                 user_promise->resolve(*result);
@@ -583,7 +669,10 @@ public:
         });
 
         ByteBuffer query_bytes;
-        MUST(query.to_raw(query_bytes));
+        if (auto result = query.to_raw(query_bytes); result.is_error()) {
+            promise->reject(result.release_error());
+            return promise;
+        }
 
         if (m_mode == ConnectionMode::TCP) {
             auto original_query_bytes = query_bytes;
@@ -607,6 +696,135 @@ public:
     }
 
 private:
+    // Per-name state for an in-flight system-resolver lookup. We split the
+    // single AF_UNSPEC `getaddrinfo` call into two parallel calls (AF_INET +
+    // AF_INET6) so that buggy stub resolvers (notably systemd-resolved under
+    // load) can't drop the AAAA half of a coupled query and stall us on it.
+    // The promise resolves as soon as one side returns records, with a small
+    // 50 ms grace window for the other side (Happy Eyeballs v2's Resolution
+    // Delay, RFC 8305) so curl can prefer IPv6 when both are available. The
+    // slower side keeps running and merges its records into the cached
+    // LookupResult so subsequent lookups see the full set.
+    //
+    // `waiting_promises` holds one Promise per `lookup()` caller that joined
+    // this resolution. Each caller MUST get their own Promise — Core::Promise
+    // has a single on_resolution slot, so sharing one promise across callers
+    // means each new `when_resolved` clobbers the previous handler and only
+    // the last caller ever fires.
+    struct PendingSystemResolution
+        : public AtomicRefCounted<PendingSystemResolution>
+        , public Weakable<PendingSystemResolution> {
+        struct SideTiming {
+            i64 queue_ms { 0 };
+            i64 work_ms { 0 };
+        };
+
+        Vector<NonnullRefPtr<Core::Promise<NonnullRefPtr<LookupResult const>>>> waiting_promises;
+        NonnullRefPtr<LookupResult> result;
+        MonotonicTime dispatched_at;
+        Optional<SideTiming> a;
+        Optional<SideTiming> aaaa;
+        bool promise_resolved { false };
+        RefPtr<Core::Timer> grace_timer;
+
+        explicit PendingSystemResolution(NonnullRefPtr<LookupResult> r)
+            : result(move(r))
+            , dispatched_at(MonotonicTime::now())
+        {
+        }
+    };
+
+    // Resolve (or reject) every joined caller's promise from `state` and tear down any pending grace timer.
+    // Idempotent — safe to call from both the main completion path and from the grace timer callback.
+    static void try_finalize_pending_system_resolution(PendingSystemResolution& state)
+    {
+        if (state.promise_resolved)
+            return;
+        state.promise_resolved = true;
+        if (state.grace_timer) {
+            state.grace_timer->stop();
+            state.grace_timer = nullptr;
+        }
+        auto promises = move(state.waiting_promises);
+        if (state.result->records().is_empty()) {
+            for (auto& promise : promises)
+                promise->reject(Error::from_string_literal("Could not resolve to IPv4 or IPv6 address"));
+        } else {
+            for (auto& promise : promises)
+                promise->resolve(state.result);
+        }
+    }
+
+    // Runs on the main thread (deferred-invoked from a ThreadPool worker).
+    void handle_system_resolver_completion(
+        ByteString const& name,
+        PendingSystemResolution& state,
+        Core::Socket::AddressFamily family,
+        ErrorOr<Vector<Variant<IPv4Address, IPv6Address>>> record_or_error,
+        PendingSystemResolution::SideTiming timing)
+    {
+        (family == Core::Socket::AddressFamily::IPv4Only ? state.a : state.aaaa) = timing;
+
+        // Merge this side's records into the (shared, main-thread-only) LookupResult. Late-arriving records still
+        // populate the cache for subsequent lookups.
+        bool got_records_this_side = false;
+        if (!record_or_error.is_error()) {
+            constexpr u32 SYSTEM_RESOLVER_SYNTHETIC_TTL_SECONDS = 60;
+            for (auto const& record : record_or_error.value()) {
+                record.visit(
+                    [&](IPv4Address const& address) {
+                        state.result->add_record({ .name = {}, .type = Messages::ResourceType::A, .class_ = Messages::Class::IN, .ttl = SYSTEM_RESOLVER_SYNTHETIC_TTL_SECONDS, .record = Messages::Records::A { address }, .raw = {} });
+                        got_records_this_side = true;
+                    },
+                    [&](IPv6Address const& address) {
+                        state.result->add_record({ .name = {}, .type = Messages::ResourceType::AAAA, .class_ = Messages::Class::IN, .ttl = SYSTEM_RESOLVER_SYNTHETIC_TTL_SECONDS, .record = Messages::Records::AAAA { address }, .raw = {} });
+                        got_records_this_side = true;
+                    });
+            }
+        }
+
+        bool both_completed = state.a.has_value() && state.aaaa.has_value();
+
+        if (both_completed) {
+            state.result->finished_request();
+            m_cache.with_write_locked([&](auto& cache) {
+                cache.set(name, state.result);
+            });
+            m_pending_system_resolutions.with_write_locked([&](auto& pending) {
+                pending.remove(name);
+            });
+
+            auto total_ms = (MonotonicTime::now() - state.dispatched_at).to_milliseconds();
+            if (total_ms > 5) {
+                dbgln_if(REQUESTSERVER_WIRE_DEBUG, "LibDNS wire-dns: lookup({}) path=system-resolver-bg total={} ms = A(queue {} + work {}) | AAAA(queue {} + work {}) (off event loop)",
+                    name, total_ms,
+                    state.a->queue_ms, state.a->work_ms,
+                    state.aaaa->queue_ms, state.aaaa->work_ms);
+            }
+
+            try_finalize_pending_system_resolution(state);
+            return;
+        }
+
+        if (state.promise_resolved)
+            return;
+
+        if (!got_records_this_side)
+            return;
+
+        // First side has records. Wait briefly so the other side gets a chance to add its records too
+        // (RFC 8305 Resolution Delay, 50 ms).
+        if (state.grace_timer)
+            return;
+        constexpr int RESOLUTION_DELAY_MS = 50;
+        auto weak_state = state.make_weak_ptr();
+        state.grace_timer = Core::Timer::create_single_shot(RESOLUTION_DELAY_MS, [weak_state] {
+            if (auto state = weak_state.strong_ref())
+                try_finalize_pending_system_resolution(*state);
+        });
+        state.grace_timer->start();
+    }
+
     ErrorOr<Messages::Message> parse_one_message()
     {
         if (m_mode == ConnectionMode::UDP)
@@ -919,7 +1137,7 @@ private:
             };
 
             if (is_root_zone) {
-                resolve_using_keys(s_root_zone_dnskeys);
+                resolve_using_keys(root_zone_dnskeys());
                 return;
             }
 
@@ -1201,9 +1419,10 @@ private:
         });
     }
 
-    Threading::RWLockProtected<HashMap<ByteString, NonnullRefPtr<LookupResult>>> m_cache;
-    Threading::RWLockProtected<NonnullOwnPtr<RedBlackTree<u16, PendingLookup>>> m_pending_lookups;
-    Threading::RWLockProtected<Optional<MaybeOwned<Core::Socket>>> m_socket;
+    Sync::RWLockProtected<HashMap<ByteString, NonnullRefPtr<LookupResult>>> m_cache;
+    Sync::RWLockProtected<HashMap<ByteString, NonnullRefPtr<PendingSystemResolution>>> m_pending_system_resolutions;
+    Sync::RWLockProtected<NonnullOwnPtr<RedBlackTree<u16, PendingLookup>>> m_pending_lookups;
+    Sync::RWLockProtected<Optional<MaybeOwned<Core::Socket>>> m_socket;
     Function<ErrorOr<SocketResult>()> m_create_socket;
     bool m_attempting_restart { false };
     ConnectionMode m_mode { ConnectionMode::UDP };

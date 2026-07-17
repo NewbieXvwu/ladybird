@@ -5,12 +5,12 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/PerformanceEntryPrototype.h>
+#include <LibWeb/Bindings/PerformanceEntry.h>
 #include <LibWeb/PerformanceTimeline/PerformanceEntry.h>
 
 namespace Web::PerformanceTimeline {
 
-PerformanceEntry::PerformanceEntry(JS::Realm& realm, String const& name, HighResolutionTime::DOMHighResTimeStamp start_time, HighResolutionTime::DOMHighResTimeStamp duration)
+PerformanceEntry::PerformanceEntry(JS::Realm& realm, Utf16String const& name, HighResolutionTime::DOMHighResTimeStamp start_time, HighResolutionTime::DOMHighResTimeStamp duration)
     : Bindings::PlatformObject(realm)
     , m_name(name)
     , m_start_time(start_time)

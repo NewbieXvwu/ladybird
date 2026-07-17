@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2023-2025, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -28,7 +28,7 @@ void IteratorHelperPrototype::initialize(Realm& realm)
     define_native_function(realm, vm.names.return_, return_, 0, attr);
 
     // 27.1.2.1.3 %IteratorHelperPrototype% [ %Symbol.toStringTag% ], https://tc39.es/ecma262/#sec-%iteratorhelperprototype%-%symbol.tostringtag%
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Iterator Helper"_string), Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Iterator Helper"_utf16_fly_string), Attribute::Configurable);
 }
 
 // 27.1.2.1.1 %IteratorHelperPrototype%.next ( ), https://tc39.es/ecma262/#sec-%iteratorhelperprototype%.next
@@ -45,7 +45,7 @@ JS_DEFINE_NATIVE_FUNCTION(IteratorHelperPrototype::next)
 JS_DEFINE_NATIVE_FUNCTION(IteratorHelperPrototype::return_)
 {
     // 1. Let O be this value.
-    // 2. Perform ? RequireInternalSlot(O, [[UnderlyingIterator]]).
+    // 2. Perform ? RequireInternalSlot(O, [[UnderlyingIterators]]).
     auto iterator = TRY(typed_this_object(vm));
 
     // 3. Assert: O has a [[GeneratorState]] slot.
@@ -56,8 +56,8 @@ JS_DEFINE_NATIVE_FUNCTION(IteratorHelperPrototype::return_)
 
         // b. NOTE: Once a generator enters the completed state it never leaves it and its associated execution context is never resumed. Any execution state associated with O can be discarded at this point.
 
-        // c. Perform ? IteratorClose(O.[[UnderlyingIterator]], NormalCompletion(unused)).
-        TRY(iterator_close(vm, iterator->underlying_iterator(), normal_completion(js_undefined())));
+        // c. Perform ? IteratorCloseAll(O.[[UnderlyingIterators]], NormalCompletion(UNUSED)).
+        TRY(iterator_close_all(vm, iterator->underlying_iterators(), normal_completion(js_undefined())));
 
         // d. Return CreateIterResultObject(undefined, true).
         return create_iterator_result_object(vm, js_undefined(), true);

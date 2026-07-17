@@ -6,26 +6,38 @@
 
 #pragma once
 
-#include <AK/HashMap.h>
+#include <AK/Vector.h>
 #include <LibWeb/IndexedDB/Internal/RequestList.h>
 #include <LibWeb/StorageAPI/StorageKey.h>
 
 namespace Web::IndexedDB {
 
-using ConnectionMap = HashMap<StorageAPI::StorageKey, HashMap<String, RequestList>>;
-
 // https://w3c.github.io/IndexedDB/#connection-queues
 class ConnectionQueueHandler {
+    struct Connection;
+
 public:
-    static RequestList& for_key_and_name(StorageAPI::StorageKey& key, String& name);
+    static RequestList& for_key_and_name(StorageAPI::StorageKey const& key, Utf16String const& name);
     static ConnectionQueueHandler& the()
     {
-        static ConnectionQueueHandler s_instance;
-        return s_instance;
+        static ConnectionQueueHandler& instance = *new ConnectionQueueHandler;
+        return instance;
     }
 
 private:
-    ConnectionMap m_open_requests;
+    Vector<NonnullRefPtr<Connection>> m_open_requests;
+
+    struct Connection final : public RefCounted<Connection> {
+        Connection(StorageAPI::StorageKey storage_key, Utf16String name)
+            : storage_key(move(storage_key))
+            , name(move(name))
+        {
+        }
+
+        StorageAPI::StorageKey storage_key;
+        Utf16String name;
+        RequestList request_list;
+    };
 };
 
 }

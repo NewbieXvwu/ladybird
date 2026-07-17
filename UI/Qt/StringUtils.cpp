@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/StringBuilder.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibURL/Parser.h>
 #include <UI/Qt/StringUtils.h>
 
@@ -39,6 +41,13 @@ QString qstring_from_utf16_string(Utf16View const& string)
     if (string.has_ascii_storage())
         return qstring_from_ak_string(string.bytes());
     return QString::fromUtf16(string.utf16_span().data(), static_cast<qsizetype>(string.length_in_code_units()));
+}
+
+QString vqformatted(StringView format, AK::TypeErasedFormatParams& parameters)
+{
+    Utf16StringBuilder builder;
+    MUST(vformat(builder, format, parameters));
+    return qstring_from_utf16_string(builder.view());
 }
 
 QByteArray qbytearray_from_ak_string(StringView ak_string)

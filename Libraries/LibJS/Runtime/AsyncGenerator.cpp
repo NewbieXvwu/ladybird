@@ -5,34 +5,44 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/AsyncGenerator.h>
 #include <LibJS/Runtime/AsyncGeneratorPrototype.h>
 #include <LibJS/Runtime/AsyncGeneratorRequest.h>
-#include <LibJS/Runtime/CompletionCell.h>
 #include <LibJS/Runtime/ECMAScriptFunctionObject.h>
-#include <LibJS/Runtime/GeneratorResult.h>
 #include <LibJS/Runtime/GlobalObject.h>
+#include <LibJS/Runtime/NativeJavaScriptBackedFunction.h>
 #include <LibJS/Runtime/PromiseConstructor.h>
 
 namespace JS {
 
 GC_DEFINE_ALLOCATOR(AsyncGenerator);
 
-ThrowCompletionOr<GC::Ref<AsyncGenerator>> AsyncGenerator::create(Realm& realm, Value initial_value, ECMAScriptFunctionObject* generating_function, NonnullOwnPtr<ExecutionContext> execution_context)
+GC::Ref<AsyncGenerator> AsyncGenerator::create(Realm& realm, Variant<GC::Ref<ECMAScriptFunctionObject>, GC::Ref<NativeJavaScriptBackedFunction>> generating_function, NonnullOwnPtr<ExecutionContext> execution_context)
 {
     auto& vm = realm.vm();
-    // This is "g1.prototype" in figure-2 (https://tc39.es/ecma262/img/figure-2.png)
-    auto generating_function_prototype = TRY(generating_function->get(vm.names.prototype));
-    auto generating_function_prototype_object = TRY(generating_function_prototype.to_object(vm));
-    auto object = realm.create<AsyncGenerator>(realm, generating_function_prototype_object, move(execution_context));
-    object->m_generating_function = generating_function;
-    object->m_previous_value = initial_value;
-    return object;
+    // 2. Let _generator_ be ? OrdinaryCreateFromConstructor(_functionObject_, *"%AsyncGeneratorPrototype%"*,
+    //    « [[AsyncGeneratorState]], [[AsyncGeneratorContext]], [[AsyncGeneratorQueue]], [[GeneratorBrand]] »).
+    auto* generating_function_prototype_object = MUST(generating_function.visit([&vm](auto function) -> ThrowCompletionOr<Object*> {
+        return get_prototype_from_constructor(vm, *function, &Intrinsics::async_generator_prototype);
+    }));
+
+    auto generating_executable = generating_function.visit(
+        [](GC::Ref<ECMAScriptFunctionObject> function) -> GC::Ref<Bytecode::Executable> {
+            return function->bytecode_executable().as_nonnull();
+        },
+        [](GC::Ref<NativeJavaScriptBackedFunction> function) -> GC::Ref<Bytecode::Executable> {
+            return function->bytecode_executable();
+        });
+
+    return realm.create<AsyncGenerator>(realm, generating_function_prototype_object, move(execution_context), generating_executable);
 }
 
-AsyncGenerator::AsyncGenerator(Realm&, Object& prototype, NonnullOwnPtr<ExecutionContext> context)
-    : Object(ConstructWithPrototypeTag::Tag, prototype)
+AsyncGenerator::AsyncGenerator(Realm& realm, Object* prototype, NonnullOwnPtr<ExecutionContext> context, GC::Ref<Bytecode::Executable> bytecode_executable)
+    : Object(realm, prototype)
     , m_async_generator_context(move(context))
+    , m_generating_executable(bytecode_executable)
+    , m_yield_continuation(m_async_generator_context->yield_continuation)
 {
 }
 
@@ -45,9 +55,9 @@ void AsyncGenerator::visit_edges(Cell::Visitor& visitor)
         visitor.visit(request.completion.value());
         visitor.visit(request.capability);
     }
-    visitor.visit(m_generating_function);
-    visitor.visit(m_previous_value);
+    visitor.visit(m_generating_executable);
     visitor.visit(m_current_promise);
+    visitor.visit(m_pending_completion_value);
     m_async_generator_context->visit_edges(visitor);
 }
 
@@ -153,57 +163,48 @@ ThrowCompletionOr<void> AsyncGenerator::await(Value value)
 void AsyncGenerator::execute(VM& vm, Completion completion)
 {
     while (true) {
-        // Loosely based on step 4 of https://tc39.es/ecma262/#sec-asyncgeneratorstart
-        auto generated_value = [](Value value) -> Value {
-            if (value.is_cell())
-                return static_cast<GeneratorResult const&>(value.as_cell()).result();
-            return value.is_special_empty_value() ? js_undefined() : value;
-        };
-
-        auto generated_continuation = [&](Value value) -> Optional<size_t> {
-            if (value.is_cell()) {
-                auto number_value = static_cast<GeneratorResult const&>(value.as_cell()).continuation();
-                if (number_value.is_null())
-                    return {};
-                return static_cast<size_t>(number_value.as_double());
-            }
-            return {};
-        };
-
-        auto generated_is_await = [](Value value) -> bool {
-            if (value.is_cell())
-                return static_cast<GeneratorResult const&>(value.as_cell()).is_await();
-            return false;
-        };
-
-        auto completion_cell = heap().allocate<CompletionCell>(completion);
-
-        auto& bytecode_interpreter = vm.bytecode_interpreter();
-
-        auto const continuation_address = generated_continuation(m_previous_value);
+        set_pending_completion(completion);
 
         // We should never enter `execute` again after the generator is complete.
-        VERIFY(continuation_address.has_value());
+        VERIFY(m_yield_continuation != ExecutionContext::no_yield_continuation);
 
-        auto next_result = bytecode_interpreter.run_executable(*m_generating_function->bytecode_executable(), continuation_address, completion_cell);
+        // Clear yield state so that a normal return (no yield) is detected as done.
+        m_async_generator_context->yield_continuation = ExecutionContext::no_yield_continuation;
 
-        auto result_value = move(next_result.value);
-        if (!result_value.is_throw_completion()) {
-            m_previous_value = result_value.release_value();
-            auto value = generated_value(m_previous_value);
-            bool is_await = generated_is_await(m_previous_value);
+        auto result_value = vm.run_executable(vm.running_execution_context(), m_generating_executable, m_yield_continuation, Value(this));
+        clear_pending_completion();
 
-            if (is_await) {
-                auto await_result = this->await(value);
-                if (await_result.is_throw_completion()) {
-                    completion = await_result.release_error();
-                    continue;
-                }
-                return;
-            }
+        if (result_value.is_throw_completion()) {
+            m_yield_continuation = ExecutionContext::no_yield_continuation;
+
+            // 27.6.3.2 AsyncGeneratorStart ( generator, generatorBody ), https://tc39.es/ecma262/#sec-asyncgeneratorstart
+            // 4.e. Assert: If we return here, the async generator either threw an exception or performed either an implicit or explicit return.
+            // 4.f. Remove acGenContext from the execution context stack and restore the execution context
+            //      that is at the top of the execution context stack as the running execution context.
+            vm.pop_execution_context();
+            m_async_generator_state = State::Completed;
+            complete_step(result_value.release_error(), true);
+            drain_queue();
+            return;
         }
 
-        bool done = result_value.is_throw_completion() || !generated_continuation(m_previous_value).has_value();
+        auto value = result_value.release_value();
+        if (value.is_special_empty_value())
+            value = js_undefined();
+
+        m_yield_continuation = m_async_generator_context->yield_continuation;
+        bool is_await = m_async_generator_context->yield_is_await;
+
+        if (is_await) {
+            auto await_result = this->await(value);
+            if (await_result.is_throw_completion()) {
+                completion = await_result.release_error();
+                continue;
+            }
+            return;
+        }
+
+        bool done = m_yield_continuation == ExecutionContext::no_yield_continuation;
         if (!done) {
             // 27.6.3.8 AsyncGeneratorYield ( value ), https://tc39.es/ecma262/#sec-asyncgeneratoryield
             // 1. Let genContext be the running execution context.
@@ -213,15 +214,13 @@ void AsyncGenerator::execute(VM& vm, Completion completion)
             // NOTE: genContext is `m_async_generator_context`, generator is `this`.
 
             // 5. Let completion be NormalCompletion(value).
-            auto value = generated_value(m_previous_value);
             auto yield_completion = normal_completion(value);
 
             // 6. Assert: The execution context stack has at least two elements.
-            VERIFY(vm.execution_context_stack().size() >= 2);
+            auto* previous_context = vm.previous_execution_context();
+            VERIFY(previous_context);
 
             // 7. Let previousContext be the second to top element of the execution context stack.
-            auto& previous_context = vm.execution_context_stack().at(vm.execution_context_stack().size() - 2);
-
             // 8. Let previousRealm be previousContext's Realm.
             auto previous_realm = previous_context->realm;
 
@@ -273,15 +272,8 @@ void AsyncGenerator::execute(VM& vm, Completion completion)
 
         // 4.h. If result.[[Type]] is normal, set result to NormalCompletion(undefined).
         // 4.i. If result.[[Type]] is return, set result to NormalCompletion(result.[[Value]]).
-        Completion result;
-        if (!result_value.is_throw_completion()) {
-            result = normal_completion(generated_value(m_previous_value));
-        } else {
-            result = result_value.release_error();
-        }
-
         // 4.j. Perform AsyncGeneratorCompleteStep(acGenerator, result, true).
-        complete_step(result, true);
+        complete_step(normal_completion(value), true);
 
         // 4.k. Perform AsyncGeneratorDrainQueue(acGenerator).
         drain_queue();

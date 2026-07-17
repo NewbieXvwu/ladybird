@@ -1,0 +1,16 @@
+// https://html.spec.whatwg.org/multipage/links.html#hyperlinkelementutils
+interface mixin HyperlinkElementUtils {
+    readonly attribute Utf16USVString origin;
+    [CEReactions] attribute Utf16USVString protocol;
+    [CEReactions] attribute Utf16USVString username;
+    [CEReactions] attribute Utf16USVString password;
+    [CEReactions] attribute Utf16USVString host;
+    [CEReactions] attribute Utf16USVString hostname;
+    [CEReactions] attribute Utf16USVString port;
+    [CEReactions] attribute Utf16USVString pathname;
+    [CEReactions] attribute Utf16USVString search;
+    [CEReactions] attribute Utf16USVString hash;
+    
+    [CEReactions, Reflect] attribute Utf16DOMString hreflang;
+    [CEReactions, Reflect] attribute Utf16DOMString type;
+};

@@ -1,8 +1,8 @@
 Harness status: OK
 
-Found 395 tests
+Found 410 tests
 
-395 Pass
+410 Pass
 Pass	Loading data…
 Pass	Origin parsing: <http://example	.
 org> against <http://example.org/foo/bar>
@@ -46,6 +46,8 @@ Pass	Origin parsing: <::> against <http://example.org/foo/bar>
 Pass	Origin parsing: <::23> against <http://example.org/foo/bar>
 Pass	Origin parsing: <foo://> against <http://example.org/foo/bar>
 Pass	Origin parsing: <http://a:b@c:29/d> against <http://example.org/foo/bar>
+Pass	Origin parsing: <http://é@é> without base
+Pass	Origin parsing: <http://é@example.com> without base
 Pass	Origin parsing: <http::@c:29> against <http://example.org/foo/bar>
 Pass	Origin parsing: <http://&a:foo(b]c@d:2/> against <http://example.org/foo/bar>
 Pass	Origin parsing: <http://::@c@d:2> against <http://example.org/foo/bar>
@@ -72,6 +74,7 @@ Pass	Origin parsing: <http://[::127.0.0.1]> against <http://example.org/foo/bar>
 Pass	Origin parsing: <http://[0:0:0:0:0:0:13.1.68.3]> against <http://example.org/foo/bar>
 Pass	Origin parsing: <http://[2001::1]:80> against <http://example.org/foo/bar>
 Pass	Origin parsing: <http:/example.com/> against <http://example.org/foo/bar>
+Pass	Origin parsing: <http:/> against <http://example.com/>
 Pass	Origin parsing: <ftp:/example.com/> against <http://example.org/foo/bar>
 Pass	Origin parsing: <https:/example.com/> against <http://example.org/foo/bar>
 Pass	Origin parsing: <madeupscheme:/example.com/> against <http://example.org/foo/bar>
@@ -226,6 +229,12 @@ Pass	Origin parsing: <non-special:opaque 		  #hi> without base
 Pass	Origin parsing: <non-special:opaque		   #hi> without base
 Pass	Origin parsing: <http://www.foo。bar.com> against <http://other.com/>
 Pass	Origin parsing: <https://x/�?�#�> without base
+Pass	Origin parsing: <http://a.b.c.xn--pokxncvks> without base
+Pass	Origin parsing: <http://10.0.0.xn--pokxncvks> without base
+Pass	Origin parsing: <http://a.b.c.XN--pokxncvks> without base
+Pass	Origin parsing: <http://a.b.c.Xn--pokxncvks> without base
+Pass	Origin parsing: <http://10.0.0.XN--pokxncvks> without base
+Pass	Origin parsing: <http://10.0.0.xN--pokxncvks> without base
 Pass	Origin parsing: <http://Ｇｏ.com> against <http://other.com/>
 Pass	Origin parsing: <http://你好你好> against <http://other.com/>
 Pass	Origin parsing: <https://faß.ExAmPlE/> without base
@@ -237,6 +246,8 @@ Pass	Origin parsing: <http://./> without base
 Pass	Origin parsing: <http://../> without base
 Pass	Origin parsing: <h://.> without base
 Pass	Origin parsing: <http://foo:💩@example.com/bar> against <http://other.com/>
+Pass	Origin parsing: <https://localhost?q=🔥> without base
+Pass	Origin parsing: <https://localhost#🔥> without base
 Pass	Origin parsing: <#> against <test:test>
 Pass	Origin parsing: <#x> against <mailto:x@x.com>
 Pass	Origin parsing: <#x> against <data:,>
@@ -316,6 +327,9 @@ Pass	Origin parsing: <http://10000000000.com> against <http://other.com/>
 Pass	Origin parsing: <http://4294967295> against <http://other.com/>
 Pass	Origin parsing: <http://0xffffffff> against <http://other.com/>
 Pass	Origin parsing: <https://0x.0x.0> without base
+Pass	Origin parsing: <https://0x.0x.0x.0x> without base
+Pass	Origin parsing: <https://00.00.00.00> without base
+Pass	Origin parsing: <https://0000000000000000000000000000000000000000177.0.0.1> without base
 Pass	Origin parsing: <asdf://%43%7C/> without base
 Pass	Origin parsing: <http://[1:0::]> against <http://example.net/>
 Pass	Origin parsing: <sc://ñ> without base
@@ -364,6 +378,7 @@ Pass	Origin parsing: <foo://host/dir/# !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~> without
 Pass	Origin parsing: <wss://host/dir/# !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~> without base
 Pass	Origin parsing: <https://example.com/"quoted"> without base
 Pass	Origin parsing: <https://a%C2%ADb/> without base
+Pass	Origin parsing: <https://xn--/> without base
 Pass	Origin parsing: <data://example.com:8080/pathname?search#hash> without base
 Pass	Origin parsing: <data:///test> without base
 Pass	Origin parsing: <data://test/a/../b> without base
@@ -406,4 +421,4 @@ Pass	Origin parsing: <non-special:\\opaque\path> without base
 Pass	Origin parsing: <non-special:\/opaque> without base
 Pass	Origin parsing: <non-special:/\path> without base
 Pass	Origin parsing: <non-special://host/a\b> without base
-Pass	Origin parsing: <http://example.com//U+d800������U+dfff﷐﷏﷯ﷰ￾￿??U+d800������U+dfff﷐﷏﷯ﷰ￾￿> without base
+Pass	Origin parsing: <http://example.com/U+d800𐟾U+dfff﷐﷏﷯ﷰ￾￿?U+d800𐟾U+dfff﷐﷏﷯ﷰ￾￿> without base

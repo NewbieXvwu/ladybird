@@ -11,13 +11,14 @@
 #include <LibJS/Runtime/PromiseCapability.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibJS/Runtime/VM.h>
+#include <LibJS/Runtime/ValueInlines.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/WebIDL/Promise.h>
 
 namespace Web::WebIDL {
 
 class WEB_API AsyncIterator : public Bindings::PlatformObject {
-    WEB_PLATFORM_OBJECT(AsyncIterator, Bindings::PlatformObject);
+    WEB_NON_IDL_PLATFORM_OBJECT(AsyncIterator, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(AsyncIterator);
 
 public:

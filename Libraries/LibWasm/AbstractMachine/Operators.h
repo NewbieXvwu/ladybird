@@ -51,6 +51,10 @@ DEFINE_BINARY_OPERATOR(BitXor, ^);
 
 #undef DEFINE_BINARY_OPERATOR
 
+struct Identity {
+    auto operator()(auto x) const { return x; }
+};
+
 struct Divide {
     template<typename Lhs, typename Rhs>
     auto operator()(Lhs lhs, Rhs rhs) const
@@ -738,8 +742,35 @@ struct VectorBitmask {
 };
 
 template<size_t VectorSize>
+struct VectorMultiplyAdd {
+    auto operator()(u128 a1, u128 a2, u128 a3) const
+    {
+        using VectorInput = NativeFloatingVectorType<128 / VectorSize, VectorSize, NativeFloatingType<128 / VectorSize>>;
+        auto a = bit_cast<VectorInput>(a1);
+        auto b = bit_cast<VectorInput>(a2);
+        auto c = bit_cast<VectorInput>(a3);
+        // Spec talks about rounding and such, but v8's arm impl just does vmul + vadd with nothing in between.
+        return bit_cast<u128>(a * b + c);
+    }
+};
+
+template<size_t VectorSize>
+struct VectorMultiplySub {
+    auto operator()(u128 a1, u128 a2, u128 a3) const
+    {
+        using VectorInput = NativeFloatingVectorType<128 / VectorSize, VectorSize, NativeFloatingType<128 / VectorSize>>;
+        auto a = bit_cast<VectorInput>(a1);
+        auto b = bit_cast<VectorInput>(a2);
+        auto c = bit_cast<VectorInput>(a3);
+        // Spec talks about rounding and such, but v8's arm impl just does vmul + vsub with nothing in between.
+        return bit_cast<u128>(a * b - c);
+    }
+};
+
+template<size_t VectorSize, typename ContinuationOp = Identity>
 struct VectorDotProduct {
-    auto operator()(u128 lhs, u128 rhs) const
+    template<typename... ContinuationArgs>
+    auto operator()(u128 lhs, u128 rhs, ContinuationArgs&&... args) const
     {
         using VectorInput = NativeVectorType<128 / (VectorSize * 2), VectorSize * 2, MakeSigned>;
         using VectorResult = NativeVectorType<128 / VectorSize, VectorSize, MakeSigned>;
@@ -754,10 +785,38 @@ struct VectorDotProduct {
             result[i] = low + high;
         }
 
-        return bit_cast<u128>(result);
+        return ContinuationOp { forward<ContinuationArgs>(args)... }(bit_cast<u128>(result));
     }
 
     static StringView name() { return "dot"sv; }
+};
+
+struct VectorRelaxedDotI8I7AddS {
+    auto operator()(u128 lhs, u128 rhs, u128 acc) const
+    {
+        using VectorInput = Native128ByteVectorOf<i8, MakeSigned>;
+        using VectorResult = Native128ByteVectorOf<i32, MakeSigned>;
+        using VectorAcc = Native128ByteVectorOf<i32, MakeSigned>;
+
+        auto v1 = bit_cast<VectorInput>(lhs);
+        auto v2 = bit_cast<VectorInput>(rhs);
+        auto accumulator = bit_cast<VectorAcc>(acc);
+        VectorResult result {};
+
+        // Each i32 lane is the sum of 4 i8*i8 products, plus accumulator
+        for (size_t lane = 0; lane < 4; ++lane) {
+            i32 sum = 0;
+            for (size_t i = 0; i < 4; ++i) {
+                auto const idx = lane * 4 + i;
+                sum += static_cast<i32>(v1[idx]) * static_cast<i32>(v2[idx]);
+            }
+            result[lane] = sum + accumulator[lane];
+        }
+
+        return bit_cast<u128>(result);
+    }
+
+    static StringView name() { return "i32x4.relaxed_dot_i8x16_i7x16_add_s"sv; }
 };
 
 template<size_t VectorSize, typename Element>
@@ -1015,7 +1074,7 @@ struct CheckedTruncate {
         // FIXME: This function assumes that all values of ResultT are representable in Lhs
         //        the assumption comes from the fact that this was used exclusively by LibJS,
         //        which only considers values that are all representable in 'double'.
-        if (!AK::is_within_range<ResultT>(truncated))
+        if (!AK::is_within_range<ResultT>(static_cast<long double>(truncated)))
             return "Truncation out of range"sv;
 
         return static_cast<ResultT>(truncated);

@@ -35,21 +35,27 @@ void report_exception_to_console(JS::Value value, JS::Realm& realm, ErrorInPromi
         } else {
             dbgln("\033[31;1mUnhandled JavaScript exception{}:\033[0m [{}] {}", error_in_promise == ErrorInPromise::Yes ? " (in promise)" : "", name, message);
         }
-        if (is<JS::Error>(object)) {
-            // FIXME: We should be doing this for DOMException as well
-            //        https://webidl.spec.whatwg.org/#js-DOMException-specialness
-            //        "Additionally, if an implementation gives native Error objects special powers or nonstandard properties (such as a stack property), it should also expose those on DOMException objects."
-            auto const& error_value = static_cast<JS::Error const&>(object);
-            dbgln("{}", error_value.stack_string(JS::CompactTraceback::Yes));
-            console.report_exception(error_value, error_in_promise == ErrorInPromise::Yes);
-
+        if (auto const* error_data = object.error_data()) {
+            Utf16String exception_name;
+            Utf16String exception_message;
+            if (auto const* exception = as_if<WebIDL::DOMException>(object)) {
+                exception_name = exception->name().to_utf16_string();
+                exception_message = exception->message().to_utf16_string();
+            } else {
+                exception_name = name.to_utf16_string_without_side_effects();
+                exception_message = message.to_utf16_string_without_side_effects();
+            }
+            dbgln("{}", error_data->stack_string(JS::CompactTraceback::Yes));
+            console.report_exception(exception_name, exception_message, *error_data, error_in_promise == ErrorInPromise::Yes);
             return;
         }
     } else {
         dbgln("\033[31;1mUnhandled JavaScript exception{}:\033[0m {}", error_in_promise == ErrorInPromise::Yes ? " (in promise)" : "", value);
     }
 
-    console.report_exception(*JS::Error::create(realm, value.to_utf16_string_without_side_effects()), error_in_promise == ErrorInPromise::Yes);
+    auto utf16_message = value.to_utf16_string_without_side_effects();
+    auto error = JS::Error::create(realm, utf16_message);
+    console.report_exception("Error"_utf16, utf16_message, *error, error_in_promise == ErrorInPromise::Yes);
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#report-the-exception

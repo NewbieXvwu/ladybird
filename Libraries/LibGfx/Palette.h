@@ -28,7 +28,7 @@ public:
     Color color(ColorRole role) const
     {
         VERIFY((int)role < (int)ColorRole::__Count);
-        return Color::from_argb(theme().color[(int)role]);
+        return Color::from_bgra(theme().color[(int)role]);
     }
 
     Gfx::TextAlignment alignment(AlignmentRole role) const
@@ -65,7 +65,6 @@ public:
     Color window() const { return color(ColorRole::Window); }
     Color window_text() const { return color(ColorRole::WindowText); }
     Color selection() const { return color(ColorRole::Selection); }
-    Color selection_text() const { return color(ColorRole::SelectionText); }
     Color inactive_selection() const { return color(ColorRole::InactiveSelection); }
     Color inactive_selection_text() const { return color(ColorRole::InactiveSelectionText); }
     Color desktop_background() const { return color(ColorRole::DesktopBackground); }

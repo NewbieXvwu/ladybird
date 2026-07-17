@@ -9,9 +9,9 @@
 
 #pragma once
 
+#include <AK/Utf16View.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/AutocompleteElement.h>
-#include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/HTMLOptionsCollection.h>
 #include <LibWeb/HTML/SelectItem.h>
@@ -21,28 +21,30 @@ namespace Web::HTML {
 
 class WEB_API HTMLSelectElement final
     : public HTMLElement
-    , public FormAssociatedElement
     , public AutocompleteElement {
     WEB_PLATFORM_OBJECT(HTMLSelectElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLSelectElement);
-    FORM_ASSOCIATED_ELEMENT(HTMLElement, HTMLSelectElement);
     AUTOCOMPLETE_ELEMENT(HTMLElement, HTMLSelectElement);
 
 public:
     virtual ~HTMLSelectElement() override;
 
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
+    virtual bool is_html_select_element() const final { return true; }
+
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
     WebIDL::UnsignedLong size() const;
-    WebIDL::ExceptionOr<void> set_size(WebIDL::UnsignedLong);
+    void set_size(WebIDL::UnsignedLong);
 
-    GC::Ptr<HTMLOptionsCollection> const& options();
+    GC::Ptr<HTMLOptionsCollection> const& options() const;
 
     WebIDL::UnsignedLong length();
     WebIDL::ExceptionOr<void> set_length(WebIDL::UnsignedLong);
     HTMLOptionElement* item(WebIDL::UnsignedLong index);
-    HTMLOptionElement* named_item(FlyString const& name);
-    WebIDL::ExceptionOr<void> add(HTMLOptionOrOptGroupElement element, Optional<HTMLElementOrElementIndex> before = {});
+    virtual Optional<JS::Value> item_value(size_t index) const override;
+    HTMLOptionElement* named_item(Utf16View name);
+    WebIDL::ExceptionOr<void> add(HTMLOptionOrOptGroupElement element, NullableHTMLElementOrElementIndex before = { Empty {} });
+    virtual WebIDL::ExceptionOr<void> set_value_of_indexed_property(u32, JS::Value) override;
     void remove();
     void remove(WebIDL::Long);
 
@@ -50,10 +52,11 @@ public:
     GC::Ref<DOM::HTMLCollection> selected_options() const { return const_cast<HTMLSelectElement*>(this)->selected_options(); }
 
     WebIDL::Long selected_index() const;
-    void set_selected_index(WebIDL::Long);
+    WebIDL::ExceptionOr<void> set_selected_index(WebIDL::Long);
 
-    virtual Utf16String value() const override;
-    WebIDL::ExceptionOr<void> set_value(Utf16String const&);
+    Utf16String value() const;
+    virtual Utf16String form_value() const override { return value(); }
+    WebIDL::ExceptionOr<void> set_value(Utf16View);
 
     bool is_open() const { return m_is_open; }
     void set_is_open(bool);
@@ -67,6 +70,9 @@ public:
     // https://html.spec.whatwg.org/multipage/interaction.html#focusable-area
     // https://html.spec.whatwg.org/multipage/semantics-other.html#concept-element-disabled
     virtual bool is_focusable() const override;
+
+    // ^FormAssociatedElement
+    virtual bool is_form_associated_element() const override { return true; }
 
     // ^FormAssociatedElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-listed
@@ -87,7 +93,7 @@ public:
 
     virtual void reset_algorithm() override;
 
-    String const& type() const;
+    Utf16FlyString type() const;
 
     virtual Optional<ARIA::Role> default_role() const override;
 
@@ -95,13 +101,13 @@ public:
     virtual void activation_behavior(DOM::Event const&) override;
 
     virtual void form_associated_element_was_inserted() override;
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     void did_select_item(Optional<u32> const& id);
 
     void update_selectedness();
 
-    void update_inner_text_element(Badge<HTMLOptionElement>);
+    void clone_selected_option_into_select_button();
 
     bool can_skip_selectedness_update_for_inserted_option(HTMLOptionElement const&) const;
 
@@ -110,6 +116,15 @@ public:
 
     // https://html.spec.whatwg.org/multipage/form-elements.html#placeholder-label-option
     HTMLOptionElement* placeholder_label_option() const;
+
+    // https://html.spec.whatwg.org/multipage/form-elements.html#select-enabled-selectedcontent
+    GC::Ptr<HTMLSelectedContentElement> enabled_selectedcontent() const;
+
+    // https://html.spec.whatwg.org/multipage/form-elements.html#clear-a-select%27s-non-primary-selectedcontent-elements
+    void clear_non_primary_selectedcontent();
+
+    // https://html.spec.whatwg.org/multipage/form-elements.html#update-a-select%27s-selectedcontent
+    WebIDL::ExceptionOr<void> update_selectedcontent();
 
     // https://html.spec.whatwg.org/multipage/form-elements.html#the-select-element%3Asuffering-from-being-missing
     virtual bool suffering_from_being_missing() const override;
@@ -127,22 +142,22 @@ private:
 
     virtual void computed_properties_changed() override;
 
-    virtual void children_changed(ChildrenChangedMetadata const*) override;
+    virtual void children_changed(ChildrenChangedMetadata const&) override;
     bool can_skip_children_changed_selectedness_update(ChildrenChangedMetadata const& metadata) const;
 
     void update_cached_list_of_options() const;
     void show_the_picker_if_applicable();
 
     void create_shadow_tree_if_needed();
-    void update_inner_text_element();
-    void queue_input_and_change_events();
+    // https://html.spec.whatwg.org/multipage/form-elements.html#send-select-update-notifications
+    void send_select_update_notifications();
 
     u32 display_size() const;
 
     mutable Vector<GC::Ref<HTMLOptionElement>> m_cached_list_of_options;
     mutable size_t m_cached_number_of_selected_options { 0 };
 
-    GC::Ptr<HTMLOptionsCollection> m_options;
+    mutable GC::Ptr<HTMLOptionsCollection> m_options;
     GC::Ptr<DOM::HTMLCollection> m_selected_options;
     bool m_is_open { false };
     Vector<SelectItem> m_select_items;
@@ -152,5 +167,15 @@ private:
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#user-validity
     bool m_user_validity { false };
 };
+
+GC::Ptr<HTMLSelectElement> get_nearest_ancestor_select(DOM::Element&);
+GC::Ptr<HTMLSelectElement const> get_nearest_ancestor_select(DOM::Element const&);
+
+}
+
+namespace Web::DOM {
+
+template<>
+inline bool Node::fast_is<HTML::HTMLSelectElement>() const { return is_html_select_element(); }
 
 }

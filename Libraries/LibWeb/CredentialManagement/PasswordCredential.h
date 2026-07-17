@@ -7,43 +7,44 @@
 #pragma once
 
 #include <LibJS/Forward.h>
-#include <LibWeb/Bindings/PasswordCredentialPrototype.h>
+#include <LibWeb/Bindings/PasswordCredential.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/CredentialManagement/Credential.h>
+#include <LibWeb/CredentialManagement/CredentialUserData.h>
 #include <LibWeb/HTML/HTMLFormElement.h>
 
 namespace Web::CredentialManagement {
 
-class PasswordCredential final : public Credential {
+// https://www.w3.org/TR/credential-management-1/#passwordcredential
+class PasswordCredential final
+    : public Credential
+    , public CredentialUserData {
     WEB_PLATFORM_OBJECT(PasswordCredential, Credential);
     GC_DECLARE_ALLOCATOR(PasswordCredential);
 
 public:
-    [[nodiscard]] static GC::Ref<PasswordCredential> create(JS::Realm&);
-    static WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> construct_impl(JS::Realm&, HTML::HTMLFormElement const&);
-    static WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> construct_impl(JS::Realm&, PasswordCredentialData const&);
+    [[nodiscard]] static WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> construct_impl(JS::Realm&, GC::Ref<HTML::HTMLFormElement>);
+    [[nodiscard]] static WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> construct_impl(JS::Realm&, Bindings::PasswordCredentialData const&);
 
     virtual ~PasswordCredential() override;
 
-    String const& password() { return m_password; }
+    Utf16String const& password() const { return m_password; }
+    URL::Origin const& origin() const { return m_origin; }
 
-    String type() override { return "password"_string; }
+    Utf16FlyString const& type() const override;
 
 private:
-    explicit PasswordCredential(JS::Realm&);
+    PasswordCredential(JS::Realm&, Bindings::PasswordCredentialData const&, URL::Origin);
     virtual void initialize(JS::Realm&) override;
 
     // TODO: Use Core::SecretString when it comes back
-    String m_password;
+    Utf16String m_password;
+
+    // https://www.w3.org/TR/credential-management-1/#dom-credential-origin-slot
+    URL::Origin m_origin;
 };
 
-struct PasswordCredentialData : CredentialData {
-    Optional<String> name;
-    Optional<String> icon_url;
-    String origin;
-    String password;
-};
-
-using PasswordCredentialInit = Variant<PasswordCredentialData, GC::Root<HTML::HTMLFormElement>>;
+// https://www.w3.org/TR/credential-management-1/#typedefdef-passwordcredentialinit
+using PasswordCredentialInit = Variant<Bindings::PasswordCredentialData, GC::Root<HTML::HTMLFormElement>>;
 
 }

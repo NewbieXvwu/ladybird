@@ -6,6 +6,7 @@
 
 #include <AK/IPv4Address.h>
 #include <AK/IPv6Address.h>
+#include <LibURL/InternalURLs.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
 #include <LibWeb/DOMURL/DOMURL.h>
@@ -17,8 +18,12 @@ namespace Web::SecureContexts {
 Trustworthiness is_origin_potentially_trustworthy(URL::Origin const& origin)
 {
     // 1. If origin is an opaque origin, return "Not Trustworthy".
-    if (origin.is_opaque())
-        return Trustworthiness::NotTrustworthy;
+    if (origin.is_opaque()) {
+        // AD-HOC: The secure context spec assumes file scheme origins are tuple origins.
+        //         Therefore, we need to special case file scheme origins here. See spec issue:
+        //         https://github.com/w3c/webappsec-secure-contexts/issues/66
+        return origin.is_opaque_file_origin() ? Trustworthiness::PotentiallyTrustworthy : Trustworthiness::NotTrustworthy;
+    }
 
     // 2. Assert: origin is a tuple origin.
 
@@ -28,14 +33,12 @@ Trustworthiness is_origin_potentially_trustworthy(URL::Origin const& origin)
         return Trustworthiness::PotentiallyTrustworthy;
 
     // 4. If origin’s host matches one of the CIDR notations 127.0.0.0/8 or ::1/128 [RFC4632], return "Potentially Trustworthy".
-    // FIXME: This would be nicer if URL::IPv4Address and URL::IPv6Address were instances of AK::IPv4Address and AK::IPv6Address
-    if (origin.host().has<URL::IPv4Address>()) {
-        if ((origin.host().get<URL::IPv4Address>() & 0xff000000) != 0)
+    if (origin.host().has<IPv4Address>()) {
+        if ((origin.host().get<IPv4Address>().to_u32() & 0xff000000) == 0x7f000000)
             return Trustworthiness::PotentiallyTrustworthy;
-    } else if (origin.host().has<URL::IPv6Address>()) {
-        auto ipv6_address = origin.host().get<URL::IPv6Address>();
-        static constexpr URL::IPv6Address loopback { 0, 0, 0, 0, 0, 0, 0, 1 };
-        if (ipv6_address == loopback)
+    } else if (origin.host().has<IPv6Address>()) {
+        auto ipv6_address = origin.host().get<IPv6Address>();
+        if (ipv6_address == IPv6Address::loopback())
             return Trustworthiness::PotentiallyTrustworthy;
     }
 
@@ -75,7 +78,11 @@ Trustworthiness is_url_potentially_trustworthy(URL::URL const& url)
     if (url == URL::about_blank() || url == URL::about_srcdoc())
         return Trustworthiness::PotentiallyTrustworthy;
 
-    // 2. If url’s scheme is "data", return "Potentially Trustworthy".
+    // AD-HOC: Browser-internal about: pages (WebUI) are served directly by the user agent.
+    if (URL::is_webui_url(url))
+        return Trustworthiness::PotentiallyTrustworthy;
+
+    // 2. If url's scheme is "data", return "Potentially Trustworthy".
     if (url.scheme() == "data"sv)
         return Trustworthiness::PotentiallyTrustworthy;
 

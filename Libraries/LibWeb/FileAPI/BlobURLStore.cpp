@@ -6,7 +6,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/StringBuilder.h>
+#include <AK/NeverDestroyed.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Crypto/Crypto.h>
@@ -14,27 +15,28 @@
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/FileAPI/BlobURLStore.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/StorageAPI/StorageKey.h>
 
 namespace Web::FileAPI {
 
 BlobURLStore& blob_url_store()
 {
-    static HashMap<String, BlobURLEntry> store;
-    return store;
+    static NeverDestroyed<GC::ConservativeHashMap<Utf16String, BlobURLEntry>> store;
+    return *store;
 }
 
 // https://w3c.github.io/FileAPI/#unicodeBlobURL
 ErrorOr<Utf16String> generate_new_blob_url()
 {
     // 1. Let result be the empty string.
-    StringBuilder result { StringBuilder::Mode::UTF16 };
+    Utf16StringBuilder result;
 
     // 2. Append the string "blob:" to result.
-    TRY(result.try_append("blob:"sv));
+    result.append_ascii("blob:"sv);
 
     // 3. Let settings be the current settings object
-    auto& settings = HTML::current_principal_settings_object();
+    auto& settings = HTML::current_settings_object();
 
     // 4. Let origin be settings’s origin.
     auto origin = settings.origin();
@@ -47,17 +49,17 @@ ErrorOr<Utf16String> generate_new_blob_url()
         serialized = "ladybird"_string;
 
     // 7. Append serialized to result.
-    TRY(result.try_append(serialized));
+    result.append_ascii(serialized.bytes_as_string_view());
 
     // 8. Append U+0024 SOLIDUS (/) to result.
-    TRY(result.try_append('/'));
+    result.append_ascii('/');
 
     // 9. Generate a UUID [RFC4122] as a string and append it to result.
-    auto uuid = TRY(Crypto::generate_random_uuid());
-    TRY(result.try_append(uuid));
+    auto uuid = Crypto::generate_random_uuid();
+    result.append_ascii(uuid.bytes_as_string_view());
 
     // 10. Return result.
-    return result.to_utf16_string();
+    return result.to_string();
 }
 
 // https://w3c.github.io/FileAPI/#add-an-entry
@@ -70,10 +72,10 @@ ErrorOr<Utf16String> add_entry_to_blob_url_store(BlobURLEntry::Object object)
     auto url = TRY(generate_new_blob_url());
 
     // 3. Let entry be a new blob URL entry consisting of object and the current settings object.
-    BlobURLEntry entry { object, HTML::current_principal_settings_object() };
+    BlobURLEntry entry { object, HTML::current_settings_object() };
 
     // 4. Set store[url] to entry.
-    TRY(store.try_set(url.to_utf8_but_should_be_ported_to_utf16(), move(entry)));
+    TRY(store.try_set(url, move(entry)));
 
     // 5. Return url.
     return url;
@@ -97,13 +99,13 @@ bool check_for_same_partition_blob_url_usage(URL::BlobURLEntry const& blob_url_e
 }
 
 // https://www.w3.org/TR/FileAPI/#blob-url-obtain-object
-Optional<URL::BlobURLEntry::Object> obtain_a_blob_object(URL::BlobURLEntry const& blob_url_entry, Variant<GC::Ref<HTML::Environment>, NavigationEnvironment> environment)
+Optional<URL::BlobURLEntry::Object> obtain_a_blob_object(URL::BlobURLEntry const& blob_url_entry, Variant<GC::Ref<HTML::Environment>, TopLevelNavigation, TopLevelSelfFetch> environment)
 {
     // 1. Let isAuthorized be true.
     bool is_authorized = true;
 
-    // 2. If environment is not the string "navigation", then set isAuthorized to the result of checking for same-partition blob URL usage with blobUrlEntry and environment.
-    if (!environment.has<NavigationEnvironment>())
+    // 2. If environment is an environment settings object, then set isAuthorized to the result of checking for same-partition blob URL usage with blobUrlEntry and environment.
+    if (environment.has<GC::Ref<HTML::Environment>>())
         is_authorized = check_for_same_partition_blob_url_usage(blob_url_entry, environment.get<GC::Ref<HTML::Environment>>());
 
     // 3. If isAuthorized is false, then return failure.
@@ -121,7 +123,7 @@ void remove_entry_from_blob_url_store(URL::URL const& url)
     auto& store = blob_url_store();
 
     // 2. Let url string be the result of serializing url.
-    auto url_string = url.serialize();
+    auto url_string = utf16_string_from_url_ascii(url.serialize());
 
     // 3. Remove store[url string].
     store.remove(url_string);
@@ -152,7 +154,7 @@ Optional<BlobURLEntry const&> resolve_a_blob_url(URL::URL const& url)
     auto& store = blob_url_store();
 
     // 3. Let url string be the result of serializing url with the exclude fragment flag set.
-    auto url_string = url.serialize(URL::ExcludeFragment::Yes);
+    auto url_string = utf16_string_from_url_ascii(url.serialize(URL::ExcludeFragment::Yes));
 
     // 4. If store[url string] exists, return store[url string]; otherwise return failure.
     return store.get(url_string);

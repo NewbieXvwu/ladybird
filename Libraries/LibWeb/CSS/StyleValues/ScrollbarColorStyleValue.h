@@ -17,13 +17,16 @@ public:
     static ValueComparingNonnullRefPtr<ScrollbarColorStyleValue const> create(NonnullRefPtr<StyleValue const> thumb_color, NonnullRefPtr<StyleValue const> track_color);
     virtual ~ScrollbarColorStyleValue() override = default;
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
     bool properties_equal(ScrollbarColorStyleValue const& other) const { return m_thumb_color == other.m_thumb_color && m_track_color == other.m_track_color; }
+
+    virtual bool is_computationally_independent() const override { return m_thumb_color->is_computationally_independent() && m_track_color->is_computationally_independent(); }
 
     NonnullRefPtr<StyleValue const> thumb_color() const { return m_thumb_color; }
     NonnullRefPtr<StyleValue const> track_color() const { return m_track_color; }
 
 private:
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
     explicit ScrollbarColorStyleValue(NonnullRefPtr<StyleValue const> thumb_color, NonnullRefPtr<StyleValue const> track_color)
         : StyleValueWithDefaultOperators(Type::ScrollbarColor)
         , m_thumb_color(move(thumb_color))
@@ -31,8 +34,8 @@ private:
     {
     }
 
-    NonnullRefPtr<StyleValue const> m_thumb_color;
-    NonnullRefPtr<StyleValue const> m_track_color;
+    ValueComparingNonnullRefPtr<StyleValue const> m_thumb_color;
+    ValueComparingNonnullRefPtr<StyleValue const> m_track_color;
 };
 
 }

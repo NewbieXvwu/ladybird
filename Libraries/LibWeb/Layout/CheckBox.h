@@ -7,20 +7,20 @@
 #pragma once
 
 #include <LibWeb/Forward.h>
-#include <LibWeb/Layout/FormAssociatedLabelableNode.h>
+#include <LibWeb/Layout/ReplacedBox.h>
 
 namespace Web::Layout {
 
-class CheckBox final : public FormAssociatedLabelableNode {
-    GC_CELL(CheckBox, FormAssociatedLabelableNode);
-    GC_DECLARE_ALLOCATOR(CheckBox);
+class CheckBox final : public ReplacedBox {
+    LAYOUT_NODE(CheckBox, ReplacedBox);
 
 public:
-    CheckBox(DOM::Document&, HTML::HTMLInputElement&, GC::Ref<CSS::ComputedProperties>);
+    CheckBox(DOM::Document&, HTML::HTMLInputElement&, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~CheckBox() override;
 
 private:
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual CSS::SizeWithAspectRatio compute_auto_content_box_size() const override { return { 13, 13, {} }; }
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 };
 
 }

@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLTitleElementPrototype.h>
+#include <LibWeb/Bindings/HTMLTitleElement.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/HTMLTitleElement.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/Page/Page.h>
 
 namespace Web::HTML {
@@ -27,7 +27,7 @@ void HTMLTitleElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void HTMLTitleElement::children_changed(ChildrenChangedMetadata const* metadata)
+void HTMLTitleElement::children_changed(ChildrenChangedMetadata const& metadata)
 {
     HTMLElement::children_changed(metadata);
     auto navigable = this->navigable();
@@ -44,7 +44,7 @@ Utf16String HTMLTitleElement::text() const
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#dom-title-text
-void HTMLTitleElement::set_text(Utf16String const& value)
+void HTMLTitleElement::set_text(Utf16View value)
 {
     // The text attribute's setter must string replace all with the given value within this title element.
     string_replace_all(value);

@@ -1,23 +1,27 @@
 /*
  * Copyright (c) 2025, Tim Ledbetter <tim.ledbetter@ladybird.org>
+ * Copyright (c) 2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "ColorMixStyleValue.h"
 #include <AK/TypeCasts.h>
+#include <LibWeb/CSS/ColorInterpolation.h>
 #include <LibWeb/CSS/Interpolation.h>
+#include <LibWeb/CSS/StyleValues/ColorFunctionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ColorInterpolationMethodStyleValue.h>
 #include <LibWeb/Layout/Node.h>
 
 namespace Web::CSS {
 
-ValueComparingNonnullRefPtr<ColorMixStyleValue const> ColorMixStyleValue::create(ColorInterpolationMethod interpolation_method, ColorMixComponent first_component, ColorMixComponent second_component)
+ValueComparingNonnullRefPtr<ColorMixStyleValue const> ColorMixStyleValue::create(RefPtr<StyleValue const> color_interpolation_method, ColorMixComponent first_component, ColorMixComponent second_component)
 {
-    return adopt_ref(*new (nothrow) ColorMixStyleValue(move(interpolation_method), move(first_component), move(second_component)));
+    return adopt_ref(*new (nothrow) ColorMixStyleValue(move(color_interpolation_method), move(first_component), move(second_component)));
 }
 
-ColorMixStyleValue::ColorMixStyleValue(ColorInterpolationMethod color_interpolation_method, ColorMixComponent first_component, ColorMixComponent second_component)
-    : ColorStyleValue(ColorType::ColorMix, ColorSyntax::Modern)
+ColorMixStyleValue::ColorMixStyleValue(RefPtr<StyleValue const> color_interpolation_method, ColorMixComponent first_component, ColorMixComponent second_component)
+    : ColorStyleValue({}, ColorSyntax::Modern)
     , m_properties {
         .color_interpolation_method = move(color_interpolation_method),
         .first_component = move(first_component),
@@ -28,46 +32,45 @@ ColorMixStyleValue::ColorMixStyleValue(ColorInterpolationMethod color_interpolat
 
 bool ColorMixStyleValue::equals(StyleValue const& other) const
 {
-    if (type() != other.type())
+    auto const* other_color_mix = as_if<ColorMixStyleValue>(other);
+    if (!other_color_mix)
         return false;
-    auto const& other_color = other.as_color();
-    if (color_type() != other_color.color_type())
-        return false;
-    auto const& other_color_mix = as<ColorMixStyleValue>(other_color);
-    return m_properties == other_color_mix.m_properties;
+    return m_properties == other_color_mix->m_properties;
 }
 
 // https://drafts.csswg.org/css-color-5/#serial-color-mix
-String ColorMixStyleValue::to_string(SerializationMode mode) const
+void ColorMixStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    auto serialize_first_percentage = [&mode](StringBuilder& builder, Optional<PercentageOrCalculated> const& p1, Optional<PercentageOrCalculated> const& p2) {
+    auto serialize_first_percentage = [&mode](StringBuilder& builder, RefPtr<StyleValue const> const& p1, RefPtr<StyleValue const> const& p2) {
         // if BOTH the first percentage p1 and second percentage p2 are specified:
-        if (p1.has_value() && p2.has_value()) {
+        if (p1 && p2) {
             // If both p1 equals 50% and p2 equals 50%, nothing is serialized.
-            if (!p1->is_calculated() && !p2->is_calculated() && p1->value().value() == 50 && p2->value().value() == 50)
+            if (p1->is_percentage() && p2->is_percentage() && p1->as_percentage().percentage().value() == 50 && p2->as_percentage().percentage().value() == 50)
                 return;
 
             // else, p1 is serialized as is.
-            builder.appendff(" {}", p1->to_string(mode));
+            builder.append(' ');
+            p1->serialize(builder, mode);
         }
         // else if ONLY the first percentage p1 is specified:
-        else if (p1.has_value()) {
+        else if (p1) {
             // If p1 is equal to 50%, nothing is serialized.
-            if (!p1->is_calculated() && p1->value().value() == 50)
+            if (p1->is_percentage() && p1->as_percentage().percentage().value() == 50)
                 return;
 
             // else, p1 is serialized as is.
-            builder.appendff(" {}", p1->to_string(mode));
+            builder.append(' ');
+            p1->serialize(builder, mode);
         }
         // else if ONLY the second percentage p2 is specified:
-        else if (p2.has_value()) {
+        else if (p2) {
             // if p2 equals 50%, nothing is serialized.
-            if (!p2->is_calculated() && p2->value().value() == 50)
+            if (p2->is_percentage() && p2->as_percentage().percentage().value() == 50)
                 return;
 
             // if p2 is not calc(), the value of 100% - p2 is serialized.
             if (!p2->is_calculated())
-                builder.appendff(" {}%", 100 - p2->value().value());
+                builder.appendff(" {}%", 100 - p2->as_percentage().percentage().value());
 
             // else, nothing is serialized.
         }
@@ -77,24 +80,25 @@ String ColorMixStyleValue::to_string(SerializationMode mode) const
         }
     };
 
-    auto serialize_second_percentage = [&mode](StringBuilder& builder, Optional<PercentageOrCalculated> const& p1, Optional<PercentageOrCalculated> const& p2) {
+    auto serialize_second_percentage = [&mode](StringBuilder& builder, RefPtr<StyleValue const> const& p1, RefPtr<StyleValue const> const& p2) {
         // If BOTH the first percentage p1 and second percentages p2 are specified:
-        if (p1.has_value() && p2.has_value()) {
+        if (p1 && p2) {
             // if neither p1 nor p2 is calc(), and p1 + p2 equals 100%, nothing is serialized.
-            if (!p1->is_calculated() && !p2->is_calculated() && p1->value().value() + p2->value().value() == 100)
+            if (p1->is_percentage() && p2->is_percentage() && p1->as_percentage().percentage().value() + p2->as_percentage().percentage().value() == 100)
                 return;
 
             // else, p2 is serialized as is.
-            builder.appendff(" {}", p2->to_string(mode));
+            builder.append(' ');
+            p2->serialize(builder, mode);
         }
         // else if ONLY the first percentage p1 is specified:
-        else if (p1.has_value()) {
+        else if (p1) {
             // nothing is serialized.
         }
         // else if ONLY the second percentage p2 is specified:
-        else if (p2.has_value()) {
+        else if (p2) {
             // if p2 equals 50%, nothing is serialized.
-            if (!p2->is_calculated() && p2->value().value() == 50)
+            if (p2->is_percentage() && p2->as_percentage().percentage().value() == 50)
                 return;
 
             // if p2 is not calc(), nothing is serialized.
@@ -102,7 +106,8 @@ String ColorMixStyleValue::to_string(SerializationMode mode) const
                 return;
 
             // else, p2 is serialized as is.
-            builder.appendff(" {}", p2->to_string(mode));
+            builder.append(' ');
+            p2->serialize(builder, mode);
         }
         // else if NEITHER is specified:
         else {
@@ -110,34 +115,28 @@ String ColorMixStyleValue::to_string(SerializationMode mode) const
         }
     };
 
-    StringBuilder builder;
-    builder.appendff("color-mix(in {}", m_properties.color_interpolation_method.color_space);
-    if (m_properties.color_interpolation_method.hue_interpolation_method.value_or(HueInterpolationMethod::Shorter) != HueInterpolationMethod::Shorter)
-        builder.appendff(" {} hue", CSS::to_string(*m_properties.color_interpolation_method.hue_interpolation_method));
-    builder.append(", "sv);
-    builder.append(m_properties.first_component.color->to_string(mode));
+    builder.append("color-mix("sv);
+
+    if (m_properties.color_interpolation_method && m_properties.color_interpolation_method->as_color_interpolation_method().color_interpolation_method() != RectangularColorSpace::Oklab) {
+        m_properties.color_interpolation_method->serialize(builder, mode);
+        builder.append(", "sv);
+    }
+
+    m_properties.first_component.color->serialize(builder, mode);
     serialize_first_percentage(builder, m_properties.first_component.percentage, m_properties.second_component.percentage);
-    builder.appendff(", {}", m_properties.second_component.color->to_string(mode));
+    builder.append(", "sv);
+    m_properties.second_component.color->serialize(builder, mode);
     serialize_second_percentage(builder, m_properties.first_component.percentage, m_properties.second_component.percentage);
     builder.append(')');
-    return MUST(builder.to_string());
 }
 
 // https://drafts.csswg.org/css-color-5/#color-mix-percent-norm
-ColorMixStyleValue::PercentageNormalizationResult ColorMixStyleValue::normalize_percentages() const
+ColorMixStyleValue::NormalizedPercentages ColorMixStyleValue::normalize_percentage_pair(Optional<Percentage> p1, Optional<Percentage> p2)
 {
-    auto resolve_percentage = [&](Optional<PercentageOrCalculated> const& percentage_or_calculated) -> Optional<Percentage> {
-        if (!percentage_or_calculated.has_value())
-            return {};
-        if (!percentage_or_calculated->is_calculated())
-            return percentage_or_calculated->value();
-        return percentage_or_calculated->resolved({});
-    };
+    double alpha_multiplier = 1.0;
 
     // 1. Let p1 be the first percentage and p2 the second one.
-    auto p1 = resolve_percentage(m_properties.first_component.percentage);
-    auto p2 = resolve_percentage(m_properties.second_component.percentage);
-    double alpha_multiplier = 0;
+    // NB: Provided by the caller.
 
     // 2. If both percentages are omitted, they each default to 50% (an equal mix of the two colors).
     if (!p1.has_value() && !p2.has_value()) {
@@ -171,23 +170,109 @@ ColorMixStyleValue::PercentageNormalizationResult ColorMixStyleValue::normalize_
     VERIFY(p1.has_value());
     VERIFY(p2.has_value());
 
-    return PercentageNormalizationResult { .p1 = *p1, .p2 = *p2, .alpha_multiplier = alpha_multiplier };
+    return { .first_percentage = *p1, .second_percentage = *p2, .alpha_multiplier = alpha_multiplier };
+}
+
+ColorMixStyleValue::PercentageNormalizationResult ColorMixStyleValue::normalize_percentages(ComputationContext const& computation_context) const
+{
+    auto p1 = m_properties.first_component.percentage
+        ? Percentage::from_style_value(m_properties.first_component.percentage->absolutized(computation_context))
+        : Optional<Percentage> {};
+    auto p2 = m_properties.second_component.percentage
+        ? Percentage::from_style_value(m_properties.second_component.percentage->absolutized(computation_context))
+        : Optional<Percentage> {};
+
+    auto result = normalize_percentage_pair(p1, p2);
+    return {
+        .p1 = PercentageStyleValue::create(result.first_percentage),
+        .p2 = PercentageStyleValue::create(result.second_percentage),
+        .alpha_multiplier = result.alpha_multiplier,
+    };
 }
 
 // https://drafts.csswg.org/css-color-5/#color-mix-result
 Optional<Color> ColorMixStyleValue::to_color(ColorResolutionContext color_resolution_context) const
 {
-    // FIXME: Take the color space and hue interpolation method into account.
-    // The current implementation only uses oklab interpolation.
-    auto normalized_percentages = normalize_percentages();
-    auto from_color = m_properties.first_component.color->to_color(color_resolution_context);
-    auto to_color = m_properties.second_component.color->to_color(color_resolution_context);
-    auto delta = normalized_percentages.p2.value() / 100;
+    auto p1 = m_properties.first_component.percentage
+        ? Optional<Percentage>(Percentage::from_style_value(*m_properties.first_component.percentage))
+        : Optional<Percentage> {};
+    auto p2 = m_properties.second_component.percentage
+        ? Optional<Percentage>(Percentage::from_style_value(*m_properties.second_component.percentage))
+        : Optional<Percentage> {};
+    auto normalized = normalize_percentage_pair(p1, p2);
 
-    if (!from_color.has_value() || !to_color.has_value())
+    auto color_interpolation_method = m_properties.color_interpolation_method
+        ? m_properties.color_interpolation_method->as_color_interpolation_method().color_interpolation_method()
+        : ColorInterpolationMethodStyleValue::ColorInterpolationMethod { RectangularColorSpace::Oklab };
+
+    auto interpolated = perform_color_interpolation(*m_properties.first_component.color, *m_properties.second_component.color, normalized.second_percentage.as_fraction(), color_interpolation_method, color_resolution_context);
+    if (!interpolated.has_value())
         return {};
 
-    return interpolate_color(from_color.value(), to_color.value(), delta, ColorSyntax::Modern);
+    if (normalized.alpha_multiplier < 1.0)
+        interpolated->components.set_alpha(interpolated->components.alpha() * normalized.alpha_multiplier);
+
+    auto style_value = style_value_for_interpolated_color(*interpolated);
+    if (!style_value)
+        return {};
+
+    return style_value->to_color(color_resolution_context);
+}
+
+ValueComparingNonnullRefPtr<StyleValue const> ColorMixStyleValue::absolutized(ComputationContext const& context) const
+{
+    // FIXME: Follow the spec algorithm. https://drafts.csswg.org/css-color-5/#calculate-a-color-mix
+
+    auto normalized_percentages = normalize_percentages(context);
+    ColorResolutionContext color_resolution_context {
+        .color_scheme = context.color_scheme,
+        .current_color = {},
+        .current_color_style_value = nullptr,
+        .calculation_resolution_context = CalculationResolutionContext::from_computation_context(context),
+    };
+    auto absolutized_color_interpolation_method = m_properties.color_interpolation_method ? ValueComparingRefPtr<StyleValue const> { m_properties.color_interpolation_method->absolutized(context) } : nullptr;
+
+    auto delta = Percentage::from_style_value(normalized_percentages.p2).as_fraction();
+
+    auto color_interpolation_method = absolutized_color_interpolation_method
+        ? absolutized_color_interpolation_method->as_color_interpolation_method().color_interpolation_method()
+        : ColorInterpolationMethodStyleValue::ColorInterpolationMethod { RectangularColorSpace::Oklab };
+
+    // Resolve relative-color components before interpolation so channel-keyword references and `none` missing-channel
+    // markers are made visible during interpolation.
+    auto resolve_if_relative = [&](ValueComparingNonnullRefPtr<StyleValue const> const& component) -> ValueComparingNonnullRefPtr<StyleValue const> {
+        if (!component->is_color_function())
+            return component;
+        auto const& color_function = as<ColorFunctionStyleValue>(*component);
+        if (!color_function.origin_color())
+            return component;
+        auto resolved = color_function.resolve_relative_form(color_resolution_context);
+        if (!resolved)
+            return component;
+        return resolved.release_nonnull();
+    };
+    auto first_component = resolve_if_relative(m_properties.first_component.color);
+    auto second_component = resolve_if_relative(m_properties.second_component.color);
+
+    if (auto interpolated = perform_color_interpolation(*first_component, *second_component, delta, color_interpolation_method, color_resolution_context); interpolated.has_value()) {
+        if (normalized_percentages.alpha_multiplier < 1.0)
+            interpolated->components.set_alpha(interpolated->components.alpha() * normalized_percentages.alpha_multiplier);
+        if (auto style_value = style_value_for_interpolated_color(*interpolated))
+            return style_value.release_nonnull();
+    }
+
+    // Fall back to returning a color-mix() with absolutized values if we can't compute completely.
+    // Currently, this is only the case if one of our colors relies on `currentcolor`, as that does not compute to a color value.
+    auto absolutized_first_color = m_properties.first_component.color->absolutized(context);
+    auto absolutized_second_color = m_properties.second_component.color->absolutized(context);
+    if (absolutized_first_color == m_properties.first_component.color && normalized_percentages.p1 == m_properties.first_component.percentage
+        && absolutized_second_color == m_properties.second_component.color && normalized_percentages.p2 == m_properties.second_component.percentage)
+        return *this;
+
+    return ColorMixStyleValue::create(
+        absolutized_color_interpolation_method,
+        ColorMixComponent { .color = move(absolutized_first_color), .percentage = normalized_percentages.p1 },
+        ColorMixComponent { .color = move(absolutized_second_color), .percentage = normalized_percentages.p2 });
 }
 
 }

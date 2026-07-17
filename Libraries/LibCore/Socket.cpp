@@ -10,9 +10,6 @@
 
 namespace Core {
 
-// FIXME: This limit has been chosen arbitrarily
-size_t const LocalSocket::MAX_TRANSFER_FDS = 64;
-
 ErrorOr<int> Socket::create_fd(SocketDomain domain, SocketType type)
 {
     int socket_domain;
@@ -52,7 +49,7 @@ ErrorOr<int> Socket::create_fd(SocketDomain domain, SocketType type)
 #endif
 }
 
-ErrorOr<Vector<Variant<IPv4Address, IPv6Address>>> Socket::resolve_host(ByteString const& host, SocketType type)
+ErrorOr<Vector<Variant<IPv4Address, IPv6Address>>> Socket::resolve_host(ByteString const& host, SocketType type, AddressFamily address_family)
 {
     int socket_type;
     switch (type) {
@@ -66,8 +63,23 @@ ErrorOr<Vector<Variant<IPv4Address, IPv6Address>>> Socket::resolve_host(ByteStri
         VERIFY_NOT_REACHED();
     }
 
+    int ai_family;
+    switch (address_family) {
+    case AddressFamily::Unspecified:
+        ai_family = AF_UNSPEC;
+        break;
+    case AddressFamily::IPv4Only:
+        ai_family = AF_INET;
+        break;
+    case AddressFamily::IPv6Only:
+        ai_family = AF_INET6;
+        break;
+    default:
+        VERIFY_NOT_REACHED();
+    }
+
     struct addrinfo hints = {};
-    hints.ai_family = AF_UNSPEC;
+    hints.ai_family = ai_family;
     hints.ai_socktype = socket_type;
     hints.ai_flags = 0;
     hints.ai_protocol = 0;
@@ -126,7 +138,7 @@ ErrorOr<Bytes> PosixSocketHelper::read(Bytes buffer, int flags)
         return Error::from_errno(ENOTCONN);
     }
 
-    ssize_t nread = TRY(System::recv(m_fd, buffer.data(), buffer.size(), flags));
+    auto nread = TRY(System::recv(m_fd, buffer, flags));
     if (nread == 0)
         did_reach_eof_on_read();
 
@@ -150,7 +162,7 @@ ErrorOr<size_t> PosixSocketHelper::write(ReadonlyBytes buffer, int flags)
         return Error::from_errno(ENOTCONN);
     }
 
-    return TRY(System::send(m_fd, buffer.data(), buffer.size(), flags));
+    return System::send(m_fd, buffer, flags);
 }
 
 void PosixSocketHelper::close()
@@ -410,7 +422,7 @@ ErrorOr<void> LocalSocket::send_fd(int fd)
 #endif
 }
 
-ErrorOr<ssize_t> LocalSocket::send_message(ReadonlyBytes data, int flags, Vector<int, 1> fds)
+ErrorOr<size_t> LocalSocket::send_message(ReadonlyBytes data, int flags, Vector<int, 1> fds)
 {
     size_t const num_fds = fds.size();
     if (num_fds == 0)
@@ -439,7 +451,7 @@ ErrorOr<ssize_t> LocalSocket::send_message(ReadonlyBytes data, int flags, Vector
     msg.msg_control = header;
     msg.msg_controllen = CMSG_LEN(fd_payload_size);
 
-    return TRY(Core::System::sendmsg(m_helper.fd(), &msg, default_flags() | flags));
+    return Core::System::sendmsg(m_helper.fd(), &msg, default_flags() | flags);
 }
 
 ErrorOr<Bytes> LocalSocket::receive_message(AK::Bytes buffer, int flags, Vector<int>& fds)

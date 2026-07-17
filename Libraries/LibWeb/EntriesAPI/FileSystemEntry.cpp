@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/FileSystemEntryPrototype.h>
+#include <LibWeb/Bindings/FileSystemEntry.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/EntriesAPI/FileSystemEntry.h>
 #include <LibWeb/HTML/Window.h>
@@ -13,15 +13,15 @@ namespace Web::EntriesAPI {
 
 GC_DEFINE_ALLOCATOR(FileSystemEntry);
 
-GC::Ref<FileSystemEntry> FileSystemEntry::create(JS::Realm& realm, EntryType entry_type, ByteString name)
+GC::Ref<FileSystemEntry> FileSystemEntry::create(JS::Realm& realm, EntryType entry_type, Utf16String name)
 {
     return realm.create<FileSystemEntry>(realm, entry_type, name);
 }
 
-FileSystemEntry::FileSystemEntry(JS::Realm& realm, EntryType entry_type, ByteString name)
+FileSystemEntry::FileSystemEntry(JS::Realm& realm, EntryType entry_type, Utf16String name)
     : PlatformObject(realm)
     , m_entry_type(entry_type)
-    , m_name(name)
+    , m_name(move(name))
 {
 }
 
@@ -46,7 +46,7 @@ bool FileSystemEntry::is_directory() const
 }
 
 // https://wicg.github.io/entries-api/#dom-filesystementry-name
-ByteString FileSystemEntry::name() const
+Utf16String const& FileSystemEntry::name() const
 {
     // The name getter steps are to return this's name.
     return m_name;

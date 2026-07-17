@@ -18,7 +18,7 @@ class SVGForeignObjectElement final : public SVGGraphicsElement {
 public:
     virtual ~SVGForeignObjectElement() override;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
 
     GC::Ref<SVG::SVGAnimatedLength> x();
     GC::Ref<SVG::SVGAnimatedLength> y();
@@ -32,9 +32,6 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
-
-    virtual bool is_presentational_hint(FlyString const&) const override;
-    virtual void apply_presentational_hints(GC::Ref<CSS::CascadedProperties>) const override;
 
     GC::Ptr<SVG::SVGAnimatedLength> m_x;
     GC::Ptr<SVG::SVGAnimatedLength> m_y;

@@ -34,7 +34,7 @@ public:
     // Note: Do not call these methods directly unless you are HostResolveImportedModule.
     //       Badges cannot be used because other hosts must be able to call this (and it is called recursively)
     virtual ThrowCompletionOr<void> link(VM& vm) override final;
-    virtual ThrowCompletionOr<GC::Ref<Promise>> evaluate(VM& vm) override final;
+    virtual ThrowCompletionOr<GC::Ref<PromiseCapability>> evaluate(VM& vm) override final;
 
     virtual PromiseCapability& load_requested_modules(GC::Ptr<GraphLoadingState::HostDefined>) override;
 
@@ -42,24 +42,25 @@ public:
     void set_status(ModuleStatus status) { m_status = status; }
 
     Vector<ModuleRequest> const& requested_modules() const { return m_requested_modules; }
-    Vector<ModuleWithSpecifier> const& loaded_modules() const { return m_loaded_modules; }
-    Vector<ModuleWithSpecifier>& loaded_modules() { return m_loaded_modules; }
+    Vector<LoadedModuleRequest> const& loaded_modules() const { return m_loaded_modules; }
+    Vector<LoadedModuleRequest>& loaded_modules() { return m_loaded_modules; }
 
 protected:
     CyclicModule(Realm& realm, StringView filename, bool has_top_level_await, Vector<ModuleRequest> requested_modules, Script::HostDefined* host_defined);
 
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
-    virtual ThrowCompletionOr<u32> inner_module_linking(VM& vm, Vector<Module*>& stack, u32 index) override final;
-    virtual ThrowCompletionOr<u32> inner_module_evaluation(VM& vm, Vector<Module*>& stack, u32 index) override final;
+    virtual ThrowCompletionOr<u32> inner_module_linking(VM& vm, GC::RootVector<GC::Ref<Module>>& stack, u32 index) override final;
+    virtual ThrowCompletionOr<u32> inner_module_evaluation(VM& vm, GC::RootVector<GC::Ref<Module>>& stack, u32 index) override final;
 
     virtual ThrowCompletionOr<void> initialize_environment(VM& vm);
     virtual ThrowCompletionOr<void> execute_module(VM& vm, GC::Ptr<PromiseCapability> capability = {});
 
-    [[nodiscard]] GC::Ref<Module> get_imported_module(ModuleRequest const&);
+    [[nodiscard]] GC::Ref<Module> get_imported_module(ModuleRequest const& request);
 
     void execute_async_module(VM& vm);
-    void gather_available_ancestors(Vector<CyclicModule*>& exec_list);
+    void gather_available_ancestors(GC::RootVector<GC::Ptr<CyclicModule>>& exec_list);
     void async_module_execution_fulfilled(VM& vm);
     void async_module_execution_rejected(VM& vm, Value error);
 
@@ -68,10 +69,10 @@ protected:
     Optional<u32> m_dfs_index;                            // [[DFSIndex]]
     Optional<u32> m_dfs_ancestor_index;                   // [[DFSAncestorIndex]]
     Vector<ModuleRequest> m_requested_modules;            // [[RequestedModules]]
-    Vector<ModuleWithSpecifier> m_loaded_modules;         // [[LoadedModules]]
+    Vector<LoadedModuleRequest> m_loaded_modules;         // [[LoadedModules]]
     GC::Ptr<CyclicModule> m_cycle_root;                   // [[CycleRoot]]
     bool m_has_top_level_await { false };                 // [[HasTLA]]
-    bool m_async_evaluation { false };                    // [[AsyncEvaluation]]
+    Optional<u64> m_async_evaluation_order;               // [[AsyncEvaluationOrder]]
     GC::Ptr<PromiseCapability> m_top_level_capability;    // [[TopLevelCapability]]
     Vector<GC::Ptr<CyclicModule>> m_async_parent_modules; // [[AsyncParentModules]]
     Optional<u32> m_pending_async_dependencies;           // [[PendingAsyncDependencies]]

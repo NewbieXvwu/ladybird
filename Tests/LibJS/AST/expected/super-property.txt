@@ -1,0 +1,65 @@
+Program (script) @1:1
+├─ ClassDeclaration @1:1
+│  └─ ClassExpression "Base" @1:1
+│     ├─ constructor
+│     │  └─ FunctionExpression "Base" [strict] [uses-this] [uses-this-from-environment] @1:1
+│     │     └─ body
+│     │        └─ BlockStatement @1:1
+│     └─ elements
+│        └─ ClassMethod @1:1
+│           ├─ StringLiteral "getValue" @2:5
+│           └─ FunctionExpression "" [strict] @2:5
+│              └─ body
+│                 └─ FunctionBody @3:9
+│                    └─ ReturnStatement @3:9
+│                       └─ NumericLiteral 42 @3:16
+├─ ClassDeclaration @7:1
+│  └─ ClassExpression "Derived" @7:1
+│     ├─ super class
+│     │  └─ Identifier "Base" [global] @7:23
+│     ├─ constructor
+│     │  └─ FunctionExpression "Derived" [strict] [uses-this] [uses-this-from-environment] @7:1
+│     │     ├─ parameters
+│     │     │  └─ rest
+│     │     │     └─ Identifier "args" @7:1
+│     │     └─ body
+│     │        └─ BlockStatement @7:1
+│     │           └─ ReturnStatement @7:1
+│     │              └─ SuperCall @7:1
+│     │                 └─ Identifier "args" @7:1
+│     └─ elements
+│        ├─ ClassMethod @7:1
+│        │  ├─ StringLiteral "getValue" @8:5
+│        │  └─ FunctionExpression "" [strict] [uses-this] [uses-this-from-environment] @8:5
+│        │     └─ body
+│        │        └─ FunctionBody @9:9
+│        │           └─ ReturnStatement @9:9
+│        │              └─ CallExpression @9:30
+│        │                 └─ MemberExpression @9:21
+│        │                    ├─ SuperExpression @9:16
+│        │                    └─ Identifier "getValue" @9:22
+│        └─ ClassMethod @7:1
+│           ├─ StringLiteral "getComputed" @11:5
+│           └─ FunctionExpression "" [strict] [uses-this] [uses-this-from-environment] @11:5
+│              ├─ parameters
+│              │  └─ Identifier "key" [argument:0] @11:17
+│              └─ body
+│                 └─ FunctionBody @12:9
+│                    └─ ReturnStatement @12:9
+│                       └─ MemberExpression [computed] @12:21
+│                          ├─ SuperExpression @12:16
+│                          └─ Identifier "key" [argument:0] @12:22
+└─ VariableDeclaration (let) @16:1
+   └─ VariableDeclarator @16:1
+      ├─ Identifier "obj" [global] (let) @16:5
+      └─ ObjectExpression @16:11
+         └─ ObjectProperty (method) @16:11
+            ├─ StringLiteral "foo" @17:5
+            └─ FunctionExpression "" [uses-this] [uses-this-from-environment] @17:5
+               └─ body
+                  └─ FunctionBody @18:9
+                     └─ ReturnStatement @18:9
+                        └─ CallExpression @18:30
+                           └─ MemberExpression @18:21
+                              ├─ SuperExpression @18:16
+                              └─ Identifier "toString" @18:22

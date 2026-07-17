@@ -1,9 +1,7 @@
-#import <HTML/MimeType.idl>
-
 // https://html.spec.whatwg.org/multipage/system-state.html#mimetypearray
 [Exposed=Window, LegacyUnenumerableNamedProperties]
 interface MimeTypeArray {
     readonly attribute unsigned long length;
     getter MimeType? item(unsigned long index);
-    getter MimeType? namedItem(DOMString name);
+    getter MimeType? namedItem([Utf16FlyString] Utf16DOMString name);
 };

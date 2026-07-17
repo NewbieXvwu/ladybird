@@ -1,0 +1,47 @@
+$84f4cb35 using-declaration-non-local-env.js:1:1
+  Registers: 9
+  Blocks:    3
+  Locals:    e~0
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] GetLexicalEnvironment dst:reg4
+  [   8] Jump target:block2
+
+block1:
+  [  10] Catch dst:reg5
+  [  18] SetLexicalEnvironment environment:reg4
+  [  20] Mov3 dst1:e~0, src1:reg5, dst2:reg6, src2:Undefined, dst3:reg7, src3:reg6
+  [  40] End value:reg6
+
+block2:
+  [  48] Mov dst:reg5, src:Undefined
+  [  58] NewFunction dst:reg8, shared_function_data_index:0
+  [  70] Call dst:reg6, callee:reg8, this_value:Undefined
+  [  90] Mov2 dst1:reg5, src1:reg6, dst2:reg6, src2:reg5
+  [  a8] End value:reg6
+
+Exception handlers:
+  [  48 ..   b0] => handler block1
+
+
+$66e73949 using-declaration-non-local-env.js:1:21
+  Registers: 8
+  Blocks:    2
+  Constants:
+    [0] = Undefined
+
+block0:
+  [   0] GetLexicalEnvironment dst:reg4
+  [   8] CreateLexicalEnvironment dst:reg5, parent:reg4, capacity:0, is_catch_environment:false
+  [  20] CreateImmutableBinding environment:reg5, `x`, strict_binding:true
+  [  30] NewTypeError dst:reg6, TODO: UsingDeclaration
+  [  40] SetLexicalEnvironment environment:reg4
+  [  48] Throw src:reg6
+
+block1:
+  [  50] NewFunction dst:reg7, shared_function_data_index:0
+  [  68] Call dst:reg6, callee:reg7, this_value:Undefined
+  [  88] SetLexicalEnvironment environment:reg4
+  [  90] End value:Undefined

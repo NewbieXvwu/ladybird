@@ -9,7 +9,7 @@
 namespace Web::PerformanceTimeline::EventNames {
 
 #define __ENUMERATE_PERFORMANCE_TIMELINE_EVENT(name) \
-    FlyString name = #name##_fly_string;
+    Utf16FlyString const& name = *new Utf16FlyString(#name##_utf16_fly_string);
 ENUMERATE_PERFORMANCE_TIMELINE_EVENTS
 #undef __ENUMERATE_PERFORMANCE_TIMELINE_EVENT
 

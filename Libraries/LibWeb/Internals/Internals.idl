@@ -1,18 +1,20 @@
-#import <DOM/EventTarget.idl>
-#import <HTML/HTMLElement.idl>
-#import <Internals/InternalAnimationTimeline.idl>
-#import <Internals/InternalGamepad.idl>
-
 [Exposed=Nobody]
 interface Internals {
 
-    undefined signalTestIsDone(DOMString text);
+    undefined signalTestIsDone(Utf16DOMString text);
     undefined setTestTimeout(double milliseconds);
+    undefined forceIncompatibleVisualContextTreeRebuild();
+    unsigned long long visualContextTreeNodeCount();
+    undefined sendMismatchedVisualContextTreeUpdateToCompositor();
     undefined loadReferenceTestMetadata();
 
-    DOMString setTimeZone(DOMString timeZone);
+    Utf16DOMString setTimeZone(Utf16DOMString timeZone);
 
     undefined gc();
+    Promise<undefined> gcAsync();
+    // Clears a named environment binding and forces its current cell to be treated as garbage.
+    // This does not work for values stored only in optimized locals or registers.
+    undefined markAsGarbage([Utf16FlyString] Utf16DOMString variableName);
     object hitTest(double x, double y);
 
     const unsigned short MOD_NONE = 0;
@@ -22,45 +24,139 @@ interface Internals {
     const unsigned short MOD_SUPER = 8;
     const unsigned short MOD_KEYPAD = 16;
 
-    undefined sendText(HTMLElement target, DOMString text, optional unsigned short modifiers = 0);
-    undefined sendKey(HTMLElement target, DOMString keyName, optional unsigned short modifiers = 0);
-    undefined paste(HTMLElement target, DOMString text);
+    const unsigned short BUTTON_LEFT = 0;
+    const unsigned short BUTTON_MIDDLE = 1;
+    const unsigned short BUTTON_RIGHT = 2;
+
+    undefined sendText(HTMLElement target, Utf16DOMString text, optional unsigned short modifiers = 0);
+    undefined sendKey(HTMLElement target, Utf16DOMString keyName, optional unsigned short modifiers = 0);
+    undefined paste(HTMLElement target, Utf16DOMString text);
     undefined commitText();
 
-    undefined click(double x, double y);
-    undefined doubleclick(double x, double y);
-    undefined middleClick(double x, double y);
-    undefined mouseDown(double x, double y);
-    undefined movePointerTo(double x, double y);
-    undefined wheel(double x, double y, double deltaX, double deltaY);
+    // Low-level mouse primitives
+    undefined mouseDown(double x, double y, optional unsigned short clickCount = 1, optional unsigned short button = 0, optional unsigned short modifiers = 0);
+    undefined mouseUp(double x, double y, optional unsigned short button = 0, optional unsigned short modifiers = 0);
+    undefined mouseMove(double x, double y, optional unsigned short modifiers = 0);
+    undefined mouseLeave();
+
+    // High-level mouse conveniences
+    undefined click(double x, double y, optional unsigned short clickCount = 1, optional unsigned short button = 0, optional unsigned short modifiers = 0);
+    undefined clickAndHold(double x, double y, optional unsigned short clickCount = 1, optional unsigned short button = 0, optional unsigned short modifiers = 0);
+    Promise<undefined> wheel(double x, double y, double deltaX, double deltaY);
+    undefined pinch(double x, double y, double scaleDelta, optional unsigned short modifiers = 0);
+
+    Utf16DOMString currentCursor();
+
+    // Returns the text that would be placed on the clipboard if the user copied the current selection now.
+    // Excludes nodes whose used value of user-select is 'none' — mirroring what browsers actually copy.
+    Utf16DOMString selectedTextForClipboard();
+
+    // Drive marked/preedit-text composition via the same path platform input methods use. setMarkedTextFromInputMethod
+    // updates the inline preedit — replacing any previous preedit. commitText finalizes the composition with the given
+    // text. unmarkText finalizes the composition — leaving the current preedit in place. Each fires an InputEvent with
+    // inputType = "insertText" on the focused editable. All are no-ops if nothing editable is focused.
+    undefined setMarkedTextFromInputMethod(Utf16DOMString text);
+    undefined commitTextFromInputMethod(Utf16DOMString text, optional long replacementStart = 0, optional long replacementLength = 0);
+    undefined unmarkTextFromInputMethod();
+
+    // Returns the bounds of the current text caret in viewport-relative CSS pixels — or null if no editable element is
+    // focused. Used for verifying the data the platform UI feeds into IME overlay positioning.
+    DOMRect? currentCaretRect();
 
     boolean dispatchUserActivatedEvent(EventTarget target, Event event);
-    undefined spoofCurrentURL(USVString url);
+    undefined spoofCurrentURL(Utf16USVString url);
+
+    // Loads a URL in the top-level traversable — deferred so it starts outside the calling task and can land between
+    // session-history traversal-queue steps, as can one requested by ConnectionFromClient::load_url in the UI process.
+    undefined loadURL(Utf16USVString url);
 
     InternalAnimationTimeline createInternalAnimationTimeline();
 
-    undefined simulateDragStart(double x, double y, DOMString mimeType, DOMString contents);
+    undefined simulateDragStart(double x, double y, Utf16DOMString mimeType, Utf16DOMString contents);
     undefined simulateDragMove(double x, double y);
     undefined simulateDrop(double x, double y);
 
-    undefined enableCookiesOnFileDomains();
     undefined expireCookiesWithTimeOffset(long long seconds);
+    Promise<undefined> deleteAllCookies();
 
-    DOMString getComputedRole(Element element);
-    DOMString getComputedLabel(Element element);
+    boolean setHttpMemoryCacheEnabled(boolean enabled);
+    undefined setContentBlockers(Utf16DOMString patterns);
+    undefined setContentBlockingEnabled(boolean enabled);
+    unsigned long long partialLayoutCount();
+    unsigned long long fullLayoutCount();
+    unsigned long long accumulatedVisualContextTreeBuildCount();
+    undefined setAutoplayPolicy(Utf16DOMString policy);
+
+    Utf16DOMString getComputedRole(Element element);
+    Utf16DOMString getComputedLabel(Element element);
+    Utf16DOMString getComputedAriaLevel(Element element);
     unsigned short getEchoServerPort();
 
+    undefined setHSTSPolicy(Utf16DOMString domain, unsigned long long maxAge, boolean includeSubDomains);
+    undefined ingestHSTSHeader(Utf16USVString url, Utf16DOMString headerValue);
+    boolean isKnownHSTSHost(Utf16DOMString domain);
+
     undefined setBrowserZoom(double factor);
+    undefined setDevicePixelRatio(double ratio);
 
     readonly attribute boolean headless;
+    readonly attribute boolean screenWakeLockActive;
 
-    DOMString dumpDisplayList();
+    readonly attribute boolean needsRepaint;
+    readonly attribute boolean needsDisplayListRecord;
+
+    Utf16DOMString dumpDisplayList();
+    Utf16DOMString dumpAccessibilityTree();
+    Utf16DOMString dumpLayoutTree(Node node);
+    Utf16DOMString dumpPaintableTree(Node node);
+    Utf16DOMString dumpStackingContextTree();
+    Utf16DOMString dumpGCGraph();
+    Utf16DOMString dumpSessionHistory();
+    Utf16DOMString dumpUIProcessSessionHistory();
+    Utf16DOMString dumpSiteIsolationProcessTree();
+    Promise<undefined> flushSessionHistoryTraversalQueue();
+
+    // Test-only: deterministically reproduce the navigation-vs-traversal race in Navigable::begin_navigation by
+    // re-stamping the next navigation's ongoing navigation with a traversal during its unload check.
+    undefined clobberNextNavigationWithATraversal();
 
     // Returns the shadow root of the element, if it has one, even if it's not normally accessible to JS.
     ShadowRoot? getShadowRoot(Element element);
 
     undefined handleSDLInputEvents();
 
+    undefined setEnvironmentsTopLevelURL(Utf16USVString url);
+
     InternalGamepad connectVirtualGamepad();
+
+    undefined setHighlightedNode(Node? node);
+
+    undefined clearElement(HTMLElement element);
+
+    // Returns a snapshot of the style-invalidation and recomputation counters for the current document.
+    // Keys include hasAncestorWalkInvocations, hasInvalidationRuleCacheBuilds,
+    // styleInvalidations, elementStyleRecomputations, and elementStyleNoopRecomputations.
+    object getStyleInvalidationCounters();
+    undefined resetStyleInvalidationCounters();
+    // Flushes pending style work without forcing layout.
+    undefined updateStyle();
+    undefined setPreferredColorScheme(Utf16DOMString colorScheme);
+    // Simulates the window gaining or losing focus (e.g. browser chrome or another window taking focus).
+    undefined setPageFocus(boolean hasFocus);
+    Utf16DOMString canvasColorScheme();
+    // Returns the selector-insight cache state for stylesheet invalidation tests.
+    boolean styleSheetMayHaveHasSelectors(CSSStyleSheet sheet);
+    object imageAnimationStateForURL(Utf16USVString url);
+    boolean mediaElementIsFetching(HTMLMediaElement element);
+    boolean mediaElementIsPlayingAudio(HTMLMediaElement element);
+    undefined setPageMuted(boolean muted);
+
+    object asyncScrollingState();
+    boolean asyncScrollingStateBlocksWheelEventAt(double x, double y);
+    boolean asyncScrollingStateCanWheelScrollAt(double x, double y, double deltaX, double deltaY, optional boolean forceStaleWheelEventRegions = false);
+    Utf16DOMString asyncScrollingStateWheelRoutingAdmission();
+    Utf16DOMString asyncScrollingStateWheelScrollAdmissionAt(double x, double y, double deltaX, double deltaY, optional boolean forceStaleWheelEventRegions = false);
+    Utf16DOMString asyncScrollingStateWheelTargetAt(double x, double y, double deltaX, double deltaY);
+    DOMString viewportOverflowX();
 
 };

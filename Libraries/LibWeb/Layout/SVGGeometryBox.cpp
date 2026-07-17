@@ -12,14 +12,12 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(SVGGeometryBox);
-
-SVGGeometryBox::SVGGeometryBox(DOM::Document& document, SVG::SVGGeometryElement& element, GC::Ref<CSS::ComputedProperties> style)
+SVGGeometryBox::SVGGeometryBox(DOM::Document& document, SVG::SVGGeometryElement& element, NonnullRefPtr<CSS::ComputedValues const> style)
     : SVGGraphicsBox(document, element, style)
 {
 }
 
-GC::Ptr<Painting::Paintable> SVGGeometryBox::create_paintable() const
+RefPtr<Painting::Paintable> SVGGeometryBox::create_paintable() const
 {
     return Painting::SVGPathPaintable::create(*this);
 }

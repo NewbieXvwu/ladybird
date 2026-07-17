@@ -17,10 +17,12 @@
 namespace Web::DOM {
 
 class WEB_API DocumentObserver final : public Bindings::PlatformObject {
-    WEB_PLATFORM_OBJECT(DocumentObserver, Bindings::PlatformObject);
+    WEB_NON_IDL_PLATFORM_OBJECT(DocumentObserver, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(DocumentObserver);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     [[nodiscard]] GC::Ptr<GC::Function<void()>> document_became_active() const { return m_document_became_active; }
     void set_document_became_active(Function<void()>);
 
@@ -41,6 +43,10 @@ public:
 
     GC::Ref<Document> document() { return m_document; }
     void set_document(GC::Ref<Document>);
+
+    // Retargets this observer to the observed element's new document and synthesizes a became-active or
+    // became-inactive callback if the old and new documents differ in fully-active state.
+    void retarget_for_adoption(GC::Ref<Document>);
 
 private:
     explicit DocumentObserver(JS::Realm&, Document&);

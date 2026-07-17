@@ -200,6 +200,17 @@ TEST_CASE(test_unsigned_bigint_base10_from_string)
         EXPECT_EQ(Crypto::UnsignedBigInteger::from_base(10, invalid_base10_number_string).is_error(), true);
 }
 
+TEST_CASE(test_bigint_from_utf16_string)
+{
+    auto unsigned_result = TRY_OR_FAIL(Crypto::UnsignedBigInteger::from_base(16, u"ffffffffffff"sv));
+    EXPECT_EQ(MUST(unsigned_result.to_base(16)), "ffffffffffff");
+
+    auto signed_result = TRY_OR_FAIL(Crypto::SignedBigInteger::from_base(10, u"-123456789"sv));
+    EXPECT_EQ(MUST(signed_result.to_base(10)), "-123456789");
+
+    EXPECT(Crypto::UnsignedBigInteger::from_base(10, u"12\u00a0"sv).is_error());
+}
+
 TEST_CASE(test_unsigned_bigint_base10_to_string)
 {
     auto bigint = Crypto::UnsignedBigInteger {
@@ -207,6 +218,31 @@ TEST_CASE(test_unsigned_bigint_base10_to_string)
     };
     auto result = MUST(bigint.to_base(10));
     EXPECT_EQ(result, "57195071295721390579057195715793");
+}
+
+TEST_CASE(test_unsigned_bigint_count_digits)
+{
+    constexpr auto count_digits = [](u64 number, u16 base) {
+        u8 digits = 0;
+
+        do {
+            number /= base;
+            ++digits;
+        } while (number > 0);
+
+        return digits;
+    };
+
+    for (auto base : to_array<u16>({ 2, 8, 10, 16 })) {
+        for (auto test : to_array<u64>({ 0, 9, 10, 19, 99, 100, 999, 1000, 9999, 10000, 99999, 10000000000, 99999999999 })) {
+            auto bigint = Crypto::UnsignedBigInteger { test };
+
+            auto result = bigint.count_digits_in_base(base);
+            auto expected = count_digits(test, base);
+
+            EXPECT_EQ(result, expected);
+        }
+    }
 }
 
 static size_t count_leading_zeros(Bytes data)

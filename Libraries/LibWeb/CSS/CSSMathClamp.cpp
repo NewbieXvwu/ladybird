@@ -5,10 +5,11 @@
  */
 
 #include "CSSMathClamp.h"
-#include <LibWeb/Bindings/CSSMathClampPrototype.h>
+#include <LibWeb/Bindings/CSSMathClamp.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSMathNegate.h>
 #include <LibWeb/CSS/CSSNumericArray.h>
+#include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
@@ -33,9 +34,9 @@ WebIDL::ExceptionOr<GC::Ref<CSSMathClamp>> CSSMathClamp::construct_impl(JS::Real
     // 2. Let type be the result of adding the types of lower, value, and upper. If type is failure, throw a TypeError.
     auto type = lower_rectified->type()
                     .added_to(value_rectified->type())
-                    .map([&](auto& type) { return type.added_to(upper_rectified->type()); });
+                    .map([&](auto&& type) { return type.added_to(upper_rectified->type()); });
     if (!type.has_value()) {
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot create a CSSMathClamp with values of incompatible types"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot create a CSSMathClamp with values of incompatible types"_utf16 };
     }
 
     // 3. Return a new CSSMathClamp whose lower, value, and upper internal slots are set to lower, value, and upper, respectively.
@@ -67,18 +68,16 @@ void CSSMathClamp::visit_edges(Visitor& visitor)
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#serialize-a-cssmathvalue
-String CSSMathClamp::serialize_math_value(Nested, Parens) const
+void CSSMathClamp::serialize_math_value(Utf16StringBuilder& s, Nested, Parens) const
 {
     // AD-HOC: The spec is missing serialization rules for CSSMathClamp: https://github.com/w3c/css-houdini-drafts/issues/1152
-    StringBuilder s;
-    s.append("clamp("sv);
-    s.append(m_lower->to_string({ .nested = true, .parenless = true }));
-    s.append(", "sv);
-    s.append(m_value->to_string({ .nested = true, .parenless = true }));
-    s.append(", "sv);
-    s.append(m_upper->to_string({ .nested = true, .parenless = true }));
-    s.append(")"sv);
-    return s.to_string_without_validation();
+    s.append_ascii("clamp("sv);
+    m_lower->serialize(s, { .nested = true, .parenless = true });
+    s.append_ascii(", "sv);
+    m_value->serialize(s, { .nested = true, .parenless = true });
+    s.append_ascii(", "sv);
+    m_upper->serialize(s, { .nested = true, .parenless = true });
+    s.append_ascii(')');
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#dom-cssmathclamp-lower
@@ -144,6 +143,14 @@ Optional<SumValue> CSSMathClamp::create_a_sum_value() const
             value->first().unit_map,
         }
     };
+}
+
+WebIDL::ExceptionOr<NonnullRefPtr<CalculationNode const>> CSSMathClamp::create_calculation_node(CalculationContext const& context) const
+{
+    auto lower = TRY(m_lower->create_calculation_node(context));
+    auto value = TRY(m_value->create_calculation_node(context));
+    auto upper = TRY(m_upper->create_calculation_node(context));
+    return ClampCalculationNode::create(move(lower), move(value), move(upper));
 }
 
 }

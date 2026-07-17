@@ -7,9 +7,11 @@
 #pragma once
 
 #include <AK/ByteBuffer.h>
-#include <AK/String.h>
-#include <AK/StringView.h>
+#include <AK/Utf16String.h>
+#include <AK/Variant.h>
 #include <AK/Vector.h>
+#include <LibIPC/Forward.h>
+#include <LibWeb/Forward.h>
 
 namespace Web::HTML {
 
@@ -31,10 +33,32 @@ struct POSTResource {
     RequestContentType request_content_type {};
 
     struct Directive {
-        StringView type;
-        String value;
+        Utf16String type;
+        Utf16String value;
+
+        bool operator==(Directive const&) const = default;
     };
     Vector<Directive> request_content_type_directives {};
+
+    bool operator==(POSTResource const&) const = default;
 };
+
+using DocumentResource = Variant<Empty, Utf16String, POSTResource>;
+
+}
+
+namespace IPC {
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::HTML::POSTResource::Directive const&);
+
+template<>
+WEB_API ErrorOr<Web::HTML::POSTResource::Directive> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::HTML::POSTResource const&);
+
+template<>
+WEB_API ErrorOr<Web::HTML::POSTResource> decode(Decoder&);
 
 }

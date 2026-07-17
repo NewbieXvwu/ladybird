@@ -41,9 +41,10 @@ void set_default_interface_mode(InterfaceMode interface_mode)
 
 static Response deserialize_as_ladybird_capability(StringView name, JsonValue value)
 {
-    if (name == "ladybird:headless"sv) {
+    if (name.is_one_of("ladybird:headless"sv, "ladybird:enableTestHooks"sv)) {
         if (!value.is_bool())
-            return Error::from_code(ErrorCode::InvalidArgument, "Extension capability ladybird:headless must be a boolean"sv);
+            return Error::from_code(ErrorCode::InvalidArgument,
+                MUST(String::formatted("Extension capability {} must be a boolean", name)));
     }
 
     return value;
@@ -52,6 +53,7 @@ static Response deserialize_as_ladybird_capability(StringView name, JsonValue va
 static void set_default_ladybird_capabilities(JsonObject& options)
 {
     options.set("ladybird:headless"sv, default_interface_mode == InterfaceMode::Headless);
+    options.set("ladybird:enableTestHooks"sv, false);
 }
 
 // https://w3c.github.io/webdriver/#dfn-validate-capabilities
@@ -235,9 +237,9 @@ static bool matches_platform_name(StringView requested_platform_name, StringView
 // https://w3c.github.io/webdriver/#dfn-matching-capabilities
 static JsonValue match_capabilities(JsonObject const& capabilities, SessionFlags flags)
 {
-    static auto browser_name = String::from_utf8_without_validation({ BROWSER_NAME, __builtin_strlen(BROWSER_NAME) }).to_ascii_lowercase();
-    static auto browser_version = String::from_utf8_without_validation({ BROWSER_VERSION, __builtin_strlen(BROWSER_VERSION) });
-    static auto platform_name = String::from_utf8_without_validation({ OS_STRING, __builtin_strlen(OS_STRING) }).to_ascii_lowercase();
+    static auto& browser_name = *new String(String::from_utf8_without_validation({ BROWSER_NAME, __builtin_strlen(BROWSER_NAME) }).to_ascii_lowercase());
+    static auto& browser_version = *new String(String::from_utf8_without_validation({ BROWSER_VERSION, __builtin_strlen(BROWSER_VERSION) }));
+    static auto& platform_name = *new String(String::from_utf8_without_validation({ OS_STRING, __builtin_strlen(OS_STRING) }).to_ascii_lowercase());
 
     // 1. Let matched capabilities be a JSON Object with the following entries:
     JsonObject matched_capabilities;
@@ -440,6 +442,8 @@ LadybirdOptions::LadybirdOptions(JsonObject const& capabilities)
 {
     if (auto headless = capabilities.get_bool("ladybird:headless"sv); headless.has_value())
         this->headless = *headless;
+    if (auto enable_test_hooks = capabilities.get_bool("ladybird:enableTestHooks"sv); enable_test_hooks.has_value())
+        this->enable_test_hooks = *enable_test_hooks;
 }
 
 }

@@ -9,6 +9,7 @@
 #include <LibURL/URL.h>
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWeb/UIEvents/KeyCode.h>
+#include <LibWebView/Utilities.h>
 
 #import <Carbon/Carbon.h>
 #import <Interface/Event.h>
@@ -16,7 +17,7 @@
 
 namespace Ladybird {
 
-static Web::UIEvents::KeyModifier ns_modifiers_to_key_modifiers(NSEventModifierFlags modifier_flags, Optional<Web::UIEvents::MouseButton&> button = {})
+Web::UIEvents::KeyModifier ns_modifiers_to_key_modifiers(NSEventModifierFlags modifier_flags)
 {
     unsigned modifiers = Web::UIEvents::KeyModifier::Mod_None;
 
@@ -24,11 +25,7 @@ static Web::UIEvents::KeyModifier ns_modifiers_to_key_modifiers(NSEventModifierF
         modifiers |= Web::UIEvents::KeyModifier::Mod_Shift;
     }
     if ((modifier_flags & NSEventModifierFlagControl) != 0) {
-        if (button == Web::UIEvents::MouseButton::Primary) {
-            *button = Web::UIEvents::MouseButton::Secondary;
-        } else {
-            modifiers |= Web::UIEvents::KeyModifier::Mod_Ctrl;
-        }
+        modifiers |= Web::UIEvents::KeyModifier::Mod_Ctrl;
     }
     if ((modifier_flags & NSEventModifierFlagOption) != 0) {
         modifiers |= Web::UIEvents::KeyModifier::Mod_Alt;
@@ -48,31 +45,28 @@ Web::MouseEvent ns_event_to_mouse_event(Web::MouseEvent::Type type, NSEvent* eve
     auto screen_position = [NSEvent mouseLocation];
     auto device_screen_position = ns_point_to_gfx_point(screen_position).to_type<Web::DevicePixels>();
 
-    auto modifiers = ns_modifiers_to_key_modifiers(event.modifierFlags, button);
+    auto modifiers = ns_modifiers_to_key_modifiers(event.modifierFlags);
 
-    int wheel_delta_x = 0;
-    int wheel_delta_y = 0;
+    double wheel_delta_x = 0;
+    double wheel_delta_y = 0;
 
-    if (type == Web::MouseEvent::Type::MouseDown) {
-        if (event.clickCount % 2 == 0) {
-            type = Web::MouseEvent::Type::DoubleClick;
-        }
-    } else if (type == Web::MouseEvent::Type::MouseWheel) {
-        CGFloat delta_x = -[event scrollingDeltaX];
-        CGFloat delta_y = -[event scrollingDeltaY];
+    if (type == Web::MouseEvent::Type::MouseWheel) {
+        wheel_delta_x = -[event scrollingDeltaX];
+        wheel_delta_y = -[event scrollingDeltaY];
 
         if (![event hasPreciseScrollingDeltas]) {
-            static constexpr CGFloat imprecise_scroll_multiplier = 24;
+            static constexpr double imprecise_scroll_multiplier = 40;
 
-            delta_x *= imprecise_scroll_multiplier;
-            delta_y *= imprecise_scroll_multiplier;
+            wheel_delta_x *= imprecise_scroll_multiplier;
+            wheel_delta_y *= imprecise_scroll_multiplier;
         }
-
-        wheel_delta_x = static_cast<int>(delta_x);
-        wheel_delta_y = static_cast<int>(delta_y);
     }
 
-    return { type, device_position, device_screen_position, button, button, modifiers, wheel_delta_x, wheel_delta_y, nullptr };
+    int click_count = 0;
+    if (type == Web::MouseEvent::Type::MouseDown || type == Web::MouseEvent::Type::MouseUp)
+        click_count = static_cast<int>(event.clickCount);
+
+    return { type, device_position, device_screen_position, button, button, modifiers, wheel_delta_x, wheel_delta_y, click_count, nullptr };
 }
 
 struct DragData : public Web::BrowserInputData {
@@ -93,7 +87,7 @@ Web::DragEvent ns_event_to_drag_event(Web::DragEvent::Type type, id<NSDraggingIn
     auto device_screen_position = ns_point_to_gfx_point(screen_position).to_type<Web::DevicePixels>();
 
     auto button = Web::UIEvents::MouseButton::Primary;
-    auto modifiers = ns_modifiers_to_key_modifiers([NSEvent modifierFlags], button);
+    auto modifiers = ns_modifiers_to_key_modifiers([NSEvent modifierFlags]);
 
     Vector<Web::HTML::SelectedFile> files;
     OwnPtr<DragData> browser_data;
@@ -110,7 +104,7 @@ Web::DragEvent ns_event_to_drag_event(Web::DragEvent::Type type, id<NSDraggingIn
 
     if (type == Web::DragEvent::Type::DragStart) {
         for_each_file([&](ByteString const& file_path) {
-            if (auto file = Web::HTML::SelectedFile::from_file_path(file_path); file.is_error())
+            if (auto file = WebView::create_selected_file(file_path); file.is_error())
                 warnln("Unable to open file {}: {}", file_path, file.error());
             else
                 files.append(file.release_value());
@@ -295,7 +289,7 @@ private:
     CFTypeRef m_event { nullptr };
 };
 
-Web::KeyEvent ns_event_to_key_event(Web::KeyEvent::Type type, NSEvent* event)
+Web::KeyEvent ns_event_to_key_event(Web::KeyEvent::Type type, NSEvent* event, bool should_insert_text)
 {
     auto modifiers = ns_modifiers_to_key_modifiers(event.modifierFlags);
     auto key_code = ns_key_code_to_key_code(event.keyCode, modifiers);
@@ -317,7 +311,7 @@ Web::KeyEvent ns_event_to_key_event(Web::KeyEvent::Type type, NSEvent* event)
     if (code_point >= 0xE000 && code_point <= 0xF8FF)
         code_point = 0;
 
-    return { type, key_code, modifiers, code_point, repeat, make<KeyData>(event) };
+    return { type, key_code, modifiers, code_point, repeat, should_insert_text, make<KeyData>(event) };
 }
 
 NSEvent* key_event_to_ns_event(Web::KeyEvent const& event)

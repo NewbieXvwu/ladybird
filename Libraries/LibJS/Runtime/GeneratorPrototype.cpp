@@ -6,6 +6,7 @@
 
 #include <LibJS/Runtime/GeneratorPrototype.h>
 #include <LibJS/Runtime/GlobalObject.h>
+#include <LibJS/Runtime/Iterator.h>
 
 namespace JS {
 
@@ -26,7 +27,16 @@ void GeneratorPrototype::initialize(Realm& realm)
     define_native_function(realm, vm.names.throw_, throw_, 1, attr);
 
     // 27.5.1.5 Generator.prototype [ @@toStringTag ], https://tc39.es/ecma262/#sec-generator.prototype-@@tostringtag
-    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Generator"_string), Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Generator"_utf16_fly_string), Attribute::Configurable);
+}
+
+static Value generator_resume_result_to_value(VM& vm, GeneratorObject::IterationResult const& iteration_result)
+{
+    if (iteration_result.value_is_iterator_result) {
+        VERIFY(iteration_result.value.is_object());
+        return iteration_result.value;
+    }
+    return create_iterator_result_object(vm, iteration_result.value, iteration_result.done);
 }
 
 // 27.5.1.2 Generator.prototype.next ( value ), https://tc39.es/ecma262/#sec-generator.prototype.next
@@ -35,7 +45,7 @@ JS_DEFINE_NATIVE_FUNCTION(GeneratorPrototype::next)
     // 1. Return ? GeneratorResume(this value, value, empty).
     auto generator_object = TRY(typed_this_object(vm));
     auto iteration_result = TRY(generator_object->resume(vm, vm.argument(0), {}));
-    return create_iterator_result_object(vm, iteration_result.value, iteration_result.done);
+    return generator_resume_result_to_value(vm, iteration_result);
 }
 
 // 27.5.1.3 Generator.prototype.return ( value ), https://tc39.es/ecma262/#sec-generator.prototype.return
@@ -49,7 +59,7 @@ JS_DEFINE_NATIVE_FUNCTION(GeneratorPrototype::return_)
 
     // 3. Return ? GeneratorResumeAbrupt(g, C, empty).
     auto iteration_result = TRY(generator_object->resume_abrupt(vm, completion, {}));
-    return create_iterator_result_object(vm, iteration_result.value, iteration_result.done);
+    return generator_resume_result_to_value(vm, iteration_result);
 }
 
 // 27.5.1.4 Generator.prototype.throw ( exception ), https://tc39.es/ecma262/#sec-generator.prototype.throw
@@ -63,7 +73,7 @@ JS_DEFINE_NATIVE_FUNCTION(GeneratorPrototype::throw_)
 
     // 3. Return ? GeneratorResumeAbrupt(g, C, empty).
     auto iteration_result = TRY(generator_object->resume_abrupt(vm, completion, {}));
-    return create_iterator_result_object(vm, iteration_result.value, iteration_result.done);
+    return generator_resume_result_to_value(vm, iteration_result);
 }
 
 }

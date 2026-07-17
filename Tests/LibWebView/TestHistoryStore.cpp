@@ -1,0 +1,845 @@
+/*
+ * Copyright (c) 2026-present, the Ladybird developers.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include <AK/Random.h>
+#include <AK/ScopeGuard.h>
+#include <LibCore/Directory.h>
+#include <LibCore/StandardPaths.h>
+#include <LibDatabase/Database.h>
+#include <LibFileSystem/FileSystem.h>
+#include <LibTest/TestCase.h>
+#include <LibURL/Parser.h>
+#include <LibWebView/HistoryStore.h>
+
+static URL::URL parse_url(StringView url)
+{
+    auto parsed_url = URL::Parser::basic_parse(url);
+    VERIFY(parsed_url.has_value());
+    return parsed_url.release_value();
+}
+
+static NonnullOwnPtr<WebView::HistoryStore> create_persisted_store(Database::Database& database)
+{
+    VERIFY(MUST(WebView::HistoryStore::migrate_schema(database)) == Database::MigrationOutcome::Success);
+    return MUST(WebView::HistoryStore::create(database));
+}
+
+static void populate_history_for_url_autocomplete_tests(WebView::HistoryStore& store)
+{
+    store.record_visit(parse_url("https://www.google.com/"sv), {}, UnixDateTime::from_seconds_since_epoch(30));
+    store.record_visit(parse_url("https://x.com/"sv), {}, UnixDateTime::from_seconds_since_epoch(20));
+    store.record_visit(parse_url("https://github.com/LadybirdBrowser/ladybird"sv), {}, UnixDateTime::from_seconds_since_epoch(10));
+}
+
+static void expect_history_autocomplete_ignores_url_boilerplate(WebView::HistoryStore& store)
+{
+    populate_history_for_url_autocomplete_tests(store);
+
+    EXPECT(store.autocomplete_entries("https://"sv, 8).is_empty());
+    EXPECT(store.autocomplete_entries("https://www."sv, 8).is_empty());
+    EXPECT(store.autocomplete_entries("www."sv, 8).is_empty());
+
+    auto git_entries = store.autocomplete_entries("git"sv, 8);
+    VERIFY(git_entries.size() == 1);
+    EXPECT_EQ(git_entries[0].url, "https://github.com/LadybirdBrowser/ladybird"_string);
+
+    auto https_goo_entries = store.autocomplete_entries("https://goo"sv, 8);
+    VERIFY(https_goo_entries.size() == 1);
+    EXPECT_EQ(https_goo_entries[0].url, "https://www.google.com/"_string);
+}
+
+static void expect_history_autocomplete_requires_three_characters_for_title_matches(WebView::HistoryStore& store)
+{
+    store.record_visit(parse_url("https://example.com/"sv), "Foo bar baz wip wap wop"_string, UnixDateTime::from_seconds_since_epoch(10));
+
+    EXPECT(store.autocomplete_entries("w"sv, 8).is_empty());
+    EXPECT(store.autocomplete_entries("wi"sv, 8).is_empty());
+
+    auto entries = store.autocomplete_entries("wip"sv, 8);
+    VERIFY(entries.size() == 1);
+    EXPECT_EQ(entries[0].url, "https://example.com/"_string);
+}
+
+static void expect_history_autocomplete_requires_three_characters_for_non_prefix_url_matches(WebView::HistoryStore& store)
+{
+    store.record_visit(parse_url("https://example.com/wip-path"sv), "Example"_string, UnixDateTime::from_seconds_since_epoch(10));
+
+    EXPECT(store.autocomplete_entries("w"sv, 8).is_empty());
+    EXPECT(store.autocomplete_entries("wi"sv, 8).is_empty());
+
+    auto entries = store.autocomplete_entries("wip"sv, 8);
+    VERIFY(entries.size() == 1);
+    EXPECT_EQ(entries[0].url, "https://example.com/wip-path"_string);
+}
+
+static void expect_history_autocomplete_entries_include_metadata(WebView::HistoryStore& store)
+{
+    auto google_url = parse_url("https://www.google.com/"sv);
+    auto github_url = parse_url("https://github.com/LadybirdBrowser/ladybird"sv);
+
+    store.record_visit(google_url, "Google"_string, UnixDateTime::from_seconds_since_epoch(20));
+    store.update_favicon(google_url, "Zm9v"_string);
+    store.record_visit(github_url, "Ladybird repository"_string, UnixDateTime::from_seconds_since_epoch(10));
+
+    auto entries = store.autocomplete_entries("goo"sv, 8);
+    VERIFY(entries.size() == 1);
+    EXPECT_EQ(entries[0].url, "https://www.google.com/"_string);
+    EXPECT_EQ(entries[0].title, Optional<String> { "Google"_string });
+    EXPECT_EQ(entries[0].favicon_base64_png, Optional<String> { "Zm9v"_string });
+    EXPECT_EQ(entries[0].visit_count, 1u);
+    EXPECT_EQ(entries[0].last_visited_time, UnixDateTime::from_seconds_since_epoch(20));
+}
+
+static void expect_history_ranking_signals_track_visit_intent(WebView::HistoryStore& store)
+{
+    auto url = parse_url("https://example.com/"sv);
+    auto first_visit = UnixDateTime::from_seconds_since_epoch(1'000'000);
+    auto reload = UnixDateTime::from_seconds_since_epoch(1'000'000 + 86'400);
+    auto redirect = UnixDateTime::from_seconds_since_epoch(1'000'000 + 2 * 86'400);
+    auto direct_visit = UnixDateTime::from_seconds_since_epoch(1'000'000 + 30 * 86'400);
+    auto restore = UnixDateTime::from_seconds_since_epoch(1'000'000 + 31 * 86'400);
+
+    store.record_visit(url, {}, first_visit, WebView::HistoryVisitTransition::Link);
+    store.record_visit(url, {}, reload, WebView::HistoryVisitTransition::Reload);
+    store.record_visit(url, {}, redirect, WebView::HistoryVisitTransition::Redirect);
+    store.record_visit(url, {}, direct_visit, WebView::HistoryVisitTransition::Omnibox);
+    store.record_visit(url, {}, restore, WebView::HistoryVisitTransition::Restore);
+
+    auto entry = store.entry_for_url(url);
+    VERIFY(entry.has_value());
+    EXPECT_EQ(entry->visit_count, 5u);
+    EXPECT_EQ(entry->direct_visit_count, 1u);
+    EXPECT_EQ(entry->last_visited_time, restore);
+    EXPECT_EQ(entry->last_qualifying_visit_time, direct_visit);
+    EXPECT_EQ(entry->last_direct_visit_time, direct_visit);
+    EXPECT_EQ(entry->score_updated_at, direct_visit);
+    EXPECT_APPROXIMATE(entry->decayed_visit_score, 1.5);
+    EXPECT_APPROXIMATE(entry->decayed_direct_score, 1.0);
+}
+
+static void expect_omnibox_engagements_are_normalized_and_accumulated(WebView::HistoryStore& store)
+{
+    store.record_omnibox_engagement({
+                                        .input = "  HTTPS://WWW.DoCs  "_string,
+                                        .destination_kind = WebView::OmniboxDestinationKind::URL,
+                                        .destination = "https://example.com/manual#first"_string,
+                                        .was_explicit = true,
+                                    },
+        UnixDateTime::from_seconds_since_epoch(10));
+    store.record_omnibox_engagement({
+                                        .input = "docs"_string,
+                                        .destination_kind = WebView::OmniboxDestinationKind::URL,
+                                        .destination = "https://example.com/manual#second"_string,
+                                        .was_explicit = false,
+                                    },
+        UnixDateTime::from_seconds_since_epoch(20));
+    store.record_omnibox_engagement({
+                                        .input = "  Lady   Bird  "_string,
+                                        .destination_kind = WebView::OmniboxDestinationKind::Search,
+                                        .destination = "Ladybird Browser"_string,
+                                        .was_explicit = true,
+                                    },
+        UnixDateTime::from_seconds_since_epoch(30));
+
+    auto url_engagements = store.omnibox_engagements("DO"sv);
+    VERIFY(url_engagements.size() == 1);
+    EXPECT_EQ(url_engagements[0].normalized_input, "docs"sv);
+    EXPECT_EQ(url_engagements[0].destination_kind, WebView::OmniboxDestinationKind::URL);
+    EXPECT_EQ(url_engagements[0].destination, "https://example.com/manual"sv);
+    EXPECT_EQ(url_engagements[0].explicit_use_count, 1u);
+    EXPECT_EQ(url_engagements[0].default_use_count, 1u);
+    EXPECT_EQ(url_engagements[0].last_used_time, UnixDateTime::from_seconds_since_epoch(20));
+
+    auto search_engagements = store.omnibox_engagements("lady"sv);
+    VERIFY(search_engagements.size() == 1);
+    EXPECT_EQ(search_engagements[0].normalized_input, "lady bird"sv);
+    EXPECT_EQ(search_engagements[0].destination_kind, WebView::OmniboxDestinationKind::Search);
+    EXPECT_EQ(search_engagements[0].destination, "ladybird browser"sv);
+    EXPECT(store.omnibox_engagements("unrelated"sv).is_empty());
+}
+
+static void expect_history_page_entries_are_paginated_and_searchable(WebView::HistoryStore& store)
+{
+    store.record_visit(parse_url("https://www.alpha.example.com/path"sv), "Alpha docs"_string, UnixDateTime::from_seconds_since_epoch(10));
+    store.record_visit(parse_url("https://beta.example.com/"sv), "Beta page"_string, UnixDateTime::from_seconds_since_epoch(30));
+    store.record_visit(parse_url("https://gamma.example.com/search"sv), "Gamma search"_string, UnixDateTime::from_seconds_since_epoch(20));
+    store.record_visit(parse_url("https://docs.ladybird.dev/"sv), "Ladybird docs"_string, UnixDateTime::from_seconds_since_epoch(40));
+
+    auto paginated_entries = store.list_entries({}, 1, 2);
+    VERIFY(paginated_entries.size() == 2);
+    EXPECT_EQ(paginated_entries[0].url, "https://beta.example.com/"_string);
+    EXPECT_EQ(paginated_entries[1].url, "https://gamma.example.com/search"_string);
+
+    auto url_search_entries = store.list_entries("https://www.alpha"sv, 0, 10);
+    VERIFY(url_search_entries.size() == 1);
+    EXPECT_EQ(url_search_entries[0].url, "https://www.alpha.example.com/path"_string);
+
+    auto title_search_entries = store.list_entries("docs"sv, 0, 10);
+    VERIFY(title_search_entries.size() == 2);
+    EXPECT_EQ(title_search_entries[0].url, "https://docs.ladybird.dev/"_string);
+    EXPECT_EQ(title_search_entries[1].url, "https://www.alpha.example.com/path"_string);
+}
+
+static void expect_history_entries_can_be_removed(WebView::HistoryStore& store)
+{
+    auto example_url = parse_url("https://example.com/"sv);
+    auto other_url = parse_url("https://other.example.com/"sv);
+
+    store.record_visit(example_url, "Example"_string, UnixDateTime::from_seconds_since_epoch(10));
+    store.record_visit(other_url, "Other"_string, UnixDateTime::from_seconds_since_epoch(20));
+    store.record_omnibox_engagement({
+        .input = "example"_string,
+        .destination_kind = WebView::OmniboxDestinationKind::URL,
+        .destination = example_url.serialize(),
+        .was_explicit = true,
+    });
+    store.record_omnibox_engagement({
+        .input = "other"_string,
+        .destination_kind = WebView::OmniboxDestinationKind::URL,
+        .destination = other_url.serialize(),
+        .was_explicit = true,
+    });
+
+    store.remove_entry_for_url(example_url);
+
+    EXPECT(!store.entry_for_url(example_url).has_value());
+    EXPECT(store.entry_for_url(other_url).has_value());
+    EXPECT(store.omnibox_engagements("example"sv).is_empty());
+    EXPECT_EQ(store.omnibox_engagements("other"sv).size(), 1u);
+}
+
+static void expect_bookmarked_history_deletion_can_preserve_engagements(WebView::HistoryStore& store)
+{
+    auto example_url = parse_url("https://example.com/"sv);
+    store.record_visit(example_url, "Example"_string, UnixDateTime::from_seconds_since_epoch(10));
+    store.record_omnibox_engagement({
+        .input = "example"_string,
+        .destination_kind = WebView::OmniboxDestinationKind::URL,
+        .destination = example_url.serialize(),
+        .was_explicit = true,
+    });
+
+    store.remove_entry_for_url(example_url, WebView::RemoveHistoryEntryEngagements::No);
+
+    EXPECT(!store.entry_for_url(example_url).has_value());
+    EXPECT_EQ(store.omnibox_engagements("example"sv).size(), 1u);
+}
+
+static void expect_clearing_history_clears_all_engagements(WebView::HistoryStore& store)
+{
+    auto example_url = parse_url("https://example.com/"sv);
+    store.record_visit(example_url, "Example"_string, UnixDateTime::from_seconds_since_epoch(10));
+    store.record_omnibox_engagement({
+                                        .input = "example"_string,
+                                        .destination_kind = WebView::OmniboxDestinationKind::URL,
+                                        .destination = example_url.serialize(),
+                                        .was_explicit = true,
+                                    },
+        UnixDateTime::from_seconds_since_epoch(20));
+
+    store.remove_entries_accessed_since(UnixDateTime::earliest());
+
+    EXPECT(!store.entry_for_url(example_url).has_value());
+    EXPECT(store.omnibox_engagements("example"sv).is_empty());
+}
+
+static void expect_history_entries_for_same_site_can_be_removed(WebView::HistoryStore& store)
+{
+    auto example_url = parse_url("https://www.example.com/"sv);
+    auto subdomain_url = parse_url("https://docs.example.com/guide"sv);
+    auto other_url = parse_url("https://ladybird.dev/"sv);
+
+    store.record_visit(example_url, "Example"_string, UnixDateTime::from_seconds_since_epoch(10));
+    store.record_visit(subdomain_url, "Docs"_string, UnixDateTime::from_seconds_since_epoch(20));
+    store.record_visit(other_url, "Ladybird"_string, UnixDateTime::from_seconds_since_epoch(30));
+    store.record_omnibox_engagement({
+        .input = "docs"_string,
+        .destination_kind = WebView::OmniboxDestinationKind::URL,
+        .destination = subdomain_url.serialize(),
+        .was_explicit = true,
+    });
+
+    store.remove_entries_for_same_site(example_url);
+
+    EXPECT(!store.entry_for_url(example_url).has_value());
+    EXPECT(!store.entry_for_url(subdomain_url).has_value());
+    EXPECT(store.entry_for_url(other_url).has_value());
+    EXPECT(store.omnibox_engagements("docs"sv).is_empty());
+}
+
+TEST_CASE(record_and_lookup_history_entries)
+{
+    auto store = WebView::HistoryStore::create();
+
+    auto visited_at = UnixDateTime::from_seconds_since_epoch(1234);
+    store->record_visit(parse_url("https://example.com/path#fragment"sv), "Example page"_string, visited_at);
+    store->record_visit(parse_url("https://example.com/path"sv), {}, visited_at);
+
+    auto entry = store->entry_for_url(parse_url("https://example.com/path"sv));
+    VERIFY(entry.has_value());
+
+    EXPECT_EQ(entry->url, "https://example.com/path"_string);
+    EXPECT_EQ(entry->title, Optional<String> { "Example page"_string });
+    EXPECT_EQ(entry->visit_count, 2u);
+    EXPECT_EQ(entry->last_visited_time, visited_at);
+}
+
+TEST_CASE(history_autocomplete_prefers_url_prefix_then_recency)
+{
+    auto store = WebView::HistoryStore::create();
+
+    store->record_visit(parse_url("https://beta.example.com/"sv), "Alpha reference"_string, UnixDateTime::from_seconds_since_epoch(10));
+    store->record_visit(parse_url("https://alpha.example.com/"sv), "Something else"_string, UnixDateTime::from_seconds_since_epoch(20));
+    store->record_visit(parse_url("https://docs.example.com/"sv), "Alpha docs"_string, UnixDateTime::from_seconds_since_epoch(30));
+
+    auto entries = store->autocomplete_entries("alpha"sv, 8);
+
+    VERIFY(entries.size() == 3);
+    EXPECT_EQ(entries[0].url, "https://alpha.example.com/"_string);
+    EXPECT_EQ(entries[1].url, "https://docs.example.com/"_string);
+    EXPECT_EQ(entries[2].url, "https://beta.example.com/"_string);
+}
+
+TEST_CASE(history_autocomplete_trims_whitespace)
+{
+    auto store = WebView::HistoryStore::create();
+
+    store->record_visit(parse_url("https://ladybird.dev/"sv), "Ladybird"_string, UnixDateTime::from_seconds_since_epoch(10));
+
+    auto entries = store->autocomplete_entries("  ladybird  "sv, 8);
+
+    VERIFY(entries.size() == 1);
+    EXPECT_EQ(entries[0].url, "https://ladybird.dev/"_string);
+}
+
+TEST_CASE(history_autocomplete_ignores_www_prefix_for_host_matches)
+{
+    auto store = WebView::HistoryStore::create();
+
+    store->record_visit(parse_url("https://www.google.com/"sv), "Google"_string, UnixDateTime::from_seconds_since_epoch(20));
+    store->record_visit(parse_url("https://www.goodreads.com/"sv), "Goodreads"_string, UnixDateTime::from_seconds_since_epoch(10));
+
+    auto entries = store->autocomplete_entries("goo"sv, 8);
+
+    VERIFY(entries.size() == 2);
+    EXPECT_EQ(entries[0].url, "https://www.google.com/"_string);
+    EXPECT_EQ(entries[1].url, "https://www.goodreads.com/"_string);
+}
+
+TEST_CASE(history_autocomplete_ignores_scheme_and_www_boilerplate_prefixes)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_history_autocomplete_ignores_url_boilerplate(*store);
+}
+
+TEST_CASE(history_autocomplete_requires_three_characters_for_title_matches)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_history_autocomplete_requires_three_characters_for_title_matches(*store);
+}
+
+TEST_CASE(history_autocomplete_requires_three_characters_for_non_prefix_url_matches)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_history_autocomplete_requires_three_characters_for_non_prefix_url_matches(*store);
+}
+
+TEST_CASE(history_favicon_updates_entry)
+{
+    auto store = WebView::HistoryStore::create();
+    auto url = parse_url("https://ladybird.dev/"sv);
+
+    store->record_visit(url, "Ladybird"_string, UnixDateTime::from_seconds_since_epoch(10));
+    store->update_favicon(url, "Zm9v"_string);
+
+    auto entry = store->entry_for_url(url);
+    VERIFY(entry.has_value());
+    EXPECT_EQ(entry->favicon_base64_png, Optional<String> { "Zm9v"_string });
+}
+
+TEST_CASE(recently_closed_entries_are_reopened_in_lifo_order)
+{
+    auto store = WebView::HistoryStore::create();
+    auto first_url = parse_url("https://first.example.com/"sv);
+    auto second_url = parse_url("https://second.example.com/"sv);
+    auto third_url = parse_url("https://third.example.com/"sv);
+
+    EXPECT(!store->has_recently_closed_entries());
+
+    store->record_closed_tab(first_url, UnixDateTime::from_seconds_since_epoch(10));
+    store->record_closed_window({ second_url, third_url }, 1, UnixDateTime::from_seconds_since_epoch(20));
+
+    EXPECT(store->has_recently_closed_entries());
+
+    auto recently_closed_entry = store->pop_most_recently_closed_entry();
+    VERIFY(recently_closed_entry.has_value());
+    EXPECT(recently_closed_entry->was_window);
+    EXPECT_EQ(recently_closed_entry->active_tab_index, 1u);
+    EXPECT_EQ(recently_closed_entry->urls.size(), 2u);
+    EXPECT_EQ(recently_closed_entry->urls[0], second_url);
+    EXPECT_EQ(recently_closed_entry->urls[1], third_url);
+    EXPECT(store->has_recently_closed_entries());
+
+    recently_closed_entry = store->pop_most_recently_closed_entry();
+    VERIFY(recently_closed_entry.has_value());
+    EXPECT(!recently_closed_entry->was_window);
+    EXPECT_EQ(recently_closed_entry->active_tab_index, 0u);
+    EXPECT_EQ(recently_closed_entry->urls.size(), 1u);
+    EXPECT_EQ(recently_closed_entry->urls[0], first_url);
+    EXPECT(!store->has_recently_closed_entries());
+
+    EXPECT(!store->pop_most_recently_closed_entry().has_value());
+}
+
+TEST_CASE(recently_closed_entries_accessed_since_can_be_removed)
+{
+    auto store = WebView::HistoryStore::create();
+    auto older_url = parse_url("https://older.example.com/"sv);
+    auto newer_url = parse_url("https://newer.example.com/"sv);
+    auto newest_url = parse_url("https://newest.example.com/"sv);
+
+    store->record_closed_tab(older_url, UnixDateTime::from_seconds_since_epoch(10));
+    store->record_closed_window({ newer_url, newest_url }, 0, UnixDateTime::from_seconds_since_epoch(20));
+
+    store->remove_entries_accessed_since(UnixDateTime::from_seconds_since_epoch(15));
+
+    EXPECT(store->has_recently_closed_entries());
+
+    auto recently_closed_entry = store->pop_most_recently_closed_entry();
+    VERIFY(recently_closed_entry.has_value());
+    EXPECT_EQ(recently_closed_entry->urls.size(), 1u);
+    EXPECT_EQ(recently_closed_entry->urls[0], older_url);
+    EXPECT(!store->has_recently_closed_entries());
+}
+
+TEST_CASE(recently_closed_entries_can_be_peeked_without_popping)
+{
+    auto store = WebView::HistoryStore::create();
+    auto first_url = parse_url("https://peek.example.com/"sv);
+    auto second_url = parse_url("https://peek-two.example.com/"sv);
+
+    store->record_closed_window({ first_url, second_url }, 0, UnixDateTime::from_seconds_since_epoch(10));
+
+    auto recently_closed_entry = store->most_recently_closed_entry();
+    VERIFY(recently_closed_entry.has_value());
+    EXPECT(recently_closed_entry->was_window);
+    EXPECT_EQ(recently_closed_entry->urls.size(), 2u);
+    EXPECT_EQ(recently_closed_entry->urls[0], first_url);
+    EXPECT_EQ(recently_closed_entry->urls[1], second_url);
+    EXPECT(store->has_recently_closed_entries());
+}
+
+TEST_CASE(recently_closed_entries_are_cleared_with_history)
+{
+    auto store = WebView::HistoryStore::create();
+    auto first_url = parse_url("https://clear.example.com/"sv);
+    auto second_url = parse_url("https://clear-two.example.com/"sv);
+
+    store->record_closed_tab(first_url, UnixDateTime::from_seconds_since_epoch(10));
+    store->record_closed_window({ second_url }, 0, UnixDateTime::from_seconds_since_epoch(20));
+
+    store->remove_entries_accessed_since(UnixDateTime::earliest());
+
+    EXPECT(!store->has_recently_closed_entries());
+    EXPECT(!store->most_recently_closed_entry().has_value());
+    EXPECT(!store->pop_most_recently_closed_entry().has_value());
+}
+
+TEST_CASE(history_autocomplete_entries_include_metadata)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_history_autocomplete_entries_include_metadata(*store);
+}
+
+TEST_CASE(history_ranking_signals_track_visit_intent)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_history_ranking_signals_track_visit_intent(*store);
+}
+
+TEST_CASE(omnibox_engagements_are_normalized_and_accumulated)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_omnibox_engagements_are_normalized_and_accumulated(*store);
+}
+
+TEST_CASE(history_page_entries_are_paginated_and_searchable)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_history_page_entries_are_paginated_and_searchable(*store);
+}
+
+TEST_CASE(non_browsable_urls_are_not_recorded)
+{
+    auto store = WebView::HistoryStore::create();
+
+    store->record_visit(parse_url("about:blank"sv));
+    store->record_visit(parse_url("data:text/plain,hello"sv));
+
+    EXPECT(!store->entry_for_url(parse_url("about:blank"sv)).has_value());
+    EXPECT(!store->entry_for_url(parse_url("data:text/plain,hello"sv)).has_value());
+}
+
+TEST_CASE(disabled_history_store_ignores_updates)
+{
+    auto store = WebView::HistoryStore::create_disabled();
+    auto url = parse_url("https://example.com/"sv);
+
+    auto check_is_empty = [&] {
+        EXPECT(!store->entry_for_url(url).has_value());
+        EXPECT(store->autocomplete_entries("example"sv, 8).is_empty());
+    };
+
+    store->record_visit(url, "Example"_string, UnixDateTime::from_seconds_since_epoch(10));
+    check_is_empty();
+
+    store->update_title(url, "Example title"_string);
+    check_is_empty();
+
+    store->remove_entries_accessed_since(UnixDateTime::from_seconds_since_epoch(0));
+    check_is_empty();
+}
+
+TEST_CASE(history_entries_accessed_since_can_be_removed)
+{
+    auto store = WebView::HistoryStore::create();
+
+    auto older_url = parse_url("https://older.example.com/"sv);
+    auto newer_url = parse_url("https://newer.example.com/"sv);
+
+    store->record_visit(older_url, "Older"_string, UnixDateTime::from_seconds_since_epoch(10));
+    store->record_visit(newer_url, "Newer"_string, UnixDateTime::from_seconds_since_epoch(20));
+
+    store->remove_entries_accessed_since(UnixDateTime::from_seconds_since_epoch(15));
+
+    EXPECT(store->entry_for_url(older_url).has_value());
+    EXPECT(!store->entry_for_url(newer_url).has_value());
+}
+
+TEST_CASE(history_entries_can_be_removed)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_history_entries_can_be_removed(*store);
+}
+
+TEST_CASE(bookmarked_history_deletion_can_preserve_engagements)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_bookmarked_history_deletion_can_preserve_engagements(*store);
+}
+
+TEST_CASE(clearing_history_clears_all_engagements)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_clearing_history_clears_all_engagements(*store);
+}
+
+TEST_CASE(history_entries_for_same_site_can_be_removed)
+{
+    auto store = WebView::HistoryStore::create();
+    expect_history_entries_for_same_site_can_be_removed(*store);
+}
+
+TEST_CASE(persisted_history_survives_reopen)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    {
+        auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+        auto store = create_persisted_store(*database);
+        store->record_visit(parse_url("https://persist.example.com/"sv), "Persisted title"_string, UnixDateTime::from_seconds_since_epoch(77));
+        store->update_favicon(parse_url("https://persist.example.com/"sv), "Zm9v"_string);
+    }
+
+    {
+        auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+        auto store = create_persisted_store(*database);
+
+        auto entry = store->entry_for_url(parse_url("https://persist.example.com/"sv));
+        VERIFY(entry.has_value());
+
+        EXPECT_EQ(entry->title, Optional<String> { "Persisted title"_string });
+        EXPECT_EQ(entry->visit_count, 1u);
+        EXPECT_EQ(entry->last_visited_time, UnixDateTime::from_seconds_since_epoch(77));
+        EXPECT_EQ(entry->favicon_base64_png, Optional<String> { "Zm9v"_string });
+    }
+}
+
+TEST_CASE(persisted_history_entries_accessed_since_can_be_removed)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-remove-since-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto older_url = parse_url("https://older.example.com/"sv);
+    auto newer_url = parse_url("https://newer.example.com/"sv);
+
+    {
+        auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+        auto store = create_persisted_store(*database);
+        store->record_visit(older_url, "Older"_string, UnixDateTime::from_seconds_since_epoch(10));
+        store->record_visit(newer_url, "Newer"_string, UnixDateTime::from_seconds_since_epoch(20));
+        store->remove_entries_accessed_since(UnixDateTime::from_seconds_since_epoch(15));
+    }
+
+    {
+        auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+        auto store = create_persisted_store(*database);
+
+        EXPECT(store->entry_for_url(older_url).has_value());
+        EXPECT(!store->entry_for_url(newer_url).has_value());
+    }
+}
+
+TEST_CASE(persisted_history_autocomplete_ignores_scheme_and_www_boilerplate_prefixes)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-autocomplete-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+
+    expect_history_autocomplete_ignores_url_boilerplate(*store);
+}
+
+TEST_CASE(persisted_history_autocomplete_requires_three_characters_for_title_matches)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-title-autocomplete-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+
+    expect_history_autocomplete_requires_three_characters_for_title_matches(*store);
+}
+
+TEST_CASE(persisted_history_autocomplete_requires_three_characters_for_non_prefix_url_matches)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-url-autocomplete-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+
+    expect_history_autocomplete_requires_three_characters_for_non_prefix_url_matches(*store);
+}
+
+TEST_CASE(persisted_history_autocomplete_entries_include_metadata)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-entry-autocomplete-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+
+    expect_history_autocomplete_entries_include_metadata(*store);
+}
+
+TEST_CASE(persisted_history_ranking_signals_track_visit_intent)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-ranking-signals-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+
+    expect_history_ranking_signals_track_visit_intent(*store);
+}
+
+TEST_CASE(persisted_omnibox_engagements_are_normalized_and_accumulated)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-engagement-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+
+    expect_omnibox_engagements_are_normalized_and_accumulated(*store);
+}
+
+TEST_CASE(persisted_history_page_entries_are_paginated_and_searchable)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-page-list-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+
+    expect_history_page_entries_are_paginated_and_searchable(*store);
+}
+
+TEST_CASE(persisted_history_entries_can_be_removed)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-remove-entry-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+
+    expect_history_entries_can_be_removed(*store);
+}
+
+TEST_CASE(persisted_bookmarked_history_deletion_can_preserve_engagements)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-bookmark-engagement-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+    expect_bookmarked_history_deletion_can_preserve_engagements(*store);
+}
+
+TEST_CASE(persisted_clearing_history_clears_all_engagements)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-clear-engagement-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+    expect_clearing_history_clears_all_engagements(*store);
+}
+
+TEST_CASE(persisted_history_entries_for_same_site_can_be_removed)
+{
+    auto database_directory = ByteString::formatted(
+        "{}/ladybird-history-store-remove-site-test-{}",
+        Core::StandardPaths::tempfile_directory(),
+        generate_random_uuid());
+    TRY_OR_FAIL(Core::Directory::create(database_directory, Core::Directory::CreateDirectories::Yes));
+
+    auto cleanup = ScopeGuard([&] {
+        MUST(FileSystem::remove(database_directory, FileSystem::RecursionMode::Allowed));
+    });
+
+    auto database = TRY_OR_FAIL(Database::Database::create(database_directory, "HistoryStore"sv));
+    auto store = create_persisted_store(*database);
+
+    expect_history_entries_for_same_site_can_be_removed(*store);
+}
+
+TEST_CASE(newer_history_schema_reports_database_too_new)
+{
+    auto database = TRY_OR_FAIL(Database::Database::create_memory_backed());
+
+    TRY_OR_FAIL(database->execute_raw("CREATE TABLE SchemaVersions (store TEXT PRIMARY KEY, version INTEGER NOT NULL);"sv));
+    TRY_OR_FAIL(database->execute_raw("INSERT INTO SchemaVersions (store, version) VALUES ('History', 99);"sv));
+
+    EXPECT_EQ(TRY_OR_FAIL(WebView::HistoryStore::migrate_schema(*database)), Database::MigrationOutcome::DatabaseTooNew);
+    EXPECT_EQ(TRY_OR_FAIL(WebView::HistoryStore::migrate_schema(*database, Database::MigrationMode::CheckOnly)), Database::MigrationOutcome::DatabaseTooNew);
+}
+
+TEST_CASE(history_ranking_signal_migration_preserves_existing_entries)
+{
+    auto database = TRY_OR_FAIL(Database::Database::create_memory_backed());
+    TRY_OR_FAIL(database->execute_raw(R"#(
+        CREATE TABLE SchemaVersions (store TEXT PRIMARY KEY, version INTEGER NOT NULL);
+        INSERT INTO SchemaVersions (store, version) VALUES ('History', 1);
+        CREATE TABLE History (
+            url TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            favicon TEXT,
+            visit_count INTEGER NOT NULL,
+            last_visited_time INTEGER NOT NULL
+        );
+        INSERT INTO History (url, title, visit_count, last_visited_time)
+        VALUES ('https://example.com/', 'Example', 12, 123000);
+    )#"sv));
+
+    EXPECT_EQ(TRY_OR_FAIL(WebView::HistoryStore::migrate_schema(*database)), Database::MigrationOutcome::Success);
+    auto store = TRY_OR_FAIL(WebView::HistoryStore::create(*database));
+    auto entry = store->entry_for_url(parse_url("https://example.com/"sv));
+
+    VERIFY(entry.has_value());
+    EXPECT_EQ(entry->visit_count, 12u);
+    EXPECT_EQ(entry->direct_visit_count, 0u);
+    EXPECT_EQ(entry->last_qualifying_visit_time, UnixDateTime::from_seconds_since_epoch(123));
+    EXPECT_EQ(entry->score_updated_at, UnixDateTime::from_seconds_since_epoch(123));
+    EXPECT_APPROXIMATE(entry->decayed_visit_score, 8.0);
+}

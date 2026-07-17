@@ -7,11 +7,12 @@
  */
 
 #include <LibJS/Runtime/TypedArray.h>
-#include <LibWeb/Bindings/DOMMatrixReadOnlyPrototype.h>
+#include <LibWeb/Bindings/DOMMatrixReadOnly.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShorthandStyleValue.h>
+#include <LibWeb/CSS/StyleValues/TransformationStyleValue.h>
 #include <LibWeb/Geometry/DOMMatrix.h>
 #include <LibWeb/Geometry/DOMMatrixReadOnly.h>
 #include <LibWeb/Geometry/DOMPoint.h>
@@ -25,10 +26,8 @@ namespace Web::Geometry {
 GC_DEFINE_ALLOCATOR(DOMMatrixReadOnly);
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-dommatrixreadonly
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::construct_impl(JS::Realm& realm, Optional<Variant<String, Vector<double>>> const& init)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::construct_impl(JS::Realm& realm, Optional<Variant<Utf16String, Vector<double>>> const& init)
 {
-    auto& vm = realm.vm();
-
     // -> If init is omitted
     if (!init.has_value()) {
         // Return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with the sequence [1, 0, 0, 1, 0, 0].
@@ -38,13 +37,13 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::construct_imp
     auto const& init_value = init.value();
 
     // -> If init is a DOMString
-    if (init_value.has<String>()) {
+    if (init_value.has<Utf16String>()) {
         // 1. If current global object is not a Window object, then throw a TypeError exception.
         if (!is<HTML::Window>(realm.global_object()))
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "This can only be used in a Window context"_string };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "This can only be used in a Window context"_utf16 };
 
         // 2. Parse init into an abstract matrix, and let matrix and 2dTransform be the result. If the result is failure, then throw a "SyntaxError" DOMException.
-        auto result = TRY(parse_dom_matrix_init_string(realm, init_value.get<String>()));
+        auto result = TRY(parse_dom_matrix_init_string(realm, init_value.get<Utf16String>()));
         auto& m = result.matrix;
 
         // If 2dTransform is true
@@ -80,11 +79,11 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::construct_imp
     }
 
     // -> Otherwise, throw a TypeError exception.
-    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, TRY_OR_THROW_OOM(vm, String::formatted("Sequence must contain exactly 6 or 16 elements, got {} element(s)", double_sequence.size())) };
+    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Sequence must contain exactly 6 or 16 elements, got {} element(s)", double_sequence.size()) };
 }
 
 // https://drafts.fxtf.org/geometry/#create-a-dommatrixreadonly-from-the-2d-dictionary
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_dom_matrix_2d_init(JS::Realm& realm, DOMMatrix2DInit& init)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_dom_matrix_2d_init(JS::Realm& realm, Bindings::DOMMatrix2DInit& init)
 {
     // 1. Validate and fixup (2D) other.
     TRY(validate_and_fixup_dom_matrix_2d_init(init));
@@ -103,7 +102,7 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_d
 }
 
 // https://drafts.fxtf.org/geometry/#create-a-dommatrixreadonly-from-the-dictionary
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_dom_matrix_init(JS::Realm& realm, DOMMatrixInit& init)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_dom_matrix_init(JS::Realm& realm, Bindings::DOMMatrixInit& init)
 {
     // 1. Validate and fixup other.
     TRY(validate_and_fixup_dom_matrix_init(init));
@@ -223,59 +222,65 @@ void DOMMatrixReadOnly::initialize_from_create_3d_matrix(double m11, double m12,
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-frommatrix
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_matrix(JS::VM& vm, DOMMatrixInit& other)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_matrix(JS::VM& vm, Bindings::DOMMatrixInit& other)
 {
     return create_from_dom_matrix_init(*vm.current_realm(), other);
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-fromfloat32array
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_float32_array(JS::VM& vm, GC::Root<WebIDL::BufferSource> const& array32)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_float32_array(JS::VM& vm, GC::Ref<JS::Float32Array> array)
 {
-    if (!is<JS::Float32Array>(*array32))
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "Float32Array");
-
     auto& realm = *vm.current_realm();
-    auto& float32_array = static_cast<JS::Float32Array&>(*array32->raw_object());
-    ReadonlySpan<float> elements = float32_array.data();
+    auto record = JS::make_typed_array_with_buffer_witness_record(*array, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(record))
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float32Array argument with 6 or 16 elements"_utf16 };
 
-    // If array32 has 6 elements, return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array32 in the provided order.
-    if (elements.size() == 6)
-        return realm.create<DOMMatrixReadOnly>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3), elements.at(4), elements.at(5));
+    auto element_count = JS::typed_array_length(record);
+    if (element_count != 6 && element_count != 16)
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float32Array argument with 6 or 16 elements"_utf16 };
 
-    // If array32 has 16 elements, return the result of invoking create a 3d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array32 in the provided order.
-    if (elements.size() == 16)
+    return array->viewed_array_buffer()->with_readonly_bytes(array->byte_offset(), element_count * sizeof(float), [&](ReadonlyBytes bytes) -> WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> {
+        auto elements = bytes.reinterpret<float const>();
+
+        // If array32 has 6 elements, return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array32 in the provided order.
+        if (element_count == 6)
+            return realm.create<DOMMatrixReadOnly>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3), elements.at(4), elements.at(5));
+
+        // If array32 has 16 elements, return the result of invoking create a 3d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array32 in the provided order.
+        VERIFY(element_count == 16);
         return realm.create<DOMMatrixReadOnly>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3),
             elements.at(4), elements.at(5), elements.at(6), elements.at(7),
             elements.at(8), elements.at(9), elements.at(10), elements.at(11),
             elements.at(12), elements.at(13), elements.at(14), elements.at(15));
-
-    // Otherwise, throw a TypeError exception.
-    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float32Array argument with 6 or 16 elements"_string };
+    });
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-fromfloat64array
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_float64_array(JS::VM& vm, GC::Root<WebIDL::BufferSource> const& array64)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_float64_array(JS::VM& vm, GC::Ref<JS::Float64Array> array)
 {
-    if (!is<JS::Float64Array>(*array64))
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "Float64Array");
-
     auto& realm = *vm.current_realm();
-    auto& float64_array = static_cast<JS::Float64Array&>(*array64->raw_object());
-    ReadonlySpan<double> elements = float64_array.data();
+    auto record = JS::make_typed_array_with_buffer_witness_record(*array, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(record))
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float64Array argument with 6 or 16 elements"_utf16 };
 
-    // If array64 has 6 elements, return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array64 in the provided order.
-    if (elements.size() == 6)
-        return realm.create<DOMMatrixReadOnly>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3), elements.at(4), elements.at(5));
+    auto element_count = JS::typed_array_length(record);
+    if (element_count != 6 && element_count != 16)
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float64Array argument with 6 or 16 elements"_utf16 };
 
-    // If array64 has 16 elements, return the result of invoking create a 3d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array64 in the provided order.
-    if (elements.size() == 16)
+    return array->viewed_array_buffer()->with_readonly_bytes(array->byte_offset(), element_count * sizeof(double), [&](ReadonlyBytes bytes) -> WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> {
+        auto elements = bytes.reinterpret<double const>();
+
+        // If array64 has 6 elements, return the result of invoking create a 2d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array64 in the provided order.
+        if (element_count == 6)
+            return realm.create<DOMMatrixReadOnly>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3), elements.at(4), elements.at(5));
+
+        // If array64 has 16 elements, return the result of invoking create a 3d matrix of type DOMMatrixReadOnly or DOMMatrix as appropriate, with a sequence of numbers taking the values from array64 in the provided order.
+        VERIFY(element_count == 16);
         return realm.create<DOMMatrixReadOnly>(realm, elements.at(0), elements.at(1), elements.at(2), elements.at(3),
             elements.at(4), elements.at(5), elements.at(6), elements.at(7),
             elements.at(8), elements.at(9), elements.at(10), elements.at(11),
             elements.at(12), elements.at(13), elements.at(14), elements.at(15));
-
-    // Otherwise, throw a TypeError exception.
-    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Expected a Float64Array argument with 6 or 16 elements"_string };
+    });
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-isidentity
@@ -432,7 +437,7 @@ GC::Ref<DOMMatrix> DOMMatrixReadOnly::skew_y(double sy) const
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-multiply
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrixReadOnly::multiply(DOMMatrixInit other)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrixReadOnly::multiply(Bindings::DOMMatrixInit other)
 {
     // 1. Let result be the resulting matrix initialized to the values of the current matrix.
     auto result = DOMMatrix::create_from_dom_matrix_read_only(realm(), *this);
@@ -493,7 +498,7 @@ GC::Ref<DOMMatrix> DOMMatrixReadOnly::inverse() const
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-transformpoint
-GC::Ref<DOMPoint> DOMMatrixReadOnly::transform_point(DOMPointInit const& point) const
+GC::Ref<DOMPoint> DOMMatrixReadOnly::transform_point(Bindings::DOMPointInit const& point) const
 {
     // Let pointObject be the result of invoking create a DOMPoint from the dictionary point.
     auto point_object = DOMPoint::from_point(realm().vm(), point);
@@ -552,7 +557,7 @@ GC::Ref<JS::Float64Array> DOMMatrixReadOnly::to_float64_array() const
 }
 
 // https://drafts.fxtf.org/geometry/#dommatrixreadonly-stringification-behavior
-WebIDL::ExceptionOr<String> DOMMatrixReadOnly::to_string() const
+WebIDL::ExceptionOr<Utf16String> DOMMatrixReadOnly::to_string() const
 {
     auto& vm = this->vm();
 
@@ -574,37 +579,37 @@ WebIDL::ExceptionOr<String> DOMMatrixReadOnly::to_string() const
         TRY_OR_THROW_OOM(vm, builder.try_append("matrix("sv));
 
         // 2. Append ! ToString(m11 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::Value(m11()).to_string_without_side_effects()));
+        JS::number_to_string(builder, m11());
 
         // 3. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 4. Append ! ToString(m12 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::Value(m12()).to_string_without_side_effects()));
+        JS::number_to_string(builder, m12());
 
         // 5. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 6. Append ! ToString(m21 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::Value(m21()).to_string_without_side_effects()));
+        JS::number_to_string(builder, m21());
 
         // 7. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 8. Append ! ToString(m22 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::Value(m22()).to_string_without_side_effects()));
+        JS::number_to_string(builder, m22());
 
         // 9. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 10. Append ! ToString(m41 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::Value(m41()).to_string_without_side_effects()));
+        JS::number_to_string(builder, m41());
 
         // 11. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 12. Append ! ToString(m42 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::Value(m42()).to_string_without_side_effects()));
+        JS::number_to_string(builder, m42());
 
         // 13. Append ")" to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(")"sv));
@@ -613,94 +618,94 @@ WebIDL::ExceptionOr<String> DOMMatrixReadOnly::to_string() const
         TRY_OR_THROW_OOM(vm, builder.try_append("matrix3d("sv));
 
         // 2. Append ! ToString(m11 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m11())));
+        JS::number_to_string(builder, m11());
 
         // 3. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 4. Append ! ToString(m12 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m12())));
+        JS::number_to_string(builder, m12());
 
         // 5. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 6. Append ! ToString(m13 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m13())));
+        JS::number_to_string(builder, m13());
 
         // 7. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 8. Append ! ToString(m14 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m14())));
+        JS::number_to_string(builder, m14());
 
         // 9. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 10. Append ! ToString(m21 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m21())));
+        JS::number_to_string(builder, m21());
 
         // 11. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 12. Append ! ToString(m22 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m22())));
+        JS::number_to_string(builder, m22());
 
         // 13. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 14. Append ! ToString(m23 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m23())));
+        JS::number_to_string(builder, m23());
 
         // 15. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 16. Append ! ToString(m24 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m24())));
+        JS::number_to_string(builder, m24());
 
         // 17. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // NOTE: The spec doesn't include the steps to append m31 to m34, but they are required as matrix3d requires 16 elements.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m31())));
+        JS::number_to_string(builder, m31());
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m32())));
+        JS::number_to_string(builder, m32());
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m33())));
+        JS::number_to_string(builder, m33());
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m34())));
+        JS::number_to_string(builder, m34());
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 18. Append ! ToString(m41 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m41())));
+        JS::number_to_string(builder, m41());
 
         // 19. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 20. Append ! ToString(m42 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m42())));
+        JS::number_to_string(builder, m42());
 
         // 21. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 22. Append ! ToString(m43 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m43())));
+        JS::number_to_string(builder, m43());
 
         // 23. Append ", " to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(", "sv));
 
         // 24. Append ! ToString(m44 element) to string.
-        TRY_OR_THROW_OOM(vm, builder.try_append(JS::number_to_string(m44())));
+        JS::number_to_string(builder, m44());
 
         // 25. Append ")" to string.
         TRY_OR_THROW_OOM(vm, builder.try_append(")"sv));
     }
 
     // 5. Return string.
-    return TRY_OR_THROW_OOM(vm, builder.to_string());
+    return Utf16String::from_utf8(TRY_OR_THROW_OOM(vm, builder.to_string()));
 }
 
 // https://drafts.fxtf.org/geometry/#structured-serialization
-WebIDL::ExceptionOr<void> DOMMatrixReadOnly::serialization_steps(HTML::TransferDataEncoder& serialized, bool, HTML::SerializationMemory&)
+WebIDL::ExceptionOr<void> DOMMatrixReadOnly::serialization_steps(HTML::StructuredSerializeWriter& serialized, bool, HTML::SerializationMemory&)
 {
     serialized.encode(m_is_2d);
 
@@ -763,22 +768,28 @@ WebIDL::ExceptionOr<void> DOMMatrixReadOnly::serialization_steps(HTML::TransferD
 }
 
 // https://drafts.fxtf.org/geometry/#structured-serialization
-WebIDL::ExceptionOr<void> DOMMatrixReadOnly::deserialization_steps(HTML::TransferDataDecoder& serialized, HTML::DeserializationMemory&)
+WebIDL::ExceptionOr<void> DOMMatrixReadOnly::deserialization_steps(HTML::StructuredSerializeReader& serialized, HTML::DeserializationMemory&)
 {
-    bool is_2d = serialized.decode<bool>();
+    auto& realm = this->realm();
+
+    auto decode_double = [&]() {
+        return HTML::decode_or_throw_data_clone_error<double>(realm, serialized);
+    };
+
+    bool is_2d = TRY(HTML::decode_or_throw_data_clone_error<bool>(realm, serialized));
 
     // 1. If serialized.[[Is2D]] is true:
     if (is_2d) {
         // 1. Set value’s m11 element to serialized.[[M11]].
-        auto m11 = serialized.decode<double>();
+        auto m11 = TRY(decode_double());
         // 2. Set value’s m12 element to serialized.[[M12]].
-        auto m12 = serialized.decode<double>();
+        auto m12 = TRY(decode_double());
         // 3. Set value’s m13 element to 0.
         // 4. Set value’s m14 element to 0.
         // 5. Set value’s m21 element to serialized.[[M21]].
-        auto m21 = serialized.decode<double>();
+        auto m21 = TRY(decode_double());
         // 6. Set value’s m22 element to serialized.[[M22]].
-        auto m22 = serialized.decode<double>();
+        auto m22 = TRY(decode_double());
         // 7. Set value’s m23 element to 0.
         // 8. Set value’s m24 element to 0.
         // 9. Set value’s m31 element to 0.
@@ -786,9 +797,9 @@ WebIDL::ExceptionOr<void> DOMMatrixReadOnly::deserialization_steps(HTML::Transfe
         // 11. Set value’s m33 element to 1.
         // 12. Set value’s m34 element to 0.
         // 13. Set value’s m41 element to serialized.[[M41]].
-        auto m41 = serialized.decode<double>();
+        auto m41 = TRY(decode_double());
         // 14 Set value’s m42 element to serialized.[[M42]].
-        auto m42 = serialized.decode<double>();
+        auto m42 = TRY(decode_double());
         // 15. Set value’s m43 element to 0.
         // 16. Set value’s m44 element to 1.
         // 17. Set value’s is 2D to true.
@@ -798,37 +809,37 @@ WebIDL::ExceptionOr<void> DOMMatrixReadOnly::deserialization_steps(HTML::Transfe
     // 2. Otherwise:
     else {
         // 1. Set value’s m11 element to serialized.[[M11]].
-        auto m11 = serialized.decode<double>();
+        auto m11 = TRY(decode_double());
         // 2. Set value’s m12 element to serialized.[[M12]].
-        auto m12 = serialized.decode<double>();
+        auto m12 = TRY(decode_double());
         // 3. Set value’s m13 element to serialized.[[M13]].
-        auto m13 = serialized.decode<double>();
+        auto m13 = TRY(decode_double());
         // 4. Set value’s m14 element to serialized.[[M14]].
-        auto m14 = serialized.decode<double>();
+        auto m14 = TRY(decode_double());
         // 5. Set value’s m21 element to serialized.[[M21]].
-        auto m21 = serialized.decode<double>();
+        auto m21 = TRY(decode_double());
         // 6. Set value’s m22 element to serialized.[[M22]].
-        auto m22 = serialized.decode<double>();
+        auto m22 = TRY(decode_double());
         // 7. Set value’s m23 element to serialized.[[M23]].
-        auto m23 = serialized.decode<double>();
+        auto m23 = TRY(decode_double());
         // 8. Set value’s m24 element to serialized.[[M24]].
-        auto m24 = serialized.decode<double>();
+        auto m24 = TRY(decode_double());
         // 9. Set value’s m31 element to serialized.[[M31]].
-        auto m31 = serialized.decode<double>();
+        auto m31 = TRY(decode_double());
         // 10. Set value’s m32 element to serialized.[[M32]].
-        auto m32 = serialized.decode<double>();
+        auto m32 = TRY(decode_double());
         // 11. Set value’s m33 element to serialized.[[M33]].
-        auto m33 = serialized.decode<double>();
+        auto m33 = TRY(decode_double());
         // 12. Set value’s m34 element to serialized.[[M34]].
-        auto m34 = serialized.decode<double>();
+        auto m34 = TRY(decode_double());
         // 13. Set value’s m41 element to serialized.[[M41]].
-        auto m41 = serialized.decode<double>();
+        auto m41 = TRY(decode_double());
         // 14. Set value’s m42 element to serialized.[[M42]].
-        auto m42 = serialized.decode<double>();
+        auto m42 = TRY(decode_double());
         // 15. Set value’s m43 element to serialized.[[M43]].
-        auto m43 = serialized.decode<double>();
+        auto m43 = TRY(decode_double());
         // 16. Set value’s m44 element to serialized.[[M44]].
-        auto m44 = serialized.decode<double>();
+        auto m44 = TRY(decode_double());
         // 17. Set value’s is 2D to false.
 
         initialize_from_create_3d_matrix(m11, m12, m13, m14, m21, m22, m23, m24, m31, m32, m33, m34, m41, m42, m43, m44);
@@ -838,32 +849,32 @@ WebIDL::ExceptionOr<void> DOMMatrixReadOnly::deserialization_steps(HTML::Transfe
 }
 
 // https://drafts.fxtf.org/geometry/#matrix-validate-and-fixup-2d
-WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_2d_init(DOMMatrix2DInit& init)
+WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_2d_init(Bindings::DOMMatrix2DInit& init)
 {
     // 1. If at least one of the following conditions are true for dict, then throw a TypeError exception and abort these steps.
     // - a and m11 are both present and SameValueZero(a, m11) is false.
     if (init.a.has_value() && init.m11.has_value() && !JS::same_value_zero(JS::Value(init.a.value()), JS::Value(init.m11.value())))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.a and DOMMatrix2DInit.m11 must have the same value if they are both present"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.a and DOMMatrix2DInit.m11 must have the same value if they are both present"_utf16 };
 
     // - b and m12 are both present and SameValueZero(b, m12) is false.
     if (init.b.has_value() && init.m12.has_value() && !JS::same_value_zero(JS::Value(init.b.value()), JS::Value(init.m12.value())))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.b and DOMMatrix2DInit.m12 must have the same value if they are both present"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.b and DOMMatrix2DInit.m12 must have the same value if they are both present"_utf16 };
 
     // - c and m21 are both present and SameValueZero(c, m21) is false.
     if (init.c.has_value() && init.m21.has_value() && !JS::same_value_zero(JS::Value(init.c.value()), JS::Value(init.m21.value())))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.c and DOMMatrix2DInit.m21 must have the same value if they are both present"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.c and DOMMatrix2DInit.m21 must have the same value if they are both present"_utf16 };
 
     // - d and m22 are both present and SameValueZero(d, m22) is false.
     if (init.d.has_value() && init.m22.has_value() && !JS::same_value_zero(JS::Value(init.d.value()), JS::Value(init.m22.value())))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.d and DOMMatrix2DInit.m22 must have the same value if they are both present"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.d and DOMMatrix2DInit.m22 must have the same value if they are both present"_utf16 };
 
     // - e and m41 are both present and SameValueZero(e, m41) is false.
     if (init.e.has_value() && init.m41.has_value() && !JS::same_value_zero(JS::Value(init.e.value()), JS::Value(init.m41.value())))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.e and DOMMatrix2DInit.m41 must have the same value if they are both present"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.e and DOMMatrix2DInit.m41 must have the same value if they are both present"_utf16 };
 
     // - f and m42 are both present and SameValueZero(f, m42) is false.
     if (init.f.has_value() && init.m42.has_value() && !JS::same_value_zero(JS::Value(init.f.value()), JS::Value(init.m42.value())))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.f and DOMMatrix2DInit.m42 must have the same value if they are both present"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrix2DInit.f and DOMMatrix2DInit.m42 must have the same value if they are both present"_utf16 };
 
     // 2. If m11 is not present then set it to the value of member a, or value 1 if a is also not present.
     if (!init.m11.has_value())
@@ -893,7 +904,7 @@ WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_2d_init(DOMMatrix2DInit&
 }
 
 // https://drafts.fxtf.org/geometry/#matrix-validate-and-fixup
-WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_init(DOMMatrixInit& init)
+WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_init(Bindings::DOMMatrixInit& init)
 {
     // 1. Validate and fixup (2D) dict.
     TRY(validate_and_fixup_dom_matrix_2d_init(init));
@@ -911,7 +922,7 @@ WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_init(DOMMatrixInit& init
             || (init.m43 != 0.0 && init.m43 != -0.0)
             || init.m33 != 1.0
             || init.m44 != 1.0) {
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrixInit.is2D is true, but the given matrix is not a 2D matrix"sv };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "DOMMatrixInit.is2D is true, but the given matrix is not a 2D matrix"_utf16 };
         }
     }
 
@@ -940,19 +951,26 @@ WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_init(DOMMatrixInit& init
 }
 
 // https://drafts.fxtf.org/geometry/#parse-a-string-into-an-abstract-matrix
-WebIDL::ExceptionOr<ParsedMatrix> parse_dom_matrix_init_string(JS::Realm& realm, StringView transform_list)
+WebIDL::ExceptionOr<ParsedMatrix> parse_dom_matrix_init_string(JS::Realm& realm, Utf16View transform_list)
 {
     // 1. If transformList is the empty string, set it to the string "matrix(1, 0, 0, 1, 0, 0)".
     if (transform_list.is_empty())
-        transform_list = "matrix(1, 0, 0, 1, 0, 0)"sv;
+        transform_list = u"matrix(1, 0, 0, 1, 0, 0)"sv;
 
     // 2. Parse transformList into parsedValue given the grammar for the CSS transform property.
     // The result will be a <transform-list>, the keyword none, or failure.
     // If parsedValue is failure, or any <transform-function> has <length> values without absolute length units, or any keyword other than none is used, then return failure. [CSS3-SYNTAX] [CSS3-TRANSFORMS]
-    auto transform_style_value = parse_css_value(CSS::Parser::ParsingParams {}, transform_list, CSS::PropertyID::Transform);
-    if (!transform_style_value || (transform_style_value->is_keyword() && transform_style_value->to_keyword() != CSS::Keyword::None))
+    CSS::Parser::ParsingParams parsing_params {};
+    parsing_params.value_context = { CSS::Parser::SpecialContext::DOMMatrixInitString };
+
+    auto transform_style_value = parse_css_value(parsing_params, transform_list, CSS::PropertyID::Transform);
+    if (!transform_style_value || (transform_style_value->is_keyword() && transform_style_value->to_keyword() != CSS::Keyword::None) || transform_style_value->is_unresolved())
         return WebIDL::SyntaxError::create(realm, "Failed to parse CSS transform string."_utf16);
     auto parsed_value = CSS::ComputedProperties::transformations_for_style_value(*transform_style_value);
+
+    // NB: Check that no <length> values with non-absolute length units were used
+    if (!all_of(parsed_value, [](auto& transform) { return transform->can_be_converted_to_matrix_without_reference_box(); }))
+        return WebIDL::SyntaxError::create(realm, "Failed to parse CSS transform string."_utf16);
 
     // 3. If parsedValue is none, set parsedValue to a <transform-list> containing a single identity matrix.
     // NOTE: parsed_value is empty on none so for loop in 6 won't modify matrix
@@ -964,28 +982,19 @@ WebIDL::ExceptionOr<ParsedMatrix> parse_dom_matrix_init_string(JS::Realm& realm,
     bool is_2d_transform = true;
     for (auto const& transform : parsed_value) {
         // https://www.w3.org/TR/css-transforms-1/#two-d-transform-functions
-        if (transform.function() != CSS::TransformFunction::Matrix
-            && transform.function() != CSS::TransformFunction::Translate
-            && transform.function() != CSS::TransformFunction::TranslateX
-            && transform.function() != CSS::TransformFunction::TranslateY
-            && transform.function() != CSS::TransformFunction::Scale
-            && transform.function() != CSS::TransformFunction::ScaleX
-            && transform.function() != CSS::TransformFunction::ScaleY
-            && transform.function() != CSS::TransformFunction::Rotate
-            && transform.function() != CSS::TransformFunction::Skew
-            && transform.function() != CSS::TransformFunction::SkewX
-            && transform.function() != CSS::TransformFunction::SkewY)
+        if (!first_is_one_of(transform->as_transformation().transform_function(),
+                CSS::TransformFunction::Matrix,
+                CSS::TransformFunction::Translate, CSS::TransformFunction::TranslateX, CSS::TransformFunction::TranslateY,
+                CSS::TransformFunction::Scale, CSS::TransformFunction::ScaleX, CSS::TransformFunction::ScaleY,
+                CSS::TransformFunction::Rotate,
+                CSS::TransformFunction::Skew, CSS::TransformFunction::SkewX, CSS::TransformFunction::SkewY))
             is_2d_transform = false;
     }
 
     // 5. Transform all <transform-function>s to 4x4 abstract matrices by following the “Mathematical Description of Transform Functions”. [CSS3-TRANSFORMS]
     // 6. Let matrix be a 4x4 abstract matrix as shown in the initial figure of this section. Post-multiply all matrices from left to right and set matrix to this product.
-    for (auto const& transform : parsed_value) {
-        auto const& transform_matrix = transform.to_matrix({});
-        if (transform_matrix.is_error())
-            return WebIDL::SyntaxError::create(realm, "Failed to parse CSS transform string."_utf16);
-        matrix = matrix * transform_matrix.value();
-    }
+    for (auto const& transform : parsed_value)
+        matrix = matrix * transform->as_transformation().to_matrix({});
 
     // 7. Return matrix and 2dTransform.
     Gfx::DoubleMatrix4x4 double_matrix {

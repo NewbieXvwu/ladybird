@@ -74,7 +74,7 @@ The Sanitizer test preset already sets these environment variables.
 ```sh
 export ASAN_OPTIONS='strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=1:allocator_may_return_null=1'
 export UBSAN_OPTIONS='print_stacktrace=1:print_summary=1:halt_on_error=1'
-cmake -GNinja -S Meta/Lagom -B Build/lagom -DENABLE_ADDRESS_SANITIZER=ON -DENABLE_UNDEFINED_SANITIZER=ON
+cmake -GNinja -B Build/lagom -DENABLE_ADDRESS_SANITIZER=ON -DENABLE_UNDEFINED_SANITIZER=ON
 cd Build/lagom
 ninja
 CTEST_OUTPUT_ON_FAILURE=1 LADYBIRD_SOURCE_DIR=${PWD}/../.. ninja test
@@ -142,7 +142,7 @@ For Ref and Screenshot tests, you will need to supply the equivalently rendering
 tests, you can generate the reference screenshot itself by running Ladybird in headless mode:
 
 ```bash
-./Meta/ladybird.py run ladybird --headless --layout-test-mode Tests/LibWeb/Screenshot/input/your-new-test-name.html
+./Meta/ladybird.py run ladybird --headless --test-mode Tests/LibWeb/Screenshot/input/your-new-test-name.html
 
 # This will log something like: "Saved screenshot to: ~/Downloads/screenshot-2025-06-07-08-37-45.png"
 

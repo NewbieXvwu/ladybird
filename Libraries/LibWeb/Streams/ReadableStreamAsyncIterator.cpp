@@ -5,8 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ReadableStreamAsyncIteratorPrototype.h>
-#include <LibWeb/Streams/ReadableStream.h>
+#include <LibWeb/Bindings/ReadableStream.h>
 #include <LibWeb/Streams/ReadableStreamAsyncIterator.h>
 #include <LibWeb/Streams/ReadableStreamDefaultReader.h>
 #include <LibWeb/Streams/ReadableStreamOperations.h>
@@ -17,7 +16,7 @@ template<>
 void Intrinsics::create_web_prototype_and_constructor<ReadableStreamAsyncIteratorPrototype>(JS::Realm& realm)
 {
     auto prototype = realm.create<ReadableStreamAsyncIteratorPrototype>(realm);
-    m_prototypes.set("ReadableStreamAsyncIterator"_fly_string, prototype);
+    m_prototypes.set("ReadableStreamAsyncIterator"_utf16_fly_string, prototype);
 }
 
 }
@@ -27,7 +26,7 @@ namespace Web::Streams {
 GC_DEFINE_ALLOCATOR(ReadableStreamAsyncIterator);
 
 // https://streams.spec.whatwg.org/#ref-for-asynchronous-iterator-initialization-steps
-WebIDL::ExceptionOr<GC::Ref<ReadableStreamAsyncIterator>> ReadableStreamAsyncIterator::create(JS::Realm& realm, JS::Object::PropertyKind kind, ReadableStream& stream, ReadableStreamIteratorOptions options)
+WebIDL::ExceptionOr<GC::Ref<ReadableStreamAsyncIterator>> ReadableStreamAsyncIterator::create(JS::Realm& realm, JS::Object::PropertyKind kind, ReadableStream& stream, Bindings::ReadableStreamIteratorOptions options)
 {
     // 1. Let reader be ? AcquireReadableStreamDefaultReader(stream).
     // 2. Set iterator’s reader to reader.

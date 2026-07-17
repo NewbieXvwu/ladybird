@@ -7,10 +7,12 @@
 #pragma once
 
 #include <LibCrypto/PK/EC.h>
+#include <LibCrypto/PK/MLDSA.h>
+#include <LibCrypto/PK/MLKEM.h>
 #include <LibCrypto/PK/RSA.h>
 #include <LibGC/Ptr.h>
 #include <LibJS/Forward.h>
-#include <LibWeb/Bindings/CryptoKeyPrototype.h>
+#include <LibWeb/Bindings/CryptoKey.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Bindings/Serializable.h>
@@ -18,38 +20,47 @@
 
 namespace Web::Crypto {
 
-class CryptoKey final
+// The raw key octets of an Ed25519, Ed448, X25519, or X448 ("OKP") key.
+struct OKPPublicKey {
+    ByteBuffer bytes;
+};
+
+struct OKPPrivateKey {
+    ByteBuffer bytes;
+};
+
+class WEB_API CryptoKey final
     : public Bindings::PlatformObject
     , public Bindings::Serializable {
     WEB_PLATFORM_OBJECT(CryptoKey, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(CryptoKey);
 
 public:
-    using InternalKeyData = Variant<ByteBuffer, Bindings::JsonWebKey, ::Crypto::PK::RSAPublicKey, ::Crypto::PK::RSAPrivateKey, ::Crypto::PK::ECPublicKey, ::Crypto::PK::ECPrivateKey>;
+    using ImportKeyData = Variant<ByteBuffer, JsonWebKey>;
+    using InternalKeyData = Variant<ByteBuffer, ::Crypto::PK::RSAPublicKey, ::Crypto::PK::RSAPrivateKey, ::Crypto::PK::ECPublicKey, ::Crypto::PK::ECPrivateKey, ::Crypto::PK::MLDSAPublicKey, ::Crypto::PK::MLDSAPrivateKey, ::Crypto::PK::MLKEMPublicKey, ::Crypto::PK::MLKEMPrivateKey, OKPPublicKey, OKPPrivateKey>;
+
+    static constexpr bool OVERRIDES_FINALIZE = true;
 
     [[nodiscard]] static GC::Ref<CryptoKey> create(JS::Realm&, InternalKeyData);
     [[nodiscard]] static GC::Ref<CryptoKey> create(JS::Realm&);
 
-    virtual ~CryptoKey() override;
-
     bool extractable() const { return m_extractable; }
     Bindings::KeyType type() const { return m_type; }
-    JS::Object const* algorithm() const { return m_algorithm; }
-    JS::Object const* usages() const { return m_usages; }
+    JS::Object const* algorithm() const { return m_algorithm_cached; }
+    JS::Object const* usages() const { return m_usages_cached; }
 
-    Vector<Bindings::KeyUsage> internal_usages() const { return m_key_usages; }
+    Vector<Bindings::KeyUsage> internal_usages() const { return m_usages; }
 
     void set_extractable(bool extractable) { m_extractable = extractable; }
     void set_type(Bindings::KeyType type) { m_type = type; }
-    void set_algorithm(GC::Ref<Object> algorithm) { m_algorithm = move(algorithm); }
+    void set_algorithm(GC::Ref<Object> algorithm) { m_algorithm_cached = algorithm; }
     void set_usages(Vector<Bindings::KeyUsage>);
 
     InternalKeyData const& handle() const { return m_key_data; }
-    String algorithm_name() const;
+    Utf16String const& algorithm_name() const;
 
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::CryptoKey; }
-    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
-    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::StructuredSerializeWriter&, bool for_storage, HTML::SerializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::StructuredSerializeReader&, HTML::DeserializationMemory&) override;
 
 private:
     CryptoKey(JS::Realm&, InternalKeyData);
@@ -57,15 +68,16 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Visitor&) override;
+    virtual void finalize() override;
 
     Bindings::KeyType m_type;
     bool m_extractable { false };
-    GC::Ref<Object> m_algorithm;
-    GC::Ref<Object> m_usages;
+    GC::Ref<Object> m_algorithm_cached;
+    GC::Ref<Object> m_usages_cached;
 
-    Vector<Bindings::KeyUsage> m_key_usages;
+    Vector<Bindings::KeyUsage> m_usages;
     InternalKeyData m_key_data; // [[handle]]
-    mutable String m_algorithm_name;
+    mutable Utf16String m_algorithm_name;
 };
 
 // https://w3c.github.io/webcrypto/#ref-for-dfn-CryptoKeyPair-2

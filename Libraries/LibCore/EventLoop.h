@@ -8,19 +8,22 @@
 
 #pragma once
 
+#include <AK/AtomicRefCounted.h>
 #include <AK/Forward.h>
 #include <AK/Function.h>
 #include <AK/Noncopyable.h>
 #include <AK/NonnullOwnPtr.h>
-#include <AK/Swift.h>
-#include <AK/Time.h>
-#include <LibCore/Event.h>
+#include <AK/NonnullRefPtr.h>
+#include <AK/RefPtr.h>
+#include <LibCore/Export.h>
 #include <LibCore/Forward.h>
+#include <LibSync/RWLock.h>
 
 namespace Core {
 
 class EventLoopImplementation;
 class ThreadEventQueue;
+class WeakEventLoopReference;
 
 // The event loop enables asynchronous (not parallel or multi-threaded) computing by efficiently handling events from various sources.
 // Event loops are most important for GUI programs, where the various GUI updates and action callbacks run on the EventLoop,
@@ -28,10 +31,7 @@ class ThreadEventQueue;
 // Event loops, through select(), allow programs to "go to sleep" for most of their runtime until some event happens.
 // EventLoop is too expensive to use in realtime scenarios (read: audio) where even the time required by a single select() system call is too large and unpredictable.
 //
-// There is at most one running event loop per thread.
-// Another event loop can be started while another event loop is already running; that new event loop will take over for the other event loop.
-// This is mainly used in LibGUI, where each modal window stacks another event loop until it is closed.
-// However, that means you need to be careful with storing the current event loop, as it might already be gone at the time of use.
+// There is at most one event loop per thread.
 // Event loops currently handle these kinds of events:
 // - Deferred invocations caused by various objects. These are just a generic way of telling the EventLoop to run some function as soon as possible at a later point.
 // - Timers, which repeatedly (or once after a delay) run a function on the EventLoop. Note that timers are not super accurate.
@@ -40,12 +40,9 @@ class ThreadEventQueue;
 // - Fork events, because the child process event loop needs to clear its events and handlers.
 // - Quit events, i.e. the event loop should exit.
 // Any event that the event loop needs to wait on or needs to repeatedly handle is stored in a handle, e.g. s_timers.
-class EventLoop {
+class CORE_API EventLoop {
     AK_MAKE_NONMOVABLE(EventLoop);
     AK_MAKE_NONCOPYABLE(EventLoop);
-
-private:
-    friend struct EventLoopPusher;
 
 public:
     enum class WaitMode {
@@ -55,6 +52,9 @@ public:
 
     EventLoop();
     ~EventLoop();
+
+    // Create an event loop for the current thread and keep it alive for the rest of the program.
+    static EventLoop& initialize_for_current_thread();
 
     // Pump the event loop until its exit is requested.
     int exec();
@@ -66,11 +66,6 @@ public:
 
     // Pump the event loop until some condition is met.
     void spin_until(Function<bool()>);
-
-    // Post an event to this event loop.
-    void post_event(EventReceiver& receiver, NonnullOwnPtr<Event>&&);
-
-    void add_job(NonnullRefPtr<Promise<NonnullRefPtr<EventReceiver>>> job_promise);
 
     void deferred_invoke(ESCAPING Function<void()>);
 
@@ -90,15 +85,56 @@ public:
     static int register_signal(int signo, ESCAPING Function<void(int)> handler);
     static void unregister_signal(int handler_id);
 
+    // Invokes the specified handler when the process exits
+    static void register_process(pid_t pid, ESCAPING Function<void(pid_t)> exit_handler);
+    static void unregister_process(pid_t pid);
+
     static bool is_running();
     static EventLoop& current();
+    static NonnullRefPtr<WeakEventLoopReference> current_weak();
 
     EventLoopImplementation& impl() { return *m_impl; }
 
 private:
     NonnullOwnPtr<EventLoopImplementation> m_impl;
-} SWIFT_UNSAFE_REFERENCE;
+    RefPtr<WeakEventLoopReference> m_weak;
+};
 
-void deferred_invoke(ESCAPING Function<void()>);
+class StrongEventLoopReference;
+
+class CORE_API WeakEventLoopReference : public AtomicRefCounted<WeakEventLoopReference> {
+public:
+    StrongEventLoopReference take();
+
+private:
+    friend class EventLoop;
+    friend class StrongEventLoopReference;
+
+    WeakEventLoopReference(EventLoop&);
+
+    void revoke();
+
+    EventLoop* m_event_loop;
+    Sync::RWLock m_lock;
+};
+
+class CORE_API StrongEventLoopReference {
+public:
+    ~StrongEventLoopReference();
+
+    bool is_alive() const;
+    operator bool() const;
+    EventLoop* operator*() const;
+    EventLoop* operator->() const;
+
+private:
+    friend class WeakEventLoopReference;
+
+    StrongEventLoopReference(WeakEventLoopReference&);
+
+    WeakEventLoopReference* m_event_loop_weak;
+};
+
+CORE_API void deferred_invoke(ESCAPING Function<void()>);
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2023-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,12 +7,14 @@
 #pragma once
 
 #include <AK/Forward.h>
+#include <AK/Function.h>
 #include <AK/StringUtils.h>
 #include <LibGfx/Forward.h>
 #include <LibURL/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
 #include <LibWeb/HTML/AudioPlayState.h>
 #include <LibWebView/Forward.h>
+#include <LibWebView/PrivateBrowsing.h>
 
 #import <Cocoa/Cocoa.h>
 
@@ -21,37 +23,35 @@
 - (String const&)onCreateNewTab:(Optional<URL::URL> const&)url
                     activateTab:(Web::HTML::ActivateTab)activate_tab;
 
-- (String const&)onCreateNewTab:(StringView)html
-                            url:(URL::URL const&)url
-                    activateTab:(Web::HTML::ActivateTab)activate_tab;
-
 - (String const&)onCreateChildTab:(Optional<URL::URL> const&)url
                       activateTab:(Web::HTML::ActivateTab)activate_tab
                         pageIndex:(u64)page_index;
 
-- (void)loadURL:(URL::URL const&)url;
-- (void)onLoadStart:(URL::URL const&)url isRedirect:(BOOL)is_redirect;
-- (void)onLoadFinish:(URL::URL const&)url;
+- (void)onLoadStart;
+- (void)onLoadFinish;
 
 - (void)onURLChange:(URL::URL const&)url;
 - (void)onTitleChange:(Utf16String const&)title;
-- (void)onFaviconChange:(Gfx::Bitmap const&)bitmap;
+- (void)onFaviconChange:(Optional<Gfx::Bitmap const&>)bitmap;
 - (void)onAudioPlayStateChange:(Web::HTML::AudioPlayState)play_state;
+
+- (void)onEnterFullscreenWindow;
+- (void)onExitFullscreenWindow;
 
 - (void)onFindInPageResult:(size_t)current_match_index
            totalMatchCount:(Optional<size_t> const&)total_match_count;
 
 @end
 
-@interface LadybirdWebView : NSView <NSMenuDelegate>
+@interface LadybirdWebView : NSView <NSMenuDelegate, NSTextInputClient>
 
-- (instancetype)init:(id<LadybirdWebViewObserver>)observer;
+- (instancetype)init:(id<LadybirdWebViewObserver>)observer
+           isPrivate:(WebView::IsPrivate)is_private;
 - (instancetype)initAsChild:(id<LadybirdWebViewObserver>)observer
                      parent:(LadybirdWebView*)parent
                   pageIndex:(u64)page_index;
 
 - (void)loadURL:(URL::URL const&)url;
-- (void)loadHTML:(StringView)html;
 
 - (WebView::ViewImplementation&)view;
 - (String const&)handle;
@@ -62,11 +62,18 @@
 - (void)handleResize;
 - (void)handleDevicePixelRatioChange;
 - (void)handleDisplayRefreshRateChange;
+- (void)handleEnteredFullScreen;
+- (void)handleExitedFullScreen;
+- (void)handleExitFullScreen;
 - (void)handleVisibility:(BOOL)is_visible;
 
 - (void)findInPage:(NSString*)query
     caseSensitivity:(CaseSensitivity)case_sensitivity;
 - (void)findInPageNextMatch;
 - (void)findInPagePreviousMatch;
+
+- (void)requestClose;
+- (Function<void()>)prepareForImmediateClose;
+- (BOOL)needsBeforeUnloadCheck;
 
 @end

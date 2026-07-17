@@ -6,19 +6,14 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
+#include <LibWeb/Bindings/Event.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HighResolutionTime/DOMHighResTimeStamp.h>
 
 namespace Web::DOM {
-
-struct EventInit {
-    bool bubbles { false };
-    bool cancelable { false };
-    bool composed { false };
-};
 
 class WEB_API Event : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(Event, Bindings::PlatformObject);
@@ -48,19 +43,19 @@ public:
 
     using Path = Vector<PathEntry>;
 
-    [[nodiscard]] static GC::Ref<Event> create(JS::Realm&, FlyString const& event_name, EventInit const& event_init = {});
-    static WebIDL::ExceptionOr<GC::Ref<Event>> construct_impl(JS::Realm&, FlyString const& event_name, EventInit const& event_init);
+    [[nodiscard]] static GC::Ref<Event> create(JS::Realm&, Utf16FlyString const& event_name, Bindings::EventInit const& event_init = {});
+    static WebIDL::ExceptionOr<GC::Ref<Event>> construct_impl(JS::Realm&, Utf16FlyString const& event_name, Bindings::EventInit const& event_init);
 
-    Event(JS::Realm&, FlyString const& type);
-    Event(JS::Realm&, FlyString const& type, EventInit const& event_init);
+    Event(JS::Realm&, Utf16FlyString const& type);
+    Event(JS::Realm&, Utf16FlyString const& type, Bindings::EventInit const& event_init);
 
     virtual ~Event() = default;
 
     // https://dom.spec.whatwg.org/#dom-event-timestamp
     HighResolutionTime::DOMHighResTimeStamp time_stamp() const { return m_time_stamp; }
 
-    FlyString const& type() const { return m_type; }
-    void set_type(FlyString const& type) { m_type = type; }
+    Utf16FlyString const& type() const { return m_type; }
+    void set_type(Utf16FlyString const& type) { m_type = type; }
 
     GC::Ptr<EventTarget> target() const { return m_target; }
     void set_target(EventTarget* target) { m_target = target; }
@@ -100,6 +95,8 @@ public:
 
     GC::Ptr<EventTarget> current_target() const { return m_current_target; }
     void set_current_target(EventTarget* current_target) { m_current_target = current_target; }
+
+    GC::Ptr<EventTarget> current_target_for_bindings() const;
 
     bool return_value() const { return !m_cancelled; }
     void set_return_value(bool return_value)
@@ -141,7 +138,7 @@ public:
         m_stop_immediate_propagation = true;
     }
 
-    void init_event(String const&, bool, bool);
+    void init_event(Utf16FlyString const&, bool, bool);
 
     void set_time_stamp(double time_stamp) { m_time_stamp = time_stamp; }
 
@@ -154,7 +151,7 @@ public:
     virtual bool is_pointer_event() const { return false; }
 
 protected:
-    void initialize_event(String const&, bool, bool);
+    void initialize_event(Utf16FlyString const&, bool, bool);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Visitor&) override;
@@ -162,7 +159,7 @@ protected:
 private:
     virtual bool is_dom_event() const final { return true; }
 
-    FlyString m_type;
+    Utf16FlyString m_type;
     GC::Ptr<EventTarget> m_target;
     GC::Ptr<EventTarget> m_related_target;
     GC::Ptr<EventTarget> m_current_target;

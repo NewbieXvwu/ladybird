@@ -9,6 +9,9 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/EventTarget.h>
+#include <LibWeb/HTML/EventNames.h>
+#include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/Page/Page.h>
 
 namespace Web::DOM {
 
@@ -27,7 +30,7 @@ void schedule_a_selectionchange_event(T& target, Document& document)
     if (target.has_scheduled_selectionchange_event())
         return;
 
-    // AD-HOC (https://github.com/w3c/selection-api/issues/338):
+    // AD-HOC: See https://github.com/w3c/selection-api/issues/338
     // Set target's has scheduled selectionchange event to true
     target.set_scheduled_selectionchange_event(true);
 
@@ -49,12 +52,18 @@ void fire_a_selectionchange_event(T& target, Document& document)
     //    cancelable, at target.
     // 3. Otherwise, if target is a document, fire an event named selectionchange, which does not
     //    bubble and not cancelable, at target.
-    EventInit event_init;
+    Bindings::EventInit event_init;
     event_init.bubbles = DerivedFrom<T, Element>;
     event_init.cancelable = false;
 
     auto event = DOM::Event::create(document.realm(), HTML::EventNames::selectionchange, event_init);
     target.dispatch_event(event);
+
+    // AD-HOC: When the selection changes, inform the UI to update the primary pasteboard.
+    if (auto& page = document.page(); page.enable_primary_paste()) {
+        if (auto text = page.focused_navigable().selected_text(); !text.is_empty())
+            page.client().page_did_update_primary_selection(text);
+    }
 }
 
 }

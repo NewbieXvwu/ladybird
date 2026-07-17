@@ -8,9 +8,7 @@
 
 namespace Audio {
 
-class ConnectionToServer;
-class Loader;
+class AudioConverter;
 class PlaybackStream;
-struct Sample;
 
 }

@@ -19,6 +19,10 @@
 #include <LibGC/Function.h>
 #include <LibGC/Heap.h>
 #include <LibGC/RootVector.h>
+#include <LibJS/Bytecode/Executable.h>
+#include <LibJS/Bytecode/Label.h>
+#include <LibJS/Bytecode/Operand.h>
+#include <LibJS/Bytecode/Register.h>
 #include <LibJS/CyclicModule.h>
 #include <LibJS/Export.h>
 #include <LibJS/ModuleLoading.h>
@@ -28,6 +32,7 @@
 #include <LibJS/Runtime/Error.h>
 #include <LibJS/Runtime/ErrorTypes.h>
 #include <LibJS/Runtime/ExecutionContext.h>
+#include <LibJS/Runtime/InterpreterStack.h>
 #include <LibJS/Runtime/Promise.h>
 #include <LibJS/Runtime/Value.h>
 
@@ -58,10 +63,93 @@ public:
     static NonnullRefPtr<VM> create();
     ~VM();
 
-    GC::Heap& heap() { return m_heap; }
-    GC::Heap const& heap() const { return m_heap; }
+    ALWAYS_INLINE static VM& the() { return *s_the; }
 
-    Bytecode::Interpreter& bytecode_interpreter() { return *m_bytecode_interpreter; }
+    GC::Heap& heap() const { return const_cast<GC::Heap&>(m_heap); }
+
+    VM& vm() { return *this; }
+    VM const& vm() const { return *this; }
+
+    [[nodiscard]] Realm& realm() { return *m_running_execution_context->realm; }
+    [[nodiscard]] Object& global_object() { return realm().global_object(); }
+    [[nodiscard]] DeclarativeEnvironment& global_declarative_environment();
+
+    ThrowCompletionOr<Value> run(Script&, GC::Ptr<Environment> lexical_environment_override = nullptr);
+    ThrowCompletionOr<Value> run(SourceTextModule&);
+
+    ThrowCompletionOr<Value> run_executable(ExecutionContext&, Bytecode::Executable&, u32 entry_point = 0);
+    ThrowCompletionOr<Value> run_executable(ExecutionContext& context, Bytecode::Executable& executable, u32 entry_point, Value initial_accumulator_value)
+    {
+        context.registers_and_constants_and_locals_and_arguments_span()[0] = initial_accumulator_value;
+        return run_executable(context, executable, entry_point);
+    }
+
+    void enter_module_execution() { ++m_module_execution_depth; }
+    void leave_module_execution()
+    {
+        VERIFY(m_module_execution_depth > 0);
+        --m_module_execution_depth;
+    }
+    [[nodiscard]] bool is_executing_module() const { return m_module_execution_depth > 0; }
+    u64 increment_module_async_evaluation_count() { return m_module_async_evaluation_count++; }
+
+    ALWAYS_INLINE Value& accumulator() { return reg(Bytecode::Register::accumulator()); }
+    Value& reg(Bytecode::Register const& r)
+    {
+        return m_running_execution_context->registers_and_constants_and_locals_and_arguments()[r.index()];
+    }
+    Value reg(Bytecode::Register const& r) const
+    {
+        return m_running_execution_context->registers_and_constants_and_locals_and_arguments()[r.index()];
+    }
+
+    ALWAYS_INLINE Value get(Bytecode::Operand op) const
+    {
+        return m_running_execution_context->registers_and_constants_and_locals_and_arguments()[op.raw()];
+    }
+    ALWAYS_INLINE void set(Bytecode::Operand op, Value value)
+    {
+        m_running_execution_context->registers_and_constants_and_locals_and_arguments_span().data()[op.raw()] = value;
+    }
+
+    void do_return(Value value)
+    {
+        if (value.is_special_empty_value())
+            value = js_undefined();
+        reg(Bytecode::Register::return_value()) = value;
+        reg(Bytecode::Register::exception()) = js_special_empty_value();
+    }
+
+    Bytecode::Executable& current_executable() { return *m_running_execution_context->executable; }
+    Bytecode::Executable const& current_executable() const { return *m_running_execution_context->executable; }
+
+    [[nodiscard]] Utf16FlyString const& get_identifier(Bytecode::IdentifierTableIndex) const;
+    [[nodiscard]] Optional<Utf16FlyString const&> get_identifier(Optional<Bytecode::IdentifierTableIndex> index) const
+    {
+        if (!index.has_value())
+            return {};
+        return get_identifier(*index);
+    }
+
+    [[nodiscard]] PropertyKey const& get_property_key(Bytecode::PropertyKeyTableIndex) const;
+
+    enum class HandleExceptionResponse {
+        ExitFromExecutable,
+        ContinueInThisExecutable,
+    };
+    [[nodiscard]] COLD HandleExceptionResponse handle_exception(u32 program_counter, Value exception);
+
+    NEVER_INLINE void unwind_inline_frame_for_exception();
+
+    ExecutionContext* push_inline_frame(
+        ECMAScriptFunctionObject& callee_function,
+        Bytecode::Executable& callee_executable,
+        ReadonlySpan<Bytecode::Operand> arguments,
+        u32 return_pc,
+        u32 dst_raw,
+        Value this_value,
+        Object* new_target,
+        bool is_construct);
 
     void dump_backtrace() const;
 
@@ -75,15 +163,12 @@ public:
     JS_ENUMERATE_WELL_KNOWN_SYMBOLS
 #undef __JS_ENUMERATE
 
-    HashMap<String, GC::Ptr<PrimitiveString>>& string_cache()
-    {
-        return m_string_cache;
-    }
-
     HashMap<Utf16String, GC::Ptr<PrimitiveString>>& utf16_string_cache()
     {
         return m_utf16_string_cache;
     }
+
+    auto& numeric_string_cache() { return m_numeric_string_cache; }
 
     PrimitiveString& empty_string() { return *m_empty_string; }
 
@@ -106,8 +191,8 @@ public:
 
     bool did_reach_stack_space_limit() const
     {
-#if defined(AK_OS_MACOS) && defined(HAS_ADDRESS_SANITIZER)
-        // We hit stack limits sooner on macOS 14 arm64 with ASAN enabled.
+#if defined(HAS_ADDRESS_SANITIZER)
+        // We hit stack limits sooner with ASAN enabled.
         return m_stack_info.size_free() < 96 * KiB;
 #else
         return m_stack_info.size_free() < 32 * KiB;
@@ -123,18 +208,37 @@ public:
         if (did_reach_stack_space_limit()) [[unlikely]] {
             return throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
         }
+        context.caller_frame = nullptr;
+        context.caller_return_pc = 0;
+        context.caller_dst_raw = 0;
+        context.caller_is_construct = false;
         m_execution_context_stack.append(&context);
+        m_execution_context_stack_previous_running_contexts.append(m_running_execution_context);
+        m_running_execution_context = &context;
         return {};
     }
 
     void push_execution_context(ExecutionContext& context)
     {
+        context.caller_frame = nullptr;
+        context.caller_return_pc = 0;
+        context.caller_dst_raw = 0;
+        context.caller_is_construct = false;
         m_execution_context_stack.append(&context);
+        m_execution_context_stack_previous_running_contexts.append(m_running_execution_context);
+        m_running_execution_context = &context;
     }
 
-    void pop_execution_context()
+    ExecutionContext* pop_execution_context()
     {
-        m_execution_context_stack.take_last();
+        VERIFY(!m_execution_context_stack.is_empty());
+        auto* context = m_execution_context_stack.take_last();
+        context->caller_frame = nullptr;
+        context->caller_return_pc = 0;
+        context->caller_dst_raw = 0;
+        context->caller_is_construct = false;
+        m_running_execution_context = m_execution_context_stack_previous_running_contexts.take_last();
+        return context;
     }
 
     // https://tc39.es/ecma262/#running-execution-context
@@ -142,19 +246,62 @@ public:
     // This is known as the agent's running execution context.
     ExecutionContext& running_execution_context()
     {
-        VERIFY(!m_execution_context_stack.is_empty());
-        return *m_execution_context_stack.last();
+        VERIFY(m_running_execution_context);
+        return *m_running_execution_context;
     }
     ExecutionContext const& running_execution_context() const
     {
-        VERIFY(!m_execution_context_stack.is_empty());
-        return *m_execution_context_stack.last();
+        VERIFY(m_running_execution_context);
+        return *m_running_execution_context;
     }
 
+    bool has_running_execution_context() const { return m_running_execution_context != nullptr; }
+
     // https://tc39.es/ecma262/#execution-context-stack
-    // The execution context stack is used to track execution contexts.
+    // The execution context stack tracks base execution contexts. Inline JS-to-JS
+    // frames are threaded through ExecutionContext::caller_frame starting at the
+    // running execution context.
     Vector<ExecutionContext*> const& execution_context_stack() const { return m_execution_context_stack; }
-    Vector<ExecutionContext*>& execution_context_stack() { return m_execution_context_stack; }
+
+    template<typename Callback>
+    void for_each_execution_context_top_to_bottom(Callback callback)
+    {
+        for_each_execution_context_top_to_bottom(m_execution_context_stack, m_execution_context_stack_previous_running_contexts, m_running_execution_context, callback);
+    }
+
+    template<typename Callback>
+    void for_each_execution_context_top_to_bottom(Callback callback) const
+    {
+        for_each_execution_context_top_to_bottom(m_execution_context_stack, m_execution_context_stack_previous_running_contexts, m_running_execution_context, callback);
+    }
+
+    template<typename Callback>
+    Optional<ExecutionContext*> last_execution_context_matching(Callback callback)
+    {
+        Optional<ExecutionContext*> matching_execution_context;
+        for_each_execution_context_top_to_bottom([&](ExecutionContext& execution_context) {
+            if (!callback(&execution_context))
+                return true;
+            matching_execution_context = &execution_context;
+            return false;
+        });
+        return matching_execution_context;
+    }
+
+    template<typename Callback>
+    Optional<ExecutionContext const*> last_execution_context_matching(Callback callback) const
+    {
+        Optional<ExecutionContext const*> matching_execution_context;
+        for_each_execution_context_top_to_bottom([&](ExecutionContext const& execution_context) {
+            if (!callback(&execution_context))
+                return true;
+            matching_execution_context = &execution_context;
+            return false;
+        });
+        return matching_execution_context;
+    }
+
+    ExecutionContext* previous_execution_context() const;
 
     Environment const* lexical_environment() const { return running_execution_context().lexical_environment; }
     Environment* lexical_environment() { return running_execution_context().lexical_environment; }
@@ -171,15 +318,11 @@ public:
     // The value of the Function component of the running execution context is also called the active function object.
     FunctionObject const* active_function_object() const { return running_execution_context().function; }
     FunctionObject* active_function_object() { return running_execution_context().function; }
-
-    bool in_strict_mode() const
-    {
-        return running_execution_context().is_strict_mode;
-    }
+    SharedFunctionInstanceData* active_shared_function_data();
 
     size_t argument_count() const
     {
-        return running_execution_context().arguments.size();
+        return running_execution_context().argument_count;
     }
 
     Value argument(size_t index) const
@@ -196,18 +339,21 @@ public:
 
     StackInfo const& stack_info() const { return m_stack_info; }
 
+    InterpreterStack& interpreter_stack() { return m_interpreter_stack; }
+
     HashMap<Utf16String, GC::Ref<Symbol>> const& global_symbol_registry() const { return m_global_symbol_registry; }
     HashMap<Utf16String, GC::Ref<Symbol>>& global_symbol_registry() { return m_global_symbol_registry; }
 
     u32 execution_generation() const { return m_execution_generation; }
     void finish_execution_generation() { ++m_execution_generation; }
+    FlatPtr primitive_storage_cage_base() const { return m_primitive_storage_cage_base; }
 
-    ThrowCompletionOr<Reference> resolve_binding(Utf16FlyString const&, Environment* = nullptr);
-    ThrowCompletionOr<Reference> get_identifier_reference(Environment*, Utf16FlyString, bool strict, size_t hops = 0);
+    ThrowCompletionOr<Reference> resolve_binding(Utf16FlyString const&, Strict, Environment* = nullptr);
+    ThrowCompletionOr<Reference> get_identifier_reference(Environment*, Utf16FlyString, Strict, size_t hops = 0);
 
     // 5.2.3.2 Throw an Exception, https://tc39.es/ecma262/#sec-throw-an-exception
     template<typename T, typename... Args>
-    Completion throw_completion(Args&&... args)
+    COLD Completion throw_completion(Args&&... args)
     {
         auto& realm = *current_realm();
         auto completion = T::create(realm, forward<Args>(args)...);
@@ -216,13 +362,17 @@ public:
     }
 
     template<typename T>
-    Completion throw_completion(ErrorType const& type)
+    COLD Completion throw_completion(ErrorType const& type)
     {
-        return throw_completion<T>(type.message());
+        auto& realm = *current_realm();
+        if constexpr (requires { T::create(realm, type.message()); })
+            return throw_completion<T>(type.message());
+        else
+            return throw_completion<T>(Utf16String::from_utf16(type.message()));
     }
 
     template<typename T, typename... Args>
-    Completion throw_completion(ErrorType const& type, Args&&... args)
+    COLD Completion throw_completion(ErrorType const& type, Args&&... args)
     {
         return throw_completion<T>(Utf16String::formatted(type.format(), forward<Args>(args)...));
     }
@@ -272,9 +422,6 @@ public:
     void clear_execution_context_stack();
     void restore_execution_context_stack();
 
-    // Do not call this method unless you are sure this is the only and first module to be loaded in this vm.
-    ThrowCompletionOr<void> link_and_eval_module(Badge<Bytecode::Interpreter>, SourceTextModule& module);
-
     ScriptOrModule get_active_script_or_module() const;
 
     // 16.2.1.10 HostLoadImportedModule ( referrer, moduleRequest, hostDefined, payload ), https://tc39.es/ecma262/#sec-HostLoadImportedModule
@@ -293,14 +440,15 @@ public:
     Function<void(GC::Ref<GC::Function<ThrowCompletionOr<Value>()>>, Realm*)> host_enqueue_promise_job;
     Function<GC::Ref<JobCallback>(FunctionObject&)> host_make_job_callback;
     Function<GC::Ptr<PrimitiveString>(Object const&)> host_get_code_for_eval;
-    Function<ThrowCompletionOr<void>(Realm&, ReadonlySpan<String>, StringView, StringView, CompilationType, ReadonlySpan<Value>, Value)> host_ensure_can_compile_strings;
+    Function<ThrowCompletionOr<void>(Realm&, ReadonlySpan<Utf16String>, Utf16View, Utf16View, CompilationType, ReadonlySpan<Value>, Value)> host_ensure_can_compile_strings;
     Function<ThrowCompletionOr<void>(Object&)> host_ensure_can_add_private_element;
     Function<ThrowCompletionOr<HandledByHost>(ArrayBuffer&, size_t)> host_resize_array_buffer;
-    Function<void(StringView)> host_unrecognized_date_string;
-    Function<ThrowCompletionOr<void>(Realm&, NonnullOwnPtr<ExecutionContext>, ShadowRealm&)> host_initialize_shadow_realm;
+    Function<ThrowCompletionOr<HandledByHost>(ArrayBuffer&, size_t)> host_grow_shared_array_buffer;
+    Function<void(Utf16View)> host_unrecognized_date_string;
     Function<Crypto::SignedBigInteger(Object const& global)> host_system_utc_epoch_nanoseconds;
+    Function<bool()> host_promise_job_queue_is_empty;
 
-    Vector<StackTraceElement> stack_trace() const;
+    [[nodiscard]] Vector<StackTraceElement> stack_trace() const;
 
 private:
     using ErrorMessages = AK::Array<Utf16String, to_underlying(ErrorMessage::__Count)>;
@@ -314,30 +462,87 @@ private:
 
     explicit VM(ErrorMessages);
 
+    template<typename Callback>
+    static void for_each_execution_context_top_to_bottom(Vector<ExecutionContext*> const& execution_context_stack, Vector<ExecutionContext*> const& execution_context_stack_previous_running_contexts, ExecutionContext* running_execution_context, Callback callback)
+    {
+        VERIFY(execution_context_stack.size() == execution_context_stack_previous_running_contexts.size());
+
+        if (!running_execution_context) {
+            for (size_t i = execution_context_stack.size(); i-- > 0;) {
+                if (!callback(*execution_context_stack[i]))
+                    return;
+            }
+            return;
+        }
+
+        if (execution_context_stack.is_empty()) {
+            for (auto* execution_context = running_execution_context; execution_context; execution_context = execution_context->caller_frame) {
+                if (!callback(*execution_context))
+                    return;
+            }
+            return;
+        }
+
+        auto stack_index = execution_context_stack.size();
+        auto* execution_context = running_execution_context;
+        while (execution_context) {
+            if (!callback(*execution_context))
+                return;
+            if (stack_index > 0 && execution_context == execution_context_stack[stack_index - 1]) {
+                execution_context = execution_context_stack_previous_running_contexts[stack_index - 1];
+                --stack_index;
+                continue;
+            }
+
+            execution_context = execution_context->caller_frame;
+        }
+
+        VERIFY(stack_index == 0);
+    }
+
+    struct SavedExecutionContextStack {
+        Vector<ExecutionContext*> stack;
+        Vector<ExecutionContext*> previous_running_contexts;
+        ExecutionContext* running_execution_context { nullptr };
+    };
+
     void load_imported_module(ImportedModuleReferrer, ModuleRequest const&, GC::Ptr<GraphLoadingState::HostDefined>, ImportedModulePayload);
     ThrowCompletionOr<void> link_and_eval_module(CyclicModule&);
+    ThrowCompletionOr<void> link_and_eval_module(SourceTextModule&);
 
     void set_well_known_symbols(WellKnownSymbols well_known_symbols) { m_well_known_symbols = move(well_known_symbols); }
 
     void run_queued_promise_jobs_impl();
 
-    HashMap<String, GC::Ptr<PrimitiveString>> m_string_cache;
+    static VM* s_the;
+
     HashMap<Utf16String, GC::Ptr<PrimitiveString>> m_utf16_string_cache;
+
+    static constexpr size_t numeric_string_cache_size = 1000;
+    AK::Array<GC::Ptr<PrimitiveString>, numeric_string_cache_size> m_numeric_string_cache;
 
     GC::Heap m_heap;
 
     Vector<ExecutionContext*> m_execution_context_stack;
+    // Base pushes may happen while an inline JS-to-JS frame is running, and
+    // TemporaryExecutionContext can push the same context multiple times. Keep
+    // the previous running context for each base push so we can restore and
+    // walk the full active stack without relying on caller_frame there.
+    Vector<ExecutionContext*> m_execution_context_stack_previous_running_contexts;
+    ExecutionContext* m_running_execution_context { nullptr };
 
-    Vector<Vector<ExecutionContext*>> m_saved_execution_context_stacks;
+    Vector<SavedExecutionContextStack> m_saved_execution_context_stacks;
 
     StackInfo m_stack_info;
+
+    InterpreterStack m_interpreter_stack;
 
     // GlobalSymbolRegistry, https://tc39.es/ecma262/#table-globalsymbolregistry-record-fields
     HashMap<Utf16String, GC::Ref<Symbol>> m_global_symbol_registry;
 
     Vector<GC::Ref<GC::Function<ThrowCompletionOr<Value>()>>> m_promise_jobs;
 
-    Vector<GC::Ptr<FinalizationRegistry>> m_finalization_registry_cleanup_jobs;
+    Vector<GC::Ref<FinalizationRegistry>> m_finalization_registry_cleanup_jobs;
 
     GC::Ptr<PrimitiveString> m_empty_string;
     GC::Ptr<PrimitiveString> m_single_ascii_character_strings[128] {};
@@ -358,10 +563,12 @@ private:
     WellKnownSymbols m_well_known_symbols;
 
     u32 m_execution_generation { 0 };
+    FlatPtr m_primitive_storage_cage_base { 0 };
+    u32 m_run_executable_depth { 0 };
+    u32 m_module_execution_depth { 0 };
+    u64 m_module_async_evaluation_count { 0 }; // [[ModuleAsyncEvaluationCount]]
 
     OwnPtr<Agent> m_agent;
-
-    OwnPtr<Bytecode::Interpreter> m_bytecode_interpreter;
 
     bool m_dynamic_imports_allowed { false };
 };
@@ -377,5 +584,7 @@ template<typename GlobalObjectType, typename... Args>
         nullptr));
     return root_execution_context;
 }
+
+ALWAYS_INLINE VM& Cell::vm() const { return VM::the(); }
 
 }

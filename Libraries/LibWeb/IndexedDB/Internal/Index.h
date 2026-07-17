@@ -15,7 +15,7 @@
 
 namespace Web::IndexedDB {
 
-using KeyPath = Variant<String, Vector<String>>;
+using KeyPath = Variant<Utf16String, Vector<Utf16String>>;
 
 // https://w3c.github.io/IndexedDB/#index-construct
 class Index : public JS::Cell {
@@ -23,16 +23,19 @@ class Index : public JS::Cell {
     GC_DECLARE_ALLOCATOR(Index);
 
 public:
-    [[nodiscard]] static GC::Ref<Index> create(JS::Realm&, GC::Ref<ObjectStore>, String const&, KeyPath const&, bool, bool);
+    [[nodiscard]] static GC::Ref<Index> create(JS::Realm&, GC::Ref<ObjectStore>, Utf16String const&, KeyPath const&, bool, bool);
     virtual ~Index();
 
-    void set_name(String name);
-    [[nodiscard]] String name() const { return m_name; }
+    void set_name(Utf16String name);
+    [[nodiscard]] Utf16String name() const { return m_name; }
     [[nodiscard]] bool unique() const { return m_unique; }
     [[nodiscard]] bool multi_entry() const { return m_multi_entry; }
     [[nodiscard]] GC::Ref<ObjectStore> object_store() const { return m_object_store; }
     [[nodiscard]] AK::ReadonlySpan<IndexRecord> records() const { return m_records; }
     [[nodiscard]] KeyPath const& key_path() const { return m_key_path; }
+
+    [[nodiscard]] bool is_deleted() const { return m_deleted; }
+    void set_deleted(bool deleted) { m_deleted = deleted; }
 
     [[nodiscard]] bool has_record_with_key(GC::Ref<Key> key);
     void clear_records();
@@ -41,15 +44,16 @@ public:
     GC::ConservativeVector<IndexRecord> last_n_in_range(GC::Ref<IDBKeyRange> range, Optional<WebIDL::UnsignedLong> count);
     u64 count_records_in_range(GC::Ref<IDBKeyRange> range);
     void store_a_record(IndexRecord const& record);
+    void remove_record(IndexRecord const& record);
     void remove_records_with_value_in_range(GC::Ref<IDBKeyRange> range);
 
-    HTML::SerializationRecord referenced_value(IndexRecord const& index_record) const;
+    HTML::StorageSerializationRecord const& referenced_value(IndexRecord const& index_record) const;
 
 protected:
     virtual void visit_edges(Visitor&) override;
 
 private:
-    Index(GC::Ref<ObjectStore>, String const&, KeyPath const&, bool, bool);
+    Index(GC::Ref<ObjectStore>, Utf16String const&, KeyPath const&, bool, bool);
 
     // An index [...] has a referenced object store.
     GC::Ref<ObjectStore> m_object_store;
@@ -58,7 +62,7 @@ private:
     Vector<IndexRecord> m_records;
 
     // An index has a name, which is a name. At any one time, the name is unique within index’s referenced object store.
-    String m_name;
+    Utf16String m_name;
 
     // An index has a unique flag. When true, the index enforces that no two records in the index has the same key.
     bool m_unique { false };
@@ -68,6 +72,8 @@ private:
 
     // The keys are derived from the referenced object store’s values using a key path.
     KeyPath m_key_path;
+
+    bool m_deleted { false };
 };
 
 }

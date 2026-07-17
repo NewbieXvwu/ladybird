@@ -23,22 +23,34 @@ class HTMLIFrameElement final
 public:
     virtual ~HTMLIFrameElement() override;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
     // ^EventTarget
-    virtual bool is_focusable() const override { return true; }
+    virtual bool is_focusable() const override
+    {
+        return meets_focusable_area_rendering_requirements();
+    }
 
     void set_current_navigation_was_lazy_loaded(bool value);
 
     Optional<HighResolutionTime::DOMHighResTimeStamp> const& pending_resource_start_time() const { return m_pending_resource_start_time; }
     void set_pending_resource_start_time(Optional<HighResolutionTime::DOMHighResTimeStamp> time) { m_pending_resource_start_time = time; }
 
+    Optional<URL::URL> const& pending_resource_timing_url() const { return m_pending_resource_timing_url; }
+    void set_pending_resource_timing_url(Optional<URL::URL> url) { m_pending_resource_timing_url = url; }
+
     GC::Ref<DOM::DOMTokenList> sandbox();
 
     SandboxingFlagSet iframe_sandboxing_flag_set() const { return m_iframe_sandboxing_flag_set; }
 
+    TrustedTypes::TrustedHTMLOrString srcdoc();
+    WebIDL::ExceptionOr<void> set_srcdoc(TrustedTypes::TrustedHTMLOrString const& value);
+
     virtual void visit_edges(Cell::Visitor&) override;
+
+    void set_iframe_fullscreen_flag(bool iframe_fullscreen_flag) { m_iframe_fullscreen_flag = iframe_fullscreen_flag; }
+    bool iframe_fullscreen_flag() const { return m_iframe_fullscreen_flag; }
 
 private:
     HTMLIFrameElement(DOM::Document&, DOM::QualifiedName);
@@ -50,11 +62,11 @@ private:
 
     // ^DOM::Element
     virtual void post_connection() override;
-    virtual void removed_from(Node* old_parent, Node& old_root) override;
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
     virtual i32 default_tab_index_value() const override;
-    virtual bool is_presentational_hint(FlyString const&) const override;
-    virtual void apply_presentational_hints(GC::Ref<CSS::CascadedProperties>) const override;
+    virtual bool is_presentational_hint(Utf16FlyString const&) const override;
+    virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
 
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-iframe-element:dimension-attributes
     virtual bool supports_dimension_attributes() const override { return true; }
@@ -65,8 +77,14 @@ private:
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#current-navigation-was-lazy-loaded
     bool m_current_navigation_was_lazy_loaded { false };
 
+    // https://fullscreen.spec.whatwg.org/#iframe-fullscreen-flag
+    bool m_iframe_fullscreen_flag { false };
+
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#iframe-pending-resource-timing-start-time
     Optional<HighResolutionTime::DOMHighResTimeStamp> m_pending_resource_start_time = {};
+
+    // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#iframe-pending-resource-timing-url
+    Optional<URL::URL> m_pending_resource_timing_url {};
 
     GC::Ptr<DOM::DOMTokenList> m_sandbox;
 
@@ -74,7 +92,9 @@ private:
     SandboxingFlagSet m_iframe_sandboxing_flag_set {};
 };
 
-void run_iframe_load_event_steps(HTML::HTMLIFrameElement&);
+WEB_API void run_iframe_load_event_steps(HTML::HTMLIFrameElement&);
+
+ReferrerPolicy::ReferrerPolicy determine_iframe_element_referrer_policy(GC::Ptr<DOM::Element> embedder);
 
 }
 

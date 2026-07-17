@@ -33,11 +33,12 @@ void LiveNodeList::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_root);
+    visitor.visit_possible_values(m_filter.raw_capture_range());
 }
 
 GC::RootVector<Node*> LiveNodeList::collection() const
 {
-    GC::RootVector<Node*> nodes(heap());
+    GC::RootVector<Node*> nodes;
     if (m_scope == Scope::Descendants) {
         m_root->for_each_in_subtree([&](auto& node) {
             if (m_filter(node))

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<video autoplay id="video" src="../../../Assets/test-webm.webm" muted></video>
+<script src="../include.js"></script>
+<script>
+  asyncTest(done => {
+    setTimeout(() => {
+      println("FAIL: timeout waiting for autoplay");
+      done();
+    }, 10_000);
+
+    function autoplayed() {
+      println("PASS: autoplay working");
+      done();
+    }
+    if (video.paused) {
+      video.onplaying = autoplayed;
+    } else {
+      autoplayed();
+    }
+  });
+</script>

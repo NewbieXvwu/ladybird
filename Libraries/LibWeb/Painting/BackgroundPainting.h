@@ -9,17 +9,16 @@
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/BorderPainting.h>
+#include <LibWeb/Painting/BorderRadiiData.h>
 
 namespace Web::Painting {
 
 struct ResolvedBackgroundLayerData {
-    RefPtr<CSS::AbstractImageStyleValue const> background_image;
+    NonnullRefPtr<CSS::AbstractImageStyleValue const> background_image;
     CSS::BackgroundAttachment attachment;
     CSS::BackgroundBox clip;
-    CSS::PositionEdge position_edge_x;
-    CSS::PositionEdge position_edge_y;
-    CSSPixels offset_x;
-    CSSPixels offset_y;
+    CSSPixels position_x;
+    CSSPixels position_y;
     CSSPixelRect background_positioning_area;
     CSSPixelRect image_rect;
     CSS::Repetition repeat_x;
@@ -46,8 +45,8 @@ struct ResolvedBackground {
     Color color {};
 };
 
-WEB_API ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> const& layers, PaintableBox const& paintable_box, Color background_color, CSSPixelRect const& border_rect, BorderRadiiData const& border_radii);
+WEB_API ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> const& layers, Paintable const& paintable_box, Color background_color, CSS::BackgroundBox background_color_clip, CSSPixelRect const& border_rect, BorderRadiiData const& border_radii);
 
-WEB_API void paint_background(DisplayListRecordingContext&, PaintableBox const&, CSS::ImageRendering, ResolvedBackground resolved_background, BorderRadiiData const&);
+WEB_API void paint_background(DisplayListRecordingContext&, Paintable const&, CSS::ImageRendering, ResolvedBackground const&, BorderRadiiData const&);
 
 }

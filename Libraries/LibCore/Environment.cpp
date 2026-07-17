@@ -13,9 +13,6 @@
 
 #if defined(AK_OS_MACOS) || defined(AK_OS_IOS)
 #    include <crt_externs.h>
-#elif defined(AK_OS_FREEBSD)
-// FIXME: Remove this once FreeBSD exports environ from libc
-extern "C" __attribute__((weak)) char** environ;
 #elif !defined(AK_OS_WINDOWS)
 extern "C" char** environ;
 #endif
@@ -115,7 +112,7 @@ Optional<StringView> get(StringView name, [[maybe_unused]] SecureOnly secure)
 
 ErrorOr<void> set(StringView name, StringView value, Overwrite overwrite)
 {
-    auto builder = TRY(StringBuilder::create());
+    StringBuilder builder;
     TRY(builder.try_append(name));
     TRY(builder.try_append('\0'));
     TRY(builder.try_append(value));
@@ -137,7 +134,7 @@ ErrorOr<void> set(StringView name, StringView value, Overwrite overwrite)
 
 ErrorOr<void> unset(StringView name)
 {
-    auto builder = TRY(StringBuilder::create());
+    StringBuilder builder;
     TRY(builder.try_append(name));
     TRY(builder.try_append('\0'));
     // Note the explicit null terminator above.

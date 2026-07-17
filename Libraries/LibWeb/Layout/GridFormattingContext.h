@@ -7,30 +7,17 @@
 
 #pragma once
 
+#include <AK/Function.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/CSS/Length.h>
 #include <LibWeb/Layout/FormattingContext.h>
+#include <LibWeb/Layout/GridLayoutData.h>
 
 namespace Web::Layout {
 
 enum class GridDimension {
     Row,
     Column
-};
-
-enum class Alignment {
-    Baseline,
-    Center,
-    End,
-    Normal,
-    Safe,
-    SelfEnd,
-    SelfStart,
-    SpaceAround,
-    SpaceBetween,
-    SpaceEvenly,
-    Start,
-    Stretch,
-    Unsafe,
 };
 
 struct GridPosition {
@@ -40,7 +27,7 @@ struct GridPosition {
 };
 
 struct GridItem {
-    GC::Ref<Box const> box;
+    Box const& box;
     LayoutState::UsedValues& used_values;
 
     // Position and span are empty if the item is auto-placed which could only be the case for abspos items
@@ -76,7 +63,7 @@ struct GridItem {
 
     CSS::ComputedValues const& computed_values() const
     {
-        return box->computed_values();
+        return box.computed_values();
     }
 
     CSS::Size const& minimum_size(GridDimension dimension) const
@@ -132,11 +119,6 @@ struct GridItem {
     }
 };
 
-enum class FoundUnoccupiedPlace {
-    No,
-    Yes
-};
-
 class OccupationGrid {
 public:
     OccupationGrid(size_t columns_count, size_t rows_count)
@@ -166,8 +148,7 @@ public:
     int max_row_index() const { return m_max_row_index; }
 
     bool is_occupied(int column_index, int row_index) const;
-
-    FoundUnoccupiedPlace find_unoccupied_place(GridDimension dimension, int& column_index, int& row_index, int column_span, int row_span) const;
+    bool is_area_occupied(int column_start, int row_start, int column_span, int row_span) const;
 
 private:
     HashTable<GridPosition> m_occupation_grid;
@@ -185,10 +166,9 @@ public:
 
     virtual bool inhibits_floating() const override { return true; }
 
-    virtual void run(AvailableSpace const& available_space) override;
+    virtual void run(LayoutInput const&) override;
     virtual CSSPixels automatic_content_width() const override;
     virtual CSSPixels automatic_content_height() const override;
-    StaticPositionRect calculate_static_position_rect(Box const&) const;
 
     Box const& grid_container() const { return context_box(); }
 
@@ -198,6 +178,8 @@ private:
     void resolve_items_box_metrics(GridDimension dimension);
 
     CSSPixels m_automatic_content_height { 0 };
+    CSSPixels m_row_track_alignment_grid_container_height { 0 };
+    bool m_use_row_track_alignment_grid_container_height { false };
 
     bool is_auto_positioned_track(CSS::GridTrackPlacement const&, CSS::GridTrackPlacement const&) const;
 
@@ -218,19 +200,14 @@ private:
 
         bool is_gap { false };
         bool is_auto_fit { false };
+        bool is_auto_repeat { false };
+        bool is_collapsed { false };
 
-        static GridTrack create_from_definition(CSS::ExplicitGridTrack const& definition, bool is_auto_fit);
+        static GridTrack create_from_definition(CSS::ExplicitGridTrack const& definition, bool is_auto_fit = false, bool is_auto_repeat = false);
         static GridTrack create_auto();
+        static GridTrack create_from_subgrid_parent_track(GridTrack const&);
+        static GridTrack create_fixed(CSSPixels size);
         static GridTrack create_gap(CSSPixels size);
-    };
-
-    struct GridArea {
-        String name;
-        size_t row_start { 0 };
-        size_t row_end { 1 };
-        size_t column_start { 0 };
-        size_t column_end { 1 };
-        bool invalid { false }; /* FIXME: Ignore ignore invalid areas during layout */
     };
 
     Vector<Vector<CSS::GridLineName>> m_row_lines;
@@ -241,14 +218,20 @@ private:
     Vector<GridTrack> m_grid_rows;
     Vector<GridTrack> m_grid_columns;
 
-    bool has_gaps(GridDimension dimension) const
-    {
-        if (dimension == GridDimension::Column) {
-            return !grid_container().computed_values().column_gap().has<CSS::NormalGap>();
-        } else {
-            return !grid_container().computed_values().row_gap().has<CSS::NormalGap>();
-        }
-    }
+    bool is_subgridded_axis(GridDimension) const;
+    GridFormattingContext const* parent_grid_formatting_context() const;
+    GridItem const* grid_item_for_box(Box const&) const;
+    GridItem const* parent_grid_item() const;
+    bool grid_item_is_subgridded_in_axis(GridItem const&, GridDimension) const;
+    void for_each_item_contributing_to_track_sizing(GridDimension, Function<void(GridItem const&)> const&);
+    void for_each_subgrid_item_contributing_to_track_sizing(GridItem const&, GridDimension, Function<void(GridItem const&)> const&);
+    size_t subgrid_track_count(GridDimension) const;
+    CSSPixels parent_gap_size_for_subgrid(GridDimension) const;
+    CSSPixels subgrid_gap_extra_margin(GridDimension, AvailableSize const&) const;
+    void apply_subgrid_edge_extra_margins(GridItem&, GridDimension) const;
+    void apply_subgrid_gap_extra_margins(GridItem&, GridDimension, AvailableSize const&) const;
+    CSSPixels resolved_gap_size(GridDimension, AvailableSize const&) const;
+    bool has_gaps(GridDimension) const;
 
     template<typename Callback>
     void for_each_spanned_track_by_item(GridItem const& item, GridDimension dimension, Callback callback)
@@ -306,6 +289,8 @@ private:
 
     size_t m_explicit_rows_line_count { 0 };
     size_t m_explicit_columns_line_count { 0 };
+    size_t m_explicit_rows_start_line_index { 0 };
+    size_t m_explicit_columns_start_line_index { 0 };
 
     bool m_has_flexible_row_tracks { false };
     bool m_has_flexible_column_tracks { false };
@@ -319,22 +304,31 @@ private:
     Vector<GridItem> m_grid_items;
 
     Optional<AvailableSpace> m_available_space;
+    Optional<LayoutInput> m_layout_input;
+    ContainingBlockConstraints grid_area_constraints_for_item(GridItem const&) const;
+    ContainingBlockConstraints track_sizing_constraints_for_items() const;
+    ContainingBlockConstraints container_derived_constraints() const;
+    Optional<CSSPixels> item_quirks_mode_percentage_basis_height() const;
 
     LayoutState::UsedValues& m_grid_container_used_values;
 
     void determine_grid_container_height();
+    CSSPixels resolve_used_grid_container_height_for_second_row_layout() const;
+    void rerun_row_track_sizing_using_grid_container_height(CSSPixels);
     void determine_intrinsic_size_of_grid_container(AvailableSpace const& available_space);
 
-    void layout_absolutely_positioned_element(Box const&);
+    virtual AbsposContainingBlockInfo resolve_abspos_containing_block_info(Box const&) override;
     virtual void parent_context_did_dimension_child_root_box() override;
 
     void resolve_grid_item_sizes(GridDimension dimension);
 
     void resolve_track_spacing(GridDimension dimension);
+    void save_grid_layout_data();
+    CSSPixels grid_container_size_for_track_alignment(GridDimension dimension) const;
 
     AvailableSize get_free_space(AvailableSpace const&, GridDimension) const;
 
-    Optional<int> get_nth_line_index_by_line_name(GridDimension dimension, String const&, int line_number);
+    Optional<int> get_nth_line_index_by_line_name(GridDimension dimension, Utf16View, int line_number);
     CSSPixels resolve_definite_track_size(CSS::GridSize const&, AvailableSpace const&) const;
     int count_of_repeated_auto_fill_or_fit_tracks(GridDimension, CSS::ExplicitGridTrack const& repeated_track);
 
@@ -346,16 +340,23 @@ private:
         size_t span { 1 };
     };
     PlacementPosition resolve_grid_position(Box const& child_box, GridDimension dimension);
+    size_t resolve_grid_span(Box const& child_box, GridDimension dimension) const;
 
     void place_grid_items();
     void place_item_with_row_and_column_position(Box const& child_box);
     void place_item_with_row_position(Box const& child_box);
-    void place_item_with_column_position(Box const& child_box, int& auto_placement_cursor_x, int& auto_placement_cursor_y);
-    void place_item_with_no_declared_position(Box const& child_box, int& auto_placement_cursor_x, int& auto_placement_cursor_y);
+    void place_item_with_column_position(Box const& child_box, int& auto_placement_cursor_row);
+    void place_item_with_no_declared_position(Box const& child_box, int& auto_placement_cursor_column, int& auto_placement_cursor_row);
+    void clamp_grid_area_to_subgrid(GridDimension, int&, size_t&) const;
+    void clamp_grid_area_to_subgrid(GridItem&) const;
+    bool grid_area_is_occupied(int column_start, int row_start, size_t column_span, size_t row_span) const;
+    void find_unoccupied_grid_area(GridDimension, int& column_index, int& row_index, size_t column_span, size_t row_span) const;
     void record_grid_placement(GridItem);
 
     void initialize_grid_tracks_from_definition(GridDimension);
+    void initialize_grid_tracks_from_subgrid(GridDimension);
     void initialize_grid_tracks_for_columns_and_rows();
+    void initialize_gap_tracks(GridDimension, AvailableSize const&);
     void initialize_gap_tracks(AvailableSpace const&);
 
     void collapse_auto_fit_tracks_if_needed(GridDimension);
@@ -382,7 +383,9 @@ private:
     void stretch_auto_tracks(GridDimension);
     void run_track_sizing(GridDimension);
 
+    bool should_treat_grid_container_maximum_size_as_none(GridDimension) const;
     CSSPixels calculate_grid_container_maximum_size(GridDimension) const;
+    bool should_treat_preferred_size_as_auto_for_intrinsic_contribution(GridItem const&, GridDimension) const;
 
     CSSPixels calculate_min_content_size(GridItem const&, GridDimension) const;
     CSSPixels calculate_max_content_size(GridItem const&, GridDimension) const;
@@ -390,10 +393,14 @@ private:
     CSSPixels calculate_min_content_contribution(GridItem const&, GridDimension) const;
     CSSPixels calculate_max_content_contribution(GridItem const&, GridDimension) const;
 
+    Optional<CSSPixels> calculate_fixed_max_track_size_limit(GridItem const&, GridDimension) const;
     CSSPixels calculate_limited_min_content_contribution(GridItem const&, GridDimension) const;
     CSSPixels calculate_limited_max_content_contribution(GridItem const&, GridDimension) const;
 
     CSSPixels containing_block_size_for_item(GridItem const&, GridDimension) const;
+    Box const& table_box_inside_table_wrapper(GridItem const&) const;
+    void resolve_table_wrapper_grid_item_width(GridItem&, CSSPixels containing_block_width);
+    CSSPixels non_cyclic_containing_block_width_for_table_wrapper(GridItem const&, CSSPixels containing_block_width) const;
 
     CSSPixelRect get_grid_area_rect(GridItem const&) const;
 

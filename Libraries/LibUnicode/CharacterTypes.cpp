@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, Tim Flynn <trflynn89@serenityos.org>
+ * Copyright (c) 2021-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,12 +7,17 @@
 #include <AK/Array.h>
 #include <AK/CharacterTypes.h>
 #include <AK/Find.h>
+#include <AK/HashMap.h>
+#include <AK/NeverDestroyed.h>
+#include <AK/NonnullOwnPtr.h>
 #include <AK/Traits.h>
 #include <LibUnicode/CharacterTypes.h>
 #include <LibUnicode/ICU.h>
 
 #include <unicode/uchar.h>
+#include <unicode/uniset.h>
 #include <unicode/uscript.h>
+#include <unicode/uset.h>
 
 namespace Unicode {
 
@@ -49,6 +54,18 @@ static constexpr GeneralCategory GENERAL_CATEGORY_SEPARATOR = U_CHAR_CATEGORY_CO
 static constexpr GeneralCategory GENERAL_CATEGORY_OTHER = U_CHAR_CATEGORY_COUNT + 8;
 static constexpr GeneralCategory GENERAL_CATEGORY_LIMIT = U_CHAR_CATEGORY_COUNT + 9;
 
+static auto& category_sets_with_case_closure()
+{
+    static NeverDestroyed<HashMap<GeneralCategory, NonnullOwnPtr<icu::UnicodeSet>>> sets;
+    return *sets;
+}
+
+static auto& property_sets_with_case_closure()
+{
+    static NeverDestroyed<HashMap<Property, NonnullOwnPtr<icu::UnicodeSet>>> sets;
+    return *sets;
+}
+
 Optional<GeneralCategory> general_category_from_string(StringView general_category)
 {
     static auto general_category_names = []() {
@@ -83,29 +100,49 @@ Optional<GeneralCategory> general_category_from_string(StringView general_catego
     return {};
 }
 
-bool code_point_has_general_category(u32 code_point, GeneralCategory general_category)
+static uint32_t get_icu_mask(GeneralCategory general_category)
+{
+    if (general_category == GENERAL_CATEGORY_CASED_LETTER)
+        return U_GC_LC_MASK;
+    if (general_category == GENERAL_CATEGORY_LETTER)
+        return U_GC_L_MASK;
+    if (general_category == GENERAL_CATEGORY_MARK)
+        return U_GC_M_MASK;
+    if (general_category == GENERAL_CATEGORY_NUMBER)
+        return U_GC_N_MASK;
+    if (general_category == GENERAL_CATEGORY_PUNCTUATION)
+        return U_GC_P_MASK;
+    if (general_category == GENERAL_CATEGORY_SYMBOL)
+        return U_GC_S_MASK;
+    if (general_category == GENERAL_CATEGORY_SEPARATOR)
+        return U_GC_Z_MASK;
+    if (general_category == GENERAL_CATEGORY_OTHER)
+        return U_GC_C_MASK;
+
+    return U_MASK(static_cast<UCharCategory>(general_category.value()));
+}
+
+bool code_point_has_general_category(u32 code_point, GeneralCategory general_category, CaseSensitivity case_sensitivity)
 {
     auto icu_code_point = static_cast<UChar32>(code_point);
-    auto icu_general_category = static_cast<UCharCategory>(general_category.value());
+    auto category_mask = get_icu_mask(general_category);
 
-    if (general_category == GENERAL_CATEGORY_CASED_LETTER)
-        return (U_GET_GC_MASK(icu_code_point) & U_GC_LC_MASK) != 0;
-    if (general_category == GENERAL_CATEGORY_LETTER)
-        return (U_GET_GC_MASK(icu_code_point) & U_GC_L_MASK) != 0;
-    if (general_category == GENERAL_CATEGORY_MARK)
-        return (U_GET_GC_MASK(icu_code_point) & U_GC_M_MASK) != 0;
-    if (general_category == GENERAL_CATEGORY_NUMBER)
-        return (U_GET_GC_MASK(icu_code_point) & U_GC_N_MASK) != 0;
-    if (general_category == GENERAL_CATEGORY_PUNCTUATION)
-        return (U_GET_GC_MASK(icu_code_point) & U_GC_P_MASK) != 0;
-    if (general_category == GENERAL_CATEGORY_SYMBOL)
-        return (U_GET_GC_MASK(icu_code_point) & U_GC_S_MASK) != 0;
-    if (general_category == GENERAL_CATEGORY_SEPARATOR)
-        return (U_GET_GC_MASK(icu_code_point) & U_GC_Z_MASK) != 0;
-    if (general_category == GENERAL_CATEGORY_OTHER)
-        return (U_GET_GC_MASK(icu_code_point) & U_GC_C_MASK) != 0;
+    if ((U_GET_GC_MASK(icu_code_point) & category_mask) != 0)
+        return true;
 
-    return u_charType(icu_code_point) == icu_general_category;
+    if (case_sensitivity == CaseSensitivity::CaseSensitive)
+        return false;
+
+    auto& set = category_sets_with_case_closure().ensure(general_category, [&] {
+        UErrorCode status = U_ZERO_ERROR;
+        auto new_set = make<icu::UnicodeSet>();
+        new_set->applyIntPropertyValue(UCHAR_GENERAL_CATEGORY_MASK, static_cast<int32_t>(category_mask), status);
+        new_set->closeOver(USET_CASE_INSENSITIVE);
+        new_set->freeze();
+        return new_set;
+    });
+
+    return set->contains(icu_code_point);
 }
 
 bool code_point_is_printable(u32 code_point)
@@ -121,6 +158,11 @@ bool code_point_has_control_general_category(u32 code_point)
 bool code_point_has_letter_general_category(u32 code_point)
 {
     return code_point_has_general_category(code_point, GENERAL_CATEGORY_LETTER);
+}
+
+bool code_point_has_mark_general_category(u32 code_point)
+{
+    return code_point_has_general_category(code_point, GENERAL_CATEGORY_MARK);
 }
 
 bool code_point_has_number_general_category(u32 code_point)
@@ -181,19 +223,34 @@ Optional<Property> property_from_string(StringView property)
     return {};
 }
 
-bool code_point_has_property(u32 code_point, Property property)
+bool code_point_has_property(u32 code_point, Property property, CaseSensitivity case_sensitivity)
 {
     auto icu_code_point = static_cast<UChar32>(code_point);
-    auto icu_property = static_cast<UProperty>(property.value());
 
     if (property == PROPERTY_ANY)
         return is_unicode(code_point);
     if (property == PROPERTY_ASCII)
         return is_ascii(code_point);
     if (property == PROPERTY_ASSIGNED)
-        return u_isdefined(icu_code_point);
+        return u_isdefined(icu_code_point) != 0;
 
-    return static_cast<bool>(u_hasBinaryProperty(icu_code_point, icu_property));
+    auto icu_property = static_cast<UProperty>(property.value());
+    if (u_hasBinaryProperty(icu_code_point, icu_property))
+        return true;
+
+    if (case_sensitivity == CaseSensitivity::CaseSensitive)
+        return false;
+
+    auto& set = property_sets_with_case_closure().ensure(property, [&] {
+        UErrorCode status = U_ZERO_ERROR;
+        auto new_set = make<icu::UnicodeSet>();
+        new_set->applyIntPropertyValue(icu_property, 1, status);
+        new_set->closeOver(USET_CASE_INSENSITIVE);
+        new_set->freeze();
+        return new_set;
+    });
+
+    return set->contains(icu_code_point);
 }
 
 bool code_point_has_emoji_property(u32 code_point)
@@ -209,6 +266,11 @@ bool code_point_has_emoji_modifier_base_property(u32 code_point)
 bool code_point_has_emoji_presentation_property(u32 code_point)
 {
     return code_point_has_property(code_point, UCHAR_EMOJI_PRESENTATION);
+}
+
+bool code_point_has_default_ignorable_code_point_property(u32 code_point)
+{
+    return code_point_has_property(code_point, UCHAR_DEFAULT_IGNORABLE_CODE_POINT);
 }
 
 bool code_point_has_identifier_start_property(u32 code_point)
@@ -297,6 +359,56 @@ bool is_ecma262_property(Property property)
     default:
         return false;
     }
+}
+
+// https://tc39.es/ecma262/#table-binary-unicode-properties-of-strings
+bool is_ecma262_string_property(Property property)
+{
+    switch (property.value()) {
+    case UCHAR_BASIC_EMOJI:
+    case UCHAR_EMOJI_KEYCAP_SEQUENCE:
+    case UCHAR_RGI_EMOJI:
+    case UCHAR_RGI_EMOJI_FLAG_SEQUENCE:
+    case UCHAR_RGI_EMOJI_TAG_SEQUENCE:
+    case UCHAR_RGI_EMOJI_MODIFIER_SEQUENCE:
+    case UCHAR_RGI_EMOJI_ZWJ_SEQUENCE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+Vector<String> get_property_strings(Property property)
+{
+    Vector<String> result;
+
+    if (!is_ecma262_string_property(property))
+        return result;
+
+    UErrorCode status = U_ZERO_ERROR;
+    auto const* icu_set = u_getBinaryPropertySet(static_cast<UProperty>(property.value()), &status);
+    if (!icu_success(status) || !icu_set)
+        return result;
+
+    auto const* unicode_set = icu::UnicodeSet::fromUSet(icu_set);
+    if (!unicode_set)
+        return result;
+
+    auto range_count = unicode_set->getRangeCount();
+    for (int32_t i = 0; i < range_count; ++i) {
+        auto start = unicode_set->getRangeStart(i);
+        auto end = unicode_set->getRangeEnd(i);
+
+        for (auto code_point = start; code_point <= end; ++code_point) {
+            result.append(String::from_code_point(code_point));
+        }
+    }
+
+    for (auto const& str : unicode_set->strings()) {
+        result.append(icu_string_to_string(str));
+    }
+
+    return result;
 }
 
 Optional<Script> script_from_string(StringView script)
@@ -406,4 +518,444 @@ BidiClass bidirectional_class(u32 code_point)
     return char_direction_to_bidi_class(direction);
 }
 
+LineBreakClass line_break_class(u32 code_point)
+{
+    auto icu_code_point = static_cast<UChar32>(code_point);
+    auto icu_line_break = static_cast<ULineBreak>(u_getIntPropertyValue(icu_code_point, UCHAR_LINE_BREAK));
+
+    switch (icu_line_break) {
+    case U_LB_ALPHABETIC:
+    case U_LB_HEBREW_LETTER:
+        return LineBreakClass::Alphabetic;
+    case U_LB_NUMERIC:
+        return LineBreakClass::Numeric;
+    case U_LB_IDEOGRAPHIC:
+    case U_LB_H2:
+    case U_LB_H3:
+        return LineBreakClass::Ideographic;
+    case U_LB_AMBIGUOUS:
+        return LineBreakClass::Ambiguous;
+    case U_LB_COMPLEX_CONTEXT:
+        return LineBreakClass::ComplexContext;
+    case U_LB_COMBINING_MARK:
+        return LineBreakClass::CombiningMark;
+    default:
+        return LineBreakClass::Other;
+    }
+}
+
+// 22.2.2.7.3 Canonicalize ( rer, ch ), https://tc39.es/ecma262/#sec-runtime-semantics-canonicalize-ch
+u32 canonicalize(u32 code_point, bool unicode_mode)
+{
+    // 1. If HasEitherUnicodeFlag(rer) is true and rer.[[IgnoreCase]] is true, then
+    //    a. If the file CaseFolding.txt of the Unicode Character Database provides a simple or common case folding mapping for ch, return the result of applying that mapping to ch.
+    //    b. Return ch.
+    if (unicode_mode)
+        return u_foldCase(static_cast<UChar32>(code_point), U_FOLD_CASE_DEFAULT);
+
+    // 2. If rer.[[IgnoreCase]] is false, return ch.
+    // NOTE: This is handled by the caller.
+
+    // 3. Assert: ch is a UTF-16 code unit.
+    // 4. Let cp be the code point whose numeric value is the numeric value of ch.
+    // NOTE: We already have a code point.
+
+    // 5. Let u be toUppercase(« cp »), according to the Unicode Default Case Conversion algorithm.
+    // 6. Let uStr be CodePointsToString(u).
+
+    // OPTIMIZATION: For ASCII characters, toUppercase is just to_ascii_uppercase.
+    //               Conditions in 7 & 9 are trivially satisfied (ASCII always maps to a single code point, and the result stays in the same range).
+    if (code_point < 128)
+        return to_ascii_uppercase(code_point);
+
+    auto code_point_string = String::from_code_point(code_point);
+    auto uppercased = code_point_string.to_uppercase();
+    if (uppercased.is_error())
+        return code_point;
+
+    auto code_points = uppercased.value().code_points();
+
+    // 7. If the length of uStr ≠ 1, return ch.
+    if (code_points.length() != 1)
+        return code_point;
+
+    // 8. Let cu be uStr's single code unit element.
+    auto it = code_points.begin();
+    auto uppercased_code_point = *it;
+
+    // 9. If the numeric value of ch ≥ 128 and the numeric value of cu < 128, return ch.
+    if (code_point >= 128 && uppercased_code_point < 128)
+        return code_point;
+
+    // 10. Return cu.
+    return uppercased_code_point;
+}
+
+Vector<CodePointRange> expand_range_case_insensitive(u32 from, u32 to)
+{
+    icu::UnicodeSet set(static_cast<UChar32>(from), static_cast<UChar32>(to));
+    set.closeOver(USET_CASE_INSENSITIVE);
+
+    Vector<CodePointRange> result;
+    auto range_count = set.getRangeCount();
+    result.ensure_capacity(range_count);
+
+    for (int32_t i = 0; i < range_count; ++i)
+        result.unchecked_append({ static_cast<u32>(set.getRangeStart(i)), static_cast<u32>(set.getRangeEnd(i)) });
+
+    return result;
+}
+
+void for_each_case_folded_code_point(u32 code_point, Function<IterationDecision(u32)> callback)
+{
+    u32 canonical = canonicalize(code_point, true);
+
+    icu::UnicodeSet closure(static_cast<UChar32>(canonical), static_cast<UChar32>(canonical));
+    closure.closeOver(USET_CASE_INSENSITIVE);
+
+    auto range_count = closure.getRangeCount();
+    for (int32_t i = 0; i < range_count; ++i) {
+        auto start = closure.getRangeStart(i);
+        auto end = closure.getRangeEnd(i);
+        for (auto cp = start; cp <= end; ++cp) {
+            if (callback(static_cast<u32>(cp)) == IterationDecision::Break)
+                return;
+        }
+    }
+}
+
+bool code_point_matches_range_ignoring_case(u32 code_point, u32 from, u32 to, bool unicode_mode)
+{
+    if (code_point >= from && code_point <= to)
+        return true;
+
+    icu::UnicodeSet candidates(static_cast<UChar32>(code_point), static_cast<UChar32>(code_point));
+    candidates.closeOver(USET_CASE_INSENSITIVE);
+    candidates.retain(static_cast<UChar32>(from), static_cast<UChar32>(to));
+
+    if (candidates.isEmpty())
+        return false;
+
+    auto canonical_ch = canonicalize(code_point, unicode_mode);
+    auto range_count = candidates.getRangeCount();
+    for (auto i = 0; i < range_count; ++i) {
+        auto start = candidates.getRangeStart(i);
+        auto end = candidates.getRangeEnd(i);
+
+        for (auto candidate_cp = start; candidate_cp <= end; ++candidate_cp) {
+            if (canonicalize(candidate_cp, unicode_mode) == canonical_ch)
+                return true;
+        }
+    }
+
+    return false;
+}
+
+}
+
+enum class ResolvedPropertyKind : u8 {
+    Script,
+    ScriptExtension,
+    GeneralCategory,
+    BinaryProperty,
+};
+
+static constexpr StringView string_view_from_ffi(unsigned char const* string, size_t length)
+{
+    VERIFY(string);
+    return { reinterpret_cast<char const*>(string), length };
+}
+
+static constexpr Optional<StringView> optional_string_view_from_ffi(unsigned char const* string, size_t length)
+{
+    if (string)
+        return string_view_from_ffi(string, length);
+    return {};
+}
+
+static bool has_property(u32 code_point, StringView name, Optional<StringView> value)
+{
+    if (value.has_value()) {
+        if (name.is_one_of("sc"sv, "Script"sv, "scx"sv, "Script_Extensions"sv)) {
+            if (auto script = Unicode::script_from_string(*value); script.has_value()) {
+                if (name.is_one_of("sc"sv, "Script"sv))
+                    return Unicode::code_point_has_script(code_point, *script);
+                return Unicode::code_point_has_script_extension(code_point, *script);
+            }
+        } else if (name.is_one_of("gc"sv, "General_Category"sv)) {
+            if (auto category = Unicode::general_category_from_string(*value); category.has_value())
+                return Unicode::code_point_has_general_category(code_point, *category);
+        }
+
+        return false;
+    }
+
+    if (auto property = Unicode::property_from_string(name); property.has_value())
+        return Unicode::code_point_has_property(code_point, *property);
+
+    if (auto category = Unicode::general_category_from_string(name); category.has_value())
+        return Unicode::code_point_has_general_category(code_point, *category);
+
+    if (auto script = Unicode::script_from_string(name); script.has_value())
+        return Unicode::code_point_has_script(code_point, *script);
+
+    return false;
+}
+
+static bool resolve_property(StringView name, Optional<StringView> value, unsigned char* out_kind, u32* out_id)
+{
+    if (value.has_value()) {
+        if (name.is_one_of("sc"sv, "Script"sv, "scx"sv, "Script_Extensions"sv)) {
+            if (auto script = Unicode::script_from_string(*value); script.has_value()) {
+                *out_kind = to_underlying(name.is_one_of("scx"sv, "Script_Extensions"sv)
+                        ? ResolvedPropertyKind::ScriptExtension
+                        : ResolvedPropertyKind::Script);
+                *out_id = script->value();
+                return true;
+            }
+        } else if (name.is_one_of("gc"sv, "General_Category"sv)) {
+            if (auto category = Unicode::general_category_from_string(*value); category.has_value()) {
+                *out_kind = to_underlying(ResolvedPropertyKind::GeneralCategory);
+                *out_id = category->value();
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    if (auto property = Unicode::property_from_string(name); property.has_value()) {
+        *out_kind = to_underlying(ResolvedPropertyKind::BinaryProperty);
+        *out_id = property->value();
+        return true;
+    }
+
+    if (auto category = Unicode::general_category_from_string(name); category.has_value()) {
+        *out_kind = to_underlying(ResolvedPropertyKind::GeneralCategory);
+        *out_id = category->value();
+        return true;
+    }
+
+    if (auto script = Unicode::script_from_string(name); script.has_value()) {
+        *out_kind = to_underlying(ResolvedPropertyKind::Script);
+        *out_id = script->value();
+        return true;
+    }
+
+    return false;
+}
+
+extern "C" {
+
+bool unicode_property_matches(u32, unsigned char const*, size_t, unsigned char const*, size_t);
+bool unicode_property_matches_case_insensitive(u32, unsigned char const*, size_t, unsigned char const*, size_t);
+bool unicode_property_all_case_equivalents_match(u32, unsigned char const*, size_t, unsigned char const*, size_t);
+
+bool unicode_resolve_property(unsigned char const*, size_t, unsigned char const*, size_t, unsigned char*, u32*);
+bool unicode_resolved_property_matches(u32, unsigned char, u32);
+
+bool unicode_code_point_has_space_separator_general_category(u32);
+
+bool unicode_code_point_has_identifier_start_property(u32);
+bool unicode_code_point_has_identifier_continue_property(u32);
+
+bool unicode_is_string_property(unsigned char const*, size_t);
+bool unicode_is_valid_ecma262_property(unsigned char const*, size_t, unsigned char const*, size_t);
+u32 unicode_get_string_property_data(unsigned char const*, size_t, u32*, u32);
+
+u32 unicode_simple_case_fold(u32, bool);
+
+bool unicode_code_point_matches_range_ignoring_case(u32, u32, u32, bool);
+u32 unicode_get_case_closure(u32, u32*, u32);
+}
+
+extern "C" bool unicode_property_matches(
+    u32 code_point,
+    unsigned char const* name_ptr, size_t name_len,
+    unsigned char const* value_ptr, size_t value_len)
+{
+    auto name = string_view_from_ffi(name_ptr, name_len);
+    auto value = optional_string_view_from_ffi(value_ptr, value_len);
+
+    return has_property(code_point, name, value);
+}
+
+extern "C" bool unicode_property_matches_case_insensitive(
+    u32 code_point,
+    unsigned char const* name_ptr, size_t name_len,
+    unsigned char const* value_ptr, size_t value_len)
+{
+    auto name = string_view_from_ffi(name_ptr, name_len);
+    auto value = optional_string_view_from_ffi(value_ptr, value_len);
+    bool found = false;
+
+    Unicode::for_each_case_folded_code_point(code_point, [&](u32 cp) {
+        if (has_property(cp, name, value)) {
+            found = true;
+            return IterationDecision::Break;
+        }
+        return IterationDecision::Continue;
+    });
+
+    return found;
+}
+
+extern "C" bool unicode_property_all_case_equivalents_match(
+    u32 code_point,
+    unsigned char const* name_ptr, size_t name_len,
+    unsigned char const* value_ptr, size_t value_len)
+{
+    auto name = string_view_from_ffi(name_ptr, name_len);
+    auto value = optional_string_view_from_ffi(value_ptr, value_len);
+    bool all_match = true;
+
+    Unicode::for_each_case_folded_code_point(code_point, [&](u32 cp) {
+        if (!has_property(cp, name, value)) {
+            all_match = false;
+            return IterationDecision::Break;
+        }
+        return IterationDecision::Continue;
+    });
+
+    return all_match;
+}
+
+extern "C" bool unicode_resolve_property(
+    unsigned char const* name_ptr, size_t name_len,
+    unsigned char const* value_ptr, size_t value_len,
+    unsigned char* out_kind, u32* out_id)
+{
+    auto name = string_view_from_ffi(name_ptr, name_len);
+    auto value = optional_string_view_from_ffi(value_ptr, value_len);
+
+    return resolve_property(name, value, out_kind, out_id);
+}
+
+extern "C" bool unicode_resolved_property_matches(u32 code_point, unsigned char kind, u32 id)
+{
+    switch (static_cast<ResolvedPropertyKind>(kind)) {
+    case ResolvedPropertyKind::Script:
+        return Unicode::code_point_has_script(code_point, Unicode::Script { id });
+    case ResolvedPropertyKind::ScriptExtension:
+        return Unicode::code_point_has_script_extension(code_point, Unicode::Script { id });
+    case ResolvedPropertyKind::GeneralCategory:
+        return Unicode::code_point_has_general_category(code_point, Unicode::GeneralCategory { id });
+    case ResolvedPropertyKind::BinaryProperty:
+        return Unicode::code_point_has_property(code_point, Unicode::Property { id });
+    }
+    VERIFY_NOT_REACHED();
+}
+
+extern "C" bool unicode_code_point_has_space_separator_general_category(u32 code_point)
+{
+    return Unicode::code_point_has_space_separator_general_category(code_point);
+}
+
+extern "C" bool unicode_code_point_has_identifier_start_property(u32 code_point)
+{
+    return Unicode::code_point_has_identifier_start_property(code_point);
+}
+
+extern "C" bool unicode_code_point_has_identifier_continue_property(u32 code_point)
+{
+    return Unicode::code_point_has_identifier_continue_property(code_point);
+}
+
+extern "C" bool unicode_is_string_property(unsigned char const* name_ptr, size_t name_len)
+{
+    auto name = string_view_from_ffi(name_ptr, name_len);
+
+    if (auto property = Unicode::property_from_string(name); property.has_value())
+        return Unicode::is_ecma262_string_property(*property);
+
+    return false;
+}
+
+extern "C" bool unicode_is_valid_ecma262_property(
+    unsigned char const* name_ptr, size_t name_len,
+    unsigned char const* value_ptr, size_t value_len)
+{
+    auto name = string_view_from_ffi(name_ptr, name_len);
+    auto value = optional_string_view_from_ffi(value_ptr, value_len);
+
+    if (value.has_value()) {
+        if (name.is_one_of("sc"sv, "Script"sv, "scx"sv, "Script_Extensions"sv))
+            return Unicode::script_from_string(*value).has_value();
+        if (name.is_one_of("gc"sv, "General_Category"sv))
+            return Unicode::general_category_from_string(*value).has_value();
+        return false;
+    }
+
+    if (auto property = Unicode::property_from_string(name); property.has_value())
+        return Unicode::is_ecma262_property(*property) || Unicode::is_ecma262_string_property(*property);
+
+    return Unicode::general_category_from_string(name).has_value();
+}
+
+extern "C" u32 unicode_get_string_property_data(
+    unsigned char const* name_ptr, size_t name_len,
+    u32* out, u32 capacity)
+{
+    auto name = string_view_from_ffi(name_ptr, name_len);
+    auto property = Unicode::property_from_string(name);
+    if (!property.has_value() || !Unicode::is_ecma262_string_property(*property))
+        return 0;
+
+    auto strings = Unicode::get_property_strings(*property);
+
+    Vector<Vector<u32>> multi_code_point_strings;
+    for (auto const& string : strings) {
+        Vector<u32> code_points;
+        for (auto code_point : string.code_points())
+            code_points.append(code_point);
+        if (code_points.size() > 1)
+            multi_code_point_strings.append(move(code_points));
+    }
+
+    u32 total_size = 1;
+    for (auto const& code_points : multi_code_point_strings)
+        total_size += 1 + static_cast<u32>(code_points.size());
+
+    if (!out || capacity < total_size)
+        return total_size;
+
+    u32 offset = 0;
+    out[offset++] = static_cast<u32>(multi_code_point_strings.size());
+
+    for (auto const& code_points : multi_code_point_strings) {
+        out[offset++] = static_cast<u32>(code_points.size());
+
+        for (auto code_point : code_points)
+            out[offset++] = code_point;
+    }
+
+    return total_size;
+}
+
+extern "C" u32 unicode_simple_case_fold(u32 code_point, bool unicode_mode)
+{
+    return Unicode::canonicalize(code_point, unicode_mode);
+}
+
+extern "C" bool unicode_code_point_matches_range_ignoring_case(u32 code_point, u32 from, u32 to, bool unicode_mode)
+{
+    return Unicode::code_point_matches_range_ignoring_case(code_point, from, to, unicode_mode);
+}
+
+extern "C" u32 unicode_get_case_closure(
+    u32 code_point,
+    u32* out_buffer,
+    u32 buffer_capacity)
+{
+    u32 count = 0;
+
+    Unicode::for_each_case_folded_code_point(code_point, [&](u32 cp) {
+        if (count < buffer_capacity) {
+            out_buffer[count++] = cp;
+            return IterationDecision::Continue;
+        }
+        return IterationDecision::Break;
+    });
+
+    return count;
 }

@@ -1,43 +1,56 @@
 /*
- * Copyright (c) 2024-2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2024-2026, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/TemporaryChange.h>
 #include <core/SkBitmap.h>
 #include <core/SkBlurTypes.h>
 #include <core/SkCanvas.h>
+#include <core/SkColorFilter.h>
+#include <core/SkColorSpace.h>
 #include <core/SkFont.h>
 #include <core/SkMaskFilter.h>
 #include <core/SkPath.h>
 #include <core/SkPathEffect.h>
+#include <core/SkPicture.h>
+#include <core/SkPictureRecorder.h>
 #include <core/SkRRect.h>
 #include <core/SkSurface.h>
+#include <core/SkTextBlob.h>
+#include <core/SkYUVAPixmaps.h>
 #include <effects/SkDashPathEffect.h>
-#include <effects/SkGradientShader.h>
+#include <effects/SkGradient.h>
 #include <effects/SkImageFilters.h>
-#include <effects/SkRuntimeEffect.h>
-#include <gpu/GrDirectContext.h>
+#include <effects/SkLumaColorFilter.h>
+#include <gpu/ganesh/GrDirectContext.h>
+#include <gpu/ganesh/SkImageGanesh.h>
 #include <gpu/ganesh/SkSurfaceGanesh.h>
 #include <pathops/SkPathOps.h>
 
+#include <LibGfx/Bitmap.h>
+#include <LibGfx/ColorSpace.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/Font/Font.h>
 #include <LibGfx/PainterSkia.h>
-#include <LibGfx/PathSkia.h>
+#include <LibGfx/SkiaBackendContext.h>
 #include <LibGfx/SkiaUtils.h>
-#include <LibWeb/CSS/ComputedValues.h>
+#include <LibGfx/YUVData.h>
+#include <LibMedia/VideoFrame.h>
+#include <LibWeb/Painting/CanvasSurfaceRegistry.h>
 #include <LibWeb/Painting/DisplayListPlayerSkia.h>
-#include <LibWeb/Painting/ShadowPainting.h>
 
 namespace Web::Painting {
 
-DisplayListPlayerSkia::DisplayListPlayerSkia(RefPtr<Gfx::SkiaBackendContext> context)
-    : m_context(context)
+DisplayListPlayerSkia::DisplayListPlayerSkia()
+    : DisplayListPlayerSkia(Gfx::SkiaBackendContext::the_main_thread_context())
 {
 }
 
-DisplayListPlayerSkia::DisplayListPlayerSkia()
+DisplayListPlayerSkia::DisplayListPlayerSkia(RefPtr<Gfx::SkiaBackendContext> skia_backend_context)
+    : m_skia_backend_context(move(skia_backend_context))
 {
 }
 
@@ -45,7 +58,26 @@ DisplayListPlayerSkia::~DisplayListPlayerSkia()
 {
 }
 
-static SkRRect to_skia_rrect(auto const& rect, CornerRadii const& corner_radii)
+void DisplayListPlayerSkia::execute(
+    DisplayList const& display_list,
+    AccumulatedVisualContextTree const& visual_context_tree,
+    DisplayListResourceStorage const& resource_storage,
+    ScrollStateSnapshot const& scroll_state_snapshot,
+    RefPtr<Gfx::PaintingSurface> surface,
+    CanvasSurfaceRegistry const* canvas_surface_registry,
+    CompositedContextResolver const* composited_context_resolver)
+{
+    TemporaryChange composited_context_resolver_change { m_composited_context_resolver, composited_context_resolver };
+    DisplayListPlayer::execute(
+        display_list,
+        visual_context_tree,
+        resource_storage,
+        scroll_state_snapshot,
+        move(surface),
+        canvas_surface_registry);
+}
+
+static SkRRect to_skia_rrect(auto const& rect, Gfx::CornerRadii const& corner_radii)
 {
     SkRRect rrect;
     SkVector radii[4];
@@ -71,498 +103,614 @@ static SkMatrix to_skia_matrix(Gfx::AffineTransform const& affine_transform)
     matrix.setAffine(affine);
     return matrix;
 }
-
-void DisplayListPlayerSkia::flush()
+static SkM44 to_skia_matrix4x4(Gfx::FloatMatrix4x4 const& matrix)
 {
-    if (m_context)
-        m_context->flush_and_submit(&surface().sk_surface());
-    surface().flush();
+    return SkM44(
+        matrix[0, 0],
+        matrix[0, 1],
+        matrix[0, 2],
+        matrix[0, 3],
+        matrix[1, 0],
+        matrix[1, 1],
+        matrix[1, 2],
+        matrix[1, 3],
+        matrix[2, 0],
+        matrix[2, 1],
+        matrix[2, 2],
+        matrix[2, 3],
+        matrix[3, 0],
+        matrix[3, 1],
+        matrix[3, 2],
+        matrix[3, 3]);
 }
 
-void DisplayListPlayerSkia::draw_glyph_run(DrawGlyphRun const& command)
+void DisplayListPlayerSkia::flush(Gfx::PaintingSurface& surface)
 {
-    auto const& gfx_font = command.glyph_run->font();
-    auto sk_font = gfx_font.skia_font(command.scale);
+    if (auto context = surface.skia_backend_context())
+        context->flush_and_submit(&surface.sk_surface());
+    surface.flush();
+}
 
-    auto glyph_count = command.glyph_run->glyphs().size();
-    Vector<SkGlyphID> glyphs;
-    glyphs.ensure_capacity(glyph_count);
-    Vector<SkPoint> positions;
-    positions.ensure_capacity(glyph_count);
-    auto font_ascent = gfx_font.pixel_metrics().ascent;
-    for (auto const& glyph : command.glyph_run->glyphs()) {
-        auto transformed_glyph = glyph;
-        transformed_glyph.position.set_y(glyph.position.y() + font_ascent);
-        transformed_glyph.position = transformed_glyph.position.scaled(command.scale);
-        auto const& point = transformed_glyph.position;
-        glyphs.append(transformed_glyph.glyph_id);
-        positions.append(to_skia_point(point));
+void DisplayListPlayerSkia::flush_async(Gfx::PaintingSurface& surface, Function<void()>&& callback)
+{
+    if (auto context = surface.skia_backend_context())
+        context->flush_and_submit_async(&surface.sk_surface(), move(callback));
+    else
+        callback();
+    surface.flush();
+}
+
+static void paint_scrollbar_into_surface(Gfx::PaintingSurface& surface, PaintScrollBar const& command)
+{
+    auto gutter_rect = to_skia_rect(command.gutter_rect);
+
+    auto thumb_rect = to_skia_rect(command.thumb_rect);
+    auto radius = thumb_rect.width() / 2;
+    auto thumb_rrect = SkRRect::MakeRectXY(thumb_rect, radius, radius);
+
+    auto& canvas = surface.canvas();
+
+    auto gutter_fill_color = command.track_color;
+    SkPaint gutter_fill_paint;
+    gutter_fill_paint.setColor(to_skia_color(gutter_fill_color));
+    canvas.drawRect(gutter_rect, gutter_fill_paint);
+
+    SkPaint thumb_fill_paint;
+    thumb_fill_paint.setColor(to_skia_color(command.thumb_color));
+    canvas.drawRRect(thumb_rrect, thumb_fill_paint);
+
+    auto stroke_color = command.thumb_color.lightened();
+    SkPaint stroke_paint;
+    stroke_paint.setStroke(true);
+    stroke_paint.setStrokeWidth(1);
+    stroke_paint.setAntiAlias(true);
+    stroke_paint.setColor(to_skia_color(stroke_color));
+    canvas.drawRRect(thumb_rrect, stroke_paint);
+}
+
+void DisplayListPlayerSkia::paint_scrollbar(Gfx::PaintingSurface& surface, PaintScrollBar const& command)
+{
+    paint_scrollbar_into_surface(surface, command);
+}
+
+void DisplayListPlayerSkia::play_command(DrawGlyphRun const& command)
+{
+    auto const& font = resource_storage().font(command.font_id);
+    auto glyphs = inline_objects<DisplayListGlyph>(command.glyphs);
+    if (glyphs.is_empty())
+        return;
+
+    auto sk_font = font.skia_font(command.scale);
+    SkTextBlobBuilder builder;
+    auto const& run = builder.allocRunPos(sk_font, glyphs.size());
+
+    auto font_ascent = font.pixel_metrics().ascent;
+    for (size_t i = 0; i < glyphs.size(); ++i) {
+        run.glyphs[i] = glyphs[i].glyph_id;
+        run.pos[i * 2] = glyphs[i].position.x() * command.scale;
+        run.pos[i * 2 + 1] = (glyphs[i].position.y() + font_ascent) * command.scale;
     }
+
+    auto blob = builder.make();
+    if (!blob)
+        return;
 
     SkPaint paint;
     paint.setColor(to_skia_color(command.color));
 
     auto& canvas = surface().canvas();
+    auto const& translation = command.translation;
+
     switch (command.orientation) {
     case Gfx::Orientation::Horizontal:
-        canvas.drawGlyphs(glyphs.size(), glyphs.data(), positions.data(), to_skia_point(command.translation), sk_font, paint);
+        canvas.drawTextBlob(blob.get(), translation.x(), translation.y(), paint);
         break;
     case Gfx::Orientation::Vertical:
         canvas.save();
         canvas.translate(command.rect.width(), 0);
         canvas.rotate(90, command.rect.top_left().x(), command.rect.top_left().y());
-        canvas.drawGlyphs(glyphs.size(), glyphs.data(), positions.data(), to_skia_point(command.translation), sk_font, paint);
+        canvas.drawTextBlob(blob.get(), translation.x(), translation.y(), paint);
         canvas.restore();
         break;
     }
 }
 
-void DisplayListPlayerSkia::fill_rect(FillRect const& command)
+void DisplayListPlayerSkia::play_command(FillRect const& command)
 {
     auto const& rect = command.rect;
     auto& canvas = surface().canvas();
     SkPaint paint;
+    paint.setAntiAlias(true);
     paint.setColor(to_skia_color(command.color));
     canvas.drawRect(to_skia_rect(rect), paint);
 }
 
-void DisplayListPlayerSkia::draw_painting_surface(DrawPaintingSurface const& command)
+void DisplayListPlayerSkia::play_command(DrawCompositedContext const& command)
 {
-    auto src_rect = to_skia_rect(command.src_rect);
+    if (!m_composited_context_resolver)
+        return;
+
+    auto composited_context_surface = (*m_composited_context_resolver)(command.child_context_id);
+    if (!composited_context_surface)
+        return;
+
+    auto image = composited_context_surface->sk_image_snapshot<sk_sp<SkImage>>();
+    if (!image)
+        return;
+
     auto dst_rect = to_skia_rect(command.dst_rect);
-    auto& sk_surface = command.surface->sk_surface();
+    SkRect src_rect = SkRect::MakeIWH(image->width(), image->height());
     auto& canvas = surface().canvas();
-    auto image = sk_surface.makeImageSnapshot();
     SkPaint paint;
-    canvas.drawImageRect(image, src_rect, dst_rect, to_skia_sampling_options(command.scaling_mode), &paint, SkCanvas::kStrict_SrcRectConstraint);
+    paint.setAntiAlias(true);
+    canvas.drawImageRect(image.get(), src_rect, dst_rect, to_skia_sampling_options(command.scaling_mode), &paint, SkCanvas::kStrict_SrcRectConstraint);
 }
 
-void DisplayListPlayerSkia::draw_scaled_immutable_bitmap(DrawScaledImmutableBitmap const& command)
+void DisplayListPlayerSkia::play_command(DrawCanvas const& command)
 {
+    auto const* registry = canvas_surface_registry();
+    if (!registry)
+        return;
+
+    auto* canvas_surface = registry->canvas_surface(command.canvas_id);
+    if (!canvas_surface)
+        return;
+
+    auto image = canvas_surface->sk_image_snapshot<sk_sp<SkImage>>();
+    if (!image)
+        return;
+
     auto dst_rect = to_skia_rect(command.dst_rect);
-    auto clip_rect = to_skia_rect(command.clip_rect);
+    SkRect src_rect = SkRect::MakeIWH(image->width(), image->height());
     auto& canvas = surface().canvas();
     SkPaint paint;
+    paint.setAntiAlias(true);
+    canvas.drawImageRect(image.get(), src_rect, dst_rect, to_skia_sampling_options(command.scaling_mode), &paint, SkCanvas::kStrict_SrcRectConstraint);
+}
+
+void DisplayListPlayerSkia::play_command(DrawVideoFrame const& command)
+{
+    auto frame = resource_storage().video_frame(command.video_frame_id);
+    if (!frame)
+        return;
+
+    sk_sp<SkImage> image;
+    auto* gr_context = m_skia_backend_context ? m_skia_backend_context->sk_context() : nullptr;
+    if (gr_context) {
+        image = SkImages::TextureFromYUVAPixmaps(
+            gr_context,
+            frame->yuv_data().make_pixmaps(),
+            skgpu::Mipmapped::kNo,
+            false,
+            frame->color_space().color_space<sk_sp<SkColorSpace>>());
+    }
+
+    RefPtr<Gfx::Bitmap> converted_bitmap;
+    if (!image) {
+        auto bitmap_or_error = frame->yuv_data().to_bitmap();
+        if (bitmap_or_error.is_error()) {
+            dbgln("Could not convert video frame to bitmap: {}", bitmap_or_error.release_error());
+            return;
+        }
+        converted_bitmap = bitmap_or_error.release_value();
+        auto raster_image = Gfx::sk_image_from_bitmap(*converted_bitmap, frame->color_space());
+        if (gr_context) {
+            image = SkImages::TextureFromImage(gr_context, raster_image.get(), skgpu::Mipmapped::kNo, skgpu::Budgeted::kYes);
+            if (!image)
+                image = move(raster_image);
+        } else {
+            image = move(raster_image);
+        }
+    }
+
+    auto dst_rect = to_skia_rect(command.dst_rect);
+    SkRect src_rect = SkRect::MakeIWH(image->width(), image->height());
+    auto& canvas = surface().canvas();
+    SkPaint paint;
+    paint.setAntiAlias(true);
+    canvas.drawImageRect(image.get(), src_rect, dst_rect, to_skia_sampling_options(command.scaling_mode), &paint, SkCanvas::kStrict_SrcRectConstraint);
+}
+
+void DisplayListPlayerSkia::play_command(DrawScaledDecodedImageFrame const& command)
+{
+    auto image = resource_storage().skia_image_for_image_frame(command.frame_id, m_skia_backend_context);
+    if (!image)
+        return;
+
+    auto dst_rect = to_skia_rect(command.dst_rect);
+    auto& canvas = surface().canvas();
+    SkPaint paint;
+    paint.setAntiAlias(true);
+    if (command.isolated_backdrop_color.has_value()) {
+        auto src_rect = command.src_rect.value_or(Gfx::FloatRect { 0, 0, static_cast<float>(image->width()), static_cast<float>(image->height()) });
+        SkMatrix matrix;
+        matrix.setScale(dst_rect.width() / src_rect.width(), dst_rect.height() / src_rect.height());
+        matrix.postTranslate(dst_rect.x() - src_rect.x() * dst_rect.width() / src_rect.width(), dst_rect.y() - src_rect.y() * dst_rect.height() / src_rect.height());
+        auto image_shader = image->makeShader(SkTileMode::kDecal, SkTileMode::kDecal, to_skia_sampling_options(command.scaling_mode), matrix);
+        auto backdrop_shader = SkShaders::Color(to_skia_color(command.isolated_backdrop_color.value()));
+        paint.setShader(SkShaders::Blend(Gfx::to_skia_blender(command.compositing_and_blending_operator), move(backdrop_shader), move(image_shader)));
+    } else if (command.compositing_and_blending_operator != Gfx::CompositingAndBlendingOperator::Normal) {
+        paint.setBlender(Gfx::to_skia_blender(command.compositing_and_blending_operator));
+    }
     canvas.save();
-    canvas.clipRect(clip_rect);
-    canvas.drawImageRect(command.bitmap->sk_image(), dst_rect, to_skia_sampling_options(command.scaling_mode), &paint);
+    canvas.clipRect(dst_rect, true);
+    if (command.isolated_backdrop_color.has_value()) {
+        canvas.drawRect(dst_rect, paint);
+    } else if (command.src_rect.has_value()) {
+        auto src_rect = to_skia_rect(command.src_rect.value());
+        canvas.drawImageRect(image.get(), src_rect, dst_rect, to_skia_sampling_options(command.scaling_mode), &paint, SkCanvas::kStrict_SrcRectConstraint);
+    } else {
+        canvas.drawImageRect(image.get(), dst_rect, to_skia_sampling_options(command.scaling_mode), &paint);
+    }
     canvas.restore();
 }
 
-void DisplayListPlayerSkia::draw_repeated_immutable_bitmap(DrawRepeatedImmutableBitmap const& command)
+void DisplayListPlayerSkia::play_command(DrawRepeatedDecodedImageFrame const& command)
 {
+    auto const& frame = resource_storage().image_frame(command.frame_id);
+    auto image = resource_storage().skia_image_for_image_frame(command.frame_id, m_skia_backend_context);
+    if (!image)
+        return;
+
     SkMatrix matrix;
     auto dst_rect = command.dst_rect.to_type<float>();
-    auto src_size = command.bitmap->size().to_type<float>();
+    auto src_size = frame.size().to_type<float>();
     matrix.setScale(dst_rect.width() / src_size.width(), dst_rect.height() / src_size.height());
     matrix.postTranslate(dst_rect.x(), dst_rect.y());
     auto sampling_options = to_skia_sampling_options(command.scaling_mode);
 
     auto tile_mode_x = command.repeat.x ? SkTileMode::kRepeat : SkTileMode::kDecal;
     auto tile_mode_y = command.repeat.y ? SkTileMode::kRepeat : SkTileMode::kDecal;
-    auto shader = command.bitmap->sk_image()->makeShader(tile_mode_x, tile_mode_y, sampling_options, matrix);
+    auto shader = image->makeShader(tile_mode_x, tile_mode_y, sampling_options, matrix);
 
     SkPaint paint;
-    paint.setShader(shader);
+    paint.setAntiAlias(true);
+    if (command.isolated_backdrop_color.has_value()) {
+        auto backdrop_shader = SkShaders::Color(to_skia_color(command.isolated_backdrop_color.value()));
+        paint.setShader(SkShaders::Blend(Gfx::to_skia_blender(command.compositing_and_blending_operator), move(backdrop_shader), move(shader)));
+    } else {
+        paint.setShader(shader);
+    }
+    if (!command.isolated_backdrop_color.has_value() && command.compositing_and_blending_operator != Gfx::CompositingAndBlendingOperator::Normal)
+        paint.setBlender(Gfx::to_skia_blender(command.compositing_and_blending_operator));
     auto& canvas = surface().canvas();
     canvas.drawPaint(paint);
 }
 
-void DisplayListPlayerSkia::add_clip_rect(AddClipRect const& command)
+static void paint_repeated_image(SkCanvas& canvas, SkImage& image, Gfx::IntRect const& dst_rect, Gfx::IntRect const& clip_rect, Gfx::ScalingMode scaling_mode, bool repeat_x, bool repeat_y)
+{
+    SkMatrix matrix;
+    matrix.setTranslate(dst_rect.x(), dst_rect.y());
+
+    auto tile_mode_x = repeat_x ? SkTileMode::kRepeat : SkTileMode::kDecal;
+    auto tile_mode_y = repeat_y ? SkTileMode::kRepeat : SkTileMode::kDecal;
+    auto sampling_options = to_skia_sampling_options(scaling_mode);
+    auto shader = image.makeShader(tile_mode_x, tile_mode_y, sampling_options, &matrix);
+    SkPaint paint;
+    paint.setAntiAlias(true);
+    paint.setShader(shader);
+
+    canvas.save();
+    canvas.clipRect(to_skia_rect(clip_rect), true);
+    canvas.drawPaint(paint);
+    canvas.restore();
+}
+
+void DisplayListPlayerSkia::play_command(DrawTiledDecodedImageFrame const& command)
+{
+    auto image = resource_storage().skia_image_for_image_frame(command.frame_id, m_skia_backend_context);
+    if (!image)
+        return;
+
+    auto sampling_options = to_skia_sampling_options(command.scaling_mode);
+
+    auto scale_x = command.tile_rect.width() / command.src_rect.width();
+    auto scale_y = command.tile_rect.height() / command.src_rect.height();
+    auto tile_step_width = command.tile_step.width();
+    auto tile_step_height = command.tile_step.height();
+
+    SkPictureRecorder tile_recorder;
+    auto tile_bounds = SkRect::MakeWH(tile_step_width / scale_x, tile_step_height / scale_y);
+    auto* tile_canvas = tile_recorder.beginRecording(tile_bounds);
+    SkPaint tile_paint;
+    tile_paint.setAntiAlias(true);
+    tile_canvas->drawImageRect(
+        image.get(),
+        to_skia_rect(command.src_rect),
+        SkRect::MakeWH(command.src_rect.width(), command.src_rect.height()),
+        sampling_options,
+        &tile_paint,
+        SkCanvas::kStrict_SrcRectConstraint);
+    auto tile_picture = tile_recorder.finishRecordingAsPicture();
+
+    SkMatrix matrix;
+    matrix.setTranslate(command.tile_rect.x(), command.tile_rect.y());
+    matrix.preScale(scale_x, scale_y);
+
+    auto is_single_tile_axis = [](Optional<u32> const& tile_count) {
+        return tile_count.has_value() && tile_count.value() == 1;
+    };
+    auto tile_mode_x = is_single_tile_axis(command.tile_count_x) ? SkTileMode::kDecal : SkTileMode::kRepeat;
+    auto tile_mode_y = is_single_tile_axis(command.tile_count_y) ? SkTileMode::kDecal : SkTileMode::kRepeat;
+    auto filter_mode = [&] {
+        switch (command.scaling_mode) {
+        case Gfx::ScalingMode::None:
+        case Gfx::ScalingMode::NearestNeighbor:
+            return SkFilterMode::kNearest;
+        case Gfx::ScalingMode::Bilinear:
+        case Gfx::ScalingMode::BilinearMipmap:
+            return SkFilterMode::kLinear;
+        }
+        VERIFY_NOT_REACHED();
+    }();
+
+    auto shader = tile_picture->makeShader(tile_mode_x, tile_mode_y, filter_mode, &matrix, &tile_bounds);
+
+    auto pattern_left = command.tile_count_x.has_value() ? command.tile_rect.left() : static_cast<float>(command.clip_rect.left());
+    auto pattern_top = command.tile_count_y.has_value() ? command.tile_rect.top() : static_cast<float>(command.clip_rect.top());
+    auto pattern_right = command.tile_count_x.has_value()
+        ? command.tile_rect.left() + (command.tile_count_x.value() - 1) * command.tile_step.width() + command.tile_rect.width()
+        : static_cast<float>(command.clip_rect.right());
+    auto pattern_bottom = command.tile_count_y.has_value()
+        ? command.tile_rect.top() + (command.tile_count_y.value() - 1) * command.tile_step.height() + command.tile_rect.height()
+        : static_cast<float>(command.clip_rect.bottom());
+    Gfx::FloatRect pattern_rect { pattern_left, pattern_top, pattern_right - pattern_left, pattern_bottom - pattern_top };
+    pattern_rect.intersect(command.clip_rect.to_type<float>());
+    if (pattern_rect.is_empty())
+        return;
+
+    SkPaint paint;
+    paint.setAntiAlias(true);
+    paint.setShader(shader);
+
+    auto& canvas = surface().canvas();
+    canvas.drawRect(to_skia_rect(pattern_rect), paint);
+}
+
+void DisplayListPlayerSkia::play_command(DrawRepeatedDisplayList const& command)
+{
+    auto tile_size = command.dst_rect.size();
+    if (tile_size.is_empty())
+        return;
+
+    if (auto image = resource_storage().cached_skia_image_for_display_list(command.display_list_id, tile_size, m_skia_backend_context)) {
+        paint_repeated_image(surface().canvas(), *image, command.dst_rect, command.clip_rect, command.scaling_mode, command.repeat.x, command.repeat.y);
+        return;
+    }
+
+    auto tile_surface = Gfx::PaintingSurface::create_with_size(tile_size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, m_skia_backend_context);
+    Gfx::PainterSkia painter { tile_surface };
+    painter.clear_rect(tile_surface->rect().to_type<float>(), Gfx::Color::Transparent);
+    auto const& tile_display_list = resource_storage().display_list_resource(command.display_list_id);
+    execute_display_list_into_surface(*tile_display_list.display_list, tile_display_list.visual_context_tree, *tile_surface);
+    auto image = tile_surface->sk_surface().makeImageSnapshot();
+    if (!image)
+        return;
+
+    resource_storage().set_cached_skia_image_for_display_list(command.display_list_id, tile_size, m_skia_backend_context, image);
+
+    paint_repeated_image(surface().canvas(), *image, command.dst_rect, command.clip_rect, command.scaling_mode, command.repeat.x, command.repeat.y);
+}
+
+void DisplayListPlayerSkia::play_command(AddClipRect const& command)
 {
     auto& canvas = surface().canvas();
     auto const& rect = command.rect;
-    canvas.clipRect(to_skia_rect(rect));
+    canvas.clipRect(to_skia_rect(rect), true);
 }
 
-void DisplayListPlayerSkia::save(Save const&)
+void DisplayListPlayerSkia::play_command(Save const&)
 {
     auto& canvas = surface().canvas();
     canvas.save();
 }
 
-void DisplayListPlayerSkia::save_layer(SaveLayer const&)
+void DisplayListPlayerSkia::play_command(SaveLayer const&)
 {
     auto& canvas = surface().canvas();
     canvas.saveLayer(nullptr, nullptr);
 }
 
-void DisplayListPlayerSkia::restore(Restore const&)
+void DisplayListPlayerSkia::play_command(Restore const&)
 {
     auto& canvas = surface().canvas();
     canvas.restore();
 }
 
-void DisplayListPlayerSkia::translate(Translate const& command)
+void DisplayListPlayerSkia::play_command(Translate const& command)
 {
     auto& canvas = surface().canvas();
     canvas.translate(command.delta.x(), command.delta.y());
 }
 
-void DisplayListPlayerSkia::push_stacking_context(PushStackingContext const& command)
+static SkGradient::Interpolation to_skia_interpolation(Gfx::GradientInterpolationMethod interpolation_method)
 {
-    auto& canvas = surface().canvas();
+    SkGradient::Interpolation interpolation;
 
-    auto affine_transform = Gfx::extract_2d_affine_transform(command.transform.matrix);
-    auto new_transform = Gfx::AffineTransform {}
-                             .translate(command.transform.origin)
-                             .multiply(affine_transform)
-                             .translate(-command.transform.origin);
-    auto matrix = to_skia_matrix(new_transform);
-
-    if (command.opacity < 1 || command.compositing_and_blending_operator != Gfx::CompositingAndBlendingOperator::Normal || command.isolate) {
-        SkPaint paint;
-        paint.setAlphaf(command.opacity);
-        paint.setBlender(Gfx::to_skia_blender(command.compositing_and_blending_operator));
-
-        // FIXME: If we knew the bounds of the stacking context including any transformed descendants etc,
-        //        we could use saveLayer with a bounds rect. For now, we pass nullptr and let Skia figure it out.
-        canvas.saveLayer(nullptr, &paint);
+    if (interpolation_method.type == Gfx::GradientInterpolationMethod::Type::Rectangular) {
+        switch (interpolation_method.rectangular_color_space) {
+        case Gfx::RectangularColorSpace::Srgb:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kSRGB;
+            break;
+        case Gfx::RectangularColorSpace::SrgbLinear:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kSRGBLinear;
+            break;
+        case Gfx::RectangularColorSpace::Lab:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kLab;
+            break;
+        case Gfx::RectangularColorSpace::Oklab:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kOKLab;
+            break;
+        case Gfx::RectangularColorSpace::DisplayP3:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kDisplayP3;
+            break;
+        case Gfx::RectangularColorSpace::A98Rgb:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kA98RGB;
+            break;
+        case Gfx::RectangularColorSpace::ProphotoRgb:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kProphotoRGB;
+            break;
+        case Gfx::RectangularColorSpace::Rec2020:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kRec2020;
+            break;
+        case Gfx::RectangularColorSpace::DisplayP3Linear:
+        case Gfx::RectangularColorSpace::XyzD50:
+        case Gfx::RectangularColorSpace::XyzD65:
+            dbgln("FIXME: Unsupported gradient color space");
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kOKLab;
+            break;
+        case Gfx::RectangularColorSpace::Xyz:
+            VERIFY_NOT_REACHED();
+        }
     } else {
-        canvas.save();
-    }
-
-    if (command.clip_path.has_value())
-        canvas.clipPath(to_skia_path(command.clip_path.value()), true);
-
-    canvas.concat(matrix);
-}
-
-void DisplayListPlayerSkia::pop_stacking_context(PopStackingContext const&)
-{
-    surface().canvas().restore();
-}
-
-static ColorStopList replace_transition_hints_with_normal_color_stops(ColorStopList const& color_stop_list)
-{
-    ColorStopList stops_with_replaced_transition_hints;
-
-    auto const& first_color_stop = color_stop_list.first();
-    // First color stop in the list should never have transition hint value
-    VERIFY(!first_color_stop.transition_hint.has_value());
-    stops_with_replaced_transition_hints.empend(first_color_stop.color, first_color_stop.position);
-
-    // This loop replaces transition hints with five regular points, calculated using the
-    // formula defined in the spec. After rendering using linear interpolation, this will
-    // produce a result close enough to that obtained if the color of each point were calculated
-    // using the non-linear formula from the spec.
-    for (size_t i = 1; i < color_stop_list.size(); i++) {
-        auto const& color_stop = color_stop_list[i];
-        if (!color_stop.transition_hint.has_value()) {
-            stops_with_replaced_transition_hints.empend(color_stop.color, color_stop.position);
-            continue;
+        switch (interpolation_method.polar_color_space) {
+        case Gfx::PolarColorSpace::Hsl:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kHSL;
+            break;
+        case Gfx::PolarColorSpace::Hwb:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kHWB;
+            break;
+        case Gfx::PolarColorSpace::Lch:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kLCH;
+            break;
+        case Gfx::PolarColorSpace::Oklch:
+            interpolation.fColorSpace = SkGradient::Interpolation::ColorSpace::kOKLCH;
+            break;
         }
 
-        auto const& previous_color_stop = color_stop_list[i - 1];
-        auto const& next_color_stop = color_stop_list[i];
-
-        auto distance_between_stops = next_color_stop.position - previous_color_stop.position;
-        auto transition_hint = color_stop.transition_hint.value();
-
-        Array transition_hint_relative_sampling_positions {
-            transition_hint * 0.33f,
-            transition_hint * 0.66f,
-            transition_hint,
-            transition_hint + (1.f - transition_hint) * 0.33f,
-            transition_hint + (1.f - transition_hint) * 0.66f,
-        };
-
-        for (auto const& transition_hint_relative_sampling_position : transition_hint_relative_sampling_positions) {
-            auto position = previous_color_stop.position + transition_hint_relative_sampling_position * distance_between_stops;
-            auto value = color_stop_step(previous_color_stop, next_color_stop, position);
-            auto color = previous_color_stop.color.interpolate(next_color_stop.color, value);
-            stops_with_replaced_transition_hints.empend(color, position);
-        }
-
-        stops_with_replaced_transition_hints.empend(color_stop.color, color_stop.position);
-    }
-
-    return stops_with_replaced_transition_hints;
-}
-
-static ColorStopList expand_repeat_length(ColorStopList const& color_stop_list, float repeat_length)
-{
-    // https://drafts.csswg.org/css-images/#repeating-gradients
-    // When rendered, however, the color-stops are repeated infinitely in both directions, with their
-    // positions shifted by multiples of the difference between the last specified color-stop’s position
-    // and the first specified color-stop’s position. For example, repeating-linear-gradient(red 10px, blue 50px)
-    // is equivalent to linear-gradient(..., red -30px, blue 10px, red 10px, blue 50px, red 50px, blue 90px, ...).
-
-    auto first_stop_position = color_stop_list.first().position;
-    int const negative_repeat_count = AK::ceil(first_stop_position / repeat_length);
-    int const positive_repeat_count = AK::ceil((1.0f - first_stop_position) / repeat_length);
-
-    ColorStopList color_stop_list_with_expanded_repeat = color_stop_list;
-
-    auto get_color_between_stops = [](float position, auto const& current_stop, auto const& previous_stop) {
-        auto distance_between_stops = current_stop.position - previous_stop.position;
-        auto percentage = (position - previous_stop.position) / distance_between_stops;
-        return previous_stop.color.interpolate(current_stop.color, percentage);
-    };
-
-    for (auto repeat_count = 1; repeat_count <= negative_repeat_count; repeat_count++) {
-        for (auto stop : color_stop_list.in_reverse()) {
-            stop.position += repeat_length * static_cast<float>(-repeat_count);
-            if (stop.position < 0) {
-                stop.color = get_color_between_stops(0.0f, stop, color_stop_list_with_expanded_repeat.first());
-                color_stop_list_with_expanded_repeat.prepend(stop);
-                break;
-            }
-            color_stop_list_with_expanded_repeat.prepend(stop);
+        switch (interpolation_method.hue_interpolation_method) {
+        case Gfx::HueInterpolationMethod::Shorter:
+            interpolation.fHueMethod = SkGradient::Interpolation::HueMethod::kShorter;
+            break;
+        case Gfx::HueInterpolationMethod::Longer:
+            interpolation.fHueMethod = SkGradient::Interpolation::HueMethod::kLonger;
+            break;
+        case Gfx::HueInterpolationMethod::Increasing:
+            interpolation.fHueMethod = SkGradient::Interpolation::HueMethod::kIncreasing;
+            break;
+        case Gfx::HueInterpolationMethod::Decreasing:
+            interpolation.fHueMethod = SkGradient::Interpolation::HueMethod::kDecreasing;
+            break;
         }
     }
 
-    for (auto repeat_count = 0; repeat_count < positive_repeat_count; repeat_count++) {
-        for (auto stop : color_stop_list) {
-            stop.position += repeat_length * static_cast<float>(repeat_count);
-            if (stop.position > 1) {
-                stop.color = get_color_between_stops(1.0f, stop, color_stop_list_with_expanded_repeat.last());
-                color_stop_list_with_expanded_repeat.append(stop);
-                break;
-            }
-            color_stop_list_with_expanded_repeat.append(stop);
-        }
-    }
-
-    return color_stop_list_with_expanded_repeat;
-}
-
-static SkGradientShader::Interpolation to_skia_interpolation(CSS::InterpolationMethod interpolation_method)
-{
-    SkGradientShader::Interpolation interpolation;
-
-    switch (interpolation_method.color_space) {
-    case CSS::GradientSpace::sRGB:
-        interpolation.fColorSpace = SkGradientShader::Interpolation::ColorSpace::kSRGB;
-        break;
-    case CSS::GradientSpace::sRGBLinear:
-        interpolation.fColorSpace = SkGradientShader::Interpolation::ColorSpace::kSRGBLinear;
-        break;
-    case CSS::GradientSpace::Lab:
-        interpolation.fColorSpace = SkGradientShader::Interpolation::ColorSpace::kLab;
-        break;
-    case CSS::GradientSpace::OKLab:
-        interpolation.fColorSpace = SkGradientShader::Interpolation::ColorSpace::kOKLab;
-        break;
-    case CSS::GradientSpace::HSL:
-        interpolation.fColorSpace = SkGradientShader::Interpolation::ColorSpace::kHSL;
-        break;
-    case CSS::GradientSpace::HWB:
-        interpolation.fColorSpace = SkGradientShader::Interpolation::ColorSpace::kHWB;
-        break;
-    case CSS::GradientSpace::LCH:
-        interpolation.fColorSpace = SkGradientShader::Interpolation::ColorSpace::kLCH;
-        break;
-    case CSS::GradientSpace::OKLCH:
-        interpolation.fColorSpace = SkGradientShader::Interpolation::ColorSpace::kOKLCH;
-        break;
-    case CSS::GradientSpace::DisplayP3:
-    case CSS::GradientSpace::A98RGB:
-    case CSS::GradientSpace::ProPhotoRGB:
-    case CSS::GradientSpace::Rec2020:
-    case CSS::GradientSpace::XYZD50:
-    case CSS::GradientSpace::XYZD65:
-        dbgln("FIXME: Unsupported gradient color space");
-        interpolation.fColorSpace = SkGradientShader::Interpolation::ColorSpace::kOKLab;
-        break;
-    }
-
-    switch (interpolation_method.hue_method) {
-    case CSS::HueMethod::Shorter:
-        interpolation.fHueMethod = SkGradientShader::Interpolation::HueMethod::kShorter;
-        break;
-    case CSS::HueMethod::Longer:
-        interpolation.fHueMethod = SkGradientShader::Interpolation::HueMethod::kLonger;
-        break;
-    case CSS::HueMethod::Increasing:
-        interpolation.fHueMethod = SkGradientShader::Interpolation::HueMethod::kIncreasing;
-        break;
-    case CSS::HueMethod::Decreasing:
-        interpolation.fHueMethod = SkGradientShader::Interpolation::HueMethod::kDecreasing;
-        break;
-    }
-
-    interpolation.fInPremul = SkGradientShader::Interpolation::InPremul::kYes;
-
+    interpolation.fInPremul = SkGradient::Interpolation::InPremul::kYes;
     return interpolation;
 }
 
-void DisplayListPlayerSkia::paint_linear_gradient(PaintLinearGradient const& command)
+ReadonlySpan<Color> DisplayListPlayerSkia::gradient_colors(DisplayListGradientColorStops color_stops) const
 {
-    auto const& linear_gradient_data = command.linear_gradient_data;
-    auto color_stop_list = linear_gradient_data.color_stops.list;
-    auto const& repeat_length = linear_gradient_data.color_stops.repeat_length;
-    VERIFY(!color_stop_list.is_empty());
-    if (repeat_length.has_value())
-        color_stop_list = expand_repeat_length(color_stop_list, *repeat_length);
+    return inline_objects<Color>(color_stops.colors);
+}
 
-    auto stops_with_replaced_transition_hints = replace_transition_hints_with_normal_color_stops(color_stop_list);
+ReadonlySpan<float> DisplayListPlayerSkia::gradient_positions(DisplayListGradientColorStops color_stops) const
+{
+    return inline_objects<float>(color_stops.positions);
+}
 
+static Vector<SkColor4f> to_skia_gradient_colors(ReadonlySpan<Color> color_stop_colors)
+{
     Vector<SkColor4f> colors;
-    Vector<SkScalar> positions;
-    for (size_t stop_index = 0; stop_index < stops_with_replaced_transition_hints.size(); stop_index++) {
-        auto const& stop = stops_with_replaced_transition_hints[stop_index];
-        if (stop_index > 0 && stop == stops_with_replaced_transition_hints[stop_index - 1])
-            continue;
-        colors.append(to_skia_color4f(stop.color));
-        positions.append(stop.position);
-    }
+    colors.ensure_capacity(color_stop_colors.size());
+    for (auto color : color_stop_colors)
+        colors.unchecked_append(to_skia_color4f(color));
+    return colors;
+}
 
-    auto const& rect = command.gradient_rect;
-    auto length = calculate_gradient_length<int>(rect.size(), linear_gradient_data.gradient_angle);
-    auto bottom = rect.center().translated(0, -length / 2);
-    auto top = rect.center().translated(0, length / 2);
+void DisplayListPlayerSkia::play_command(PaintLinearGradient const& command)
+{
+    auto color_stop_colors = gradient_colors(command.color_stops);
+    auto color_stop_positions = gradient_positions(command.color_stops);
+    VERIFY(!color_stop_colors.is_empty());
 
-    Array points {
-        to_skia_point(top),
-        to_skia_point(bottom),
-    };
+    auto colors = to_skia_gradient_colors(color_stop_colors);
 
-    auto center = to_skia_rect(rect).center();
+    auto rect = command.gradient_rect.to_type<float>();
+    auto length = calculate_gradient_length<float>(rect.size(), command.gradient_angle);
+
+    // Starting and ending points before rotation (0deg / "to top")
+    auto rect_center = rect.center();
+    auto start = rect_center.translated(0, (.5f - command.first_stop_position) * length);
+    auto end = start.translated(0, command.repeat_length * -length);
+    Array const points { to_skia_point(start), to_skia_point(end) };
+
     SkMatrix matrix;
-    matrix.setRotate(linear_gradient_data.gradient_angle, center.x(), center.y());
+    matrix.setRotate(command.gradient_angle, rect_center.x(), rect_center.y());
 
     auto color_space = SkColorSpace::MakeSRGB();
-    auto interpolation = to_skia_interpolation(linear_gradient_data.interpolation_method);
-    auto shader = SkGradientShader::MakeLinear(points.data(), colors.data(), color_space, positions.data(), positions.size(), SkTileMode::kClamp, interpolation, &matrix);
+    auto interpolation = to_skia_interpolation(command.interpolation_method);
+    SkGradient gradient { SkGradient::Colors { { colors.data(), colors.size() }, { color_stop_positions.data(), color_stop_positions.size() }, SkTileMode::kRepeat, color_space }, interpolation };
+    auto shader = SkShaders::LinearGradient(points.data(), gradient, &matrix);
 
     SkPaint paint;
+    paint.setDither(true);
     paint.setShader(shader);
     surface().canvas().drawRect(to_skia_rect(rect), paint);
 }
 
-static void add_spread_distance_to_border_radius(int& border_radius, int spread_distance)
+void DisplayListPlayerSkia::play_command(PaintOuterBoxShadow const& command)
 {
-    if (border_radius == 0 || spread_distance == 0)
-        return;
-
-    // https://drafts.csswg.org/css-backgrounds/#shadow-shape
-    // To preserve the box’s shape when spread is applied, the corner radii of the shadow are also increased (decreased,
-    // for inner shadows) from the border-box (padding-box) radii by adding (subtracting) the spread distance (and flooring
-    // at zero). However, in order to create a sharper corner when the border radius is small (and thus ensure continuity
-    // between round and sharp corners), when the border radius is less than the spread distance (or in the case of an inner
-    // shadow, less than the absolute value of a negative spread distance), the spread distance is first multiplied by the
-    // proportion 1 + (r-1)^3, where r is the ratio of the border radius to the spread distance, in calculating the corner
-    // radii of the spread shadow shape.
-    if (border_radius > AK::abs(spread_distance)) {
-        border_radius += spread_distance;
-    } else {
-        auto r = (float)border_radius / AK::abs(spread_distance);
-        border_radius += spread_distance * (1 + AK::pow(r - 1, 3.0f));
-    }
-}
-
-void DisplayListPlayerSkia::paint_outer_box_shadow(PaintOuterBoxShadow const& command)
-{
-    auto const& outer_box_shadow_params = command.box_shadow_params;
-    auto const& color = outer_box_shadow_params.color;
-    auto const& spread_distance = outer_box_shadow_params.spread_distance;
-    auto const& blur_radius = outer_box_shadow_params.blur_radius;
-
-    auto content_rrect = to_skia_rrect(outer_box_shadow_params.device_content_rect, outer_box_shadow_params.corner_radii);
-
-    auto shadow_rect = outer_box_shadow_params.device_content_rect;
-    shadow_rect.inflate(spread_distance, spread_distance, spread_distance, spread_distance);
-    auto offset_x = outer_box_shadow_params.offset_x;
-    auto offset_y = outer_box_shadow_params.offset_y;
-    shadow_rect.translate_by(offset_x, offset_y);
-
-    auto add_spread_distance_to_corner_radius = [&](auto& corner_radius) {
-        add_spread_distance_to_border_radius(corner_radius.horizontal_radius, spread_distance);
-        add_spread_distance_to_border_radius(corner_radius.vertical_radius, spread_distance);
-    };
-
-    auto corner_radii = outer_box_shadow_params.corner_radii;
-    add_spread_distance_to_corner_radius(corner_radii.top_left);
-    add_spread_distance_to_corner_radius(corner_radii.top_right);
-    add_spread_distance_to_corner_radius(corner_radii.bottom_right);
-    add_spread_distance_to_corner_radius(corner_radii.bottom_left);
+    auto content_rrect = to_skia_rrect(command.device_content_rect, command.content_corner_radii);
 
     auto& canvas = surface().canvas();
     canvas.save();
     canvas.clipRRect(content_rrect, SkClipOp::kDifference, true);
     SkPaint paint;
     paint.setAntiAlias(true);
-    paint.setColor(to_skia_color(color));
-    paint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, blur_radius / 2));
-    auto shadow_rounded_rect = to_skia_rrect(shadow_rect, corner_radii);
+    paint.setColor(to_skia_color(command.color));
+    paint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, command.blur_radius / 2));
+    auto shadow_rounded_rect = to_skia_rrect(command.shadow_rect, command.shadow_corner_radii);
     canvas.drawRRect(shadow_rounded_rect, paint);
     canvas.restore();
 }
 
-void DisplayListPlayerSkia::paint_inner_box_shadow(PaintInnerBoxShadow const& command)
+void DisplayListPlayerSkia::play_command(PaintInnerBoxShadow const& command)
 {
-    auto const& outer_box_shadow_params = command.box_shadow_params;
-    auto color = outer_box_shadow_params.color;
-    auto device_content_rect = outer_box_shadow_params.device_content_rect;
-    auto offset_x = outer_box_shadow_params.offset_x;
-    auto offset_y = outer_box_shadow_params.offset_y;
-    auto blur_radius = outer_box_shadow_params.blur_radius;
-    auto spread_distance = outer_box_shadow_params.spread_distance;
-    auto const& corner_radii = outer_box_shadow_params.corner_radii;
+    auto outer_rect = to_skia_rrect(command.outer_shadow_rect, command.content_corner_radii);
+    auto inner_rect = to_skia_rrect(command.inner_shadow_rect, command.inner_shadow_corner_radii);
 
-    auto outer_shadow_rect = device_content_rect.translated({ offset_x, offset_y });
-    auto inner_shadow_rect = outer_shadow_rect.inflated(-spread_distance, -spread_distance, -spread_distance, -spread_distance);
-    outer_shadow_rect.inflate(
-        blur_radius + offset_y,
-        blur_radius + abs(offset_x),
-        blur_radius + abs(offset_y),
-        blur_radius + offset_x);
+    auto outer_path = SkPath::RRect(outer_rect);
+    auto inner_path = SkPath::RRect(inner_rect);
 
-    auto inner_rect_corner_radii = corner_radii;
-
-    auto add_spread_distance_to_corner_radius = [&](auto& corner_radius) {
-        add_spread_distance_to_border_radius(corner_radius.horizontal_radius, -spread_distance);
-        add_spread_distance_to_border_radius(corner_radius.vertical_radius, -spread_distance);
-    };
-
-    add_spread_distance_to_corner_radius(inner_rect_corner_radii.top_left);
-    add_spread_distance_to_corner_radius(inner_rect_corner_radii.top_right);
-    add_spread_distance_to_corner_radius(inner_rect_corner_radii.bottom_right);
-    add_spread_distance_to_corner_radius(inner_rect_corner_radii.bottom_left);
-
-    auto outer_rect = to_skia_rrect(outer_shadow_rect, corner_radii);
-    auto inner_rect = to_skia_rrect(inner_shadow_rect, inner_rect_corner_radii);
-
-    SkPath outer_path;
-    outer_path.addRRect(outer_rect);
-    SkPath inner_path;
-    inner_path.addRRect(inner_rect);
-
-    SkPath result_path;
-    if (!Op(outer_path, inner_path, SkPathOp::kDifference_SkPathOp, &result_path)) {
+    auto result = Op(outer_path, inner_path, SkPathOp::kDifference_SkPathOp);
+    if (!result.has_value()) {
         VERIFY_NOT_REACHED();
     }
+    auto result_path = *std::move(result);
 
     auto& canvas = surface().canvas();
     SkPaint path_paint;
     path_paint.setAntiAlias(true);
-    path_paint.setColor(to_skia_color(color));
-    path_paint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, blur_radius / 2));
+    path_paint.setColor(to_skia_color(command.color));
+    path_paint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, command.blur_radius / 2));
     canvas.save();
-    canvas.clipRRect(to_skia_rrect(device_content_rect, corner_radii), true);
+    canvas.clipRRect(to_skia_rrect(command.device_content_rect, command.content_corner_radii), true);
     canvas.drawPath(result_path, path_paint);
     canvas.restore();
 }
 
-void DisplayListPlayerSkia::paint_text_shadow(PaintTextShadow const& command)
+void DisplayListPlayerSkia::play_command(PaintTextShadow const& command)
 {
     auto& canvas = surface().canvas();
     auto blur_image_filter = SkImageFilters::Blur(command.blur_radius / 2, command.blur_radius / 2, nullptr);
     SkPaint blur_paint;
     blur_paint.setImageFilter(blur_image_filter);
+    // Skia paints color glyphs with their own colors, ignoring the paint color, so tint the shadow layer with a kSrcIn
+    // blend to force a flat silhouette in the shadow color. The glyphs are drawn opaquely below so the shadow color's
+    // alpha is applied exactly once.
+    blur_paint.setColorFilter(SkColorFilters::Blend(to_skia_color(command.color), SkBlendMode::kSrcIn));
     canvas.saveLayer(SkCanvas::SaveLayerRec(nullptr, &blur_paint, nullptr, 0));
-    draw_glyph_run({
-        .glyph_run = command.glyph_run,
-        .scale = command.glyph_run_scale,
+    play_command(DrawGlyphRun { .font_id = command.font_id,
+        .glyphs = command.glyphs,
         .rect = command.text_rect,
+        .glyph_bounding_rect = command.shadow_bounding_rect,
         .translation = command.draw_location + command.text_rect.location().to_type<float>(),
-        .color = command.color,
-    });
+        .scale = command.scale,
+        .color = command.color.with_alpha(255) });
     canvas.restore();
 }
 
-void DisplayListPlayerSkia::fill_rect_with_rounded_corners(FillRectWithRoundedCorners const& command)
+void DisplayListPlayerSkia::play_command(FillRectWithRoundedCorners const& command)
 {
     auto const& rect = command.rect;
 
@@ -575,112 +723,162 @@ void DisplayListPlayerSkia::fill_rect_with_rounded_corners(FillRectWithRoundedCo
     canvas.drawRRect(rounded_rect, paint);
 }
 
-static SkTileMode to_skia_tile_mode(SVGLinearGradientPaintStyle::SpreadMethod spread_method)
+static SkTileMode to_skia_tile_mode(DisplayListGradientSpreadMethod spread_method)
 {
     switch (spread_method) {
-    case SVGLinearGradientPaintStyle::SpreadMethod::Pad:
+    case DisplayListGradientSpreadMethod::Pad:
         return SkTileMode::kClamp;
-    case SVGLinearGradientPaintStyle::SpreadMethod::Reflect:
+    case DisplayListGradientSpreadMethod::Reflect:
         return SkTileMode::kMirror;
-    case SVGLinearGradientPaintStyle::SpreadMethod::Repeat:
+    case DisplayListGradientSpreadMethod::Repeat:
         return SkTileMode::kRepeat;
     default:
         VERIFY_NOT_REACHED();
     }
 }
 
-static SkPaint paint_style_to_skia_paint(Painting::SVGGradientPaintStyle const& paint_style, Gfx::FloatRect bounding_rect)
+template<typename MakeShader>
+static SkPaint gradient_paint_style_to_skia_paint(
+    DisplayListGradientPaintStyle const& paint_style,
+    ReadonlySpan<Color> color_stop_colors,
+    ReadonlySpan<float> color_stop_positions,
+    Gfx::FloatRect const& bounding_rect,
+    MakeShader make_shader)
 {
     SkPaint paint;
 
-    auto const& color_stops = paint_style.color_stops();
+    VERIFY(color_stop_colors.size() == color_stop_positions.size());
 
-    Vector<SkColor> colors;
-    colors.ensure_capacity(color_stops.size());
+    Vector<SkColor4f> colors;
+    colors.ensure_capacity(color_stop_colors.size());
     Vector<SkScalar> positions;
-    positions.ensure_capacity(color_stops.size());
+    positions.ensure_capacity(color_stop_positions.size());
 
-    for (auto const& color_stop : color_stops) {
-        colors.append(to_skia_color(color_stop.color));
-        positions.append(color_stop.position);
-    }
+    for (auto color : color_stop_colors)
+        colors.unchecked_append(to_skia_color4f(color));
+    for (auto position : color_stop_positions)
+        positions.unchecked_append(position);
 
     SkMatrix matrix;
     matrix.setTranslate(bounding_rect.x(), bounding_rect.y());
-    if (auto gradient_transform = paint_style.gradient_transform(); gradient_transform.has_value())
-        matrix = matrix * to_skia_matrix(gradient_transform.value());
+    if (paint_style.gradient_transform.has_value())
+        matrix = matrix * to_skia_matrix(paint_style.gradient_transform.value());
 
-    auto tile_mode = to_skia_tile_mode(paint_style.spread_method());
+    auto tile_mode = to_skia_tile_mode(paint_style.spread_method);
 
-    sk_sp<SkShader> shader;
-    if (is<SVGLinearGradientPaintStyle>(paint_style)) {
-        auto const& linear_gradient_paint_style = static_cast<SVGLinearGradientPaintStyle const&>(paint_style);
-
-        Array points {
-            to_skia_point(linear_gradient_paint_style.start_point()),
-            to_skia_point(linear_gradient_paint_style.end_point()),
-        };
-        shader = SkGradientShader::MakeLinear(points.data(), colors.data(), positions.data(), color_stops.size(), tile_mode, 0, &matrix);
-    } else if (is<SVGRadialGradientPaintStyle>(paint_style)) {
-        auto const& radial_gradient_paint_style = static_cast<SVGRadialGradientPaintStyle const&>(paint_style);
-
-        auto start_center = to_skia_point(radial_gradient_paint_style.start_center());
-        auto end_center = to_skia_point(radial_gradient_paint_style.end_center());
-
-        auto start_radius = radial_gradient_paint_style.start_radius();
-        auto end_radius = radial_gradient_paint_style.end_radius();
-
-        shader = SkGradientShader::MakeTwoPointConical(start_center, start_radius, end_center, end_radius, colors.data(), positions.data(), color_stops.size(), tile_mode, 0, &matrix);
-    }
-    paint.setShader(shader);
-    if (paint_style.color_space() == Gfx::InterpolationColorSpace::LinearRGB) {
+    paint.setShader(make_shader(colors, positions, tile_mode, matrix));
+    if (paint_style.color_space == Gfx::InterpolationColorSpace::LinearRGB) {
         paint.setColorFilter(SkColorFilters::LinearToSRGBGamma());
     }
 
     return paint;
 }
 
-void DisplayListPlayerSkia::fill_path(FillPath const& command)
+SkPaint DisplayListPlayerSkia::paint_style_to_skia_paint(DisplayListPaintStyle const& paint_style, Gfx::FloatRect const& bounding_rect)
 {
-    auto path = to_skia_path(command.path);
+    auto make_gradient_paint = [&](auto make_shader) {
+        return gradient_paint_style_to_skia_paint(
+            paint_style.gradient,
+            gradient_colors(paint_style.gradient.color_stops),
+            gradient_positions(paint_style.gradient.color_stops),
+            bounding_rect,
+            make_shader);
+    };
+
+    switch (paint_style.type) {
+    case DisplayListPaintStyleType::None:
+        return {};
+    case DisplayListPaintStyleType::LinearGradient:
+        return make_gradient_paint([&](Vector<SkColor4f> const& colors, Vector<SkScalar> const& positions, SkTileMode tile_mode, SkMatrix const& matrix) {
+            Array points {
+                to_skia_point(paint_style.linear_gradient_start_point),
+                to_skia_point(paint_style.linear_gradient_end_point),
+            };
+            SkGradient gradient { SkGradient::Colors { { colors.data(), colors.size() }, { positions.data(), positions.size() }, tile_mode }, {} };
+            return SkShaders::LinearGradient(points.data(), gradient, &matrix);
+        });
+    case DisplayListPaintStyleType::RadialGradient:
+        return make_gradient_paint([&](Vector<SkColor4f> const& colors, Vector<SkScalar> const& positions, SkTileMode tile_mode, SkMatrix const& matrix) {
+            auto start_center = to_skia_point(paint_style.radial_gradient_start_center);
+            auto end_center = to_skia_point(paint_style.radial_gradient_end_center);
+            SkGradient gradient { SkGradient::Colors { { colors.data(), colors.size() }, { positions.data(), positions.size() }, tile_mode }, {} };
+            return SkShaders::TwoPointConicalGradient(start_center, paint_style.radial_gradient_start_radius, end_center, paint_style.radial_gradient_end_radius, gradient, &matrix);
+        });
+    case DisplayListPaintStyleType::Pattern: {
+        auto const& tile_rect = paint_style.pattern_tile_rect;
+        auto tile_size = Gfx::IntSize(ceilf(tile_rect.width()), ceilf(tile_rect.height()));
+        if (tile_size.is_empty())
+            return {};
+
+        auto tile_surface = Gfx::PaintingSurface::create_with_size(tile_size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, m_skia_backend_context);
+
+        auto const& tile_display_list = resource_storage().display_list_resource(paint_style.pattern_tile_display_list_id);
+        execute_display_list_into_surface(*tile_display_list.display_list, tile_display_list.visual_context_tree, *tile_surface);
+
+        auto image = tile_surface->sk_surface().makeImageSnapshot();
+
+        SkMatrix matrix;
+        matrix.setTranslate(tile_rect.x(), tile_rect.y());
+
+        matrix.preScale(tile_rect.width() / tile_size.width(), tile_rect.height() / tile_size.height());
+        if (paint_style.pattern_transform.has_value())
+            matrix = matrix * to_skia_matrix(paint_style.pattern_transform.value());
+
+        auto sampling = SkSamplingOptions(SkFilterMode::kLinear);
+        auto shader = image->makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat, sampling, &matrix);
+
+        SkPaint paint;
+        paint.setShader(shader);
+        return paint;
+    }
+    }
+    VERIFY_NOT_REACHED();
+}
+
+Gfx::Path DisplayListPlayerSkia::path_from_data(DisplayListDataSpan path_data) const
+{
+    auto bytes = inline_data(path_data);
+    return Gfx::Path::from_serialized_bytes(bytes);
+}
+
+void DisplayListPlayerSkia::play_command(FillPath const& command)
+{
+    auto path = Gfx::to_skia_path(path_from_data(command.path_data));
     path.setFillType(to_skia_path_fill_type(command.winding_rule));
 
     SkPaint paint;
-    if (command.paint_style_or_color.has<PaintStyle>()) {
-        auto const& paint_style = command.paint_style_or_color.get<PaintStyle>();
-        paint = paint_style_to_skia_paint(*paint_style, command.bounding_rect().to_type<float>());
+    if (command.paint_kind == PathPaintKind::PaintStyle) {
+        paint = paint_style_to_skia_paint(command.paint_style, command.bounding_rect().to_type<float>());
         paint.setAlphaf(command.opacity);
     } else {
-        auto const& color = command.paint_style_or_color.get<Color>();
-        paint.setColor(to_skia_color(color));
+        paint.setColor(to_skia_color(command.color));
     }
-    paint.setAntiAlias(command.should_anti_alias == ShouldAntiAlias::Yes);
+    paint.setAntiAlias(command.should_anti_alias == Gfx::ShouldAntiAlias::Yes);
     surface().canvas().drawPath(path, paint);
 }
 
-void DisplayListPlayerSkia::stroke_path(StrokePath const& command)
+void DisplayListPlayerSkia::play_command(StrokePath const& command)
 {
-    auto path = to_skia_path(command.path);
+    auto path = Gfx::to_skia_path(path_from_data(command.path_data));
     SkPaint paint;
-    if (command.paint_style_or_color.has<PaintStyle>()) {
-        auto const& paint_style = command.paint_style_or_color.get<PaintStyle>();
-        paint = paint_style_to_skia_paint(*paint_style, command.bounding_rect().to_type<float>());
+    if (command.paint_kind == PathPaintKind::PaintStyle) {
+        paint = paint_style_to_skia_paint(command.paint_style, command.bounding_rect().to_type<float>());
         paint.setAlphaf(command.opacity);
     } else {
-        auto const& color = command.paint_style_or_color.get<Color>();
-        paint.setColor(to_skia_color(color));
+        paint.setColor(to_skia_color(command.color));
     }
-    paint.setAntiAlias(command.should_anti_alias == ShouldAntiAlias::Yes);
+    paint.setAntiAlias(command.should_anti_alias == Gfx::ShouldAntiAlias::Yes);
     paint.setStyle(SkPaint::Style::kStroke_Style);
     paint.setStrokeWidth(command.thickness);
     paint.setStrokeCap(to_skia_cap(command.cap_style));
     paint.setStrokeJoin(to_skia_join(command.join_style));
     paint.setStrokeMiter(command.miter_limit);
-    paint.setPathEffect(SkDashPathEffect::Make(command.dash_array.data(), command.dash_array.size(), command.dash_offset));
+    auto dash_array = inline_objects<float>(command.dash_array);
+    paint.setPathEffect(SkDashPathEffect::Make({ dash_array.data(), dash_array.size() }, command.dash_offset));
     surface().canvas().drawPath(path, paint);
 }
 
-void DisplayListPlayerSkia::draw_ellipse(DrawEllipse const& command)
+void DisplayListPlayerSkia::play_command(DrawEllipse const& command)
 {
     auto const& rect = command.rect;
     auto& canvas = surface().canvas();
@@ -692,7 +890,7 @@ void DisplayListPlayerSkia::draw_ellipse(DrawEllipse const& command)
     canvas.drawOval(to_skia_rect(rect), paint);
 }
 
-void DisplayListPlayerSkia::fill_ellipse(FillEllipse const& command)
+void DisplayListPlayerSkia::play_command(FillEllipse const& command)
 {
     auto const& rect = command.rect;
     auto& canvas = surface().canvas();
@@ -702,7 +900,7 @@ void DisplayListPlayerSkia::fill_ellipse(FillEllipse const& command)
     canvas.drawOval(to_skia_rect(rect), paint);
 }
 
-void DisplayListPlayerSkia::draw_line(DrawLine const& command)
+void DisplayListPlayerSkia::play_command(DrawLine const& command)
 {
     auto from = to_skia_point(command.from);
     auto to = to_skia_point(command.to);
@@ -721,7 +919,7 @@ void DisplayListPlayerSkia::draw_line(DrawLine const& command)
         auto dot_count = floor(length / (static_cast<float>(command.thickness) * 2));
         auto interval = length / dot_count;
         SkScalar intervals[] = { 0, interval };
-        paint.setPathEffect(SkDashPathEffect::Make(intervals, 2, 0));
+        paint.setPathEffect(SkDashPathEffect::Make(intervals, 0));
         paint.setStrokeCap(SkPaint::Cap::kRound_Cap);
 
         // NOTE: As Skia doesn't render a dot exactly at the end of a line, we need
@@ -736,7 +934,7 @@ void DisplayListPlayerSkia::draw_line(DrawLine const& command)
         auto dash_count = floor(length / static_cast<float>(command.thickness) / 4) * 2 + 1;
         auto interval = length / dash_count;
         SkScalar intervals[] = { interval, interval };
-        paint.setPathEffect(SkDashPathEffect::Make(intervals, 2, 0));
+        paint.setPathEffect(SkDashPathEffect::Make(intervals, 0));
 
         auto direction = to - from;
         direction.normalize();
@@ -749,23 +947,26 @@ void DisplayListPlayerSkia::draw_line(DrawLine const& command)
     canvas.drawLine(from, to, paint);
 }
 
-void DisplayListPlayerSkia::apply_backdrop_filter(ApplyBackdropFilter const& command)
+void DisplayListPlayerSkia::play_command(ApplyBackdropFilter const& command)
 {
     auto& canvas = surface().canvas();
 
     auto rect = to_skia_rect(command.backdrop_region);
     canvas.save();
-    canvas.clipRect(rect);
+    canvas.clipRect(rect, true);
     ScopeGuard guard = [&] { canvas.restore(); };
 
-    if (command.backdrop_filter.has_value()) {
-        auto image_filter = to_skia_image_filter(command.backdrop_filter.value());
+    if (command.has_backdrop_filter) {
+        auto filter = Gfx::deserialize_filter(inline_data(command.backdrop_filter_data), [&](u64 image_id) {
+            return resource_storage().image_frame(ImageFrameResourceId { image_id });
+        });
+        auto image_filter = to_skia_image_filter(filter);
         canvas.saveLayer(SkCanvas::SaveLayerRec(nullptr, nullptr, image_filter.get(), 0));
         canvas.restore();
     }
 }
 
-void DisplayListPlayerSkia::draw_rect(DrawRect const& command)
+void DisplayListPlayerSkia::play_command(DrawRect const& command)
 {
     auto const& rect = command.rect;
     auto& canvas = surface().canvas();
@@ -777,27 +978,13 @@ void DisplayListPlayerSkia::draw_rect(DrawRect const& command)
     canvas.drawRect(to_skia_rect(rect), paint);
 }
 
-void DisplayListPlayerSkia::paint_radial_gradient(PaintRadialGradient const& command)
+void DisplayListPlayerSkia::play_command(PaintRadialGradient const& command)
 {
-    auto const& radial_gradient_data = command.radial_gradient_data;
+    auto color_stop_colors = gradient_colors(command.color_stops);
+    auto color_stop_positions = gradient_positions(command.color_stops);
+    VERIFY(!color_stop_colors.is_empty());
 
-    auto color_stop_list = radial_gradient_data.color_stops.list;
-    VERIFY(!color_stop_list.is_empty());
-    auto const& repeat_length = radial_gradient_data.color_stops.repeat_length;
-    if (repeat_length.has_value())
-        color_stop_list = expand_repeat_length(color_stop_list, repeat_length.value());
-
-    auto stops_with_replaced_transition_hints = replace_transition_hints_with_normal_color_stops(color_stop_list);
-
-    Vector<SkColor4f> colors;
-    Vector<SkScalar> positions;
-    for (size_t stop_index = 0; stop_index < stops_with_replaced_transition_hints.size(); stop_index++) {
-        auto const& stop = stops_with_replaced_transition_hints[stop_index];
-        if (stop_index > 0 && stop == stops_with_replaced_transition_hints[stop_index - 1])
-            continue;
-        colors.append(to_skia_color4f(stop.color));
-        positions.append(stop.position);
-    }
+    auto colors = to_skia_gradient_colors(color_stop_colors);
 
     auto const& rect = command.rect;
     auto center = to_skia_point(command.center.translated(command.rect.location()));
@@ -806,225 +993,217 @@ void DisplayListPlayerSkia::paint_radial_gradient(PaintRadialGradient const& com
     SkMatrix matrix;
     // Skia does not support specifying of horizontal and vertical radius's separately,
     // so instead we apply scale matrix
-    matrix.setScale(size.width() / size.height(), 1.0f, center.x(), center.y());
+    auto const aspect_ratio = size.width() / size.height();
+    auto const sx = isinf(aspect_ratio) ? 1.0f : aspect_ratio;
+    matrix.setScale(sx, 1.0f, center.x(), center.y());
 
-    SkTileMode tile_mode = SkTileMode::kClamp;
-    if (repeat_length.has_value())
-        tile_mode = SkTileMode::kRepeat;
+    SkTileMode tile_mode = command.color_stops.repeating ? SkTileMode::kRepeat : SkTileMode::kClamp;
 
     auto color_space = SkColorSpace::MakeSRGB();
-    auto interpolation = to_skia_interpolation(radial_gradient_data.interpolation_method);
-    auto shader = SkGradientShader::MakeRadial(center, size.height(), colors.data(), color_space, positions.data(), positions.size(), tile_mode, interpolation, &matrix);
+    auto interpolation = to_skia_interpolation(command.interpolation_method);
+    SkGradient gradient { SkGradient::Colors { { colors.data(), colors.size() }, { color_stop_positions.data(), color_stop_positions.size() }, tile_mode, color_space }, interpolation };
+    auto shader = SkShaders::RadialGradient(center, size.height(), gradient, &matrix);
 
     SkPaint paint;
+    paint.setDither(true);
     paint.setAntiAlias(true);
     paint.setShader(shader);
     surface().canvas().drawRect(to_skia_rect(rect), paint);
 }
 
-void DisplayListPlayerSkia::paint_conic_gradient(PaintConicGradient const& command)
+void DisplayListPlayerSkia::play_command(PaintConicGradient const& command)
 {
-    auto const& conic_gradient_data = command.conic_gradient_data;
+    auto color_stop_colors = gradient_colors(command.color_stops);
+    auto color_stop_positions = gradient_positions(command.color_stops);
+    VERIFY(!color_stop_colors.is_empty());
 
-    auto color_stop_list = conic_gradient_data.color_stops.list;
-    auto const& repeat_length = conic_gradient_data.color_stops.repeat_length;
-    if (repeat_length.has_value())
-        color_stop_list = expand_repeat_length(color_stop_list, repeat_length.value());
-
-    VERIFY(!color_stop_list.is_empty());
-    auto stops_with_replaced_transition_hints = replace_transition_hints_with_normal_color_stops(color_stop_list);
-
-    Vector<SkColor4f> colors;
-    Vector<SkScalar> positions;
-    for (size_t stop_index = 0; stop_index < stops_with_replaced_transition_hints.size(); stop_index++) {
-        auto const& stop = stops_with_replaced_transition_hints[stop_index];
-        if (stop_index > 0 && stop == stops_with_replaced_transition_hints[stop_index - 1])
-            continue;
-        colors.append(to_skia_color4f(stop.color));
-        positions.append(stop.position);
-    }
+    auto colors = to_skia_gradient_colors(color_stop_colors);
 
     auto const& rect = command.rect;
     auto center = command.position.translated(rect.location()).to_type<float>();
 
     SkMatrix matrix;
-    matrix.setRotate(-90 + conic_gradient_data.start_angle, center.x(), center.y());
+    matrix.setRotate(-90 + command.start_angle, center.x(), center.y());
     auto color_space = SkColorSpace::MakeSRGB();
-    auto interpolation = to_skia_interpolation(conic_gradient_data.interpolation_method);
-    auto shader = SkGradientShader::MakeSweep(center.x(), center.y(), colors.data(), color_space, positions.data(), positions.size(), SkTileMode::kRepeat, 0, 360, interpolation, &matrix);
+    auto interpolation = to_skia_interpolation(command.interpolation_method);
+    SkGradient gradient { SkGradient::Colors { { colors.data(), colors.size() }, { color_stop_positions.data(), color_stop_positions.size() }, SkTileMode::kRepeat, color_space }, interpolation };
+    auto shader = SkShaders::SweepGradient(to_skia_point(center), 0, 360, gradient, &matrix);
 
     SkPaint paint;
+    paint.setDither(true);
     paint.setAntiAlias(true);
     paint.setShader(shader);
     surface().canvas().drawRect(to_skia_rect(rect), paint);
 }
 
-void DisplayListPlayerSkia::add_rounded_rect_clip(AddRoundedRectClip const& command)
+void DisplayListPlayerSkia::play_command(AddRoundedRectClip const& command)
 {
     auto rounded_rect = to_skia_rrect(command.border_rect, command.corner_radii);
     auto& canvas = surface().canvas();
-    auto clip_op = command.corner_clip == CornerClip::Inside ? SkClipOp::kDifference : SkClipOp::kIntersect;
+    auto clip_op = command.corner_clip == Gfx::CornerClip::Inside ? SkClipOp::kDifference : SkClipOp::kIntersect;
     canvas.clipRRect(rounded_rect, clip_op, true);
 }
 
-void DisplayListPlayerSkia::add_mask(AddMask const& command)
-{
-    auto const& rect = command.rect;
-    auto mask_surface = Gfx::PaintingSurface::create_with_size(m_context, rect.size(), Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied);
-
-    ScrollStateSnapshot scroll_state_snapshot;
-    execute_impl(*command.display_list, scroll_state_snapshot, mask_surface);
-
-    SkMatrix mask_matrix;
-    mask_matrix.setTranslate(rect.x(), rect.y());
-    auto image = mask_surface->sk_surface().makeImageSnapshot();
-    auto shader = image->makeShader(SkSamplingOptions(), mask_matrix);
-    surface().canvas().clipShader(shader);
-}
-
-void DisplayListPlayerSkia::paint_nested_display_list(PaintNestedDisplayList const& command)
+void DisplayListPlayerSkia::play_command(PaintNestedDisplayList const& command)
 {
     auto& canvas = surface().canvas();
-    canvas.translate(command.rect.x(), command.rect.y());
-    ScrollStateSnapshot scroll_state_snapshot = m_scroll_state_snapshots_by_display_list.get(*command.display_list).value_or({});
-    execute_impl(*command.display_list, scroll_state_snapshot, {});
-}
+    auto const& nested_display_list = resource_storage().display_list_resource(command.display_list_id);
 
-void DisplayListPlayerSkia::paint_scrollbar(PaintScrollBar const& command)
-{
-    auto gutter_rect = to_skia_rect(command.gutter_rect);
+    // Nested display lists (used for SVG images and mask contents) are immutable and are replayed with identical
+    // commands on every compositor frame between content updates; some carry huge command streams (thousands of
+    // paths, dozens of layers) and can be far larger than the viewport. Rasterize a list into an offscreen surface
+    // and reuse the snapshot, instead of re-encoding the entire vector command stream on every frame. Each list
+    // keeps a small set of rasters in the per-client resource storage, keyed by display list id and removed
+    // together with the display list itself; the same list can be painted at several places in one frame (repeated
+    // SVG images, atlases), and each place then hits its own raster. Only draw from the cache when the canvas
+    // transform is an integer translation, so the cached raster is pixel-identical to replaying the commands.
+    // Lists that are painted for the first time or whose blending could read page content painted underneath them
+    // replay directly (see should_cache_nested_display_list_raster).
+    auto total_matrix = canvas.getTotalMatrix();
+    bool is_integer_translation = total_matrix.isTranslate()
+        && total_matrix.getTranslateX() == SkScalarFloorToScalar(total_matrix.getTranslateX())
+        && total_matrix.getTranslateY() == SkScalarFloorToScalar(total_matrix.getTranslateY());
 
-    auto thumb_rect = to_skia_rect(command.thumb_rect);
-    auto radius = thumb_rect.width() / 2;
-    auto thumb_rrect = SkRRect::MakeRectXY(thumb_rect, radius, radius);
+    if (m_skia_backend_context && is_integer_translation && !command.rect.is_empty()) {
+        auto device_clip_bounds = canvas.getDeviceClipBounds();
+        auto translation = Gfx::IntPoint { static_cast<int>(total_matrix.getTranslateX()), static_cast<int>(total_matrix.getTranslateY()) };
+        auto clip_in_local_space = Gfx::IntRect { device_clip_bounds.x(), device_clip_bounds.y(), device_clip_bounds.width(), device_clip_bounds.height() }.translated(-translation);
+        auto visible_rect = command.rect.intersected(clip_in_local_space);
+        if (visible_rect.is_empty())
+            return;
 
-    auto& canvas = surface().canvas();
-
-    auto gutter_fill_color = command.track_color;
-    SkPaint gutter_fill_paint;
-    gutter_fill_paint.setColor(to_skia_color(gutter_fill_color));
-    canvas.drawRect(gutter_rect, gutter_fill_paint);
-
-    auto thumb_fill_color = command.thumb_color;
-    if (command.gutter_rect.is_empty() && thumb_fill_color == CSS::InitialValues::scrollbar_color().thumb_color)
-        thumb_fill_color = thumb_fill_color.with_alpha(128);
-
-    SkPaint thumb_fill_paint;
-    thumb_fill_paint.setColor(to_skia_color(thumb_fill_color));
-    canvas.drawRRect(thumb_rrect, thumb_fill_paint);
-
-    auto stroke_color = thumb_fill_color.lightened();
-    SkPaint stroke_paint;
-    stroke_paint.setStroke(true);
-    stroke_paint.setStrokeWidth(1);
-    stroke_paint.setAntiAlias(true);
-    stroke_paint.setColor(to_skia_color(stroke_color));
-    canvas.drawRRect(thumb_rrect, stroke_paint);
-}
-
-void DisplayListPlayerSkia::apply_opacity(ApplyOpacity const& command)
-{
-    auto& canvas = surface().canvas();
-    SkPaint paint;
-    paint.setAlphaf(command.opacity);
-    canvas.saveLayer(nullptr, &paint);
-}
-
-void DisplayListPlayerSkia::apply_composite_and_blending_operator(ApplyCompositeAndBlendingOperator const& command)
-{
-    auto& canvas = surface().canvas();
-    SkPaint paint;
-    paint.setBlender(Gfx::to_skia_blender(command.compositing_and_blending_operator));
-    canvas.saveLayer(nullptr, &paint);
-}
-
-void DisplayListPlayerSkia::apply_filters(ApplyFilter const& command)
-{
-    sk_sp<SkImageFilter> image_filter = to_skia_image_filter(command.filter);
-
-    SkPaint paint;
-    paint.setImageFilter(image_filter);
-    auto& canvas = surface().canvas();
-    canvas.saveLayer(nullptr, &paint);
-}
-
-void DisplayListPlayerSkia::apply_transform(ApplyTransform const& command)
-{
-    auto affine_transform = Gfx::extract_2d_affine_transform(command.matrix);
-    auto new_transform = Gfx::AffineTransform {}
-                             .translate(command.origin)
-                             .multiply(affine_transform)
-                             .translate(-command.origin);
-    auto matrix = to_skia_matrix(new_transform);
-    surface().canvas().concat(matrix);
-}
-
-struct DisplayListPlayerSkia::CachedRuntimeEffects {
-    sk_sp<SkRuntimeEffect> luminance_mask;
-    sk_sp<SkRuntimeEffect> alpha_mask;
-};
-
-DisplayListPlayerSkia::CachedRuntimeEffects& DisplayListPlayerSkia::cached_runtime_effects()
-{
-    if (!m_cached_runtime_effects)
-        m_cached_runtime_effects = make<DisplayListPlayerSkia::CachedRuntimeEffects>();
-    return *m_cached_runtime_effects;
-}
-
-void DisplayListPlayerSkia::apply_mask_bitmap(ApplyMaskBitmap const& command)
-{
-    auto& canvas = surface().canvas();
-
-    auto const* mask_image = command.bitmap->sk_image();
-
-    auto compile_effect = [](char const* sksl_shader) {
-        auto [effect, error] = SkRuntimeEffect::MakeForShader(SkString(sksl_shader));
-        if (!effect) {
-            dbgln("SkSL error: {}", error.c_str());
-            VERIFY_NOT_REACHED();
-        }
-        return effect;
-    };
-
-    auto& cached_runtime_effects = this->cached_runtime_effects();
-
-    sk_sp<SkRuntimeEffect> effect;
-    if (command.kind == Gfx::Bitmap::MaskKind::Luminance) {
-        char const* sksl_shader = R"(
-                uniform shader mask_image;
-                half4 main(float2 coord) {
-                    half4 color = mask_image.eval(coord);
-                    half luminance = 0.2126 * color.b + 0.7152 * color.g + 0.0722 * color.r;
-                    return half4(0.0, 0.0, 0.0, color.a * luminance);
+        auto visible_rect_in_list_space = visible_rect.translated(-command.rect.location());
+        Gfx::IntRect raster_rect;
+        auto cached_image = resource_storage().cached_nested_display_list_raster(command.display_list_id, m_skia_backend_context, visible_rect_in_list_space, raster_rect);
+        if (!cached_image && resource_storage().should_cache_nested_display_list_raster(command.display_list_id)) {
+            // Small lists are rasterized whole, so lists painted as many little slices (atlases, repeated
+            // images) hit one raster for every slice. Larger lists are rasterized at the visible portion.
+            auto list_bounds = Gfx::IntRect { {}, command.rect.size() };
+            constexpr size_t max_full_list_raster_bytes = 16 * MiB;
+            constexpr int max_full_list_raster_dimension = 16384;
+            auto full_list_bytes = static_cast<size_t>(list_bounds.width()) * list_bounds.height() * 4;
+            bool rasterize_whole_list = full_list_bytes <= max_full_list_raster_bytes
+                && list_bounds.width() <= max_full_list_raster_dimension
+                && list_bounds.height() <= max_full_list_raster_dimension;
+            auto raster_candidate_rect = rasterize_whole_list ? list_bounds : visible_rect_in_list_space;
+            constexpr size_t max_raster_bytes = 128 * MiB;
+            if (static_cast<size_t>(raster_candidate_rect.width()) * raster_candidate_rect.height() * 4 <= max_raster_bytes) {
+                auto offscreen_surface = Gfx::PaintingSurface::create_with_size(
+                    raster_candidate_rect.size(), Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, m_skia_backend_context);
+                offscreen_surface->canvas().clear(SK_ColorTRANSPARENT);
+                offscreen_surface->canvas().translate(-raster_candidate_rect.x(), -raster_candidate_rect.y());
+                execute_display_list_into_surface(
+                    *nested_display_list.display_list, nested_display_list.visual_context_tree, *offscreen_surface);
+                offscreen_surface->canvas().resetMatrix();
+                auto image = offscreen_surface->sk_surface().makeImageSnapshot();
+                if (image) {
+                    resource_storage().add_cached_nested_display_list_raster(command.display_list_id, m_skia_backend_context, raster_candidate_rect, image);
+                    cached_image = move(image);
+                    raster_rect = raster_candidate_rect;
                 }
-            )";
-        if (!cached_runtime_effects.luminance_mask) {
-            cached_runtime_effects.luminance_mask = compile_effect(sksl_shader);
+            }
         }
-        effect = cached_runtime_effects.luminance_mask;
-    } else if (command.kind == Gfx::Bitmap::MaskKind::Alpha) {
-        char const* sksl_shader = R"(
-                uniform shader mask_image;
-                half4 main(float2 coord) {
-                    half4 color = mask_image.eval(coord);
-                    return half4(0.0, 0.0, 0.0, color.a);
-                }
-            )";
-        if (!cached_runtime_effects.alpha_mask) {
-            cached_runtime_effects.alpha_mask = compile_effect(sksl_shader);
+        if (cached_image) {
+            auto source_rect = visible_rect_in_list_space.translated(-raster_rect.location());
+            canvas.drawImageRect(cached_image.get(), to_skia_rect(source_rect), to_skia_rect(visible_rect),
+                SkSamplingOptions(), nullptr, SkCanvas::kStrict_SrcRectConstraint);
+            return;
         }
-        effect = cached_runtime_effects.alpha_mask;
-    } else {
-        VERIFY_NOT_REACHED();
     }
 
-    SkMatrix mask_matrix;
-    auto mask_position = command.origin;
-    mask_matrix.setTranslate(mask_position.x(), mask_position.y());
+    canvas.save();
+    canvas.clipRect(to_skia_rect(command.rect));
+    canvas.translate(command.rect.x(), command.rect.y());
+    ScrollStateSnapshot scroll_state_snapshot;
+    execute_nested_display_list(
+        *nested_display_list.display_list,
+        nested_display_list.visual_context_tree,
+        scroll_state_snapshot,
+        nested_display_list.display_list->command_bytes());
+    canvas.restore();
+}
 
-    SkRuntimeShaderBuilder builder(effect);
-    builder.child("mask_image") = mask_image->makeShader(SkSamplingOptions(), mask_matrix);
-    canvas.clipShader(builder.makeShader());
+void DisplayListPlayerSkia::play_command(CompositorScrollNode const&)
+{
+}
+
+void DisplayListPlayerSkia::play_command(CompositorStickyArea const&)
+{
+}
+
+void DisplayListPlayerSkia::play_command(CompositorWheelHitTestTarget const&)
+{
+}
+
+void DisplayListPlayerSkia::play_command(CompositorWheelHitTestTargetWithCornerRadii const&)
+{
+}
+
+void DisplayListPlayerSkia::play_command(CompositorMainThreadWheelEventRegion const&)
+{
+}
+
+void DisplayListPlayerSkia::play_command(CompositorViewportScrollbar const&)
+{
+}
+
+void DisplayListPlayerSkia::play_command(CompositorBlockingWheelEventRegion const&)
+{
+}
+
+void DisplayListPlayerSkia::play_command(PaintScrollBar const& command)
+{
+    paint_scrollbar_into_surface(surface(), command);
+}
+
+void DisplayListPlayerSkia::play_command(ApplyEffects const& command)
+{
+    play_command(command, nullptr);
+}
+
+void DisplayListPlayerSkia::play_command(ApplyEffects const& command, Gfx::Filter const* filter)
+{
+    auto& canvas = surface().canvas();
+    SkPaint paint;
+
+    if (command.opacity < 1.0f)
+        paint.setAlphaf(command.opacity);
+
+    if (command.compositing_and_blending_operator != Gfx::CompositingAndBlendingOperator::Normal)
+        paint.setBlender(Gfx::to_skia_blender(command.compositing_and_blending_operator));
+
+    Optional<Gfx::Filter> deserialized_filter;
+    if (command.has_filter) {
+        if (!filter) {
+            deserialized_filter = Gfx::deserialize_filter(inline_data(command.filter_data), [&](u64 image_id) {
+                return resource_storage().image_frame(ImageFrameResourceId { image_id });
+            });
+            filter = &deserialized_filter.value();
+        }
+        paint.setImageFilter(to_skia_image_filter(*filter));
+    }
+
+    if (command.has_mask_kind && command.mask_kind == Gfx::MaskKind::Luminance)
+        paint.setColorFilter(SkLumaColorFilter::Make());
+
+    canvas.saveLayer(nullptr, &paint);
+}
+
+void DisplayListPlayerSkia::apply_transform(Gfx::FloatPoint origin, Gfx::FloatMatrix4x4 const& matrix)
+{
+    auto new_transform = Gfx::translation_matrix(Vector3<float>(origin.x(), origin.y(), 0));
+    new_transform = new_transform * matrix;
+    new_transform = new_transform * Gfx::translation_matrix(Vector3<float>(-origin.x(), -origin.y(), 0));
+    auto skia_matrix = to_skia_matrix4x4(new_transform);
+    surface().canvas().concat(skia_matrix);
+}
+
+void DisplayListPlayerSkia::add_clip_path(Gfx::Path const& path, Gfx::WindingRule winding_rule)
+{
+    auto& canvas = surface().canvas();
+    auto sk_path = to_skia_path(path);
+    sk_path.setFillType(to_skia_path_fill_type(winding_rule));
+    canvas.clipPath(sk_path, true);
 }
 
 bool DisplayListPlayerSkia::would_be_fully_clipped_by_painter(Gfx::IntRect rect) const

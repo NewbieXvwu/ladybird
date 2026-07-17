@@ -6,10 +6,10 @@
 
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/Iterator.h>
-#include <LibWeb/Bindings/HeadersIteratorPrototype.h>
+#include <LibTextCodec/Decoder.h>
+#include <LibWeb/Bindings/Headers.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Fetch/HeadersIterator.h>
-#include <LibWeb/Infra/Strings.h>
 
 namespace Web::Bindings {
 
@@ -17,7 +17,7 @@ template<>
 void Intrinsics::create_web_prototype_and_constructor<HeadersIteratorPrototype>(JS::Realm& realm)
 {
     auto prototype = realm.create<HeadersIteratorPrototype>(realm);
-    m_prototypes.set("HeadersIterator"_fly_string, prototype);
+    m_prototypes.set("HeadersIterator"_utf16_fly_string, prototype);
 }
 
 }
@@ -66,16 +66,16 @@ GC::Ref<JS::Object> HeadersIterator::next()
         return create_iterator_result_object(vm(), JS::js_undefined(), true);
 
     auto const& pair = pairs[m_index++];
-    auto pair_name = Infra::isomorphic_decode(pair.name);
-    auto pair_value = Infra::isomorphic_decode(pair.value);
+    auto pair_name = TextCodec::isomorphic_decode(pair.name);
+    auto pair_value = TextCodec::isomorphic_decode(pair.value);
 
     switch (m_iteration_kind) {
     case JS::Object::PropertyKind::Key:
-        return create_iterator_result_object(vm(), JS::PrimitiveString::create(vm(), pair_name), false);
+        return create_iterator_result_object(vm(), JS::PrimitiveString::create(vm(), Utf16String::from_utf8(pair_name)), false);
     case JS::Object::PropertyKind::Value:
-        return create_iterator_result_object(vm(), JS::PrimitiveString::create(vm(), pair_value), false);
+        return create_iterator_result_object(vm(), JS::PrimitiveString::create(vm(), Utf16String::from_utf8(pair_value)), false);
     case JS::Object::PropertyKind::KeyAndValue: {
-        auto array = JS::Array::create_from(realm(), { JS::PrimitiveString::create(vm(), pair_name), JS::PrimitiveString::create(vm(), pair_value) });
+        auto array = JS::Array::create_from(realm(), { JS::PrimitiveString::create(vm(), Utf16String::from_utf8(pair_name)), JS::PrimitiveString::create(vm(), Utf16String::from_utf8(pair_value)) });
         return create_iterator_result_object(vm(), array, false);
     }
     default:

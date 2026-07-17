@@ -5,12 +5,10 @@
  */
 
 #include <AK/CharacterTypes.h>
-#include <AK/Concepts.h>
 #include <AK/StringBuilder.h>
 #include <AK/StringView.h>
 #include <AK/Utf16String.h>
 #include <AK/Utf16View.h>
-#include <AK/Utf8View.h>
 
 #include <simdutf.h>
 
@@ -61,27 +59,27 @@ ErrorOr<ByteString> Utf16View::to_byte_string(AllowLonelySurrogates allow_lonely
 
 Utf16String Utf16View::to_ascii_lowercase() const
 {
-    StringBuilder builder(StringBuilder::Mode::UTF16, length_in_code_units());
+    Utf16StringBuilder builder(length_in_code_units());
 
     for (size_t i = 0; i < length_in_code_units(); ++i)
         builder.append_code_unit(AK::to_ascii_lowercase(code_unit_at(i)));
 
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 Utf16String Utf16View::to_ascii_uppercase() const
 {
-    StringBuilder builder(StringBuilder::Mode::UTF16, length_in_code_units());
+    Utf16StringBuilder builder(length_in_code_units());
 
     for (size_t i = 0; i < length_in_code_units(); ++i)
         builder.append_code_unit(AK::to_ascii_uppercase(code_unit_at(i)));
 
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 Utf16String Utf16View::to_ascii_titlecase() const
 {
-    StringBuilder builder(StringBuilder::Mode::UTF16, length_in_code_units());
+    Utf16StringBuilder builder(length_in_code_units());
     bool next_is_upper = true;
 
     for (size_t i = 0; i < length_in_code_units(); ++i) {
@@ -95,7 +93,7 @@ Utf16String Utf16View::to_ascii_titlecase() const
         next_is_upper = code_unit == u' ';
     }
 
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 Utf16String Utf16View::replace(char16_t needle, Utf16View const& replacement, ReplaceMode replace_mode) const
@@ -108,7 +106,7 @@ Utf16String Utf16View::replace(Utf16View const& needle, Utf16View const& replace
     if (is_empty())
         return {};
 
-    StringBuilder builder(StringBuilder::Mode::UTF16, length_in_code_units());
+    Utf16StringBuilder builder(length_in_code_units());
     auto remaining = *this;
 
     do {
@@ -124,12 +122,12 @@ Utf16String Utf16View::replace(Utf16View const& needle, Utf16View const& replace
     } while (replace_mode == ReplaceMode::All && !remaining.is_empty());
 
     builder.append(remaining);
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 Utf16String Utf16View::escape_html_entities() const
 {
-    StringBuilder builder(StringBuilder::Mode::UTF16, length_in_code_units());
+    Utf16StringBuilder builder(length_in_code_units());
 
     for (auto code_point : *this) {
         if (code_point == '<')
@@ -144,7 +142,7 @@ Utf16String Utf16View::escape_html_entities() const
             builder.append_code_point(code_point);
     }
 
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 bool Utf16View::is_ascii() const
@@ -264,6 +262,58 @@ Optional<size_t> Utf16View::find_code_unit_offset(char16_t needle, size_t start_
         return {};
 
     return result - start + start_offset;
+}
+
+Optional<size_t> Utf16View::find_last_code_point_offset(u32 needle, size_t end_offset) const
+{
+    if (end_offset == 0)
+        return {};
+
+    auto const limit = min(end_offset, length_in_code_units());
+
+    if (has_ascii_storage()) {
+        if (!AK::is_ascii(needle))
+            return {};
+        auto ascii_view = StringView { m_string.ascii, limit };
+        return ascii_view.find_last(static_cast<char>(needle));
+    }
+
+    if (needle <= 0xFFFF) {
+        auto const* start = m_string.utf16;
+        auto const* end = m_string.utf16 + limit;
+        auto const char16_needle = static_cast<char16_t>(needle);
+
+        Optional<size_t> last_found;
+        auto const* search_start = start;
+        while (true) {
+            auto const* result = simdutf::find(search_start, end, char16_needle);
+            if (result == end)
+                break;
+            last_found = result - start;
+            search_start = result + 1;
+        }
+        return last_found;
+    }
+
+    // Search for high surrogate and verify low surrogate.
+    auto const adjusted = needle - 0x10000;
+    auto const high = static_cast<char16_t>(0xD800 | (adjusted >> 10));
+    auto const low = static_cast<char16_t>(0xDC00 | (adjusted & 0x3FF));
+
+    auto const* start = m_string.utf16;
+    auto const* end = m_string.utf16 + limit;
+
+    Optional<size_t> last_found;
+    auto const* search_start = start;
+    while (true) {
+        auto const* result = simdutf::find(search_start, end, high);
+        if (result == end || result + 1 >= m_string.utf16 + length_in_code_units())
+            break;
+        if (result[1] == low)
+            last_found = result - start;
+        search_start = result + 1;
+    }
+    return last_found;
 }
 
 Vector<Utf16View> Utf16View::split_view(char16_t separator, SplitBehavior split_behavior) const

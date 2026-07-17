@@ -7,6 +7,7 @@ set(SOURCES
     ConstrainedStream.cpp
     CountingStream.cpp
     Error.cpp
+    FFIHelpers.cpp
     FlyString.cpp
     Format.cpp
     GenericLexer.cpp
@@ -25,15 +26,14 @@ set(SOURCES
     StringBase.cpp
     StringBuilder.cpp
     StringConversions.cpp
-    StringFloatingPointConversions.cpp
     StringUtils.cpp
     StringView.cpp
     Time.cpp
     Utf16FlyString.cpp
     Utf16String.cpp
+    Utf16StringBuilder.cpp
     Utf16StringData.cpp
     Utf16View.cpp
-    Utf32View.cpp
     Utf8View.cpp
     kmalloc.cpp
 )
@@ -49,17 +49,31 @@ endif()
 
 ladybird_lib(AK ak)
 
-include(stacktrace)
+configure_file(Debug.h.in Debug.h @ONLY)
+
+
+if(cpptrace_FOUND AND LADYBIRD_ENABLE_CPPTRACE)
+    target_link_libraries(AK PRIVATE cpptrace::cpptrace)
+    target_compile_definitions(AK PRIVATE AK_HAS_CPPTRACE=1)
+elseif(Backtrace_FOUND)
+    if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.30)
+        target_link_libraries(AK PRIVATE Backtrace::Backtrace)
+    else()
+        target_include_directories(AK PRIVATE ${Backtrace_INCLUDE_DIRS})
+        target_link_libraries(AK PRIVATE ${Backtrace_LIBRARIES})
+    endif()
+else()
+    message(WARNING "Cpptrace and Backtrace.h not found. Stack traces will not be available.")
+endif()
 configure_file(Backtrace.h.in Backtrace.h @ONLY)
-link_stacktrace_library(AK STD_DEFINITION AK_HAS_STD_STACKTRACE)
 
-find_package(simdutf REQUIRED)
-swizzle_target_properties_for_swift(simdutf::simdutf)
-target_link_libraries(AK PRIVATE simdutf::simdutf)
+target_link_libraries(AK PRIVATE FastFloat::fast_float fmt::fmt simdutf::simdutf)
 
-find_package(FastFloat CONFIG REQUIRED)
-swizzle_target_properties_for_swift(FastFloat::fast_float)
-target_link_libraries(AK PRIVATE FastFloat::fast_float)
+set(MIMALLOC_VISIBILITY PRIVATE)
+if (NOT BUILD_SHARED_LIBS)
+    set(MIMALLOC_VISIBILITY PUBLIC)
+endif()
+target_link_libraries(AK ${MIMALLOC_VISIBILITY} mimalloc)
 
 # FIXME: Make this generic for all imported shared library dependencies and apply globally
 if (BUILD_SHARED_LIBS AND NOT CMAKE_SKIP_INSTALL_RULES AND NOT "${VCPKG_INSTALLED_DIR}" STREQUAL "")
@@ -67,16 +81,10 @@ if (BUILD_SHARED_LIBS AND NOT CMAKE_SKIP_INSTALL_RULES AND NOT "${VCPKG_INSTALLE
             LIBRARY COMPONENT Lagom_Runtime NAMELINK_COMPONENT Lagom_Development
             FRAMEWORK COMPONENT Lagom_Runtime
     )
-endif()
-
-if (ENABLE_SWIFT)
-    generate_clang_module_map(AK
-       GENERATED_FILES
-        "${CMAKE_CURRENT_BINARY_DIR}/Backtrace.h"
-        "${CMAKE_CURRENT_BINARY_DIR}/Debug.h"
+    install(IMPORTED_RUNTIME_ARTIFACTS mimalloc
+            LIBRARY COMPONENT Lagom_Runtime NAMELINK_COMPONENT Lagom_Development
+            FRAMEWORK COMPONENT Lagom_Runtime
     )
-    target_sources(AK PRIVATE AK+Swift.swift)
-    add_swift_target_properties(AK)
 endif()
 
 if (WIN32)
@@ -93,7 +101,7 @@ if (WIN32)
     #   lld-link: error: /failifmismatch: mismatch detected for 'annotate_string':
     #   >>> lagom-ak.lib(Utf16View.cpp.obj) has value 1
     #   >>> lagom-unicode.lib(IDNA.cpp.obj) has value 0
-    if (ENABLE_WINDOWS_CI)
+    if (ENABLE_ADDRESS_SANITIZER)
         target_compile_options(AK PRIVATE -fno-sanitize=address)
     endif()
 elseif (APPLE)
@@ -102,6 +110,14 @@ elseif (APPLE)
         set(ASSERTION_HANDLER_VISIBILITY INTERFACE)
     endif()
     target_link_options(AK ${ASSERTION_HANDLER_VISIBILITY} LINKER:-U,_ak_assertion_handler)
+    if (NOT BUILD_SHARED_LIBS)
+        target_link_options(AK INTERFACE
+            LINKER:-u,_ladybird_rust_alloc
+            LINKER:-u,_ladybird_rust_alloc_zeroed
+            LINKER:-u,_ladybird_rust_dealloc
+            LINKER:-u,_ladybird_rust_realloc
+        )
+    endif()
 endif()
 
 # Manually install AK headers

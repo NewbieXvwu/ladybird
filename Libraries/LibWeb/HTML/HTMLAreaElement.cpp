@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/ARIA/Roles.h>
-#include <LibWeb/Bindings/HTMLAreaElementPrototype.h>
+#include <LibWeb/Bindings/HTMLAreaElement.h>
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/HTML/HTMLAreaElement.h>
 #include <LibWeb/HTML/Window.h>
@@ -33,7 +33,7 @@ void HTMLAreaElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_rel_list);
 }
 
-void HTMLAreaElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLAreaElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -41,7 +41,7 @@ void HTMLAreaElement::attribute_changed(FlyString const& name, Optional<String> 
         set_the_url();
     } else if (name == HTML::AttributeNames::rel) {
         if (m_rel_list)
-            m_rel_list->associated_attribute_changed(value.value_or(String {}));
+            m_rel_list->associated_attribute_changed(value.has_value() ? value->utf16_view() : u""sv);
     }
 }
 
@@ -52,21 +52,6 @@ GC::Ref<DOM::DOMTokenList> HTMLAreaElement::rel_list()
     if (!m_rel_list)
         m_rel_list = DOM::DOMTokenList::create(*this, HTML::AttributeNames::rel);
     return *m_rel_list;
-}
-
-Optional<String> HTMLAreaElement::hyperlink_element_utils_href() const
-{
-    return attribute(HTML::AttributeNames::href);
-}
-
-WebIDL::ExceptionOr<void> HTMLAreaElement::set_hyperlink_element_utils_href(String href)
-{
-    return set_attribute(HTML::AttributeNames::href, move(href));
-}
-
-Optional<String> HTMLAreaElement::hyperlink_element_utils_referrerpolicy() const
-{
-    return attribute(HTML::AttributeNames::referrerpolicy);
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-tabindex

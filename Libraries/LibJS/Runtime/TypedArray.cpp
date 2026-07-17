@@ -29,8 +29,17 @@ ThrowCompletionOr<TypedArrayBase*> typed_array_from(VM& vm, Value typed_array_va
     return static_cast<TypedArrayBase*>(this_object.ptr());
 }
 
+static ThrowCompletionOr<void> validate_typed_array_length(VM& vm, size_t array_length, size_t element_size)
+{
+    if (array_length > NumericLimits<i32>::max() / element_size)
+        return vm.throw_completion<RangeError>(ErrorType::InvalidLength, "typed array");
+    if (Checked<size_t>::multiplication_would_overflow(array_length, element_size))
+        return vm.throw_completion<RangeError>(ErrorType::InvalidLength, "typed array");
+    return {};
+}
+
 // 22.2.5.1.3 InitializeTypedArrayFromArrayBuffer, https://tc39.es/ecma262/#sec-initializetypedarrayfromarraybuffer
-static ThrowCompletionOr<void> initialize_typed_array_from_array_buffer(VM& vm, TypedArrayBase& typed_array, ArrayBuffer& array_buffer, Value byte_offset, Value length)
+ThrowCompletionOr<void> initialize_typed_array_from_array_buffer(VM& vm, TypedArrayBase& typed_array, ArrayBuffer& array_buffer, Value byte_offset, Value length)
 {
     // 1. Let elementSize be TypedArrayElementSize(O).
     auto element_size = typed_array.element_size();
@@ -73,7 +82,7 @@ static ThrowCompletionOr<void> initialize_typed_array_from_array_buffer(VM& vm, 
     }
     // 9. Else,
     else {
-        Checked<u32> new_byte_length;
+        Checked<size_t> new_byte_length;
 
         // a. If length is undefined, then
         if (length.is_undefined()) {
@@ -82,21 +91,21 @@ static ThrowCompletionOr<void> initialize_typed_array_from_array_buffer(VM& vm, 
                 return vm.throw_completion<RangeError>(ErrorType::TypedArrayInvalidBufferLength, typed_array.class_name(), element_size, buffer_byte_length);
 
             // ii. Let newByteLength be bufferByteLength - offset.
-            new_byte_length = buffer_byte_length;
-            new_byte_length -= offset;
-
             // iii. If newByteLength < 0, throw a RangeError exception.
-            if (new_byte_length.has_overflow())
+            if (offset > buffer_byte_length)
                 return vm.throw_completion<RangeError>(ErrorType::TypedArrayOutOfRangeByteOffset, offset, buffer_byte_length);
+            new_byte_length = buffer_byte_length - offset;
         }
         // b. Else,
         else {
             // i. Let newByteLength be newLength × elementSize.
             new_byte_length = new_length;
             new_byte_length *= element_size;
+            if (new_byte_length.has_overflow())
+                return vm.throw_completion<RangeError>(ErrorType::InvalidLength, "typed array");
 
             // ii. If offset + newByteLength > bufferByteLength, throw a RangeError exception.
-            Checked<u32> new_byte_end = offset;
+            Checked<size_t> new_byte_end = offset;
             new_byte_end += new_byte_length;
 
             if (new_byte_end.has_overflow())
@@ -105,18 +114,23 @@ static ThrowCompletionOr<void> initialize_typed_array_from_array_buffer(VM& vm, 
                 return vm.throw_completion<RangeError>(ErrorType::TypedArrayOutOfRangeByteOffsetOrLength, offset, new_byte_end.value(), buffer_byte_length);
         }
 
+        auto new_array_length = new_byte_length.value() / element_size;
+        TRY(validate_typed_array_length(vm, new_array_length, element_size));
+
         // c. Set O.[[ByteLength]] to newByteLength.
-        typed_array.set_byte_length(new_byte_length.value());
+        typed_array.set_byte_length(static_cast<u32>(new_byte_length.value()));
 
         // d. Set O.[[ArrayLength]] to newByteLength / elementSize.
-        typed_array.set_array_length(new_byte_length.value() / element_size);
+        typed_array.set_array_length(static_cast<u32>(new_array_length));
     }
 
     // 10. Set O.[[ViewedArrayBuffer]] to buffer.
     typed_array.set_viewed_array_buffer(&array_buffer);
 
     // 11. Set O.[[ByteOffset]] to offset.
-    typed_array.set_byte_offset(offset);
+    if (offset > NumericLimits<u32>::max())
+        return vm.throw_completion<RangeError>(ErrorType::InvalidLength, "typed array");
+    typed_array.set_byte_offset(static_cast<u32>(offset));
 
     // 12. Return unused.
     return {};
@@ -445,6 +459,12 @@ void TypedArrayBase::visit_edges(Visitor& visitor)
     visitor.visit(m_viewed_array_buffer);
 }
 
+void TypedArrayBase::finalize()
+{
+    Base::finalize();
+    remove_from_cached_view_list();
+}
+
 #define JS_DEFINE_TYPED_ARRAY(ClassName, snake_name, PrototypeName, ConstructorName, Type)                                  \
     GC_DEFINE_ALLOCATOR(ClassName);                                                                                         \
     GC_DEFINE_ALLOCATOR(PrototypeName);                                                                                     \
@@ -489,6 +509,17 @@ void TypedArrayBase::visit_edges(Visitor& visitor)
     GC::Ref<NativeFunction> ClassName::intrinsic_constructor(Realm& realm) const                                            \
     {                                                                                                                       \
         return realm.intrinsics().snake_name##_constructor();                                                               \
+    }                                                                                                                       \
+                                                                                                                            \
+    ThrowCompletionOr<GC::Ref<TypedArrayBase>> ClassName::create_default(Realm& realm, u32 array_length) const              \
+    {                                                                                                                       \
+        TRY(validate_typed_array_length(realm.vm(), array_length, sizeof(UnderlyingBufferDataType)));                       \
+        return GC::Ref<TypedArrayBase> { *TRY(create(realm, array_length)) };                                               \
+    }                                                                                                                       \
+                                                                                                                            \
+    GC::Ref<TypedArrayBase> ClassName::create_default_view_on_buffer(Realm& realm, ArrayBuffer& buffer) const               \
+    {                                                                                                                       \
+        return create(realm, 0, buffer);                                                                                    \
     }                                                                                                                       \
                                                                                                                             \
     PrototypeName::PrototypeName(Object& prototype)                                                                         \
@@ -558,18 +589,14 @@ void TypedArrayBase::visit_edges(Visitor& visitor)
             if (first_argument.as_object().is_typed_array()) {                                                              \
                 auto& arg_typed_array = static_cast<TypedArrayBase&>(first_argument.as_object());                           \
                 TRY(initialize_typed_array_from_typed_array(vm, *typed_array, arg_typed_array));                            \
-            } else if (is<ArrayBuffer>(first_argument.as_object())) {                                                       \
-                auto& array_buffer = static_cast<ArrayBuffer&>(first_argument.as_object());                                 \
-                TRY(initialize_typed_array_from_array_buffer(vm, *typed_array, array_buffer,                                \
+            } else if (auto* array_buffer = as_if<ArrayBuffer>(first_argument.as_object())) {                               \
+                TRY(initialize_typed_array_from_array_buffer(vm, *typed_array, *array_buffer,                               \
                     vm.argument(1), vm.argument(2)));                                                                       \
+            } else if (auto iterator = TRY(first_argument.get_method(vm, vm.well_known_symbol_iterator()))) {               \
+                auto values = TRY(iterator_to_list(vm, TRY(get_iterator_from_method(vm, first_argument, *iterator))));      \
+                TRY(initialize_typed_array_from_list(vm, *typed_array, values));                                            \
             } else {                                                                                                        \
-                auto iterator = TRY(first_argument.get_method(vm, vm.well_known_symbol_iterator()));                        \
-                if (iterator) {                                                                                             \
-                    auto values = TRY(iterator_to_list(vm, TRY(get_iterator_from_method(vm, first_argument, *iterator))));  \
-                    TRY(initialize_typed_array_from_list(vm, *typed_array, values));                                        \
-                } else {                                                                                                    \
-                    TRY(initialize_typed_array_from_array_like(vm, *typed_array, first_argument.as_object()));              \
-                }                                                                                                           \
+                TRY(initialize_typed_array_from_array_like(vm, *typed_array, first_argument.as_object()));                  \
             }                                                                                                               \
             return typed_array;                                                                                             \
         }                                                                                                                   \
@@ -584,11 +611,7 @@ void TypedArrayBase::visit_edges(Visitor& visitor)
             return error;                                                                                                   \
         }                                                                                                                   \
         auto array_length = array_length_or_error.release_value();                                                          \
-        if (array_length > NumericLimits<i32>::max() / sizeof(Type))                                                        \
-            return vm.throw_completion<RangeError>(ErrorType::InvalidLength, "typed array");                                \
-        /* FIXME: What is the best/correct behavior here? */                                                                \
-        if (Checked<u32>::multiplication_would_overflow(array_length, sizeof(Type)))                                        \
-            return vm.throw_completion<RangeError>(ErrorType::InvalidLength, "typed array");                                \
+        TRY(validate_typed_array_length(vm, array_length, sizeof(Type)));                                                   \
         return TRY(ClassName::create(realm, array_length, new_target));                                                     \
     }
 

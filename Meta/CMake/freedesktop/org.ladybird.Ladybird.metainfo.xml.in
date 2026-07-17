@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Copyright 2025, the Ladybird developers. -->
+<!-- Copyright 2025-present, the Ladybird developers. -->
 <component type="desktop-application">
   <id>org.ladybird.Ladybird</id>
 
@@ -14,7 +14,7 @@
   <url type="bugtracker">https://github.com/LadybirdBrowser/ladybird/issues</url>
   <url type="faq">https://ladybird.org/#faq</url>
   <url type="donation">https://donorbox.org/ladybird</url>
-  <url type="contact">https://ladybird.org/organization/#intiative</url>
+  <url type="contact">https://ladybird.org/organization/#initiative</url>
   <url type="vcs-browser">https://github.com/LadybirdBrowser/ladybird</url>
   <url type="contribute">https://ladybird.org/#gi</url>
 

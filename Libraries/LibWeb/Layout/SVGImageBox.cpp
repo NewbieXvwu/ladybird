@@ -11,12 +11,12 @@
 
 namespace Web::Layout {
 
-SVGImageBox::SVGImageBox(DOM::Document& document, SVG::SVGGraphicsElement& element, GC::Ref<CSS::ComputedProperties> style)
+SVGImageBox::SVGImageBox(DOM::Document& document, SVG::SVGGraphicsElement& element, NonnullRefPtr<CSS::ComputedValues const> style)
     : SVGGraphicsBox(document, element, style)
 {
 }
 
-GC::Ptr<Painting::Paintable> SVGImageBox::create_paintable() const
+RefPtr<Painting::Paintable> SVGImageBox::create_paintable() const
 {
     return Painting::ImagePaintable::create(*this);
 }

@@ -9,17 +9,14 @@
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/WebGL2RenderingContextPrototype.h>
+#include <LibWeb/Bindings/WebGL2RenderingContext.h>
 #include <LibWeb/HTML/HTMLCanvasElement.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/WebGL/EventNames.h>
-#include <LibWeb/WebGL/Extensions/EXTColorBufferFloat.h>
-#include <LibWeb/WebGL/Extensions/WebGLCompressedTextureS3tc.h>
-#include <LibWeb/WebGL/OpenGLContext.h>
 #include <LibWeb/WebGL/WebGL2RenderingContext.h>
 #include <LibWeb/WebGL/WebGLContextEvent.h>
+#include <LibWeb/WebGL/WebGLContextProxy.h>
 #include <LibWeb/WebGL/WebGLRenderingContext.h>
 #include <LibWeb/WebGL/WebGLShader.h>
 #include <LibWeb/WebIDL/Buffers.h>
@@ -36,25 +33,17 @@ JS::ThrowCompletionOr<GC::Ptr<WebGL2RenderingContext>> WebGL2RenderingContext::c
     // We should be coming here from getContext being called on a wrapped <canvas> element.
     auto context_attributes = TRY(convert_value_to_context_attributes_dictionary(canvas_element.vm(), options));
 
-    auto skia_backend_context = canvas_element.navigable()->traversable_navigable()->skia_backend_context();
-    if (!skia_backend_context) {
-        fire_webgl_context_creation_error(canvas_element);
-        return GC::Ptr<WebGL2RenderingContext> { nullptr };
-    }
-    auto context = OpenGLContext::create(*skia_backend_context, OpenGLContext::WebGLVersion::WebGL2);
+    auto context = create_webgl_context_proxy(canvas_element, WebGLVersion::WebGL2, context_attributes);
     if (!context) {
         fire_webgl_context_creation_error(canvas_element);
         return GC::Ptr<WebGL2RenderingContext> { nullptr };
     }
 
-    context->set_size(canvas_element.bitmap_size_for_canvas(1, 1));
-
     return realm.create<WebGL2RenderingContext>(realm, canvas_element, context.release_nonnull(), context_attributes, context_attributes);
 }
 
-WebGL2RenderingContext::WebGL2RenderingContext(JS::Realm& realm, HTML::HTMLCanvasElement& canvas_element, NonnullOwnPtr<OpenGLContext> context, WebGLContextAttributes context_creation_parameters, WebGLContextAttributes actual_context_parameters)
-    : PlatformObject(realm)
-    , WebGL2RenderingContextImpl(realm, move(context))
+WebGL2RenderingContext::WebGL2RenderingContext(JS::Realm& realm, HTML::HTMLCanvasElement& canvas_element, NonnullOwnPtr<WebGLContextProxy> context, WebGLContextAttributes context_creation_parameters, WebGLContextAttributes actual_context_parameters)
+    : WebGL2RenderingContextOverloads(realm, move(context))
     , m_canvas_element(canvas_element)
     , m_context_creation_parameters(context_creation_parameters)
     , m_actual_context_parameters(actual_context_parameters)
@@ -74,17 +63,16 @@ void WebGL2RenderingContext::visit_edges(Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     WebGL2RenderingContextImpl::visit_edges(visitor);
     visitor.visit(m_canvas_element);
-    visitor.visit(m_ext_color_buffer_float_extension);
-    visitor.visit(m_webgl_compressed_texture_s3tc_extension);
 }
 
-void WebGL2RenderingContext::present()
+void WebGL2RenderingContext::prepare_for_compositing()
 {
-    if (!m_should_present)
-        return;
+    context().present_canvas_for_compositing(m_context_creation_parameters.preserve_drawing_buffer);
+}
 
-    m_should_present = false;
-    context().present(m_context_creation_parameters.preserve_drawing_buffer);
+bool WebGL2RenderingContext::reestablish_remote_context()
+{
+    return restore_webgl_context_proxy(context(), *m_canvas_element, WebGLVersion::WebGL2, m_actual_context_parameters);
 }
 
 GC::Ref<HTML::HTMLCanvasElement> WebGL2RenderingContext::canvas_for_binding() const
@@ -92,28 +80,17 @@ GC::Ref<HTML::HTMLCanvasElement> WebGL2RenderingContext::canvas_for_binding() co
     return *m_canvas_element;
 }
 
-void WebGL2RenderingContext::needs_to_present()
+void WebGL2RenderingContext::did_update_canvas_content()
 {
-    m_should_present = true;
+    m_canvas_element->set_canvas_content_dirty();
 
-    if (!m_canvas_element->paintable())
-        return;
-    m_canvas_element->paintable()->set_needs_display();
-}
-
-void WebGL2RenderingContext::set_error(GLenum error)
-{
-    auto context_error = glGetError();
-    if (context_error != GL_NO_ERROR)
-        m_error = context_error;
-    else
-        m_error = error;
-}
-
-bool WebGL2RenderingContext::is_context_lost() const
-{
-    dbgln_if(WEBGL_CONTEXT_DEBUG, "WebGLRenderingContext::is_context_lost()");
-    return m_context_lost;
+    // NB: Invalidate the cached DrawCanvas command so that if another change causes the display list to be
+    //     recorded, it contains the new content generation and damages the canvas. Don't request a display list
+    //     recording here: the new content reaches the compositor through the canvas surface registry when the
+    //     canvas is presented.
+    if (auto paintable = m_canvas_element->unsafe_paintable())
+        paintable->invalidate_paint_cache();
+    m_canvas_element->set_needs_repaint(InvalidateDisplayList::No);
 }
 
 Optional<WebGLContextAttributes> WebGL2RenderingContext::get_context_attributes()
@@ -126,8 +103,8 @@ Optional<WebGLContextAttributes> WebGL2RenderingContext::get_context_attributes(
 void WebGL2RenderingContext::set_size(Gfx::IntSize const& size)
 {
     Gfx::IntSize final_size;
-    final_size.set_width(max(size.width(), 1));
-    final_size.set_height(max(size.height(), 1));
+    final_size.set_width(clamp(size.width(), 1, max_webgl_drawing_buffer_dimension));
+    final_size.set_height(clamp(size.height(), 1, max_webgl_drawing_buffer_dimension));
     context().set_size(final_size);
 }
 
@@ -135,66 +112,16 @@ void WebGL2RenderingContext::reset_to_default_state()
 {
 }
 
-RefPtr<Gfx::PaintingSurface> WebGL2RenderingContext::surface()
-{
-    return context().surface();
-}
-
-void WebGL2RenderingContext::allocate_painting_surface_if_needed()
-{
-    context().allocate_painting_surface_if_needed();
-}
-
-Optional<Vector<String>> WebGL2RenderingContext::get_supported_extensions()
-{
-    return context().get_supported_extensions();
-}
-
-JS::Object* WebGL2RenderingContext::get_extension(String const& name)
-{
-    // Returns an object if, and only if, name is an ASCII case-insensitive match [HTML] for one of the names returned
-    // from getSupportedExtensions; otherwise, returns null. The object returned from getExtension contains any constants
-    // or functions provided by the extension. A returned object may have no constants or functions if the extension does
-    // not define any, but a unique object must still be returned. That object is used to indicate that the extension has
-    // been enabled.
-    auto supported_extensions = get_supported_extensions();
-    auto supported_extension_iterator = supported_extensions->find_if([&name](String const& supported_extension) {
-        return supported_extension.equals_ignoring_ascii_case(name);
-    });
-    if (supported_extension_iterator == supported_extensions->end())
-        return nullptr;
-
-    if (name.equals_ignoring_ascii_case("WEBGL_compressed_texture_s3tc"sv)) {
-        if (!m_webgl_compressed_texture_s3tc_extension) {
-            m_webgl_compressed_texture_s3tc_extension = MUST(Extensions::WebGLCompressedTextureS3tc::create(realm(), this));
-        }
-
-        VERIFY(m_webgl_compressed_texture_s3tc_extension);
-        return m_webgl_compressed_texture_s3tc_extension;
-    }
-
-    if (name.equals_ignoring_ascii_case("EXT_color_buffer_float"sv)) {
-        if (!m_ext_color_buffer_float_extension) {
-            m_ext_color_buffer_float_extension = MUST(Extensions::EXTColorBufferFloat::create(realm(), *this));
-        }
-
-        VERIFY(m_ext_color_buffer_float_extension);
-        return m_ext_color_buffer_float_extension;
-    }
-
-    return nullptr;
-}
-
 WebIDL::Long WebGL2RenderingContext::drawing_buffer_width() const
 {
     auto size = canvas_for_binding()->bitmap_size_for_canvas();
-    return size.width();
+    return min(size.width(), max_webgl_drawing_buffer_dimension);
 }
 
 WebIDL::Long WebGL2RenderingContext::drawing_buffer_height() const
 {
     auto size = canvas_for_binding()->bitmap_size_for_canvas();
-    return size.height();
+    return min(size.height(), max_webgl_drawing_buffer_dimension);
 }
 
 }

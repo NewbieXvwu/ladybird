@@ -17,17 +17,19 @@ class AudioBox final : public ReplacedBox {
     GC_DECLARE_ALLOCATOR(AudioBox);
 
 public:
-    virtual void prepare_for_replaced_layout() override;
+    AudioBox(DOM::Document&, DOM::Element&, NonnullRefPtr<CSS::ComputedValues const>);
 
     HTML::HTMLAudioElement& dom_node();
     HTML::HTMLAudioElement const& dom_node() const;
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual bool can_have_children() const override;
 
-    bool should_paint() const;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
 private:
-    AudioBox(DOM::Document&, DOM::Element&, GC::Ref<CSS::ComputedProperties>);
+    // Treat the audio element as if it was not a replaced element, sizing based on its content.
+    // Thus, it can fit to the shadow DOM controls, instead of having a hardcoded height.
+    virtual bool has_auto_content_box_size() const override { return false; }
 };
 
 }

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/AllOf.h>
 #include <AK/Badge.h>
 #include <AK/Error.h>
 #include <AK/Format.h>
@@ -15,6 +16,7 @@
 #include <AK/Traits.h>
 #include <AK/UnicodeUtils.h>
 #include <AK/Utf16StringBase.h>
+#include <AK/Utf16StringBuilder.h>
 #include <AK/Utf16StringData.h>
 #include <AK/Utf16View.h>
 #include <AK/Utf8View.h>
@@ -64,6 +66,7 @@ public:
     }
 
     static Utf16String from_utf8_without_validation(StringView);
+    static Utf16String from_ascii_without_validation(ReadonlyBytes);
 
     static Utf16String from_utf16(Utf16View const& utf16_string);
 
@@ -71,7 +74,30 @@ public:
     requires(IsOneOf<RemoveCVReference<T>, Utf16String, Utf16FlyString>)
     static Utf16String from_utf16(T&&) = delete;
 
-    static Utf16String from_utf32(Utf32View const&);
+    ALWAYS_INLINE static constexpr Utf16String from_ascii_character(u8 character)
+    {
+        auto short_string = Detail::ShortString::create_with_byte_count(1);
+        short_string.storage[0] = character;
+        return Utf16String { short_string };
+    }
+
+    [[nodiscard]] static constexpr Utf16String from_ascii_short_string_without_validation(char const* data, size_t length)
+    {
+        VERIFY(length <= Detail::MAX_SHORT_STRING_BYTE_COUNT);
+        auto short_string = Detail::ShortString::create_with_byte_count(length);
+        for (size_t i = 0; i < length; ++i)
+            short_string.storage[i] = static_cast<u8>(data[i]);
+        return Utf16String { short_string };
+    }
+
+    [[nodiscard]] static constexpr Utf16String from_ascii_short_string_without_validation(char16_t const* data, size_t length)
+    {
+        VERIFY(length <= Detail::MAX_SHORT_STRING_BYTE_COUNT);
+        auto short_string = Detail::ShortString::create_with_byte_count(length);
+        for (size_t i = 0; i < length; ++i)
+            short_string.storage[i] = static_cast<u8>(data[i]);
+        return Utf16String { short_string };
+    }
 
     ALWAYS_INLINE static Utf16String from_code_point(u32 code_point)
     {
@@ -88,16 +114,19 @@ public:
     template<typename... Parameters>
     ALWAYS_INLINE static Utf16String formatted(CheckedFormatString<Parameters...>&& format, Parameters const&... parameters)
     {
-        StringBuilder builder(StringBuilder::Mode::UTF16);
+        Utf16StringBuilder builder;
 
         VariadicFormatParams<AllowDebugOnlyFormatters::No, Parameters...> variadic_format_parameters { parameters... };
         MUST(vformat(builder, format.view(), variadic_format_parameters));
 
-        return builder.to_utf16_string();
+        return builder.to_string();
     }
 
-    template<Arithmetic T>
-    ALWAYS_INLINE static Utf16String number(T value)
+    template<Integral T>
+    [[nodiscard]] static Utf16String number(T);
+
+    template<FloatingPoint T>
+    [[nodiscard]] static Utf16String number(T value)
     {
         return formatted("{}", value);
     }
@@ -105,10 +134,16 @@ public:
     template<class SeparatorType, class CollectionType>
     ALWAYS_INLINE static Utf16String join(SeparatorType const& separator, CollectionType const& collection, StringView format = "{}"sv)
     {
-        StringBuilder builder(StringBuilder::Mode::UTF16);
-        builder.join(separator, collection, format);
+        Utf16StringBuilder builder;
+        bool first = true;
+        for (auto& item : collection) {
+            if (!first)
+                builder.appendff("{}", separator);
+            builder.appendff(format, item);
+            first = false;
+        }
 
-        return builder.to_utf16_string();
+        return builder.to_string();
     }
 
     static Utf16String repeated(u32 code_point, size_t count);
@@ -117,9 +152,9 @@ public:
     String to_well_formed_utf8() const;
 
     // These methods require linking LibUnicode.
-    Utf16String to_lowercase(Optional<StringView> const& locale = {}) const;
-    Utf16String to_uppercase(Optional<StringView> const& locale = {}) const;
-    Utf16String to_titlecase(Optional<StringView> const& locale = {}, TrailingCodePointTransformation trailing_code_point_transformation = TrailingCodePointTransformation::Lowercase) const;
+    Utf16String to_lowercase(Optional<Utf16View> const& locale = {}) const;
+    Utf16String to_uppercase(Optional<Utf16View> const& locale = {}) const;
+    Utf16String to_titlecase(Optional<Utf16View> const& locale = {}, TrailingCodePointTransformation trailing_code_point_transformation = TrailingCodePointTransformation::Lowercase) const;
     Utf16String to_casefold() const;
     Utf16String to_fullwidth() const;
 
@@ -201,8 +236,25 @@ public:
 
     ALWAYS_INLINE Utf16String escape_html_entities() const { return utf16_view().escape_html_entities(); }
 
-    static Utf16String from_string_builder(Badge<StringBuilder>, StringBuilder& builder);
+    static Utf16String from_string_builder(Badge<Utf16StringBuilder>, Utf16StringBuilder& builder);
     static ErrorOr<Utf16String> from_ipc_stream(Stream&, size_t length_in_code_units, bool is_ascii);
+
+    template<typename Callback>
+    static Utf16String create_uninitialized_ascii(size_t length_in_code_units, Callback callback)
+    {
+        if (length_in_code_units <= Detail::MAX_SHORT_STRING_BYTE_COUNT) {
+            Utf16String string;
+            string.m_value.short_ascii_string = Detail::ShortString::create_with_byte_count(length_in_code_units);
+
+            callback({ string.m_value.short_ascii_string.storage, length_in_code_units });
+            return string;
+        }
+
+        Bytes buffer;
+        Utf16String string { Detail::Utf16StringData::create_uninitialized_ascii(length_in_code_units, buffer) };
+        callback(buffer);
+        return string;
+    }
 
     constexpr Utf16String(Badge<Optional<Utf16String>>, nullptr_t)
         : Detail::Utf16StringBase(Badge<Utf16String> {}, nullptr)
@@ -320,15 +372,26 @@ struct Traits<Utf16String> : public DefaultTraits<Utf16String> {
 
 }
 
-[[nodiscard]] ALWAYS_INLINE AK::Utf16String operator""_utf16(char const* string, size_t length)
+[[nodiscard]] ALWAYS_INLINE constexpr AK::Utf16String operator""_utf16(char const* string, size_t length)
 {
+    // OPTIMIZATION: Short ASCII strings become compile-time constants with no runtime validation or heap allocation.
+    if (length <= AK::Detail::MAX_SHORT_STRING_BYTE_COUNT
+        && AK::all_of(string, string + length, AK::is_ascii)) {
+        return AK::Utf16String::from_ascii_short_string_without_validation(string, length);
+    }
+
     AK::StringView view { string, length };
 
     ASSERT(AK::Utf8View { view }.validate());
     return AK::Utf16String::from_utf8_without_validation(view);
 }
 
-[[nodiscard]] ALWAYS_INLINE AK::Utf16String operator""_utf16(char16_t const* string, size_t length)
+[[nodiscard]] ALWAYS_INLINE constexpr AK::Utf16String operator""_utf16(char16_t const* string, size_t length)
 {
+    // OPTIMIZATION: Short ASCII strings become compile-time constants with no runtime work.
+    if (length <= AK::Detail::MAX_SHORT_STRING_BYTE_COUNT
+        && AK::all_of(string, string + length, AK::is_ascii))
+        return AK::Utf16String::from_ascii_short_string_without_validation(string, length);
+
     return AK::Utf16String::from_utf16({ string, length });
 }

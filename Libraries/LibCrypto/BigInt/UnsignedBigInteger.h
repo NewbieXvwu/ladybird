@@ -9,8 +9,9 @@
 
 #pragma once
 
-#include <AK/ByteString.h>
 #include <AK/String.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibCrypto/BigInt/TommathForward.h>
 
 namespace Crypto {
@@ -45,7 +46,11 @@ public:
     [[nodiscard]] Bytes export_data(Bytes) const;
 
     [[nodiscard]] static ErrorOr<UnsignedBigInteger> from_base(u16 N, StringView str);
+    [[nodiscard]] static ErrorOr<UnsignedBigInteger> from_base(u16 N, Utf16View str);
     [[nodiscard]] ErrorOr<String> to_base(u16 N) const;
+    [[nodiscard]] ErrorOr<Utf16String> to_base_utf16(u16 N) const;
+
+    [[nodiscard]] size_t count_digits_in_base(u16 base) const;
 
     [[nodiscard]] u64 to_u64() const;
 
@@ -68,6 +73,7 @@ public:
     [[nodiscard]] bool is_odd() const;
 
     [[nodiscard]] size_t byte_length() const;
+    [[nodiscard]] size_t external_memory_size() const { return m_mp.alloc * sizeof(mp_digit); }
 
     size_t one_based_index_of_highest_set_bit() const;
 
@@ -123,7 +129,7 @@ struct AK::Formatter<Crypto::UnsignedBigInteger> : Formatter<StringView> {
 
 inline Crypto::UnsignedBigInteger operator""_bigint(char const* string, size_t length)
 {
-    return MUST(Crypto::UnsignedBigInteger::from_base(10, { string, length }));
+    return MUST(Crypto::UnsignedBigInteger::from_base(10, StringView { string, length }));
 }
 
 inline Crypto::UnsignedBigInteger operator""_bigint(unsigned long long value)

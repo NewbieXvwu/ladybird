@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020-2024, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,23 +8,22 @@
 #pragma once
 
 #include <AK/HashMap.h>
+#include <AK/IterationDecision.h>
 #include <AK/OwnPtr.h>
 #include <AK/StringView.h>
-#include <AK/WeakPtr.h>
+#include <AK/Vector.h>
 #include <AK/Weakable.h>
+#include <LibGC/Weak.h>
+#include <LibGC/WeakInlines.h>
 #include <LibJS/Export.h>
 #include <LibJS/Forward.h>
 #include <LibJS/Heap/Cell.h>
+#include <LibJS/Runtime/DescriptorArray.h>
 #include <LibJS/Runtime/PropertyAttributes.h>
 #include <LibJS/Runtime/PropertyKey.h>
 #include <LibJS/Runtime/Value.h>
 
 namespace JS {
-
-struct PropertyMetadata {
-    u32 offset { 0 };
-    PropertyAttributes attributes { 0 };
-};
 
 struct TransitionKey {
     PropertyKey property_key;
@@ -33,10 +33,14 @@ struct TransitionKey {
     {
         return property_key == other.property_key && attributes == other.attributes;
     }
+
+    void visit_edges(Cell::Visitor& visitor)
+    {
+        property_key.visit_edges(visitor);
+    }
 };
 
-class PrototypeChainValidity final : public Cell
-    , public Weakable<PrototypeChainValidity> {
+class PrototypeChainValidity final : public Cell {
     GC_CELL(PrototypeChainValidity, Cell);
     GC_DECLARE_ALLOCATOR(PrototypeChainValidity);
 
@@ -49,30 +53,21 @@ private:
     size_t padding { 0 };
 };
 
-class JS_API Shape final : public Cell
-    , public Weakable<Shape> {
+class JS_API Shape final : public Cell {
     GC_CELL(Shape, Cell);
     GC_DECLARE_ALLOCATOR(Shape);
 
 public:
-    virtual ~Shape() override;
+    static constexpr bool OVERRIDES_FINALIZE = true;
 
-    enum class TransitionType : u8 {
-        Invalid,
-        Put,
-        Configure,
-        Prototype,
-        Delete,
-        CacheableDictionary,
-        UncacheableDictionary,
-    };
+    virtual ~Shape() override;
+    virtual void finalize() override;
 
     [[nodiscard]] GC::Ref<Shape> create_put_transition(PropertyKey const&, PropertyAttributes attributes);
     [[nodiscard]] GC::Ref<Shape> create_configure_transition(PropertyKey const&, PropertyAttributes attributes);
     [[nodiscard]] GC::Ref<Shape> create_prototype_transition(Object* new_prototype);
     [[nodiscard]] GC::Ref<Shape> create_delete_transition(PropertyKey const&);
-    [[nodiscard]] GC::Ref<Shape> create_cacheable_dictionary_transition();
-    [[nodiscard]] GC::Ref<Shape> create_uncacheable_dictionary_transition();
+    [[nodiscard]] GC::Ref<Shape> create_dictionary_transition();
     [[nodiscard]] GC::Ref<Shape> clone_for_prototype();
 
     void add_property_without_transition(PropertyKey const&, PropertyAttributes);
@@ -80,12 +75,13 @@ public:
     void remove_property_without_transition(PropertyKey const&, u32 offset);
     void set_property_attributes_without_transition(PropertyKey const&, PropertyAttributes);
 
-    [[nodiscard]] bool is_cacheable() const { return m_cacheable; }
     [[nodiscard]] bool is_dictionary() const { return m_dictionary; }
-    [[nodiscard]] bool is_cacheable_dictionary() const { return m_dictionary && m_cacheable; }
-    [[nodiscard]] bool is_uncacheable_dictionary() const { return m_dictionary && !m_cacheable; }
+    [[nodiscard]] bool has_parameter_map() const { return m_has_parameter_map; }
+    void set_has_parameter_map() { m_has_parameter_map = true; }
 
-    [[nodiscard]] bool is_prototype_shape() const { return m_is_prototype_shape; }
+    [[nodiscard]] u32 dictionary_generation() const { return m_dictionary_generation; }
+
+    [[nodiscard]] bool is_prototype_shape() const { return m_prototype_chain_validity; }
     void set_prototype_shape();
 
     GC::Ptr<PrototypeChainValidity> prototype_chain_validity() const { return m_prototype_chain_validity; }
@@ -96,55 +92,124 @@ public:
     Object const* prototype() const { return m_prototype; }
 
     Optional<PropertyMetadata> lookup(PropertyKey const&) const;
-    OrderedHashMap<PropertyKey, PropertyMetadata> const& property_table() const;
+    template<typename Callback>
+    void for_each_property_in_insertion_order(Callback&& callback) const
+    {
+        if (m_dictionary) {
+            for (auto const& [property_key, metadata] : property_table()) {
+                if constexpr (IsSame<IterationDecision, decltype(callback(property_key, metadata))>) {
+                    if (callback(property_key, metadata) == IterationDecision::Break)
+                        return;
+                } else {
+                    callback(property_key, metadata);
+                }
+            }
+            return;
+        }
+        if (!descriptors())
+            return;
+        descriptors()->for_each_in_insertion_order(forward<Callback>(callback), m_property_count);
+    }
     u32 property_count() const { return m_property_count; }
-
-    struct Property {
-        PropertyKey key;
-        PropertyMetadata value;
-    };
 
     void set_prototype_without_transition(Object* new_prototype);
 
 private:
+    enum class PropertyCountChange : u8 {
+        Preserve,
+        Increment,
+        Decrement,
+    };
+
+    enum class ForwardTransitionStorage : u8 {
+        Empty,
+        Single,
+        Multiple,
+    };
+
     explicit Shape(Realm&);
-    Shape(Shape& previous_shape, PropertyKey const& property_key, PropertyAttributes attributes, TransitionType);
-    Shape(Shape& previous_shape, PropertyKey const& property_key, TransitionType);
+    Shape(Shape& previous_shape, PropertyCountChange);
     Shape(Shape& previous_shape, Object* new_prototype);
 
     void invalidate_prototype_if_needed_for_new_prototype(GC::Ref<Shape> new_prototype_shape);
+    void invalidate_prototype_if_needed_for_change_without_transition();
     void invalidate_all_prototype_chains_leading_to_this();
 
+    void add_child_prototype_shape(GC::Ref<Shape>);
+
     virtual void visit_edges(Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     [[nodiscard]] GC::Ptr<Shape> get_or_prune_cached_forward_transition(TransitionKey const&);
+    void cache_forward_transition(TransitionKey const&, GC::Ref<Shape>);
+    void clear_forward_transitions();
     [[nodiscard]] GC::Ptr<Shape> get_or_prune_cached_prototype_transition(Object* prototype);
     [[nodiscard]] GC::Ptr<Shape> get_or_prune_cached_delete_transition(PropertyKey const&);
 
-    void ensure_property_table() const;
+    void ensure_descriptor_array();
+    [[nodiscard]] GC::Ref<DescriptorArray> copy_descriptors() const;
+    void copy_properties_to_dictionary_shape(Shape&) const;
+
+    using PropertyTable = OrderedHashMap<PropertyKey, PropertyMetadata>;
+    using PropertyTablePtr = OwnPtr<PropertyTable>;
+    using ForwardTransitionMap = HashMap<TransitionKey, GC::Weak<Shape>>;
+    using ForwardTransitionMapPtr = OwnPtr<ForwardTransitionMap>;
+    using ForwardTransitionTarget = GC::Weak<Shape>;
+
+    static_assert(IsTriviallyDestructible<GC::Ptr<DescriptorArray>>);
+
+    GC::Ptr<DescriptorArray> descriptors() const;
+    void set_descriptors(GC::Ptr<DescriptorArray>);
+    PropertyTable& property_table();
+    PropertyTable const& property_table() const;
+    void become_dictionary_shape();
+
+    union PropertyStorage {
+        PropertyStorage()
+            : descriptors(nullptr)
+        {
+        }
+
+        ~PropertyStorage() { }
+
+        GC::Ptr<DescriptorArray> descriptors;
+        PropertyTablePtr property_table;
+    };
+
+    union ForwardTransitions {
+        ForwardTransitions() { }
+        ~ForwardTransitions() { }
+
+        PropertyKey property_key;
+        ForwardTransitionMapPtr map;
+    };
+
+    bool m_dictionary : 1 { false };
+    bool m_has_parameter_map : 1 { false };
+    ForwardTransitionStorage m_forward_transition_storage : 2 { ForwardTransitionStorage::Empty };
+    u8 m_single_forward_transition_attributes { 0 };
 
     GC::Ref<Realm> m_realm;
 
-    mutable OwnPtr<OrderedHashMap<PropertyKey, PropertyMetadata>> m_property_table;
+    PropertyStorage m_property_storage;
 
-    OwnPtr<HashMap<TransitionKey, WeakPtr<Shape>>> m_forward_transitions;
-    OwnPtr<HashMap<GC::Ptr<Object>, WeakPtr<Shape>>> m_prototype_transitions;
-    OwnPtr<HashMap<PropertyKey, WeakPtr<Shape>>> m_delete_transitions;
-    GC::Ptr<Shape> m_previous;
-    Optional<PropertyKey> m_property_key;
+    ForwardTransitions m_forward_transitions;
+    ForwardTransitionTarget m_single_forward_transition;
+    OwnPtr<HashMap<GC::Ptr<Object>, GC::Weak<Shape>>> m_prototype_transitions;
+    OwnPtr<HashMap<PropertyKey, GC::Weak<Shape>>> m_delete_transitions;
     GC::Ptr<Object> m_prototype;
 
+    // A non-null validity cell marks this as a prototype shape. Child shape references only exist for prototype shapes.
     GC::Ptr<PrototypeChainValidity> m_prototype_chain_validity;
+    OwnPtr<Vector<GC::Weak<Shape>>> m_child_prototype_shapes;
 
     u32 m_property_count { 0 };
-
-    PropertyAttributes m_attributes { 0 };
-    TransitionType m_transition_type { TransitionType::Invalid };
-
-    bool m_dictionary : 1 { false };
-    bool m_cacheable : 1 { true };
-    bool m_is_prototype_shape : 1 { false };
+    u32 m_dictionary_generation { 0 };
 };
+
+#if !defined(AK_OS_WINDOWS)
+static_assert(sizeof(Shape) == 96, "Keep the size of JS::Shape down!");
+#endif
 
 }
 

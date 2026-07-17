@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16View.h>
 #include <LibWeb/HTML/HTMLElement.h>
 
 namespace Web::HTML {
@@ -17,14 +18,14 @@ class HTMLBaseElement final : public HTMLElement {
 public:
     virtual ~HTMLBaseElement() override;
 
-    String href() const;
-    WebIDL::ExceptionOr<void> set_href(String const& href);
+    Utf16String href() const;
+    void set_href(Utf16View href);
 
     URL::URL const& frozen_base_url() const { return m_frozen_base_url; }
 
     virtual void inserted() override;
-    virtual void removed_from(Node* old_parent, Node& old_root) override;
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
 private:
     HTMLBaseElement(DOM::Document&, DOM::QualifiedName);
@@ -36,7 +37,7 @@ private:
     // A base element that is the first base element with an href content attribute in a document tree has a frozen base URL.
     URL::URL m_frozen_base_url;
 
-    void set_the_frozen_base_url();
+    void set_the_frozen_base_url(URL::URL const& old_base_url);
 };
 
 }

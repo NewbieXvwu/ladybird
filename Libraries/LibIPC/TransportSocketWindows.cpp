@@ -6,12 +6,49 @@
  */
 
 #include <AK/ByteReader.h>
+#include <AK/Checked.h>
+#include <AK/ScopeGuard.h>
+#include <AK/Types.h>
+#include <LibCore/System.h>
+#include <LibIPC/File.h>
 #include <LibIPC/HandleType.h>
+#include <LibIPC/Limits.h>
+#include <LibIPC/TransportHandle.h>
 #include <LibIPC/TransportSocketWindows.h>
 
 #include <AK/Windows.h>
 
 namespace IPC {
+
+static constexpr size_t MAX_SERIALIZED_ATTACHMENT_SIZE = sizeof(HandleType) + sizeof(WSAPROTOCOL_INFOW);
+static constexpr size_t MAX_ATTACHMENT_DATA_SIZE = MAX_MESSAGE_FD_COUNT * MAX_SERIALIZED_ATTACHMENT_SIZE;
+
+ErrorOr<NonnullOwnPtr<TransportSocketWindows>> TransportSocketWindows::from_socket(NonnullOwnPtr<Core::LocalSocket> socket)
+{
+    return make<TransportSocketWindows>(move(socket));
+}
+
+ErrorOr<TransportSocketWindows::Paired> TransportSocketWindows::create_paired()
+{
+    int fds[2] {};
+    TRY(Core::System::socketpair(AF_LOCAL, SOCK_STREAM, 0, fds));
+
+    ArmedScopeGuard guard_fd_0 { [&] { MUST(Core::System::close(fds[0])); } };
+    ArmedScopeGuard guard_fd_1 { [&] { MUST(Core::System::close(fds[1])); } };
+
+    auto socket0 = TRY(Core::LocalSocket::adopt_fd(fds[0]));
+    guard_fd_0.disarm();
+    TRY(socket0->set_close_on_exec(true));
+    TRY(socket0->set_blocking(false));
+
+    TRY(Core::System::set_close_on_exec(fds[1], true));
+    guard_fd_1.disarm();
+
+    return Paired {
+        make<TransportSocketWindows>(move(socket0)),
+        TransportHandle { File::adopt_fd(fds[1]) },
+    };
+}
 
 TransportSocketWindows::TransportSocketWindows(NonnullOwnPtr<Core::LocalSocket> socket)
     : m_socket(move(socket))
@@ -50,77 +87,122 @@ void TransportSocketWindows::wait_until_readable()
     VERIFY(readable);
 }
 
-ErrorOr<void> TransportSocketWindows::duplicate_handles(Bytes bytes, Vector<size_t> const& handle_offsets)
-{
-    if (handle_offsets.is_empty())
-        return {};
+// Maximum size of accumulated unprocessed bytes before we disconnect the peer
+static constexpr size_t MAX_UNPROCESSED_BUFFER_SIZE = 128 * MiB;
 
-    if (m_peer_pid == -1)
-        return Error::from_string_literal("Transport is not initialized");
+struct MessageHeader {
+    u32 payload_size { 0 };
+    u32 attachment_data_size { 0 };
+    u32 attachment_count { 0 };
+};
+
+ErrorOr<Vector<u8>> TransportSocketWindows::serialize_attachments(Vector<Attachment>& attachments)
+{
+    if (attachments.is_empty())
+        return Vector<u8> {};
+
+    VERIFY(m_peer_pid != -1);
 
     HANDLE peer_process_handle = OpenProcess(PROCESS_DUP_HANDLE, FALSE, m_peer_pid);
     if (!peer_process_handle)
         return Error::from_windows_error();
-    ScopeGuard guard = [&] { CloseHandle(peer_process_handle); };
+    ScopeGuard peer_process_guard = [&] { CloseHandle(peer_process_handle); };
 
-    for (auto offset : handle_offsets) {
+    Vector<u8> serialized_attachments;
+    TRY(serialized_attachments.try_ensure_capacity(attachments.size() * MAX_SERIALIZED_ATTACHMENT_SIZE));
 
-        auto span = bytes.slice(offset);
-        if (span.size() < sizeof(HandleType))
-            return Error::from_string_literal("Not enough bytes");
+    for (auto& attachment : attachments) {
+        int handle = attachment.to_fd();
+        ScopeGuard close_original_handle = [&] {
+            if (handle != -1)
+                (void)Core::System::close(handle);
+        };
 
-        UnderlyingType<HandleType> raw_type {};
-        ByteReader::load(span.data(), raw_type);
-        auto type = static_cast<HandleType>(raw_type);
-        if (type != HandleType::Generic && type != HandleType::Socket)
-            return Error::from_string_literal("Invalid handle type");
-        span = span.slice(sizeof(HandleType));
+        if (Core::System::is_socket(handle)) {
+            TRY(serialized_attachments.try_append(to_underlying(HandleType::Socket)));
 
-        if (type == HandleType::Socket) {
-            if (span.size() < sizeof(WSAPROTOCOL_INFO))
-                return Error::from_string_literal("Not enough bytes for socket handle");
-
-            // We stashed the bytes of this process's version of the handle at the offset location
-            int handle = -1;
-            ByteReader::load(span.data(), handle);
-
-            auto* pi = reinterpret_cast<WSAPROTOCOL_INFO*>(span.data());
-            if (WSADuplicateSocket(handle, m_peer_pid, pi))
+            WSAPROTOCOL_INFOW pi {};
+            if (WSADuplicateSocketW(handle, m_peer_pid, &pi))
                 return Error::from_windows_error();
+            TRY(serialized_attachments.try_append(reinterpret_cast<u8*>(&pi), sizeof(pi)));
         } else {
-            if (span.size() < sizeof(int))
-                return Error::from_string_literal("Not enough bytes for generic handle");
+            TRY(serialized_attachments.try_append(to_underlying(HandleType::Generic)));
 
-            int handle = -1;
-            ByteReader::load(span.data(), handle);
-
-            HANDLE new_handle = INVALID_HANDLE_VALUE;
-            if (!DuplicateHandle(GetCurrentProcess(), to_handle(handle), peer_process_handle, &new_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
+            HANDLE duplicated_handle = INVALID_HANDLE_VALUE;
+            if (!DuplicateHandle(GetCurrentProcess(), to_handle(handle), peer_process_handle, &duplicated_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
                 return Error::from_windows_error();
 
-            ByteReader::store(span.data(), to_fd(new_handle));
+            auto duplicated_fd = to_fd(duplicated_handle);
+            TRY(serialized_attachments.try_append(reinterpret_cast<u8*>(&duplicated_fd), sizeof(duplicated_fd)));
         }
     }
 
-    return {};
+    attachments.clear();
+    return serialized_attachments;
 }
 
-struct MessageHeader {
-    u32 size { 0 };
-};
-
-ErrorOr<void> TransportSocketWindows::transfer_message(ReadonlyBytes bytes, Vector<size_t> const& handle_offsets)
+Attachment TransportSocketWindows::deserialize_attachment(ReadonlyBytes& serialized_bytes)
 {
+    VERIFY(serialized_bytes.size() >= sizeof(HandleType));
+
+    UnderlyingType<HandleType> raw_type {};
+    ByteReader::load(serialized_bytes.data(), raw_type);
+    auto type = static_cast<HandleType>(raw_type);
+    serialized_bytes = serialized_bytes.slice(sizeof(HandleType));
+
+    switch (type) {
+    case HandleType::Generic: {
+        VERIFY(serialized_bytes.size() >= sizeof(int));
+
+        int handle = -1;
+        ByteReader::load(serialized_bytes.data(), handle);
+        serialized_bytes = serialized_bytes.slice(sizeof(handle));
+        return Attachment::from_fd(handle);
+    }
+    case HandleType::Socket: {
+        VERIFY(serialized_bytes.size() >= sizeof(WSAPROTOCOL_INFOW));
+
+        WSAPROTOCOL_INFOW pi {};
+        memcpy(&pi, serialized_bytes.data(), sizeof(pi));
+        serialized_bytes = serialized_bytes.slice(sizeof(pi));
+
+        auto handle = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, &pi, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+        VERIFY(handle != INVALID_SOCKET);
+        return Attachment::from_fd(handle);
+    }
+    }
+
+    VERIFY_NOT_REACHED();
+}
+
+void TransportSocketWindows::post_message(MessageDataType bytes, Vector<Attachment>& attachments)
+{
+    VERIFY(bytes.size() <= MAX_MESSAGE_PAYLOAD_SIZE);
+    VERIFY(attachments.size() <= MAX_MESSAGE_FD_COUNT);
+
+    auto attachment_count = attachments.size();
+    auto serialized_attachments = MUST(serialize_attachments(attachments));
+    VERIFY(serialized_attachments.size() <= MAX_ATTACHMENT_DATA_SIZE);
+
     Vector<u8> message_buffer;
-    message_buffer.resize(sizeof(MessageHeader) + bytes.size());
-    MessageHeader header;
-    header.size = bytes.size();
-    memcpy(message_buffer.data(), &header, sizeof(MessageHeader));
-    memcpy(message_buffer.data() + sizeof(MessageHeader), bytes.data(), bytes.size());
+    MUST(message_buffer.try_resize(sizeof(MessageHeader) + serialized_attachments.size() + bytes.size()));
 
-    TRY(duplicate_handles({ message_buffer.data() + sizeof(MessageHeader), bytes.size() }, handle_offsets));
+    MessageHeader header {
+        .payload_size = static_cast<u32>(bytes.size()),
+        .attachment_data_size = static_cast<u32>(serialized_attachments.size()),
+        .attachment_count = static_cast<u32>(attachment_count),
+    };
+    memcpy(message_buffer.data(), &header, sizeof(header));
 
-    return transfer(message_buffer.span());
+    auto* serialized_attachment_storage = message_buffer.data() + sizeof(MessageHeader);
+    if (!serialized_attachments.is_empty())
+        memcpy(serialized_attachment_storage, serialized_attachments.data(), serialized_attachments.size());
+
+    auto* payload_storage = serialized_attachment_storage + serialized_attachments.size();
+    if (!bytes.is_empty())
+        memcpy(payload_storage, bytes.data(), bytes.size());
+
+    MUST(transfer(message_buffer.span()));
 }
 
 ErrorOr<void> TransportSocketWindows::transfer(ReadonlyBytes bytes_to_write)
@@ -145,7 +227,8 @@ ErrorOr<void> TransportSocketWindows::transfer(ReadonlyBytes bytes_to_write)
                 continue;
             if (result == SOCKET_ERROR)
                 return Error::from_windows_error();
-            VERIFY_NOT_REACHED();
+            dbgln("TransportSocketWindows::transfer: Unexpected WSAPoll result {}", result);
+            return Error::from_string_literal("Unexpected WSAPoll result");
         }
 
         bytes_to_write = bytes_to_write.slice(maybe_nwritten.value());
@@ -170,7 +253,9 @@ TransportSocketWindows::ShouldShutdown TransportSocketWindows::read_as_many_mess
                 should_shutdown = ShouldShutdown::Yes;
                 break;
             }
-            VERIFY_NOT_REACHED();
+            dbgln("TransportSocketWindows::read_as_many_messages_as_possible_without_blocking: {}", error);
+            should_shutdown = ShouldShutdown::Yes;
+            break;
         }
 
         auto bytes_read = maybe_bytes_read.release_value();
@@ -179,24 +264,66 @@ TransportSocketWindows::ShouldShutdown TransportSocketWindows::read_as_many_mess
             break;
         }
 
-        m_unprocessed_bytes.append(bytes_read.data(), bytes_read.size());
+        if (m_unprocessed_bytes.size() + bytes_read.size() > MAX_UNPROCESSED_BUFFER_SIZE) {
+            dbgln("TransportSocketWindows: Unprocessed buffer would exceed {} bytes, disconnecting peer", MAX_UNPROCESSED_BUFFER_SIZE);
+            should_shutdown = ShouldShutdown::Yes;
+            break;
+        }
+        if (m_unprocessed_bytes.try_append(bytes_read.data(), bytes_read.size()).is_error()) {
+            dbgln("TransportSocketWindows: Failed to append to unprocessed_bytes buffer");
+            should_shutdown = ShouldShutdown::Yes;
+            break;
+        }
     }
 
     size_t index = 0;
     while (index + sizeof(MessageHeader) <= m_unprocessed_bytes.size()) {
         MessageHeader header;
         memcpy(&header, m_unprocessed_bytes.data() + index, sizeof(MessageHeader));
-        if (header.size + sizeof(MessageHeader) > m_unprocessed_bytes.size() - index)
+        VERIFY(header.payload_size <= MAX_MESSAGE_PAYLOAD_SIZE);
+        VERIFY(header.attachment_count <= MAX_MESSAGE_FD_COUNT);
+        VERIFY(header.attachment_data_size <= MAX_ATTACHMENT_DATA_SIZE);
+
+        Checked<size_t> message_size = header.payload_size;
+        message_size += header.attachment_data_size;
+        message_size += sizeof(MessageHeader);
+        if (message_size.has_overflow() || message_size.value() > m_unprocessed_bytes.size() - index)
             break;
         Message message;
-        message.bytes.append(m_unprocessed_bytes.data() + index + sizeof(MessageHeader), header.size);
+        auto attachment_bytes = ReadonlyBytes { m_unprocessed_bytes.data() + index + sizeof(MessageHeader), header.attachment_data_size };
+        for (u32 attachment_index = 0; attachment_index < header.attachment_count; ++attachment_index)
+            message.attachments.enqueue(deserialize_attachment(attachment_bytes));
+        VERIFY(attachment_bytes.is_empty());
+
+        auto const* payload = m_unprocessed_bytes.data() + index + sizeof(MessageHeader) + header.attachment_data_size;
+        Vector<u8> payload_bytes;
+        if (payload_bytes.try_append(payload, header.payload_size).is_error()) {
+            dbgln("TransportSocketWindows: Failed to allocate message buffer for payload_size {}", header.payload_size);
+            should_shutdown = ShouldShutdown::Yes;
+            break;
+        }
+        message.bytes = ReceivedMessageBytes::from_vector(move(payload_bytes));
         callback(move(message));
-        index += header.size + sizeof(MessageHeader);
+        Checked<size_t> new_index = index;
+        new_index += header.payload_size;
+        new_index += header.attachment_data_size;
+        new_index += sizeof(MessageHeader);
+        if (new_index.has_overflow()) {
+            dbgln("TransportSocketWindows: index would overflow");
+            should_shutdown = ShouldShutdown::Yes;
+            break;
+        }
+        index = new_index.value();
     }
 
     if (index < m_unprocessed_bytes.size()) {
-        auto remaining_bytes = MUST(ByteBuffer::copy(m_unprocessed_bytes.span().slice(index)));
-        m_unprocessed_bytes = move(remaining_bytes);
+        auto remaining_bytes_or_error = ByteBuffer::copy(m_unprocessed_bytes.span().slice(index));
+        if (remaining_bytes_or_error.is_error()) {
+            dbgln("TransportSocketWindows: Failed to copy remaining bytes");
+            should_shutdown = ShouldShutdown::Yes;
+        } else {
+            m_unprocessed_bytes = remaining_bytes_or_error.release_value();
+        }
     } else {
         m_unprocessed_bytes.clear();
     }
@@ -204,14 +331,10 @@ TransportSocketWindows::ShouldShutdown TransportSocketWindows::read_as_many_mess
     return should_shutdown;
 }
 
-ErrorOr<int> TransportSocketWindows::release_underlying_transport_for_transfer()
+ErrorOr<TransportHandle> TransportSocketWindows::release_for_transfer()
 {
-    return m_socket->release_fd();
-}
-
-ErrorOr<IPC::File> TransportSocketWindows::clone_for_transfer()
-{
-    return IPC::File::clone_fd(m_socket->fd().value());
+    auto fd = TRY(m_socket->release_fd());
+    return TransportHandle { File::adopt_fd(fd) };
 }
 
 }

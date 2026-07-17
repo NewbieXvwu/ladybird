@@ -1,6 +1,3 @@
-#import <CSS/CSSStyleValue.idl>
-#import <CSS/CSSUnitValue.idl>
-
 // https://drafts.css-houdini.org/css-typed-om-1/#enumdef-cssnumericbasetype
 enum CSSNumericBaseType {
     "length",
@@ -27,20 +24,20 @@ dictionary CSSNumericType {
 // https://drafts.css-houdini.org/css-typed-om-1/#cssnumericvalue
 [Exposed=(Window, Worker, PaintWorklet, LayoutWorklet)]
 interface CSSNumericValue : CSSStyleValue {
-    [FIXME] CSSNumericValue add(CSSNumberish... values);
-    [FIXME] CSSNumericValue sub(CSSNumberish... values);
-    [FIXME] CSSNumericValue mul(CSSNumberish... values);
-    [FIXME] CSSNumericValue div(CSSNumberish... values);
-    [FIXME] CSSNumericValue min(CSSNumberish... values);
-    [FIXME] CSSNumericValue max(CSSNumberish... values);
+    CSSNumericValue add(CSSNumberish... values);
+    CSSNumericValue sub(CSSNumberish... values);
+    CSSNumericValue mul(CSSNumberish... values);
+    CSSNumericValue div(CSSNumberish... values);
+    CSSNumericValue min(CSSNumberish... values);
+    CSSNumericValue max(CSSNumberish... values);
 
     [ImplementedAs=equals_for_bindings] boolean equals(CSSNumberish... value);
 
-    CSSUnitValue to(USVString unit);
+    CSSUnitValue to(Utf16USVString unit);
     // FIXME: CSSMathSum toSum(USVString... units);
     [ImplementedAs=type_for_bindings] CSSNumericType type();
 
-    [Exposed=Window] static CSSNumericValue parse(USVString cssText);
+    [Exposed=Window] static CSSNumericValue parse(Utf16USVString cssText);
 };
 
 // https://drafts.css-houdini.org/css-typed-om-1/#typedefdef-cssnumberish

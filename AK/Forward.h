@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <AK/DefaultDelete.h>
 #include <AK/SinglyLinkedListSizePolicy.h>
 #include <AK/StdLibExtras.h>
 #include <AK/Types.h>
@@ -28,6 +27,7 @@ class Utf16StringData;
 
 enum class TrailingCodePointTransformation : u8;
 
+class AtomicRefCountedBase;
 class BigEndianInputBitStream;
 class BigEndianOutputBitStream;
 class Bitmap;
@@ -57,9 +57,8 @@ class StringView;
 class UnixDateTime;
 class Utf16FlyString;
 class Utf16String;
+class Utf16StringBuilder;
 class Utf16View;
-class Utf32CodePointIterator;
-class Utf32View;
 class Utf8CodePointIterator;
 class Utf8View;
 
@@ -86,6 +85,9 @@ using Bytes = Span<u8>;
 template<typename T, AK::MemoryOrder DefaultMemoryOrder>
 class Atomic;
 
+template<typename T>
+class AtomicRefCounted;
+
 template<typename T, typename TSizeCalculationPolicy = DefaultSizeCalculationPolicy>
 class SinglyLinkedList;
 
@@ -110,20 +112,23 @@ class HashMap;
 template<typename K, typename V, typename KeyTraits = Traits<K>, typename ValueTraits = Traits<V>>
 using OrderedHashMap = HashMap<K, V, KeyTraits, ValueTraits, true>;
 
-template<typename T>
+template<typename... Ts>
 class Badge;
 
 template<typename T>
 class FixedArray;
-
-template<size_t precision, typename Underlying = i32>
-class FixedPoint;
 
 template<typename>
 class Function;
 
 template<typename Out, typename... In>
 class Function<Out(In...)>;
+
+template<typename>
+class JsonArraySerializer;
+
+template<typename>
+class JsonObjectSerializer;
 
 template<typename T>
 class NonnullRefPtr;
@@ -143,8 +148,14 @@ class Optional<FlyString>;
 template<typename T>
 class RefPtr;
 
-template<typename T, typename TDeleter = DefaultDelete<T>>
+template<typename T>
 class OwnPtr;
+
+template<typename T>
+struct ValueComparingNonnullRefPtr;
+
+template<typename T>
+struct ValueComparingRefPtr;
 
 template<typename T>
 class WeakPtr;
@@ -164,6 +175,8 @@ class [[nodiscard]] ErrorOr;
 #if USING_AK_GLOBALLY
 using AK::Array;
 using AK::Atomic;
+using AK::AtomicRefCounted;
+using AK::AtomicRefCountedBase;
 using AK::Badge;
 using AK::BigEndianInputBitStream;
 using AK::BigEndianOutputBitStream;
@@ -188,7 +201,9 @@ using AK::HashTable;
 using AK::IPv4Address;
 using AK::IPv6Address;
 using AK::JsonArray;
+using AK::JsonArraySerializer;
 using AK::JsonObject;
+using AK::JsonObjectSerializer;
 using AK::JsonValue;
 using AK::LexicalPath;
 using AK::LittleEndianInputBitStream;
@@ -215,10 +230,10 @@ using AK::Utf16FlyString;
 using AK::Utf16GenericLexer;
 using AK::Utf16String;
 using AK::Utf16View;
-using AK::Utf32CodePointIterator;
-using AK::Utf32View;
 using AK::Utf8CodePointIterator;
 using AK::Utf8View;
+using AK::ValueComparingNonnullRefPtr;
+using AK::ValueComparingRefPtr;
 using AK::Vector;
 
 #endif

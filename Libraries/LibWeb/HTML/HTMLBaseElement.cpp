@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLBaseElementPrototype.h>
+#include <LibWeb/Bindings/HTMLBaseElement.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/HTML/HTMLBaseElement.h>
+#include <LibWeb/Infra/SerializedURL.h>
 
 namespace Web::HTML {
 
@@ -30,6 +32,7 @@ void HTMLBaseElement::inserted()
 {
     HTMLElement::inserted();
 
+    auto old_base_url = document().base_url();
     document().update_base_element({});
 
     // The frozen base URL must be immediately set for an element whenever any of the following situations occur:
@@ -38,23 +41,24 @@ void HTMLBaseElement::inserted()
     // NOTE: inserted() is called after this element has been inserted into the document.
     auto first_base_element_with_href_in_document = document().first_base_element_with_href_in_tree_order();
     if (first_base_element_with_href_in_document.ptr() == this)
-        set_the_frozen_base_url();
+        set_the_frozen_base_url(old_base_url);
 }
 
-void HTMLBaseElement::removed_from(Node* old_parent, Node& old_root)
+void HTMLBaseElement::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor, Node& old_root)
 {
-    HTMLElement::removed_from(old_parent, old_root);
+    HTMLElement::removed_from(is_subtree_root, old_ancestor, old_root);
     auto old_first_base_element_with_href_in_tree_order = document().first_base_element_with_href_in_tree_order();
+    auto old_base_url = document().base_url();
     document().update_base_element({});
 
     // The frozen base URL must be immediately set for an element whenever any of the following situations occur:
     // - The base element becomes the first base element in tree order with an href content attribute in its Document.
     auto first_base_element_with_href_in_document = document().first_base_element_with_href_in_tree_order();
     if (first_base_element_with_href_in_document && first_base_element_with_href_in_document != old_first_base_element_with_href_in_tree_order)
-        first_base_element_with_href_in_document->set_the_frozen_base_url();
+        first_base_element_with_href_in_document->set_the_frozen_base_url(old_base_url);
 }
 
-void HTMLBaseElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLBaseElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -63,22 +67,24 @@ void HTMLBaseElement::attribute_changed(FlyString const& name, Optional<String> 
     if (name != AttributeNames::href)
         return;
 
+    auto old_base_url = document().base_url();
     document().update_base_element({});
 
     auto first_base_element_with_href_in_document = document().first_base_element_with_href_in_tree_order();
     if (first_base_element_with_href_in_document.ptr() == this)
-        set_the_frozen_base_url();
+        set_the_frozen_base_url(old_base_url);
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#set-the-frozen-base-url
-void HTMLBaseElement::set_the_frozen_base_url()
+void HTMLBaseElement::set_the_frozen_base_url(URL::URL const& old_base_url)
 {
     // 1. Let document be element's node document.
     auto& document = this->document();
 
     // 2. Let urlRecord be the result of parsing the value of element's href content attribute with document's fallback base URL, and document's character encoding. (Thus, the base element isn't affected by itself.)
-    auto href = get_attribute_value(AttributeNames::href);
-    auto url_record = document.fallback_base_url().complete_url(href);
+    auto href = get_attribute_value_view(AttributeNames::href).value_or({});
+    auto encoding = document.encoding_or_default();
+    auto url_record = DOMURL::parse(href, document.fallback_base_url(), encoding.utf16_view());
 
     // 3. If any of the following are true:
     //    - urlRecord is failure;
@@ -97,35 +103,36 @@ void HTMLBaseElement::set_the_frozen_base_url()
     m_frozen_base_url = url_record.release_value();
 
     // 5. Respond to base URL changes given document.
-    document.respond_to_base_url_changes();
+    document.respond_to_base_url_changes(document.url(), old_base_url);
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#dom-base-href
-String HTMLBaseElement::href() const
+Utf16String HTMLBaseElement::href() const
 {
     // 1. Let document be element's node document.
     auto const& document = this->document();
 
     // 2. Let url be the value of the href attribute of this element, if it has one, and the empty string otherwise.
-    auto url = attribute(AttributeNames::href).value_or(String {});
+    auto url = attribute(AttributeNames::href);
+    auto url_view = url.has_value() ? url->utf16_view() : u""sv;
 
     // 3. Let urlRecord be the result of parsing url with document's fallback base URL, and document's character encoding. (Thus, the base element isn't affected by other base elements or itself.)
-    // FIXME: Pass in document's character encoding.
-    auto url_record = document.fallback_base_url().complete_url(url);
+    auto encoding = document.encoding_or_default();
+    auto url_record = DOMURL::parse(url_view, document.fallback_base_url(), encoding.utf16_view());
 
     // 4. If urlRecord is failure, return url.
     if (!url_record.has_value())
-        return url;
+        return url.has_value() ? url.release_value() : Utf16String {};
 
     // 5. Return the serialization of urlRecord.
-    return url_record->to_string();
+    return utf16_string_from_url_ascii(url_record->to_string());
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#dom-base-href
-WebIDL::ExceptionOr<void> HTMLBaseElement::set_href(String const& href)
+void HTMLBaseElement::set_href(Utf16View href)
 {
     // The href IDL attribute, on setting, must set the href content attribute to the given new value.
-    return set_attribute(AttributeNames::href, href);
+    set_attribute_value(AttributeNames::href, href);
 }
 
 }

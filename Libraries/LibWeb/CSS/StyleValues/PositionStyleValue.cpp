@@ -8,30 +8,54 @@
  */
 
 #include "PositionStyleValue.h"
+#include <LibWeb/CSS/Enums.h>
 
 namespace Web::CSS {
 
-bool PositionStyleValue::is_center() const
+ValueComparingNonnullRefPtr<PositionStyleValue const> PositionStyleValue::create(ValueComparingNonnullRefPtr<EdgeStyleValue const> edge_x, ValueComparingNonnullRefPtr<EdgeStyleValue const> edge_y)
 {
-    return (edge_x()->offset().is_percentage() && edge_x()->offset().percentage() == Percentage { 50 })
-        && (edge_y()->offset().is_percentage() && edge_y()->offset().percentage() == Percentage { 50 });
+    return adopt_ref(*new (nothrow) PositionStyleValue(move(edge_x), move(edge_y)));
 }
 
-CSSPixelPoint PositionStyleValue::resolved(Layout::Node const& node, CSSPixelRect const& rect) const
+ValueComparingNonnullRefPtr<PositionStyleValue const> PositionStyleValue::create_center()
+{
+    return adopt_ref(*new (nothrow) PositionStyleValue(
+        EdgeStyleValue::create(PositionEdge::Center, {}),
+        EdgeStyleValue::create(PositionEdge::Center, {})));
+}
+
+ValueComparingNonnullRefPtr<PositionStyleValue const> PositionStyleValue::create_computed_center()
+{
+    return adopt_ref(*new (nothrow) PositionStyleValue(
+        EdgeStyleValue::create({}, PercentageStyleValue::create(Percentage { 50 })),
+        EdgeStyleValue::create({}, PercentageStyleValue::create(Percentage { 50 }))));
+}
+
+bool PositionStyleValue::is_center(SerializationMode mode) const
+{
+    return edge_x()->is_center(mode) && edge_y()->is_center(mode);
+}
+
+CSSPixelPoint PositionStyleValue::resolved(CSSPixelRect const& rect) const
 {
     // Note: A preset + a none default x/y_relative_to is impossible in the syntax (and makes little sense)
-    CSSPixels x = m_properties.edge_x->offset().to_px(node, rect.width());
-    CSSPixels y = m_properties.edge_y->offset().to_px(node, rect.height());
-    if (m_properties.edge_x->edge() == PositionEdge::Right)
-        x = rect.width() - x;
-    if (m_properties.edge_y->edge() == PositionEdge::Bottom)
-        y = rect.height() - y;
+    CSSPixels x = LengthPercentage::from_style_value(m_properties.edge_x->offset()).to_px(rect.width());
+    CSSPixels y = LengthPercentage::from_style_value(m_properties.edge_y->offset()).to_px(rect.height());
     return CSSPixelPoint { rect.x() + x, rect.y() + y };
 }
 
-String PositionStyleValue::to_string(SerializationMode mode) const
+ValueComparingNonnullRefPtr<StyleValue const> PositionStyleValue::absolutized(ComputationContext const& computation_context) const
 {
-    return MUST(String::formatted("{} {}", m_properties.edge_x->to_string(mode), m_properties.edge_y->to_string(mode)));
+    return PositionStyleValue::create(
+        edge_x()->absolutized(computation_context)->as_edge(),
+        edge_y()->absolutized(computation_context)->as_edge());
+}
+
+void PositionStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
+{
+    m_properties.edge_x->serialize(builder, mode);
+    builder.append(' ');
+    m_properties.edge_y->serialize(builder, mode);
 }
 
 }

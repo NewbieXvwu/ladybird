@@ -6,10 +6,12 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/StyleSheetListPrototype.h>
-#include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/Bindings/StyleSheetList.h>
+#include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/StyleSheetInvalidation.h>
 #include <LibWeb/CSS/StyleSheetList.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOM/Element.h>
 #include <LibWeb/HTML/Window.h>
 
 namespace Web::CSS {
@@ -51,8 +53,8 @@ void StyleSheetList::add_a_css_style_sheet(CSS::CSSStyleSheet& sheet)
     // HTML specification says that the title element must be specified with a non-empty value for alternative style sheets.
     // See: https://html.spec.whatwg.org/multipage/links.html#the-link-is-an-alternative-stylesheet
     if ((sheet.title().is_empty() && !sheet.is_alternate())
-        || (!m_last_css_style_sheet_set_name.has_value() && sheet.title().equals_ignoring_case(m_preferred_css_style_sheet_set_name))
-        || (m_last_css_style_sheet_set_name.has_value() && sheet.title().equals_ignoring_case(m_last_css_style_sheet_set_name.value()))) {
+        || (!m_last_css_style_sheet_set_name.has_value() && sheet.title().equals_ignoring_ascii_case(m_preferred_css_style_sheet_set_name))
+        || (m_last_css_style_sheet_set_name.has_value() && sheet.title().equals_ignoring_ascii_case(m_last_css_style_sheet_set_name.value()))) {
         sheet.set_disabled(false);
         return;
     }
@@ -62,7 +64,7 @@ void StyleSheetList::add_a_css_style_sheet(CSS::CSSStyleSheet& sheet)
 }
 
 // https://www.w3.org/TR/cssom/#create-a-css-style-sheet
-GC::Ref<CSSStyleSheet> StyleSheetList::create_a_css_style_sheet(String const& css_text, String type, DOM::Element* owner_node, String media, String title, Alternate alternate, OriginClean origin_clean, Optional<::URL::URL> location, CSSStyleSheet* parent_style_sheet, CSSRule* owner_rule)
+GC::Ref<CSSStyleSheet> StyleSheetList::create_a_css_style_sheet(Utf16View css_text, DOM::Element* owner_node, Utf16View media, Utf16String title, Alternate alternate, OriginClean origin_clean, Optional<::URL::URL> location, CSSStyleSheet* parent_style_sheet, CSSRule* owner_rule)
 {
     // 1. Create a new CSS style sheet object and set its properties as specified.
     // AD-HOC: The spec never tells us when to parse this style sheet, but the most logical place is here.
@@ -71,7 +73,6 @@ GC::Ref<CSSStyleSheet> StyleSheetList::create_a_css_style_sheet(String const& cs
     sheet->set_parent_css_style_sheet(parent_style_sheet);
     sheet->set_owner_css_rule(owner_rule);
     sheet->set_owner_node(owner_node);
-    sheet->set_type(move(type));
     sheet->set_media(move(media));
     sheet->set_title(move(title));
     sheet->set_alternate(alternate == Alternate::Yes);
@@ -86,6 +87,8 @@ GC::Ref<CSSStyleSheet> StyleSheetList::create_a_css_style_sheet(String const& cs
 void StyleSheetList::add_sheet(CSSStyleSheet& sheet)
 {
     sheet.add_owning_document_or_shadow_root(document_or_shadow_root());
+
+    sheet.load_pending_image_resources(document());
 
     if (m_sheets.is_empty()) {
         // This is the first sheet, append it to the list.
@@ -109,16 +112,9 @@ void StyleSheetList::add_sheet(CSSStyleSheet& sheet)
     // NOTE: We evaluate media queries immediately when adding a new sheet.
     //       This coalesces the full document style invalidations.
     //       If we don't do this, we invalidate now, and then again when Document updates media rules.
-    sheet.evaluate_media_queries(as<HTML::Window>(HTML::relevant_global_object(*this)));
+    sheet.evaluate_media_queries(document());
 
-    if (sheet.rules().length() == 0) {
-        // NOTE: If the added sheet has no rules, we don't have to invalidate anything.
-        return;
-    }
-
-    document().style_computer().invalidate_rule_cache();
-    document().style_computer().load_fonts_from_sheet(sheet);
-    document_or_shadow_root().invalidate_style(DOM::StyleInvalidationReason::StyleSheetListAddSheet);
+    invalidate_style_for_stylesheet_change(document_or_shadow_root(), sheet, DOM::StyleInvalidationReason::StyleSheetListAddSheet);
 }
 
 void StyleSheetList::remove_sheet(CSSStyleSheet& sheet)
@@ -127,14 +123,7 @@ void StyleSheetList::remove_sheet(CSSStyleSheet& sheet)
     bool did_remove = m_sheets.remove_first_matching([&](auto& entry) { return entry.ptr() == &sheet; });
     VERIFY(did_remove);
 
-    if (sheet.rules().length() == 0) {
-        // NOTE: If the removed sheet had no rules, we don't have to invalidate anything.
-        return;
-    }
-
-    m_document_or_shadow_root->document().style_computer().unload_fonts_from_sheet(sheet);
-    m_document_or_shadow_root->document().style_computer().invalidate_rule_cache();
-    document_or_shadow_root().invalidate_style(DOM::StyleInvalidationReason::StyleSheetListRemoveSheet);
+    invalidate_style_for_stylesheet_change(document_or_shadow_root(), sheet, DOM::StyleInvalidationReason::StyleSheetListRemoveSheet);
 }
 
 GC::Ref<StyleSheetList> StyleSheetList::create(GC::Ref<DOM::Node> document_or_shadow_root)

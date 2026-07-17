@@ -11,14 +11,19 @@
 namespace Web::Layout {
 
 class InlineNode final : public NodeWithStyleAndBoxModelMetrics {
-    GC_CELL(InlineNode, NodeWithStyleAndBoxModelMetrics);
-    GC_DECLARE_ALLOCATOR(InlineNode);
+    LAYOUT_NODE(InlineNode, NodeWithStyleAndBoxModelMetrics);
 
 public:
-    InlineNode(DOM::Document&, DOM::Element*, GC::Ref<CSS::ComputedProperties>);
+    InlineNode(DOM::Document&, DOM::Element*, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~InlineNode() override;
 
-    GC::Ptr<Painting::PaintableWithLines> create_paintable_for_line_with_index(size_t line_index) const;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
+
+private:
+    virtual bool is_inline_node() const override { return true; }
 };
+
+template<>
+inline bool Node::fast_is<InlineNode>() const { return is_inline_node(); }
 
 }

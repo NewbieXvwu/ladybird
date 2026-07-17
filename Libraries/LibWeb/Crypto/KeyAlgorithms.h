@@ -8,10 +8,11 @@
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/Utf16String.h>
 #include <LibCrypto/BigInt/UnsignedBigInteger.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibWeb/Crypto/CryptoAlgorithms.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::Crypto {
@@ -25,8 +26,9 @@ public:
     static GC::Ref<KeyAlgorithm> create(JS::Realm&);
     virtual ~KeyAlgorithm() override = default;
 
-    String const& name() const { return m_name; }
-    void set_name(String name) { m_name = move(name); }
+    Utf16String const& name() const { return m_name; }
+    void set_name(Utf16String name) { m_name = move(name); }
+    void set_name(StringView name) { m_name = Utf16String::from_ascii_without_validation(name.bytes()); }
 
     JS::Realm& realm() const { return m_realm; }
 
@@ -39,12 +41,13 @@ protected:
 private:
     JS_DECLARE_NATIVE_FUNCTION(name_getter);
 
-    String m_name;
+    Utf16String m_name;
     GC::Ref<JS::Realm> m_realm;
 };
 
 // https://w3c.github.io/webcrypto/#RsaKeyAlgorithm-dictionary
-class RsaKeyAlgorithm : public KeyAlgorithm {
+// WEB_API-exported so tests can fabricate an encode-only RsaKeyAlgorithm.
+class WEB_API RsaKeyAlgorithm : public KeyAlgorithm {
     JS_OBJECT(RsaKeyAlgorithm, KeyAlgorithm);
     GC_DECLARE_ALLOCATOR(RsaKeyAlgorithm);
 
@@ -99,7 +102,8 @@ private:
 };
 
 // https://w3c.github.io/webcrypto/#EcKeyAlgorithm-dictionary
-class EcKeyAlgorithm : public KeyAlgorithm {
+// WEB_API-exported so tests can inspect decoded named_curve().
+class WEB_API EcKeyAlgorithm : public KeyAlgorithm {
     JS_OBJECT(EcKeyAlgorithm, KeyAlgorithm);
     GC_DECLARE_ALLOCATOR(EcKeyAlgorithm);
 
@@ -174,6 +178,30 @@ private:
 
     GC::Ptr<KeyAlgorithm> m_hash;
     WebIDL::UnsignedLong m_length;
+};
+
+// https://wicg.github.io/webcrypto-modern-algos/#KmacKeyAlgorithm-dictionary
+struct KmacKeyAlgorithm : public KeyAlgorithm {
+    JS_OBJECT(KmacKeyAlgorithm, KeyAlgorithm);
+    GC_DECLARE_ALLOCATOR(KmacKeyAlgorithm);
+
+public:
+    static GC::Ref<KmacKeyAlgorithm> create(JS::Realm&);
+
+    virtual ~KmacKeyAlgorithm() override = default;
+
+    WebIDL::UnsignedLong length() const { return m_length; }
+    void set_length(WebIDL::UnsignedLong length) { m_length = length; }
+
+protected:
+    KmacKeyAlgorithm(JS::Realm&);
+
+    virtual void initialize(JS::Realm&) override;
+
+private:
+    JS_DECLARE_NATIVE_FUNCTION(length_getter);
+
+    WebIDL::UnsignedLong m_length { 0 };
 };
 
 }

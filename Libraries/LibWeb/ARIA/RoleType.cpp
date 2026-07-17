@@ -4,11 +4,17 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/NeverDestroyed.h>
 #include <LibWeb/ARIA/ARIAMixin.h>
 #include <LibWeb/ARIA/AriaRoles.h>
 #include <LibWeb/ARIA/RoleType.h>
 
 namespace Web::ARIA {
+
+static ErrorOr<void> add_state_or_property(JsonObjectSerializer<Utf16StringBuilder>& object, StateAndProperties state_or_property, Utf16String const& value)
+{
+    return object.add(ARIA::state_or_property_to_string(state_or_property), value.utf16_view());
+}
 
 RoleType::RoleType(AriaData const& data)
     : m_data(data)
@@ -47,97 +53,97 @@ constexpr StateAndProperties supported_properties_array[] = {
 
 HashTable<StateAndProperties> const& RoleType::supported_states() const
 {
-    static HashTable<StateAndProperties> states;
-    if (states.is_empty())
-        states.set_from(supported_state_array);
-    return states;
+    static NeverDestroyed<HashTable<StateAndProperties>> states;
+    if (states->is_empty())
+        states->set_from(supported_state_array);
+    return *states;
 }
 
 HashTable<StateAndProperties> const& RoleType::supported_properties() const
 {
-    static HashTable<StateAndProperties> properties;
-    if (properties.is_empty())
-        properties.set_from(supported_properties_array);
-    return properties;
+    static NeverDestroyed<HashTable<StateAndProperties>> properties;
+    if (properties->is_empty())
+        properties->set_from(supported_properties_array);
+    return *properties;
 }
 
 HashTable<StateAndProperties> const& RoleType::required_states() const
 {
-    static HashTable<StateAndProperties> states;
-    return states;
+    static NeverDestroyed<HashTable<StateAndProperties>> states;
+    return *states;
 }
 
 HashTable<StateAndProperties> const& RoleType::required_properties() const
 {
-    static HashTable<StateAndProperties> properties;
-    return properties;
+    static NeverDestroyed<HashTable<StateAndProperties>> properties;
+    return *properties;
 }
 
 HashTable<StateAndProperties> const& RoleType::prohibited_properties() const
 {
-    static HashTable<StateAndProperties> properties;
-    return properties;
+    static NeverDestroyed<HashTable<StateAndProperties>> properties;
+    return *properties;
 }
 
 HashTable<StateAndProperties> const& RoleType::prohibited_states() const
 {
-    static HashTable<StateAndProperties> states;
-    return states;
+    static NeverDestroyed<HashTable<StateAndProperties>> states;
+    return *states;
 }
 
 HashTable<Role> const& RoleType::required_context_roles() const
 {
-    static HashTable<Role> roles;
-    return roles;
+    static NeverDestroyed<HashTable<Role>> roles;
+    return *roles;
 }
 
 HashTable<Role> const& RoleType::required_owned_elements() const
 {
-    static HashTable<Role> roles;
-    return roles;
+    static NeverDestroyed<HashTable<Role>> roles;
+    return *roles;
 }
 
-ErrorOr<void> RoleType::serialize_as_json(JsonObjectSerializer<StringBuilder>& object) const
+ErrorOr<void> RoleType::serialize_as_json(JsonObjectSerializer<Utf16StringBuilder>& object) const
 {
     auto state_object = TRY(object.add_object("state"sv));
     for (auto const state : supported_states()) {
         auto value = TRY(ARIA::state_or_property_to_string_value(state, m_data, default_value_for_property_or_state(state)));
-        TRY(state_object.add(ARIA::state_or_property_to_string(state), value));
+        TRY(add_state_or_property(state_object, state, value));
     }
     TRY(state_object.finish());
 
     auto properties_object = TRY(object.add_object("properties"sv));
     for (auto const property : supported_properties()) {
         auto value = TRY(ARIA::state_or_property_to_string_value(property, m_data, default_value_for_property_or_state(property)));
-        TRY(properties_object.add(ARIA::state_or_property_to_string(property), value));
+        TRY(add_state_or_property(properties_object, property, value));
     }
     TRY(properties_object.finish());
 
     auto required_states_object = TRY(object.add_object("required_state"sv));
     for (auto const state : required_states()) {
         auto value = TRY(ARIA::state_or_property_to_string_value(state, m_data, default_value_for_property_or_state(state)));
-        TRY(required_states_object.add(ARIA::state_or_property_to_string(state), value));
+        TRY(add_state_or_property(required_states_object, state, value));
     }
     TRY(required_states_object.finish());
 
     auto required_properties_object = TRY(object.add_object("required_properties"sv));
     for (auto const property : required_properties()) {
         auto value = TRY(ARIA::state_or_property_to_string_value(property, m_data, default_value_for_property_or_state(property)));
-        TRY(required_properties_object.add(ARIA::state_or_property_to_string(property), value));
+        TRY(add_state_or_property(required_properties_object, property, value));
     }
     TRY(required_properties_object.finish());
 
     auto prohibited_states_object = TRY(object.add_object("prohibited_state"sv));
     for (auto const state : prohibited_states()) {
         auto value = TRY(ARIA::state_or_property_to_string_value(state, m_data, default_value_for_property_or_state(state)));
-        TRY(prohibited_states_object.add(ARIA::state_or_property_to_string(state), value));
+        TRY(add_state_or_property(prohibited_states_object, state, value));
     }
     TRY(prohibited_states_object.finish());
 
     auto prohibited_properties_object = TRY(object.add_object("prohibited_properties"sv));
     for (auto const property : required_properties()) {
         auto value = TRY(ARIA::state_or_property_to_string_value(property, m_data, default_value_for_property_or_state(property)));
-        TRY(prohibited_properties_object.add(ARIA::state_or_property_to_string(property), value));
+        TRY(add_state_or_property(prohibited_properties_object, property, value));
     }
     TRY(prohibited_properties_object.finish());
 

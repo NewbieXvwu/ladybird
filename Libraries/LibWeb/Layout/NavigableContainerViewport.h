@@ -12,21 +12,19 @@
 namespace Web::Layout {
 
 class NavigableContainerViewport final : public ReplacedBox {
-    GC_CELL(NavigableContainerViewport, ReplacedBox);
-    GC_DECLARE_ALLOCATOR(NavigableContainerViewport);
+    LAYOUT_NODE(NavigableContainerViewport, ReplacedBox);
 
 public:
-    NavigableContainerViewport(DOM::Document&, HTML::NavigableContainer&, GC::Ref<CSS::ComputedProperties>);
+    NavigableContainerViewport(DOM::Document&, HTML::NavigableContainer&, NonnullRefPtr<CSS::ComputedValues const>);
     virtual ~NavigableContainerViewport() override;
-
-    virtual void prepare_for_replaced_layout() override;
 
     [[nodiscard]] HTML::NavigableContainer const& dom_node() const { return as<HTML::NavigableContainer>(*ReplacedBox::dom_node()); }
     [[nodiscard]] HTML::NavigableContainer& dom_node() { return as<HTML::NavigableContainer>(*ReplacedBox::dom_node()); }
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
 private:
+    virtual CSS::SizeWithAspectRatio natural_size() const override;
     virtual void did_set_content_size() override;
 };
 

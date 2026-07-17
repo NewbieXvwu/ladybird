@@ -11,6 +11,8 @@
 #include <AK/HashMap.h>
 #include <AK/Noncopyable.h>
 #include <AK/String.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <AK/Vector.h>
 #include <LibCore/ElapsedTimer.h>
 #include <LibGC/CellAllocator.h>
@@ -52,12 +54,19 @@ public:
     };
 
     struct Group {
-        String label;
+        Utf16String label;
+    };
+
+    struct TraceFrame {
+        Utf16String function_name;
+        Optional<Utf16String> source_file;
+        Optional<size_t> line;
+        Optional<size_t> column;
     };
 
     struct Trace {
-        String label;
-        Vector<String> stack;
+        Utf16String label;
+        Vector<TraceFrame> stack;
     };
 
     void set_client(ConsoleClient& client) { m_client = &client; }
@@ -66,8 +75,8 @@ public:
 
     GC::RootVector<Value> vm_arguments();
 
-    HashMap<String, unsigned>& counters() { return m_counters; }
-    HashMap<String, unsigned> const& counters() const { return m_counters; }
+    HashMap<Utf16String, unsigned>& counters() { return m_counters; }
+    HashMap<Utf16String, unsigned> const& counters() const { return m_counters; }
 
     ThrowCompletionOr<Value> assert_();
     Value clear();
@@ -90,20 +99,21 @@ public:
     ThrowCompletionOr<Value> time_end();
 
     void output_debug_message(LogLevel log_level, StringView output) const;
-    void report_exception(JS::Error const&, bool) const;
+    void output_debug_message(LogLevel log_level, Utf16View output) const;
+    void report_exception(Utf16View name, Utf16View message, JS::ErrorData const&, bool) const;
 
 private:
     explicit Console(Realm&);
 
     virtual void visit_edges(Visitor&) override;
 
-    ThrowCompletionOr<String> value_vector_to_string(GC::RootVector<Value> const&);
+    ThrowCompletionOr<Utf16String> value_vector_to_string(GC::RootVector<Value> const&);
 
     GC::Ref<Realm> m_realm;
     GC::Ptr<ConsoleClient> m_client;
 
-    HashMap<String, unsigned> m_counters;
-    HashMap<String, Core::ElapsedTimer> m_timer_table;
+    HashMap<Utf16String, unsigned> m_counters;
+    HashMap<Utf16String, Core::ElapsedTimer> m_timer_table;
     Vector<Group> m_group_stack;
 };
 
@@ -118,13 +128,13 @@ public:
     ThrowCompletionOr<GC::RootVector<Value>> formatter(GC::RootVector<Value> const& args);
     virtual ThrowCompletionOr<Value> printer(Console::LogLevel log_level, PrinterArguments) = 0;
 
-    virtual void add_css_style_to_current_message(StringView) { }
-    virtual void report_exception(JS::Error const&, bool) { }
+    virtual void add_css_style_to_current_message(Utf16View) { }
+    virtual void report_exception(Utf16View, Utf16View, JS::ErrorData const&, bool) { }
 
     virtual void clear() = 0;
     virtual void end_group() = 0;
 
-    ThrowCompletionOr<String> generically_format_values(GC::RootVector<Value> const&);
+    ThrowCompletionOr<Utf16String> generically_format_values(GC::RootVector<Value> const&);
 
 protected:
     explicit ConsoleClient(Console&);

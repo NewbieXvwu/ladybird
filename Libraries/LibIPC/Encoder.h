@@ -9,15 +9,17 @@
 
 #include <AK/Concepts.h>
 #include <AK/HashMap.h>
+#include <AK/IPv4Address.h>
 #include <AK/StdLibExtras.h>
+#include <AK/Utf16FlyString.h>
 #include <AK/Variant.h>
 #include <LibCore/Forward.h>
-#include <LibCore/SharedCircularQueue.h>
+#include <LibIPC/Attachment.h>
 #include <LibIPC/Concepts.h>
 #include <LibIPC/File.h>
 #include <LibIPC/Forward.h>
 #include <LibIPC/Message.h>
-#include <LibURL/Forward.h>
+#include <LibURL/URL.h>
 
 namespace IPC {
 
@@ -50,9 +52,9 @@ public:
         return {};
     }
 
-    ErrorOr<void> append_file_descriptor(int fd)
+    ErrorOr<void> append_attachment(Attachment attachment)
     {
-        TRY(m_buffer.append_file_descriptor(fd));
+        TRY(m_buffer.append_attachment(move(attachment)));
         return {};
     }
 
@@ -75,6 +77,12 @@ ErrorOr<void> encode(Encoder& encoder, T const& value)
     return encoder.encode(to_underlying(value));
 }
 
+template<Concepts::DistinctNumeric T>
+ErrorOr<void> encode(Encoder& encoder, T const& value)
+{
+    return encoder.encode(value.value());
+}
+
 template<>
 ErrorOr<void> encode(Encoder&, float const&);
 
@@ -89,6 +97,9 @@ ErrorOr<void> encode(Encoder&, StringView const&);
 
 template<>
 ErrorOr<void> encode(Encoder&, Utf16String const&);
+
+template<>
+ErrorOr<void> encode(Encoder&, Utf16FlyString const&);
 
 template<>
 ErrorOr<void> encode(Encoder&, Utf16View const&);
@@ -109,6 +120,12 @@ template<>
 ErrorOr<void> encode(Encoder&, UnixDateTime const&);
 
 template<>
+ErrorOr<void> encode(Encoder&, IPv4Address const&);
+
+template<>
+ErrorOr<void> encode(Encoder&, IPv6Address const&);
+
+template<>
 ErrorOr<void> encode(Encoder&, URL::URL const&);
 
 template<>
@@ -121,13 +138,13 @@ template<>
 ErrorOr<void> encode(Encoder&, File const&);
 
 template<>
+ErrorOr<void> encode(Encoder&, TransportHandle const&);
+
+template<>
 ErrorOr<void> encode(Encoder&, Empty const&);
 
 template<>
 ErrorOr<void> encode(Encoder&, Core::AnonymousBuffer const&);
-
-template<>
-ErrorOr<void> encode(Encoder&, Core::DateTime const&);
 
 template<>
 ErrorOr<void> encode(Encoder&, Core::ProxyData const&);
@@ -139,12 +156,25 @@ template<>
 ErrorOr<void> encode(Encoder&, URL::BlobURLEntry::MediaSource const&);
 
 template<Concepts::Span T>
+requires(!IsArithmetic<typename T::ElementType>)
 ErrorOr<void> encode(Encoder& encoder, T const& span)
 {
     TRY(encoder.encode_size(span.size()));
 
     for (auto const& value : span)
         TRY(encoder.encode(value));
+
+    return {};
+}
+
+template<Concepts::Span T>
+requires(IsArithmetic<typename T::ElementType>)
+ErrorOr<void> encode(Encoder& encoder, T const& span)
+{
+    TRY(encoder.encode_size(span.size()));
+
+    VERIFY(!Checked<size_t>::multiplication_would_overflow(span.size(), sizeof(typename T::ElementType)));
+    TRY(encoder.append(reinterpret_cast<u8 const*>(span.data()), span.size() * sizeof(typename T::ElementType)));
 
     return {};
 }
@@ -171,13 +201,6 @@ ErrorOr<void> encode(Encoder& encoder, T const& hashmap)
         TRY(encoder.encode(it.value));
     }
 
-    return {};
-}
-
-template<Concepts::SharedSingleProducerCircularQueue T>
-ErrorOr<void> encode(Encoder& encoder, T const& queue)
-{
-    TRY(encoder.encode(TRY(IPC::File::clone_fd(queue.fd()))));
     return {};
 }
 

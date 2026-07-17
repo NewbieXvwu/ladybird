@@ -46,22 +46,14 @@ ProxyObject::ProxyObject(Object& target, Object& handler, Object& prototype)
     , m_target(target)
     , m_handler(handler)
 {
+    // A Proxy is callable iff its target is callable.
+    if (!target.is_function())
+        clear_is_function();
+
     if (target.is_array_exotic_object()) {
         auto& array = static_cast<Array&>(target);
         array.set_is_proxy_target(true);
     }
-}
-
-static Value property_key_to_value(VM& vm, PropertyKey const& property_key)
-{
-    if (property_key.is_symbol())
-        return property_key.as_symbol();
-
-    if (property_key.is_string())
-        return PrimitiveString::create(vm, property_key.as_string());
-
-    VERIFY(property_key.is_number());
-    return PrimitiveString::create(vm, String::number(property_key.as_number()));
 }
 
 // 10.5.1 [[GetPrototypeOf]] ( ), https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-getprototypeof
@@ -261,7 +253,7 @@ ThrowCompletionOr<Optional<PropertyDescriptor>> ProxyObject::internal_get_own_pr
     }
 
     // 7. Let trapResultObj be ? Call(trap, handler, « target, P »).
-    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key_to_value(vm, property_key)));
+    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key.to_value(vm)));
 
     // 8. If Type(trapResultObj) is neither Object nor Undefined, throw a TypeError exception.
     if (!trap_result.is_object() && !trap_result.is_undefined())
@@ -327,7 +319,7 @@ ThrowCompletionOr<Optional<PropertyDescriptor>> ProxyObject::internal_get_own_pr
 }
 
 // 10.5.6 [[DefineOwnProperty]] ( P, Desc ), https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-defineownproperty-p-desc
-ThrowCompletionOr<bool> ProxyObject::internal_define_own_property(PropertyKey const& property_key, PropertyDescriptor const& property_descriptor, Optional<PropertyDescriptor>*)
+ThrowCompletionOr<bool> ProxyObject::internal_define_own_property(PropertyKey const& property_key, PropertyDescriptor& property_descriptor, Optional<PropertyDescriptor>*)
 {
     LIMIT_PROXY_RECURSION_DEPTH();
 
@@ -353,7 +345,7 @@ ThrowCompletionOr<bool> ProxyObject::internal_define_own_property(PropertyKey co
     auto descriptor_object = from_property_descriptor(vm, property_descriptor);
 
     // 8. Let booleanTrapResult be ToBoolean(? Call(trap, handler, « target, P, descObj »)).
-    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key_to_value(vm, property_key), descriptor_object)).to_boolean();
+    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key.to_value(vm), descriptor_object)).to_boolean();
 
     // 9. If booleanTrapResult is false, return false.
     if (!trap_result)
@@ -443,7 +435,7 @@ ThrowCompletionOr<bool> ProxyObject::internal_has_property(PropertyKey const& pr
     }
 
     // 7. Let booleanTrapResult be ToBoolean(? Call(trap, handler, « target, P »)).
-    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key_to_value(vm, property_key))).to_boolean();
+    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key.to_value(vm))).to_boolean();
 
     // 8. If booleanTrapResult is false, then
     if (!trap_result) {
@@ -470,7 +462,7 @@ ThrowCompletionOr<bool> ProxyObject::internal_has_property(PropertyKey const& pr
 }
 
 // 10.5.8 [[Get]] ( P, Receiver ), https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-get-p-receiver
-ThrowCompletionOr<Value> ProxyObject::internal_get(PropertyKey const& property_key, Value receiver, CacheablePropertyMetadata*, PropertyLookupPhase) const
+ThrowCompletionOr<Value> ProxyObject::internal_get(PropertyKey const& property_key, Value receiver, CacheableGetPropertyMetadata*, PropertyLookupPhase) const
 {
     LIMIT_PROXY_RECURSION_DEPTH();
 
@@ -513,7 +505,7 @@ ThrowCompletionOr<Value> ProxyObject::internal_get(PropertyKey const& property_k
     }
 
     // 7. Let trapResult be ? Call(trap, handler, « target, P, Receiver »).
-    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key_to_value(vm, property_key), receiver));
+    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key.to_value(vm), receiver));
 
     // 8. Let targetDesc be ? target.[[GetOwnProperty]](P).
     auto target_descriptor = TRY(m_target->internal_get_own_property(property_key));
@@ -539,7 +531,7 @@ ThrowCompletionOr<Value> ProxyObject::internal_get(PropertyKey const& property_k
 }
 
 // 10.5.9 [[Set]] ( P, V, Receiver ), https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-set-p-v-receiver
-ThrowCompletionOr<bool> ProxyObject::internal_set(PropertyKey const& property_key, Value value, Value receiver, CacheablePropertyMetadata*, PropertyLookupPhase)
+ThrowCompletionOr<bool> ProxyObject::internal_set(PropertyKey const& property_key, Value value, Value receiver, CacheableSetPropertyMetadata*, PropertyLookupPhase)
 {
     LIMIT_PROXY_RECURSION_DEPTH();
 
@@ -581,7 +573,7 @@ ThrowCompletionOr<bool> ProxyObject::internal_set(PropertyKey const& property_ke
     }
 
     // 7. Let booleanTrapResult be ToBoolean(? Call(trap, handler, « target, P, V, Receiver »)).
-    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key_to_value(vm, property_key), value, receiver)).to_boolean();
+    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key.to_value(vm), value, receiver)).to_boolean();
 
     // 8. If booleanTrapResult is false, return false.
     if (!trap_result)
@@ -634,7 +626,7 @@ ThrowCompletionOr<bool> ProxyObject::internal_delete(PropertyKey const& property
     }
 
     // 7. Let booleanTrapResult be ToBoolean(? Call(trap, handler, « target, P »)).
-    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key_to_value(vm, property_key))).to_boolean();
+    auto trap_result = TRY(call(vm, *trap, m_handler, m_target, property_key.to_value(vm))).to_boolean();
 
     // 8. If booleanTrapResult is false, return false.
     if (!trap_result)
@@ -689,7 +681,7 @@ ThrowCompletionOr<GC::RootVector<Value>> ProxyObject::internal_own_property_keys
     auto trap_result_array = TRY(call(vm, *trap, m_handler, m_target));
 
     // 8. Let trapResult be ? CreateListFromArrayLike(trapResultArray, « String, Symbol »).
-    HashTable<PropertyKey> unique_keys;
+    GC::ConservativeHashTable<PropertyKey> unique_keys;
     auto trap_result = TRY(create_list_from_array_like(vm, trap_result_array, [&](auto value) -> ThrowCompletionOr<void> {
         if (!value.is_string() && !value.is_symbol())
             return vm.throw_completion<TypeError>(ErrorType::ProxyOwnPropertyKeysNotStringOrSymbol);
@@ -712,10 +704,10 @@ ThrowCompletionOr<GC::RootVector<Value>> ProxyObject::internal_own_property_keys
     // 13. Assert: targetKeys contains no duplicate entries.
 
     // 14. Let targetConfigurableKeys be a new empty List.
-    auto target_configurable_keys = GC::RootVector<Value> { heap() };
+    GC::RootVector<Value> target_configurable_keys;
 
     // 15. Let targetNonconfigurableKeys be a new empty List.
-    auto target_nonconfigurable_keys = GC::RootVector<Value> { heap() };
+    GC::RootVector<Value> target_nonconfigurable_keys;
 
     // 16. For each element key of targetKeys, do
     for (auto& key : target_keys) {
@@ -743,14 +735,14 @@ ThrowCompletionOr<GC::RootVector<Value>> ProxyObject::internal_own_property_keys
     }
 
     // 18. Let uncheckedResultKeys be a List whose elements are the elements of trapResult.
-    auto unchecked_result_keys = GC::RootVector<Value> { heap() };
+    GC::RootVector<Value> unchecked_result_keys;
     unchecked_result_keys.extend(trap_result);
 
     // 19. For each element key of targetNonconfigurableKeys, do
     for (auto& key : target_nonconfigurable_keys) {
         // a. If key is not an element of uncheckedResultKeys, throw a TypeError exception.
         if (!unchecked_result_keys.contains_slow(key))
-            return vm.throw_completion<TypeError>(ErrorType::ProxyOwnPropertyKeysSkippedNonconfigurableProperty, key.to_string_without_side_effects());
+            return vm.throw_completion<TypeError>(ErrorType::ProxyOwnPropertyKeysSkippedNonconfigurableProperty, key);
 
         // b. Remove key from uncheckedResultKeys.
         unchecked_result_keys.remove_first_matching([&](auto& value) {
@@ -766,7 +758,7 @@ ThrowCompletionOr<GC::RootVector<Value>> ProxyObject::internal_own_property_keys
     for (auto& key : target_configurable_keys) {
         // a. If key is not an element of uncheckedResultKeys, throw a TypeError exception.
         if (!unchecked_result_keys.contains_slow(key))
-            return vm.throw_completion<TypeError>(ErrorType::ProxyOwnPropertyKeysNonExtensibleSkippedProperty, key.to_string_without_side_effects());
+            return vm.throw_completion<TypeError>(ErrorType::ProxyOwnPropertyKeysNonExtensibleSkippedProperty, key);
 
         // b. Remove key from uncheckedResultKeys.
         unchecked_result_keys.remove_first_matching([&](auto& value) {
@@ -776,7 +768,7 @@ ThrowCompletionOr<GC::RootVector<Value>> ProxyObject::internal_own_property_keys
 
     // 22. If uncheckedResultKeys is not empty, throw a TypeError exception.
     if (!unchecked_result_keys.is_empty())
-        return vm.throw_completion<TypeError>(ErrorType::ProxyOwnPropertyKeysNonExtensibleNewProperty, unchecked_result_keys[0].to_string_without_side_effects());
+        return vm.throw_completion<TypeError>(ErrorType::ProxyOwnPropertyKeysNonExtensibleNewProperty, unchecked_result_keys[0]);
 
     // 23. Return trapResult.
     return { move(trap_result) };
@@ -806,11 +798,11 @@ ThrowCompletionOr<Value> ProxyObject::internal_call(ExecutionContext& callee_con
     // 6. If trap is undefined, then
     if (!trap) {
         // a. Return ? Call(target, thisArgument, argumentsList).
-        return call(vm, m_target, this_argument, callee_context.arguments);
+        return call(vm, m_target, this_argument, callee_context.arguments_span());
     }
 
     // 7. Let argArray be CreateArrayFromList(argumentsList).
-    auto arguments_array = Array::create_from(realm, callee_context.arguments);
+    auto arguments_array = Array::create_from(realm, callee_context.arguments_span());
 
     // 8. Return ? Call(trap, handler, « target, thisArgument, argArray »).
     return call(vm, trap, m_handler, m_target, this_argument, arguments_array);
@@ -854,7 +846,7 @@ ThrowCompletionOr<GC::Ref<Object>> ProxyObject::internal_construct(ExecutionCont
     }
 
     // 8. Let argArray be CreateArrayFromList(argumentsList).
-    auto arguments_array = Array::create_from(realm, callee_context.arguments);
+    auto arguments_array = Array::create_from(realm, callee_context.arguments_span());
 
     // 9. Let newObj be ? Call(trap, handler, « target, argArray, newTarget »).
     auto new_object = TRY(call(vm, trap, m_handler, m_target, arguments_array, &new_target));
@@ -890,9 +882,14 @@ void ProxyObject::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_handler);
 }
 
-ThrowCompletionOr<void> ProxyObject::get_stack_frame_size(size_t& registers_and_constants_and_locals_count, size_t& argument_count)
+void ProxyObject::get_stack_frame_info(size_t& registers_and_locals_count, ReadonlySpan<Value>& constants, size_t& argument_count)
 {
-    return as<FunctionObject>(*m_target).get_stack_frame_size(registers_and_constants_and_locals_count, argument_count);
+    as<FunctionObject>(*m_target).get_stack_frame_info(registers_and_locals_count, constants, argument_count);
+}
+
+Utf16String ProxyObject::name_for_call_stack() const
+{
+    return "(Proxy)"_utf16;
 }
 
 }

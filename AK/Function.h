@@ -35,7 +35,6 @@
 #include <AK/ScopeGuard.h>
 #include <AK/Span.h>
 #include <AK/StdLibExtras.h>
-#include <AK/Swift.h>
 #include <AK/TypeCasts.h>
 #include <AK/Types.h>
 
@@ -358,6 +357,7 @@ private:
         case FunctionKind::Inline:
         case FunctionKind::Block:
             other_wrapper->init_and_swap(m_storage, inline_capacity);
+            other_wrapper->~CallableWrapperBase();
             m_kind = other.m_kind;
             break;
         case FunctionKind::Outline:
@@ -380,7 +380,7 @@ private:
     static constexpr size_t inline_capacity = 4 * sizeof(void*);
 
     alignas(inline_alignment) u8 m_storage[inline_capacity];
-} SWIFT_UNSAFE_REFERENCE;
+};
 
 }
 

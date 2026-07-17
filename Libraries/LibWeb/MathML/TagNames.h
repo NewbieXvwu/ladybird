@@ -6,11 +6,12 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 
 namespace Web::MathML::TagNames {
 
 #define ENUMERATE_MATHML_TAGS                                \
+    __ENUMERATE_MATHML_TAG(a, "a")                           \
     __ENUMERATE_MATHML_TAG(annotation, "annotation")         \
     __ENUMERATE_MATHML_TAG(annotation_xml, "annotation-xml") \
     __ENUMERATE_MATHML_TAG(maction, "maction")               \
@@ -44,7 +45,7 @@ namespace Web::MathML::TagNames {
     __ENUMERATE_MATHML_TAG(munderover, "munderover")         \
     __ENUMERATE_MATHML_TAG(semantics, "semantics")
 
-#define __ENUMERATE_MATHML_TAG(name, tag) extern FlyString name;
+#define __ENUMERATE_MATHML_TAG(name, tag) extern Utf16FlyString const& name;
 ENUMERATE_MATHML_TAGS
 #undef __ENUMERATE_MATHML_TAG
 

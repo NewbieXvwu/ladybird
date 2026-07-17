@@ -12,6 +12,7 @@
 #include <AK/Debug.h>
 #include <AK/DistinctNumeric.h>
 #include <AK/Math.h>
+#include <AK/SaturatingMath.h>
 #include <AK/Traits.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/Rect.h>
@@ -58,6 +59,12 @@ class CSSPixelFraction;
 /// CSSPixels: A position or length in CSS "reference pixels", independent of zoom or screen DPI.
 /// See https://www.w3.org/TR/css-values-3/#reference-pixel
 class WEB_API CSSPixels {
+    enum class ValueRounding : u8 {
+        Nearest,
+        Floor,
+        Truncate,
+    };
+
 public:
     static constexpr i32 fractional_bits = 6;
     static constexpr i32 fixed_point_denominator = 1 << fractional_bits;
@@ -91,24 +98,19 @@ public:
     template<FloatingPoint F>
     static CSSPixels nearest_value_for(F value)
     {
-        i32 raw_value = 0;
-        if (!isnan(value))
-            raw_value = AK::clamp_to<int>(value * fixed_point_denominator);
-        // Note: The resolution of CSSPixels is 0.015625, so care must be taken when converting
-        // floats/doubles to CSSPixels as small values (such as scale factors) can underflow to zero,
-        // or otherwise produce inaccurate results (when scaled back up).
-        if (raw_value == 0 && value != 0)
-            dbgln_if(LIBWEB_CSS_DEBUG, "CSSPixels: Conversion from float or double underflowed to zero");
-        return from_raw(raw_value);
+        return value_for<ValueRounding::Nearest>(value);
     }
 
     template<FloatingPoint F>
     static CSSPixels floored_value_for(F value)
     {
-        i32 raw_value = 0;
-        if (!isnan(value))
-            raw_value = AK::clamp_to<int>(floor(value * fixed_point_denominator));
-        return from_raw(raw_value);
+        return value_for<ValueRounding::Floor>(value);
+    }
+
+    template<FloatingPoint F>
+    static CSSPixels truncated_value_for(F value)
+    {
+        return value_for<ValueRounding::Truncate>(value);
     }
 
     template<Unsigned U>
@@ -142,9 +144,9 @@ public:
         return from_raw(1);
     }
 
-    float to_float() const;
-    double to_double() const;
-    int to_int() const;
+    constexpr float to_float() const { return static_cast<float>(m_value) / fixed_point_denominator; }
+    constexpr double to_double() const { return static_cast<double>(m_value) / fixed_point_denominator; }
+    constexpr int to_int() const { return m_value / fixed_point_denominator; }
 
     constexpr int raw_value() const { return m_value; }
     constexpr void set_raw_value(int value) { m_value = value; }
@@ -159,12 +161,12 @@ public:
 
     constexpr CSSPixels& operator++()
     {
-        m_value = Checked<int>::saturating_add(m_value, fixed_point_denominator);
+        m_value = saturating_add(m_value, fixed_point_denominator);
         return *this;
     }
     constexpr CSSPixels& operator--()
     {
-        m_value = Checked<int>::saturating_sub(m_value, fixed_point_denominator);
+        m_value = saturating_sub(m_value, fixed_point_denominator);
         return *this;
     }
 
@@ -178,16 +180,16 @@ public:
     }
 
     constexpr CSSPixels operator+() const { return from_raw(+raw_value()); }
-    constexpr CSSPixels operator-() const { return from_raw(-raw_value()); }
+    constexpr CSSPixels operator-() const { return from_raw(saturating_sub(0, raw_value())); }
 
     constexpr CSSPixels operator+(CSSPixels const& other) const
     {
-        return from_raw(Checked<int>::saturating_add(raw_value(), other.raw_value()));
+        return from_raw(saturating_add(raw_value(), other.raw_value()));
     }
 
     constexpr CSSPixels operator-(CSSPixels const& other) const
     {
-        return from_raw(Checked<int>::saturating_sub(raw_value(), other.raw_value()));
+        return from_raw(saturating_sub(raw_value(), other.raw_value()));
     }
 
     constexpr CSSPixels operator*(CSSPixels const& other) const
@@ -203,11 +205,11 @@ public:
             // If any bit after was 1 as well
             if (value & (radix_mask >> 1u)) {
                 // We need to round away from 0
-                int_value = Checked<int>::saturating_add(int_value, 1);
+                int_value = saturating_add(int_value, 1);
             } else {
                 // Otherwise we round to the next even value
                 // Which means we add the least significant bit of the raw integer value
-                int_value = Checked<int>::saturating_add(int_value, int_value & 1);
+                int_value = saturating_add(int_value, int_value & 1);
             }
         }
 
@@ -244,7 +246,7 @@ public:
         return *this;
     }
 
-    constexpr CSSPixels abs() const { return from_raw(::abs(m_value)); }
+    constexpr CSSPixels abs() const { return raw_value() < 0 ? from_raw(saturating_sub(0, raw_value())) : *this; }
 
     CSSPixels& scale_by(float value)
     {
@@ -273,6 +275,30 @@ public:
     }
 
 private:
+    template<ValueRounding rounding, FloatingPoint F>
+    static CSSPixels value_for(F value)
+    {
+        if (isnan(value))
+            return {};
+
+        auto scaled_value = value * fixed_point_denominator;
+        if constexpr (rounding == ValueRounding::Floor)
+            scaled_value = floor(scaled_value);
+        else if constexpr (rounding == ValueRounding::Truncate)
+            scaled_value = trunc(scaled_value);
+        auto raw_value = AK::clamp_to<int>(scaled_value);
+
+        if constexpr (LIBWEB_CSS_DEBUG) {
+            // Note: The resolution of CSSPixels is 0.015625, so care must be taken when converting floats/doubles to
+            // CSSPixels as small values (such as scale factors) can underflow to zero, or otherwise produce inaccurate
+            // results (when scaled back up).
+            if (raw_value == 0 && value != 0)
+                dbgln("CSSPixels: Conversion from float or double underflowed to zero");
+        }
+
+        return from_raw(raw_value);
+    }
+
     i32 m_value { 0 };
 };
 
@@ -380,8 +406,8 @@ public:
     constexpr CSSPixels numerator() const { return m_numerator; }
     constexpr CSSPixels denominator() const { return m_denominator; }
 
-    float to_float() const { return CSSPixels(*this).to_float(); }
-    double to_double() const { return CSSPixels(*this).to_double(); }
+    float to_float() const { return m_numerator.to_float() / m_denominator.to_float(); }
+    double to_double() const { return m_numerator.to_double() / m_denominator.to_double(); }
     int to_int() const { return CSSPixels(*this).to_int(); }
     bool might_be_saturated() const { return CSSPixels(*this).might_be_saturated(); }
 
@@ -415,12 +441,10 @@ constexpr CSSPixelFraction operator/(CSSPixels left, T right) { return left / CS
 inline float operator/(CSSPixels left, float right) { return left.to_float() / right; }
 inline double operator/(CSSPixels left, double right) { return left.to_double() / right; }
 
-using CSSPixelLine = Gfx::Line<CSSPixels>;
 using CSSPixelPoint = Gfx::Point<CSSPixels>;
 using CSSPixelRect = Gfx::Rect<CSSPixels>;
 using CSSPixelSize = Gfx::Size<CSSPixels>;
 
-using DevicePixelLine = Gfx::Line<DevicePixels>;
 using DevicePixelPoint = Gfx::Point<DevicePixels>;
 using DevicePixelRect = Gfx::Rect<DevicePixels>;
 using DevicePixelSize = Gfx::Size<DevicePixels>;
@@ -467,6 +491,14 @@ constexpr Web::CSSPixels square_distance_between(Web::CSSPixelPoint const& a, We
     auto delta_x = abs(a.x() - b.x());
     auto delta_y = abs(a.y() - b.y());
     return delta_x * delta_x + delta_y * delta_y;
+}
+
+constexpr Web::CSSPixelPoint constrained(Web::CSSPixelPoint const& point, Web::CSSPixelRect const& rect)
+{
+    return {
+        clamp(point.x(), rect.left(), rect.right() - 1),
+        clamp(point.y(), rect.top(), rect.bottom() - 1),
+    };
 }
 
 template<>
@@ -530,9 +562,9 @@ struct Formatter<Web::DevicePixels> : Formatter<Web::DevicePixels::Type> {
 namespace IPC {
 
 template<>
-WEB_API ErrorOr<void> encode(Encoder& encoder, Web::DevicePixels const& value);
+WEB_API ErrorOr<void> encode(Encoder& encoder, Web::CSSPixelPoint const& value);
 template<>
-WEB_API ErrorOr<Web::DevicePixels> decode(Decoder& decoder);
+WEB_API ErrorOr<Web::CSSPixelPoint> decode(Decoder& decoder);
 
 template<>
 WEB_API ErrorOr<void> encode(Encoder& encoder, Web::DevicePixelPoint const& value);
