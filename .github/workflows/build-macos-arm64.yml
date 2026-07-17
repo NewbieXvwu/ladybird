@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew install autoconf autoconf-archive automake ccache \
-            coreutils llvm@21 nasm ninja pkg-config qt unzip wabt
+            coreutils libtool llvm@21 nasm ninja pkg-config qt unzip wabt
 
       - name: Set up vcpkg
         run: ./Meta/ladybird.py vcpkg
