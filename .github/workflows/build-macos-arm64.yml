@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew install autoconf autoconf-archive automake ccache \
-            coreutils libtool llvm@21 nasm ninja pkg-config qt unzip wabt
+            coreutils libtool llvm nasm ninja pkg-config qt unzip wabt
 
       - name: Set up vcpkg
         run: ./Meta/ladybird.py vcpkg
@@ -28,8 +28,8 @@ jobs:
         run: |
           cmake --preset Release \
             -S . -B Build/release \
-            -DCMAKE_C_COMPILER="$(brew --prefix llvm@21)/bin/clang" \
-            -DCMAKE_CXX_COMPILER="$(brew --prefix llvm@21)/bin/clang++" \
+            -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" \
             -DLADYBIRD_GUI_FRAMEWORK=Qt \
             -DCMAKE_C_FLAGS="-mcpu=apple-m5 -O3" \
             -DCMAKE_CXX_FLAGS="-mcpu=apple-m5 -O3"
