@@ -31,6 +31,7 @@ jobs:
             -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" \
             -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" \
             -DLADYBIRD_GUI_FRAMEWORK=Qt \
+            -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_C_FLAGS="-mcpu=apple-m5 -O3" \
             -DCMAKE_CXX_FLAGS="-mcpu=apple-m5 -O3"
 
@@ -44,8 +45,11 @@ jobs:
           # @rpath so the .app is self-contained and no longer depends on the build
           # machine's Homebrew prefix (otherwise dyld fails to launch with
           # "Library not loaded: /opt/homebrew/.../QtWidgets.framework"). The
-          # Distribution preset links the vcpkg dependencies statically, so Qt is the
-          # only remaining dynamic dependency that must be deployed here.
+          # Distribution preset's vcpkg triplet links the vcpkg dependencies statically,
+          # so Qt is the only remaining dynamic dependency that must be deployed here.
+          # Ladybird's own libraries stay shared (BUILD_SHARED_LIBS=ON), which also
+          # avoids Apple ld64's "mach-o member not 8-byte aligned" error that occurs
+          # when Rust object files are packed into a static archive.
           "$(brew --prefix qt)/bin/macdeployqt" Ladybird.app -always-overwrite
           zip -r ../../../ladybird-macos-arm64.zip Ladybird.app
 
