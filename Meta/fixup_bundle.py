@@ -152,11 +152,19 @@ def main():
         changed = False
         for macho in list(macho_files):
             ensure_rpath_to_frameworks(macho, frameworks_dir)
-            # Make the id rpath-based for plain dylibs that live in Frameworks.
+            # Make the id rpath-based. Plain dylibs in Frameworks get an
+            # @rpath/<basename> id; framework binaries get an
+            # @rpath/<Framework.framework/Versions/A/Name> id. This removes any
+            # leftover absolute /opt/homebrew install names left by macdeployqt.
             ident = get_id(macho)
-            if ident and not is_system(ident) and os.path.dirname(macho).endswith("Frameworks"):
-                new_id = "@rpath/" + os.path.basename(macho)
-                if ident != new_id:
+            if ident and not is_system(ident):
+                if is_framework(macho):
+                    new_id = rpath_ref(macho)
+                elif os.path.dirname(macho).endswith("Frameworks"):
+                    new_id = "@rpath/" + os.path.basename(macho)
+                else:
+                    new_id = None
+                if new_id is not None and ident != new_id:
                     set_id(macho, new_id)
                     changed = True
                     sys.stderr.write("id %s -> %s\n" % (macho, new_id))
