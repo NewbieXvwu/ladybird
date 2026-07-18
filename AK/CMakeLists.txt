@@ -49,6 +49,15 @@ endif()
 
 ladybird_lib(AK ak)
 
+# AK is linked by build-time host tools (e.g. gen_asm_offsets) that execute on the build
+# machine. When the product is tuned for a newer CPU than the build host (e.g. -mcpu=apple-m5 on
+# an Apple M1/M2 CI runner), AK must be compiled for the host's baseline architecture instead,
+# otherwise those tools crash with SIGILL while the build is still running. LADYBIRD_HOST_CPU_FLAGS
+# is empty when the host matches the product target, so this is a no-op in the common case.
+if (DEFINED LADYBIRD_HOST_CPU_FLAGS AND NOT LADYBIRD_HOST_CPU_FLAGS STREQUAL "")
+    target_compile_options(AK PRIVATE ${LADYBIRD_HOST_CPU_FLAGS})
+endif()
+
 configure_file(Debug.h.in Debug.h @ONLY)
 
 
