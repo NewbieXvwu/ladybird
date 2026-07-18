@@ -40,6 +40,11 @@ jobs:
       - name: Package
         run: |
           cd Build/release/bin
+          # Bundle the Qt frameworks into the app and rewrite their install names to
+          # @rpath so the .app is self-contained and no longer depends on the build
+          # machine's Homebrew prefix (otherwise dyld fails to launch with
+          # "Library not loaded: /opt/homebrew/.../QtWidgets.framework").
+          "$(brew --prefix qt)/bin/macdeployqt" Ladybird.app -always-overwrite
           zip -r ../../../ladybird-macos-arm64.zip Ladybird.app
 
       - name: Upload artifact
