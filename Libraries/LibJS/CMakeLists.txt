@@ -344,6 +344,9 @@ if (DEFINED ASMINT_ARCH)
     # offsetof() to emit struct field offsets as DSL constants.
     add_executable(gen_asm_offsets "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/AsmInterpreter/gen_asm_offsets.cpp")
     target_link_libraries(gen_asm_offsets PRIVATE AK)
+    # This tool runs on the build host mid-build, so compile it for the baseline
+    # host architecture instead of the product's (e.g. apple-m5) target CPU.
+    ladybird_add_host_tool(gen_asm_offsets)
     if (MSVC)
         target_compile_definitions(gen_asm_offsets PRIVATE _ALLOW_KEYWORD_MACROS)
     endif()

@@ -66,6 +66,52 @@ elseif (NOT CMAKE_CROSSCOMPILING)
     add_cxx_compile_options(-march=native)
 endif()
 
+# Build-time host tools (code generators, DSL compilers, test runners, etc.) are executed on the
+# build machine while the build is still running. When the product itself is tuned for a newer CPU
+# than the build host (e.g. -mcpu=apple-m5 on an Apple M1/M2 CI runner), these tools must still be
+# compiled for the build host's own architecture; otherwise they crash with SIGILL (Illegal
+# instruction) and abort the build. By default the host CPU is probed automatically from the build
+# machine, so host tools always run there. Override with -DLADYBIRD_HOST_CPU=<cpu> (e.g. "apple-m1")
+# only when cross-building host tools for a different machine.
+set(LADYBIRD_HOST_CPU "" CACHE STRING "CPU architecture used to compile build-time host tools (empty = auto-detect native)")
+if (LADYBIRD_HOST_CPU STREQUAL "")
+    # Auto-detect the build host's native CPU. We must use the -mcpu= form on Apple Silicon because a
+    # product -mcpu=<newer> flag otherwise wins over -march=native in clang's argument precedence.
+    # Note: clang's own -mcpu=native mapping lags behind new hardware (e.g. it reports apple-m4 on an
+    # Apple M5 Pro), so on Apple Silicon we probe the exact chip via sysctl instead. The host tool only
+    # has to run on this build machine, so targeting the detected chip is always safe.
+    if (APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+        execute_process(
+            COMMAND sysctl -n machdep.cpu.brand_string
+            OUTPUT_VARIABLE _apple_cpu_brand
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if (_apple_cpu_brand MATCHES "[Aa]pple[ ]*M([0-9]+)")
+            set(LADYBIRD_HOST_CPU_FLAGS "-mcpu=apple-m${CMAKE_MATCH_1}")
+        else()
+            set(LADYBIRD_HOST_CPU_FLAGS "-mcpu=apple-m1")
+        endif()
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        set(LADYBIRD_HOST_CPU_FLAGS "-march=native")
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        set(LADYBIRD_HOST_CPU_FLAGS "-mcpu=native")
+    else()
+        # Unknown host: don't override, fall back to the (previous) behaviour.
+        set(LADYBIRD_HOST_CPU_FLAGS "")
+    endif()
+    if (NOT LADYBIRD_HOST_CPU_FLAGS STREQUAL "")
+        message(STATUS "Build-time host tools will target the build host's native CPU (${LADYBIRD_HOST_CPU_FLAGS})")
+    endif()
+else()
+    if (LADYBIRD_HOST_CPU MATCHES "^(armv|x86-)")
+        set(LADYBIRD_HOST_CPU_FLAGS "-march=${LADYBIRD_HOST_CPU}")
+    else()
+        set(LADYBIRD_HOST_CPU_FLAGS "-mcpu=${LADYBIRD_HOST_CPU}")
+    endif()
+    message(STATUS "Build-time host tools will target '${LADYBIRD_HOST_CPU}' (${LADYBIRD_HOST_CPU_FLAGS})")
+endif()
+
 add_cxx_compile_options(-Wcast-qual)
 add_cxx_compile_options(-Wformat=2)
 add_cxx_compile_options(-Wimplicit-fallthrough)

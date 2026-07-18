@@ -1,5 +1,18 @@
 include(${CMAKE_CURRENT_LIST_DIR}/utils.cmake)
 
+# ladybird_add_host_tool(target)
+#
+# Mark a target as a tool that is executed on the build machine during the build
+# (code generators, DSL compilers, etc.). The target is compiled for the baseline
+# architecture in LADYBIRD_HOST_CPU_FLAGS so it can run on the build host even when
+# the rest of the tree is tuned for a newer CPU (e.g. -mcpu=apple-m5 on M1/M2 runners).
+function(ladybird_add_host_tool target)
+    if (DEFINED LADYBIRD_HOST_CPU_FLAGS AND NOT LADYBIRD_HOST_CPU_FLAGS STREQUAL "")
+        target_compile_options(${target} PRIVATE ${LADYBIRD_HOST_CPU_FLAGS})
+        target_link_options(${target} PRIVATE ${LADYBIRD_HOST_CPU_FLAGS})
+    endif()
+endfunction()
+
 function(ladybird_generate_export_header name fs_name)
     # Temporary helper to allow libraries to opt-in to using X_API macros
     # to export symbols required by external consumers. This allows the codebase
