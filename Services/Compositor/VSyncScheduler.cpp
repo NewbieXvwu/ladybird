@@ -218,8 +218,8 @@ void DisplayLinkState::stop_display_link()
 #    pragma clang diagnostic push
 #    pragma clang diagnostic ignored "-Wdeprecated-declarations"
     CVDisplayLinkStop(display_link);
-    CVDisplayLinkRelease(display_link);
 #    pragma clang diagnostic pop
+    CVDisplayLinkRelease(display_link);
     display_link = nullptr;
 }
 
