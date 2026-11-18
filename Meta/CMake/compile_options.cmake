@@ -57,7 +57,14 @@ function(add_cxx_link_option_if_supported option)
 endfunction()
 
 # RUSTC_TARGET_CPU_FLAGS names the same CPU for rustc, so that Rust code runs on the instruction set C++ code does.
-if (ENABLE_CI_BASELINE_CPU)
+set(LADYBIRD_TARGET_CPU "" CACHE STRING "Explicit Clang and Rust CPU target for a macOS arm64 build")
+if (LADYBIRD_TARGET_CPU)
+    if (NOT APPLE OR NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        message(FATAL_ERROR "LADYBIRD_TARGET_CPU requires an arm64-only macOS build")
+    endif()
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX,ASM,OBJC,OBJCXX>:-mcpu=${LADYBIRD_TARGET_CPU}>")
+    set(RUSTC_TARGET_CPU_FLAGS "-Ctarget-cpu=${LADYBIRD_TARGET_CPU}")
+elseif (ENABLE_CI_BASELINE_CPU)
     # In CI, we want to target a common architecture so different runners can share ccache caches effectively.
     if (APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
         add_cxx_compile_options(-mcpu=apple-m1)

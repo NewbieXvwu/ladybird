@@ -1,0 +1,84 @@
+name: 优化版 macOS arm64 安装包
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_cpu:
+        description: '目标芯片的编译器名称，例如 apple-m5'
+        default: apple-m5
+        required: true
+        type: string
+  push:
+    branches: [master]
+    paths: ['.github/workflows/macos-arm64-optimized.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 360
+    env:
+      TARGET_CPU: ${{ inputs.target_cpu || 'apple-m5' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '1'
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_BUILD_JOBS: '2'
+      VCPKG_MAX_CONCURRENCY: '3'
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+        with:
+          os: macOS
+          arch: arm64
+          toolchain: Clang
+          build_preset: Distribution
+          use_caches: false
+
+      - name: 配置发行构建
+        run: |
+          if [[ ! "$TARGET_CPU" =~ ^apple-[a-z0-9-]+$ ]]; then
+            echo '::error::目标芯片请使用编译器名称，例如 apple-m5'
+            exit 1
+          fi
+
+          cc=$(xcrun --find clang)
+          cxx=$(xcrun --find clang++)
+          "$cxx" -arch arm64 -mcpu="$TARGET_CPU" -x c++ -fsyntax-only /dev/null
+          if ! rustc --target aarch64-apple-darwin --print target-cpus |
+            awk -v cpu="$TARGET_CPU" '$1 == cpu { found = 1 } END { exit !found }'; then
+            echo "::error::Rust 编译器未识别目标芯片 $TARGET_CPU"
+            exit 1
+          fi
+
+          # Keep vcpkg's build tools native. The CPU override below applies to Ladybird's own code.
+          cmake --preset Distribution -B Build/distribution \
+            -DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cxx" \
+            -DPython3_EXECUTABLE="$pythonLocation/bin/python" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
+            -DLADYBIRD_TARGET_CPU="$TARGET_CPU" \
+            -DBUILD_TESTING=OFF -DLADYBIRD_GENERATE_SYMBOL_FILES=OFF \
+            -DENABLE_LTO_FOR_RELEASE=ON
+
+      - name: 编译浏览器与辅助进程
+        run: cmake --build Build/distribution --target sign_ladybird_bundle --parallel 2
+
+      - name: 制作磁盘映像
+        id: package
+        run: |
+          staging=$(mktemp -d "$RUNNER_TEMP/ladybird-install.XXXXXX")
+          cmake --install Build/distribution --prefix "$staging" --component ladybird_Runtime --strip
+          dmg="dist/Ladybird-macOS-arm64-${TARGET_CPU}.dmg"
+          python Meta/package-macos-test-bundle.py \
+            --build-dir Build/distribution --install-dir "$staging" --static-qt --output "$dmg"
+          echo "path=$dmg" >> "$GITHUB_OUTPUT"
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.package.outputs.path }}
+          archive: false
+          if-no-files-found: error

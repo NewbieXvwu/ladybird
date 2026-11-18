@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 
-"""Pack an installed Ladybird.app into a tarball such that it's runnable on a machine other than the one which built it.
+"""Pack an installed Ladybird.app into a relocatable tarball or drag-to-install disk image.
 
 Copy the Qt platform plugin the app loads at run time into the bundle; give every executable bundle-relative rpaths;
 drop absolute ones; copy in the libraries the bundle actually links, Qt included (resolving each @rpath reference the
@@ -305,7 +305,8 @@ def main() -> int:
     parser.add_argument(
         "--install-dir", required=True, type=Path, help="the prefix `cmake --install --strip` installed into"
     )
-    parser.add_argument("--output", required=True, type=Path, help="the .tar.gz to write, holding Ladybird.app")
+    parser.add_argument("--output", required=True, type=Path, help="the .tar.gz or .dmg to write")
+    parser.add_argument("--static-qt", action="store_true", help="Qt and its platform plugin are already linked in")
     args = parser.parse_args()
 
     app = args.install_dir / "bundle" / "Ladybird.app"
@@ -320,21 +321,41 @@ def main() -> int:
     # the build tree, so they are where its libraries are.
     search_directories = [Path(entry) for entry in rpath_entries(built_app_binary) if entry.startswith("/")]
     search_directories = [directory for directory in search_directories if directory.is_dir()]
-    if not search_directories:
-        sys.exit(f"error: {built_app_binary} has no absolute rpath entries to search")
-
     # The Qt plugin first, so that the passes below see it as part of the bundle. Then rpaths, so the libraries the
     # install laid down in Contents/lib count as found and only the vcpkg ones get copied; then rpaths again for what was
     # copied, since vcpkg's dylibs can carry absolute rpaths of their own.
-    deploy_qt(app, find_qt_plugins_directory(search_directories))
+    if not args.static_qt:
+        if not search_directories:
+            sys.exit(f"error: {built_app_binary} has no absolute rpath entries to search")
+        deploy_qt(app, find_qt_plugins_directory(search_directories))
     rewritten = fix_rpaths(app)
     copied = copy_linked_libraries(app, search_directories)
     rewritten += fix_rpaths(app)
     resigned = resign(app, args.build_dir)
-    verify(app)
-
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["tar", "-czf", str(args.output), "-C", str(app.parent), app.name], check=True)
+    if args.output.suffix == ".dmg":
+        applications = app.parent / "Applications"
+        applications.symlink_to("/Applications", target_is_directory=True)
+        try:
+            subprocess.run(
+                [
+                    "hdiutil",
+                    "create",
+                    "-srcfolder",
+                    str(app.parent),
+                    "-volname",
+                    "Ladybird",
+                    "-format",
+                    "UDZO",
+                    str(args.output),
+                ],
+                check=True,
+            )
+        finally:
+            applications.unlink()
+    else:
+        verify(app)
+        subprocess.run(["tar", "-czf", str(args.output), "-C", str(app.parent), app.name], check=True)
 
     size = os.path.getsize(args.output) / (1024 * 1024)
     print(f"rewrote the rpaths of {len(rewritten)} binaries")
