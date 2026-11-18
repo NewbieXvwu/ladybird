@@ -54,14 +54,22 @@ jobs:
             exit 1
           fi
 
-          # Keep vcpkg's build tools native. The CPU override below applies to Ladybird's own code.
-          cmake --preset Distribution -B Build/distribution \
+          # Qt 6.11's Cocoa plugin requires a deployment target below macOS 15.
+          # vcpkg also builds host tools, so only Ladybird's code uses the selected CPU.
+          configure_log="$RUNNER_TEMP/ladybird-configure.log"
+          if ! cmake --preset Distribution -B Build/distribution \
             -DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cxx" \
             -DPython3_EXECUTABLE="$pythonLocation/bin/python" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
+            -DLADYBIRD_VCPKG_OSX_DEPLOYMENT_TARGET=14.4 \
             -DLADYBIRD_TARGET_CPU="$TARGET_CPU" \
             -DBUILD_TESTING=OFF -DLADYBIRD_GENERATE_SYMBOL_FILES=OFF \
-            -DENABLE_LTO_FOR_RELEASE=ON
+            -DENABLE_LTO_FOR_RELEASE=ON > "$configure_log" 2>&1; then
+            awk '/^CMake Error|^error: / { context = 8 } context > 0 { print; context-- }' "$configure_log" | tail -n 120
+            tail -n 30 "$configure_log"
+            exit 1
+          fi
+          tail -n 20 "$configure_log"
 
       - name: 编译浏览器与辅助进程
         run: cmake --build Build/distribution --target sign_ladybird_bundle --parallel 2
