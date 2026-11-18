@@ -38,6 +38,16 @@ jobs:
           build_preset: Distribution
           use_caches: false
 
+      - name: 恢复依赖和编译缓存
+        id: build-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: &build_cache |
+            Build/caches/vcpkg-binary-cache
+            .ccache
+          key: ladybird-macos-arm64-optimized-v1-${{ env.TARGET_CPU }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ladybird-macos-arm64-optimized-v1-${{ env.TARGET_CPU }}-
+
       - name: 配置发行构建
         run: |
           if [[ ! "$TARGET_CPU" =~ ^apple-[a-z0-9-]+$ ]]; then
@@ -90,3 +100,11 @@ jobs:
           path: ${{ steps.package.outputs.path }}
           archive: false
           if-no-files-found: error
+
+      - name: 保存依赖和编译缓存
+        if: ${{ !cancelled() && steps.build-cache.outputs.cache-primary-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: *build_cache
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
